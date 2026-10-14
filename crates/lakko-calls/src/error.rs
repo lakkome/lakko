@@ -26,10 +26,11 @@ pub enum Error {
     #[error("crypto primitive failed: {0}")]
     Crypto(String),
 
-    /// Frame counter exhausted — 32-bit per RFC 9605 §4.4.
-    /// A media stream that hit 2^32 frames over a single
-    /// epoch should re-key by triggering a fresh MLS commit;
-    /// the caller surfaces this to the SFU/UI.
+    /// Frame counter exhausted — 64-bit (ADR-0069).
+    /// The key refuses to seal and its counter does not wrap;
+    /// nothing is sealed. Unreachable in practice (at least
+    /// `3 * 2^62` frames from the highest random start); the
+    /// caller derives a new key.
     #[error("sframe counter exhausted")]
     CounterExhausted,
 }

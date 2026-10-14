@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
--- ADR-0072 decision 5: three words sign the person in, and nothing else.
+-- ADR-0064 decision 5: three words sign the person in, and nothing else.
 --
 -- This header replaces the description in 0017's header, which is left as
 -- written (a migration file is checksummed).

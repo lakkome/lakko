@@ -17,7 +17,10 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::media::{resolve_advertise_ip, AdvertiseError};
+use crate::media::{resolve_advertise_ip, AdvertiseError, BitrateControl, LossProtection};
+use crate::uplink_estimate::{
+    EstimatorConfig, DEFAULT_MAX_BPS, DEFAULT_START_BPS, MIN_ESTIMATE_BPS,
+};
 
 /// Default WebSocket signaling bind address.
 const DEFAULT_BIND: &str = "127.0.0.1:7880";
@@ -140,6 +143,88 @@ pub struct Config {
     /// often. Unset or `0` means off, the production default; the
     /// output is one line per stream per peer per interval.
     pub media_diagnostics: Option<Duration>,
+    /// Video FEC switch (`LAKKO_SFU_VIDEO_FEC`): unset, empty or
+    /// `0` is off, `1` is on, anything else refuses to load. Off
+    /// is exactly the behaviour without the feature: `red/90000`
+    /// and `ulpfec/90000` are never offered or answered. On, the
+    /// SFU negotiates the pair with every peer, forwards
+    /// RED-wrapped video as described in [`crate::video_fec`],
+    /// uses a publisher's FEC packets to rebuild media
+    /// packets lost on the publisher's leg
+    /// ([`crate::fec_receive`]), and sends each subscriber that
+    /// negotiated the pair FEC packets it computes for that
+    /// subscriber's leg ([`crate::fec_send`]); a publisher's FEC
+    /// packet is forwarded to nobody.
+    pub video_fec: bool,
+    /// Switch the uplink fallback on (`LAKKO_SFU_UPLINK_FALLBACK`):
+    /// unset, empty or `0` leaves it off, `1` switches it on,
+    /// anything else refuses to load. On, the main track of every
+    /// subscriber of a simulcast video track is moved to the light
+    /// layer while the publisher's uplink is in trouble
+    /// ([`crate::uplink_fallback`]). Off by default: it costs
+    /// resolution and was measured not to shorten the stall, and a
+    /// subscriber receives the light layer all the time on a second
+    /// track instead ([`crate::media::TrackRole`]). A publisher
+    /// without simulcast is not affected either way.
+    pub uplink_fallback: bool,
+    /// What the SFU does to carry video through a burst of loss
+    /// (ADR-0070 steps 3 and 4), from three switches that are on unless
+    /// set to `0` (unset, empty or `1`: on; anything else refuses to
+    /// load): `LAKKO_SFU_LIGHT_DUPLICATE` (every packet of a light
+    /// companion track is sent to a subscriber twice),
+    /// `LAKKO_SFU_PLAYOUT_DELAY` (a minimum playout delay is stamped
+    /// on a subscriber's video after a burst; off, the header
+    /// extension is not negotiated at all) and
+    /// `LAKKO_SFU_BURST_KEYFRAME` (a publisher is asked for a key
+    /// frame when a burst on one of its video streams has ended
+    /// unrepaired). See [`crate::media::LossProtection`],
+    /// [`crate::playout_delay`] and [`crate::burst_keyframe`].
+    ///
+    /// The same structure carries one more switch of the same shape,
+    /// `LAKKO_SFU_VIDEO_NEEDED` (on unless set to `0`): a publisher is
+    /// told in a `video-needed` frame which of its camera senders
+    /// somebody is being sent, so it can stop the others
+    /// ([`crate::video_needed`]). Off, no such frame is ever sent.
+    ///
+    /// And another, `LAKKO_SFU_PUBLISH_BUDGET` (on unless set to `0`):
+    /// under `LAKKO_SFU_BITRATE_CONTROL=server` a publisher is told in a
+    /// `publish-budget` frame how much its main and its middle camera
+    /// sender may send, from the SFU's estimate of its uplink
+    /// ([`crate::publish_budget`]). Off, or with the client deciding its
+    /// own bitrate, no such frame is ever sent.
+    pub protection: LossProtection,
+    /// Who decides a publisher's bitrate (`LAKKO_SFU_BITRATE_CONTROL`,
+    /// ADR-0068): unset, empty or `client` is the client's own
+    /// congestion controller, exactly the behaviour without the
+    /// feature; `server` is the SFU, which then negotiates no
+    /// transport-wide congestion control with any peer, estimates
+    /// what each publisher's path carries
+    /// ([`crate::uplink_estimate`]) and tells the publisher with
+    /// REMB. Anything else refuses to load.
+    ///
+    /// With `server` the estimate starts at
+    /// `LAKKO_SFU_BITRATE_START_KBPS` (default 1500) and never
+    /// exceeds `LAKKO_SFU_BITRATE_MAX_KBPS` (default 5000), both in
+    /// kilobits per second; the start value must be at least 30
+    /// (the floor of the estimate) and at most the maximum. Both are
+    /// parsed and checked in either mode, so a typo is found before
+    /// the switch is flipped.
+    pub bitrate_control: BitrateControl,
+    /// Whether the SFU estimates each subscriber's downlink and gives up
+    /// the larger video tracks first when it is short
+    /// (`LAKKO_SFU_DOWNLINK_CONTROL`, ADR-0070 step 6). **Off unless set
+    /// to `1`** (unset, empty or `0`: off; anything else refuses to
+    /// load), and only when the SFU also decides publishers' bitrate
+    /// (`LAKKO_SFU_BITRATE_CONTROL=server`): with `client` it is `false`
+    /// whatever the switch says. Off, nothing of step 6 happens: no
+    /// transport-wide congestion control on the media lines the SFU
+    /// sends on, no allocation, no probe, no `video-given` frame.
+    ///
+    /// It is off by default because it has never been run against a
+    /// browser or a native client; its acceptance tests against synthetic
+    /// clients (`services/sfu/README.md`, "Downlink control") pass as of
+    /// the third round, after two builds that did not.
+    pub downlink_control: bool,
     /// How often the signaling socket sends a WebSocket
     /// protocol ping to each peer (`LAKKO_SFU_SIGNALING_PING_SECS`).
     /// Every client stack answers a protocol ping on its own
@@ -195,6 +280,22 @@ impl Config {
             None => raw_advertise_ip,
         };
         let media_diagnostics = parse_optional_secs("LAKKO_SFU_MEDIA_DIAG_SECS")?;
+        let video_fec = parse_switch("LAKKO_SFU_VIDEO_FEC")?;
+        let uplink_fallback = parse_switch("LAKKO_SFU_UPLINK_FALLBACK")?;
+        let protection = LossProtection {
+            light_duplicate: parse_switch_default_on("LAKKO_SFU_LIGHT_DUPLICATE")?,
+            playout_delay: parse_switch_default_on("LAKKO_SFU_PLAYOUT_DELAY")?,
+            burst_keyframe: parse_switch_default_on("LAKKO_SFU_BURST_KEYFRAME")?,
+            video_needed: parse_switch_default_on("LAKKO_SFU_VIDEO_NEEDED")?,
+            publish_budget: parse_switch_default_on("LAKKO_SFU_PUBLISH_BUDGET")?,
+            ..LossProtection::default()
+        };
+        let bitrate_control = parse_bitrate_control()?;
+        // Parsed in either mode, so a typo is found before the bitrate
+        // switch is flipped.
+        let downlink_switch = parse_switch("LAKKO_SFU_DOWNLINK_CONTROL")?;
+        let downlink_control =
+            downlink_switch && matches!(bitrate_control, BitrateControl::Server(_));
 
         Ok(Self {
             signaling_bind,
@@ -206,6 +307,11 @@ impl Config {
             media_bind,
             media_advertise_ip,
             media_diagnostics,
+            video_fec,
+            uplink_fallback,
+            protection,
+            bitrate_control,
+            downlink_control,
             signaling_ping_interval,
             signaling_idle_timeout,
         })
@@ -338,6 +444,95 @@ fn parse_optional_secs(name: &'static str) -> Result<Option<Duration>, ConfigErr
     Ok((n > 0).then(|| Duration::from_secs(n)))
 }
 
+/// An on/off switch: unset, empty or `0` is off, `1` is on. Anything
+/// else is refused rather than guessed at.
+fn parse_switch(name: &'static str) -> Result<bool, ConfigError> {
+    match env::var(name).as_deref() {
+        Err(_) | Ok("" | "0") => Ok(false),
+        Ok("1") => Ok(true),
+        Ok(raw) => Err(ConfigError::Invalid {
+            name,
+            detail: format!("expected 0 or 1, got {raw:?}"),
+        }),
+    }
+}
+
+/// A switch that is on unless switched off: unset, empty or `1` is on, `0`
+/// is off, anything else refuses to load.
+fn parse_switch_default_on(name: &'static str) -> Result<bool, ConfigError> {
+    match env::var(name).as_deref() {
+        Err(_) | Ok("" | "1") => Ok(true),
+        Ok("0") => Ok(false),
+        Ok(raw) => Err(ConfigError::Invalid {
+            name,
+            detail: format!("expected 0 or 1, got {raw:?}"),
+        }),
+    }
+}
+
+/// Env var choosing who decides a publisher's bitrate.
+const BITRATE_CONTROL: &str = "LAKKO_SFU_BITRATE_CONTROL";
+/// Env var: where the SFU's estimate starts, kbit/s.
+const BITRATE_START_KBPS: &str = "LAKKO_SFU_BITRATE_START_KBPS";
+/// Env var: the ceiling of the SFU's estimate, kbit/s.
+const BITRATE_MAX_KBPS: &str = "LAKKO_SFU_BITRATE_MAX_KBPS";
+
+/// `LAKKO_SFU_BITRATE_CONTROL` and its two figures. The mode is spelled
+/// out (`client` / `server`) and anything else is refused; the figures are
+/// checked whichever mode is chosen.
+fn parse_bitrate_control() -> Result<BitrateControl, ConfigError> {
+    let start_bps = parse_kbps(BITRATE_START_KBPS, DEFAULT_START_BPS)?;
+    let max_bps = parse_kbps(BITRATE_MAX_KBPS, DEFAULT_MAX_BPS)?;
+    if start_bps < MIN_ESTIMATE_BPS {
+        return Err(ConfigError::Invalid {
+            name: BITRATE_START_KBPS,
+            detail: format!(
+                "must be at least {} (the floor of the estimate), got {}",
+                MIN_ESTIMATE_BPS / 1000,
+                start_bps / 1000
+            ),
+        });
+    }
+    if max_bps < start_bps {
+        return Err(ConfigError::Invalid {
+            name: BITRATE_MAX_KBPS,
+            detail: format!(
+                "must be at least {BITRATE_START_KBPS} ({}), got {}",
+                start_bps / 1000,
+                max_bps / 1000
+            ),
+        });
+    }
+    match env::var(BITRATE_CONTROL).as_deref() {
+        Err(_) | Ok("" | "client") => Ok(BitrateControl::Client),
+        Ok("server") => Ok(BitrateControl::Server(EstimatorConfig {
+            start_bps,
+            max_bps,
+        })),
+        Ok(raw) => Err(ConfigError::Invalid {
+            name: BITRATE_CONTROL,
+            detail: format!("expected client or server, got {raw:?}"),
+        }),
+    }
+}
+
+/// A bitrate given in whole kilobits per second, as bits per second;
+/// `fallback_bps` when the variable is unset or empty.
+fn parse_kbps(name: &'static str, fallback_bps: u64) -> Result<u64, ConfigError> {
+    let raw = match env::var(name) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(fallback_bps),
+    };
+    let kbps: u64 = raw.parse().map_err(|_| ConfigError::Invalid {
+        name,
+        detail: format!("expected unsigned integer (kbit/s), got {raw:?}"),
+    })?;
+    kbps.checked_mul(1000).ok_or_else(|| ConfigError::Invalid {
+        name,
+        detail: format!("too large: {raw:?}"),
+    })
+}
+
 fn parse_u32(name: &'static str, fallback: u32) -> Result<u32, ConfigError> {
     let raw = match env::var(name) {
         Ok(v) if !v.is_empty() => v,
@@ -381,6 +576,10 @@ mod tests {
             "LAKKO_SFU_SIGNALING_PING_SECS",
             "LAKKO_SFU_SIGNALING_IDLE_SECS",
             "LAKKO_SFU_MEDIA_DIAG_SECS",
+            "LAKKO_SFU_BITRATE_CONTROL",
+            "LAKKO_SFU_BITRATE_START_KBPS",
+            "LAKKO_SFU_BITRATE_MAX_KBPS",
+            "LAKKO_SFU_DOWNLINK_CONTROL",
         ] {
             env::remove_var(key);
         }
@@ -392,6 +591,269 @@ mod tests {
             env::remove_var(k);
         }
         out
+    }
+
+    #[test]
+    fn the_uplink_fallback_is_off_unless_switched_on() {
+        let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
+        with_env(&[jwks], || {
+            assert!(!Config::from_env().unwrap().uplink_fallback);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_UPLINK_FALLBACK", "0")], || {
+            assert!(!Config::from_env().unwrap().uplink_fallback);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_UPLINK_FALLBACK", "1")], || {
+            assert!(Config::from_env().unwrap().uplink_fallback);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_UPLINK_FALLBACK", "yes")], || {
+            assert!(Config::from_env().is_err());
+        });
+        // The switch it replaced is not read any more.
+        with_env(&[jwks, ("LAKKO_SFU_NO_UPLINK_FALLBACK", "yes")], || {
+            assert!(!Config::from_env().unwrap().uplink_fallback);
+        });
+    }
+
+    #[test]
+    fn the_loss_protection_switches_are_on_unless_set_to_zero() {
+        let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
+        with_env(&[jwks], || {
+            let cfg = Config::from_env().unwrap().protection;
+            assert!(cfg.light_duplicate && cfg.playout_delay);
+        });
+        with_env(
+            &[
+                jwks,
+                ("LAKKO_SFU_LIGHT_DUPLICATE", "1"),
+                ("LAKKO_SFU_PLAYOUT_DELAY", ""),
+            ],
+            || {
+                let cfg = Config::from_env().unwrap().protection;
+                assert!(cfg.light_duplicate && cfg.playout_delay);
+            },
+        );
+        with_env(&[jwks, ("LAKKO_SFU_LIGHT_DUPLICATE", "0")], || {
+            let cfg = Config::from_env().unwrap().protection;
+            assert!(!cfg.light_duplicate && cfg.playout_delay);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_PLAYOUT_DELAY", "0")], || {
+            let cfg = Config::from_env().unwrap().protection;
+            assert!(cfg.light_duplicate && !cfg.playout_delay);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_LIGHT_DUPLICATE", "off")], || {
+            assert!(Config::from_env().is_err());
+        });
+        with_env(&[jwks, ("LAKKO_SFU_PLAYOUT_DELAY", "yes")], || {
+            assert!(Config::from_env().is_err());
+        });
+        // The key frame at the end of a burst is a switch of its own.
+        with_env(&[jwks], || {
+            assert!(Config::from_env().unwrap().protection.burst_keyframe);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_BURST_KEYFRAME", "0")], || {
+            let cfg = Config::from_env().unwrap().protection;
+            assert!(!cfg.burst_keyframe && cfg.light_duplicate && cfg.playout_delay);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_BURST_KEYFRAME", "no")], || {
+            assert!(Config::from_env().is_err());
+        });
+        // And so is telling a publisher which senders are watched.
+        with_env(&[jwks], || {
+            assert!(Config::from_env().unwrap().protection.video_needed);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_VIDEO_NEEDED", "1")], || {
+            assert!(Config::from_env().unwrap().protection.video_needed);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_VIDEO_NEEDED", "0")], || {
+            let cfg = Config::from_env().unwrap().protection;
+            assert!(!cfg.video_needed && cfg.burst_keyframe && cfg.light_duplicate);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_VIDEO_NEEDED", "off")], || {
+            assert!(Config::from_env().is_err());
+        });
+        // And telling a publisher how much its senders may send.
+        with_env(&[jwks], || {
+            assert!(Config::from_env().unwrap().protection.publish_budget);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_PUBLISH_BUDGET", "1")], || {
+            assert!(Config::from_env().unwrap().protection.publish_budget);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_PUBLISH_BUDGET", "0")], || {
+            let cfg = Config::from_env().unwrap().protection;
+            assert!(!cfg.publish_budget && cfg.video_needed && cfg.burst_keyframe);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_PUBLISH_BUDGET", "off")], || {
+            assert!(Config::from_env().is_err());
+        });
+    }
+
+    #[test]
+    fn video_fec_is_off_unless_set_to_one() {
+        let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
+        with_env(&[jwks], || {
+            assert!(!Config::from_env().unwrap().video_fec);
+        });
+        for off in ["", "0"] {
+            with_env(&[jwks, ("LAKKO_SFU_VIDEO_FEC", off)], || {
+                assert!(!Config::from_env().unwrap().video_fec, "{off:?}");
+            });
+        }
+        with_env(&[jwks, ("LAKKO_SFU_VIDEO_FEC", "1")], || {
+            assert!(Config::from_env().unwrap().video_fec);
+        });
+        for bad in ["true", "yes", "2", " 1"] {
+            with_env(&[jwks, ("LAKKO_SFU_VIDEO_FEC", bad)], || {
+                assert!(
+                    matches!(
+                        Config::from_env().unwrap_err(),
+                        ConfigError::Invalid {
+                            name: "LAKKO_SFU_VIDEO_FEC",
+                            ..
+                        }
+                    ),
+                    "{bad:?}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn downlink_control_is_off_unless_switched_on_under_server_bitrate_control() {
+        let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
+        let server = ("LAKKO_SFU_BITRATE_CONTROL", "server");
+        // The client decides its bitrate: off, whatever the switch says.
+        with_env(&[jwks], || {
+            assert!(!Config::from_env().unwrap().downlink_control);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_DOWNLINK_CONTROL", "1")], || {
+            assert!(!Config::from_env().unwrap().downlink_control);
+        });
+        // The SFU decides: off unless switched on.
+        for off in [None, Some(""), Some("0")] {
+            let mut pairs = vec![jwks, server];
+            if let Some(value) = off {
+                pairs.push(("LAKKO_SFU_DOWNLINK_CONTROL", value));
+            }
+            with_env(&pairs, || {
+                assert!(!Config::from_env().unwrap().downlink_control, "{off:?}");
+            });
+        }
+        with_env(&[jwks, server, ("LAKKO_SFU_DOWNLINK_CONTROL", "1")], || {
+            assert!(Config::from_env().unwrap().downlink_control);
+        });
+        // Anything else refuses to load, in either mode.
+        for bad in ["off", "true", "2"] {
+            for mode in ["client", "server"] {
+                with_env(
+                    &[
+                        jwks,
+                        ("LAKKO_SFU_BITRATE_CONTROL", mode),
+                        ("LAKKO_SFU_DOWNLINK_CONTROL", bad),
+                    ],
+                    || {
+                        assert!(
+                            matches!(
+                                Config::from_env().unwrap_err(),
+                                ConfigError::Invalid {
+                                    name: "LAKKO_SFU_DOWNLINK_CONTROL",
+                                    ..
+                                }
+                            ),
+                            "{bad:?} {mode}"
+                        );
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bitrate_control_is_the_clients_unless_set_to_server() {
+        let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
+        with_env(&[jwks], || {
+            assert_eq!(
+                Config::from_env().unwrap().bitrate_control,
+                BitrateControl::Client
+            );
+        });
+        for client in ["", "client"] {
+            with_env(&[jwks, ("LAKKO_SFU_BITRATE_CONTROL", client)], || {
+                assert_eq!(
+                    Config::from_env().unwrap().bitrate_control,
+                    BitrateControl::Client,
+                    "{client:?}"
+                );
+            });
+        }
+        with_env(&[jwks, ("LAKKO_SFU_BITRATE_CONTROL", "server")], || {
+            assert_eq!(
+                Config::from_env().unwrap().bitrate_control,
+                BitrateControl::Server(EstimatorConfig {
+                    start_bps: 1_500_000,
+                    max_bps: 5_000_000,
+                }),
+                "the documented defaults"
+            );
+        });
+        with_env(
+            &[
+                jwks,
+                ("LAKKO_SFU_BITRATE_CONTROL", "server"),
+                ("LAKKO_SFU_BITRATE_START_KBPS", "800"),
+                ("LAKKO_SFU_BITRATE_MAX_KBPS", "3000"),
+            ],
+            || {
+                assert_eq!(
+                    Config::from_env().unwrap().bitrate_control,
+                    BitrateControl::Server(EstimatorConfig {
+                        start_bps: 800_000,
+                        max_bps: 3_000_000,
+                    })
+                );
+            },
+        );
+        for bad in ["Server", "1", "sfu", " server", "on"] {
+            with_env(&[jwks, ("LAKKO_SFU_BITRATE_CONTROL", bad)], || {
+                assert!(
+                    matches!(
+                        Config::from_env().unwrap_err(),
+                        ConfigError::Invalid {
+                            name: "LAKKO_SFU_BITRATE_CONTROL",
+                            ..
+                        }
+                    ),
+                    "{bad:?}"
+                );
+            });
+        }
+    }
+
+    /// The two figures are checked in either mode, so a typo is found
+    /// before the switch is flipped.
+    #[test]
+    fn bitrate_figures_are_refused_when_they_make_no_sense() {
+        let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
+        for (name, value) in [
+            ("LAKKO_SFU_BITRATE_START_KBPS", "fast"),
+            ("LAKKO_SFU_BITRATE_START_KBPS", "29"),
+            ("LAKKO_SFU_BITRATE_START_KBPS", "99999999999999999999"),
+            ("LAKKO_SFU_BITRATE_MAX_KBPS", "-1"),
+            ("LAKKO_SFU_BITRATE_MAX_KBPS", "1499"),
+            ("LAKKO_SFU_BITRATE_MAX_KBPS", "18446744073709551615"),
+        ] {
+            for mode in ["client", "server"] {
+                with_env(
+                    &[jwks, ("LAKKO_SFU_BITRATE_CONTROL", mode), (name, value)],
+                    || {
+                        let err = Config::from_env().unwrap_err();
+                        assert!(
+                            matches!(err, ConfigError::Invalid { name: n, .. } if n == name),
+                            "{name}={value} in {mode} mode: {err}"
+                        );
+                    },
+                );
+            }
+        }
     }
 
     #[test]

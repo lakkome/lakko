@@ -78,6 +78,8 @@ public enum ProfileResendOwed {
         }
 
         public func put(_ record: Record?, accountIdB64: String) {
+            guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+            defer { gate.leave() }
             guard let record, let data = try? JSONEncoder().encode(record) else {
                 defaults.removeObject(forKey: Self.prefix + accountIdB64)
                 return

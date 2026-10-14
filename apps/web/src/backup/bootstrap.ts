@@ -43,12 +43,12 @@ export interface BackupBootstrapInputs {
   readonly sessionToken: string;
   /** UTF-8 bytes of the canonical recovery phrase. */
   readonly phraseBytes: Uint8Array;
-  /** Phase 2a3d4: whole-storage MLS snapshot from
-   *  `Identity.snapshotStorage()`. Empty `Uint8Array` is fine
-   *  on signup baseline; recover-time path passes the snapshot
-   *  it just restored so the new baseline upload doesn't nuke
-   *  the prior server-side MLS state. */
-  readonly wholeStorageSnapshot?: Uint8Array;
+  /** The conversation ids the baseline lists, base64
+   *  (`backupKnownGroupIds`: the groups this device holds plus the restored
+   *  ones it has not joined yet). Omitted on the signup baseline, where the
+   *  account has none. The recover path passes them so its baseline does not
+   *  erase the list the restore just read. The backup carries no MLS state. */
+  readonly knownGroupIds?: readonly string[];
 }
 
 /**
@@ -76,8 +76,8 @@ export async function bootstrapBackup(inputs: BackupBootstrapInputs): Promise<vo
   }
 
   // 2. Post the baseline envelope. The server overwrites any
-  //    prior blob; this is the "fresh state" snapshot every
-  //    later device-restore can fall back to.
+  //    prior blob; this is the "fresh state" every later
+  //    device-restore can fall back to.
   try {
     const client = new BackupClient();
     client.setSessionToken(inputs.sessionToken);
@@ -85,10 +85,10 @@ export async function bootstrapBackup(inputs: BackupBootstrapInputs): Promise<vo
       inputs.accountId,
       inputs.ed25519Seed,
       inputs.phraseBytes,
-      inputs.wholeStorageSnapshot ?? new Uint8Array(0),
       // ADR-0037: hand the device key so a successful mint persists the
       // `backup_version` floor for future returning-client restores.
       inputs.deviceKey,
+      inputs.knownGroupIds ?? [],
     );
     if (result.kind !== "uploaded") {
       // eslint-disable-next-line no-console
@@ -104,9 +104,7 @@ export async function bootstrapBackup(inputs: BackupBootstrapInputs): Promise<vo
  *  encode + `bootstrapBackup` in one call. The string variant
  *  is what both signup (returns phrase as a string) and recover
  *  (takes phrase as a string) naturally hold. The optional
- *  `wholeStorageSnapshot` rides through `base` if the caller
- *  has it on hand (recover after a successful server-snapshot
- *  restore). */
+ *  `knownGroupIds` rides through `base` (recover after a restore). */
 export async function bootstrapBackupFromPhraseString(
   base: Omit<BackupBootstrapInputs, "phraseBytes">,
   phrase: string,

@@ -18,6 +18,7 @@
  * and across tabs, so the feed reloads.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import { decodeChannelPostLog, type ChannelPostLog } from "./channel-post-log";
 
 const DB_NAME = "lakko-channel-post-log";
@@ -73,6 +74,7 @@ export async function saveChannelPostLog(
   const row: PersistedRow = { accountId: accountIdB64, ciphertext };
   const db = await openDb();
   try {
+    if (!accountStoresWritable(accountIdB64)) return;
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put(row);
     await awaitTx(tx);

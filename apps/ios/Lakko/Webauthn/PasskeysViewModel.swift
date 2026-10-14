@@ -133,6 +133,10 @@ public final class PasskeysViewModel: ObservableObject {
             let response = try await client.listCredentials()
             credentials = response.credentials
             await refreshWithKeys()
+        } catch let error where Cancellation.endedByCancellation(error) {
+            // The screen was left while the list was loading: nothing failed,
+            // and the next visit loads it again.
+            return
         } catch let error as WebauthnClientError {
             // 401 is harmless on the first render after logout —
             // the publisher hasn't fired yet. Stay quiet.

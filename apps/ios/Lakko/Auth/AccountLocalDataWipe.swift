@@ -87,6 +87,26 @@ enum AccountLocalDataWipe {
         keeping: Set<Kept> = [],
         removeDeliveredNotifications: () -> Void = AuthRepository.removeAllDeliveredNotifications
     ) -> Report {
+        // The account is sealed for the whole wipe (``AccountStoreGate``): a
+        // store write already in flight finishes first and is then removed
+        // with the rest; one that starts later is refused. Without it such a
+        // write could land after its store's step and leave a forgotten
+        // account's data on the device.
+        // The staged wipe keeps the recall record, whose own later writes are
+        // refused only after a full wipe.
+        AccountStoreGate.seal(accountIdB64, wiping: true, staged: keeping.contains(.recallRecord)) {
+            wipeSealed(
+                accountIdB64: accountIdB64,
+                keeping: keeping,
+                removeDeliveredNotifications: removeDeliveredNotifications)
+        }
+    }
+
+    private static func wipeSealed(
+        accountIdB64: String,
+        keeping: Set<Kept>,
+        removeDeliveredNotifications: () -> Void
+    ) -> Report {
         var report = Report()
         func step(_ name: String, _ body: () throws -> Void) {
             do {
@@ -155,8 +175,23 @@ enum AccountLocalDataWipe {
                 KeychainRecallRecordStore().clear(accountIdB64: accountIdB64)
             }
         }
+        // A guest account's phrase is kept under a key of its own
+        // (``guestPhraseKey(accountIdB64:)``), so it has a step of its own;
+        // then the guest marker.
+        step("guest-recovery-phrase") {
+            try PhraseStore().deletePhrase(accountIdB64: guestPhraseKey(accountIdB64: accountIdB64))
+        }
+        step("guest-account") { GuestAccountMarker().clear(accountIdB64: accountIdB64) }
         step("backup-floor") { BackupFloorStore.deleteFloor(accountIdB64: accountIdB64) }
         step("auto-backup") { AutoBackupStore.clear(accountIdB64: accountIdB64) }
+        // The conversations a restored backup named, and the mark of a
+        // backup restore that is still owed.
+        step("backup-restored-groups") {
+            RestoredKnownGroupsStore.clear(accountIdB64: accountIdB64)
+        }
+        step("backup-restore-retry") {
+            BackupRestoreRetryStore.clear(accountIdB64: accountIdB64)
+        }
         step("export-key") { ExportKeyStore.deleteExportKey(accountIdB64: accountIdB64) }
         step("account-identity-seed") {
             AccountIdentitySeedStore.deleteAccountIdentitySeed(accountIdB64: accountIdB64)

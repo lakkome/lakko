@@ -51,9 +51,10 @@
 //!   * **Wire transport** — the DS journal +/- mailboxes that
 //!     ferry Commits/Welcomes between devices is a normal
 //!     `services/ds` consumer. No protocol delta.
-//!   * **Backup envelope `mls_snapshots` field** — the v1 payload
-//!     reserves the slot empty (2a1a); populating it with the
-//!     DeviceGroup state snapshot is the 2a3d work item.
+//!   * **The account backup** — carries no MLS state at all
+//!     (`lakko-backup` payload v6). A restored device does not
+//!     load a DeviceGroup snapshot; with no other device alive
+//!     the DeviceGroup is founded again.
 //!   * **Application payloads** — see 2a3e + the protobuf in
 //!     `schemas/mls-app/devicegroup.proto`.
 
@@ -724,9 +725,10 @@ impl DeviceGroup {
     ///   absent or a variant this build doesn't recognise (an
     ///   older client reading a future-version payload).
     /// - [`Error::PayloadBounds`] when a `FolderChanges` or
-    ///   `StateSnapshot` breaks an ADR-0058 section 4 bound. The whole
-    ///   payload is refused; the next write of those registers from any
-    ///   device supersedes it.
+    ///   `StateSnapshot` breaks an ADR-0058 section 4 bound, or a
+    ///   saved-message register in one breaks an ADR-0065 section 4
+    ///   bound. The whole payload is refused; the next write of those
+    ///   registers from any device supersedes it.
     /// - [`Error::Codec`] when a service envelope is empty or longer
     ///   than [`MAX_SERVICE_ENVELOPE_LEN`]: the whole payload is
     ///   refused, never truncated.
@@ -847,6 +849,8 @@ pub enum DeviceGroupBody {
     },
     /// A live chat-folder edit (ADR-0058): only the registers that
     /// changed, each with its own stamp. Bounds-checked on decode.
+    /// Also the carrier of a live Save / Remove of a saved message
+    /// (ADR-0065 section 4): those registers ride in the same change set.
     FolderChanges(lakko_sync::synced::FolderChanges),
     /// One part of the catch-up re-send of the sender's whole folded
     /// state (ADR-0058 section 5), every entry with its original stamp.

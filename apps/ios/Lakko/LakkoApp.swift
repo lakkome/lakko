@@ -225,6 +225,10 @@ struct LakkoApp: App {
                 contacts?.applyAcceptedReset(event)
             }
         }
+        // `docs/ux/call-links.md` section 3 — `Invite contacts` on a call
+        // sends the call's link to a contact the person picks: into the
+        // one-to-one with them, founded first when there is none.
+        linkHost.wireInvitations(chat: chat, contacts: contacts)
         // ADR-0050 section 2.4 — the accounts the re-admission check can look
         // up: every accepted contact whose account id is known.
         chat.readmissionContactsProvider = { [weak contacts] in
@@ -506,6 +510,14 @@ struct LakkoApp: App {
             guard let secrets = auth?.identitySecrets else { return nil }
             return DeviceRemoval.rosterKeys(
                 accountIdBytes: secrets.accountId, accountIdB64: base64Encode(secrets.accountId))
+        }
+        // `docs/ux/call-links.md` section 9 — ending a guest account needs the
+        // one local wipe Forget device and Delete account share. (Keeping a
+        // guest account does NOT delete this device's directory KeyPackage:
+        // a deleted row is tombstoned for 30 days, ADR-0074, and the kept
+        // account publishes under the same device id once the shell mounts.)
+        auth.guestEnvironment.wipeLocalData = { accountIdB64 in
+            services.wipeAccountLocalData(accountIdB64: accountIdB64)
         }
     }
 
@@ -838,6 +850,8 @@ struct AppRoot: View, Equatable {
                     // ADR-0032 (G-21/G-22) — a tapped `/c/<slug>` multi-joiner
                     // call link from an anonymous visitor. Guest join
                     // (`signupGuest`) is offered inline; no login required.
+                    // The guest session it lands is shown by ``GuestRoot``
+                    // below, never by the tab shell.
                     JoinCallLandingScreen(
                         viewModel: JoinCallLandingViewModel(
                             slug: callSlug,
@@ -890,15 +904,20 @@ struct AppRoot: View, Equatable {
                 CallKitCallRegistry.shared.reset()
             }
 
-        case .session(let account) where pendingSignupProtect:
-            // The step after sign-up (UX 19.1a): the session is live, and
-            // "Protect your account" comes before the app. Nothing else of
-            // the session mounts until the person is through it.
+        case .session(let account) where pendingSignupProtect || authRepository.protectStepOwed:
+            // The step after sign-up (UX 19.1a), and after a guest account was
+            // kept (`docs/ux/call-links.md` section 9): the session is live,
+            // and "Protect your account" comes before the app. Nothing else
+            // of the session mounts until the person is through it. The
+            // recovery phrase is not shown on either route (ADR-0075 D2).
             SignupProtectScreen(
                 authRepository: authRepository,
                 center: services.accountProtection,
                 rotation: services.keyRotation,
-                onDone: { pendingSignupProtect = false }
+                onDone: {
+                    pendingSignupProtect = false
+                    authRepository.dismissProtectStep()
+                }
             )
             .id(account.accountIdB64)
 
@@ -914,6 +933,12 @@ struct AppRoot: View, Equatable {
             // keys: "Choose a new password" comes once, before the app.
             // Saving or "Not now" clears the offer and the session mounts.
             NewPasswordPromptScreen(authRepository: authRepository)
+
+        case .session(let account) where authRepository.isGuest:
+            // `docs/ux/call-links.md` section 9 — a guest account (made to
+            // join a call from a link) never lands in the app: it is in its
+            // call, or it is asked whether to keep the account.
+            GuestRoot(account: account, services: services)
 
         case .session(let account):
             VStack(spacing: 0) {
@@ -1033,9 +1058,6 @@ enum TabRoute: Hashable {
     case savePhrase
     /// `It was not me` on an account notice.
     case secureAccount
-    /// "Choose a username": a guest account gets a username and its first
-    /// password.
-    case chooseUsername
     /// "Change username" (ADR-0076).
     case changeUsername
     /// Settings > Security > Password: choose a new password from a device
@@ -1505,7 +1527,8 @@ private struct SessionRoot: View, Equatable {
                 sessionToken: { authRepository.identitySecrets?.sessionToken },
                 accountIdentitySeed: { authRepository.identitySecrets?.accountIdentitySeed },
                 // `nil` until the chat layer has bootstrapped, so an empty
-                // list during startup is never mistaken for "left every group".
+                // list during startup is never mistaken for "left every
+                // group"; the driver uploads nothing until it is non-nil.
                 knownGroupIds: {
                     chatRepository.state.bootstrapped
                         // Every GROUP, not every conversation (ADR-0073
@@ -1513,7 +1536,6 @@ private struct SessionRoot: View, Equatable {
                         ? chatRepository.knownGroupIdHexes
                         : nil
                 },
-                snapshot: { chatRepository.currentStorageSnapshot() },
                 // ADR-0058 section 5.2 — the folded synced state (folders,
                 // pins, mutes, archive, read cursors, drafts).
                 syncedState: {
@@ -1580,10 +1602,17 @@ private struct SessionRoot: View, Equatable {
                 if !account.username.isEmpty,
                    ReachCenter.shared.ownUsernameCertificate == nil {
                     let token = secrets.sessionToken
+                    // The certificate names THIS account's username. A fetch
+                    // that returns after a sign-out, or after another account
+                    // signed in, stores nothing: the reach record it would be
+                    // written into is by then that account's, and every
+                    // profile it sends would carry this one's certificate.
+                    let bound = authRepository.binding.capture()
                     Task { @MainActor in
                         do {
                             let cert = try await DiscoveryClient(sessionToken: token)
                                 .fetchUsernameCertificate()
+                            guard bound.isCurrent else { return }
                             ReachCenter.shared.setOwnUsernameCertificate(cert)
                             if cert != nil { await chatRepository.publishOwnProfileToAllGroups() }
                         } catch {
@@ -1848,9 +1877,9 @@ private struct SessionRoot: View, Equatable {
                         await chatRepository.sendIntroductions()
                     }
                 ),
-                onChooseUsername: UsernameClaim.offered(username: account.username)
-                    ? { push(.chooseUsername, on: tab) } : nil,
-                onChangeUsername: UsernameClaim.offered(username: account.username)
+                // A guest account never reaches Settings: it gets its
+                // username from the question after its call (``GuestRoot``).
+                onChangeUsername: account.username.isEmpty
                     ? nil : { push(.changeUsername, on: tab) }
             )
         case .passkeys:
@@ -1878,7 +1907,6 @@ private struct SessionRoot: View, Equatable {
         case .addDevice:
             AddDeviceScreen(
                 authRepository: authRepository,
-                onChooseUsername: { push(.chooseUsername, on: tab) },
                 onDeviceAdded: { deviceKey in
                     // UX 17.5 — this device let it in: no notice about it here.
                     NewDeviceNoticeCenter.shared.letIn(
@@ -1914,15 +1942,13 @@ private struct SessionRoot: View, Equatable {
                 hasUsername: !account.username.isEmpty,
                 onAddEmail: { push(.recoveryEmail(remove: false), on: tab) },
                 onAddPasskey: { push(.passkeys, on: tab) },
-                onSavePhrase: { push(.savePhrase, on: tab) },
-                onChooseUsername: { push(.chooseUsername, on: tab) }
+                onSavePhrase: { push(.savePhrase, on: tab) }
             )
         case .recoveryEmail(let remove):
             RecoveryEmailScreen(
                 authRepository: authRepository,
                 center: services.accountProtection,
                 startsRemoving: remove,
-                onChooseUsername: { push(.chooseUsername, on: tab) },
                 onDone: { pop(.recoveryEmail(remove: remove), from: tab) }
             )
         case .savePhrase:
@@ -1938,16 +1964,6 @@ private struct SessionRoot: View, Equatable {
                 center: services.accountProtection,
                 currentUsername: account.username,
                 onDone: { pop(.changeUsername, from: tab) }
-            )
-        case .chooseUsername:
-            ChooseUsernameScreen(
-                authRepository: authRepository,
-                onDone: {
-                    // Back to where the person came from, and the "Protect
-                    // your account" step once: a guest never saw it.
-                    pop(.chooseUsername, from: tab)
-                    push(.protectAccount, on: tab)
-                }
             )
         case .secureAccount:
             SecureAccountScreen(
@@ -2203,6 +2219,8 @@ private struct AnonRoot: View {
         accountProtection: AccountProtectionCenter,
         onSignedUp: @escaping () -> Void
     ) {
+        // The step after a sign-up ("Protect your account") is the app
+        // root's, shown over the session; the view model only tells it.
         self._signupVM = StateObject(
             wrappedValue: SignupViewModel(repository: repository, onSignedUp: onSignedUp)
         )

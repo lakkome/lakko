@@ -336,3 +336,41 @@ describe("MultiJoinerCall — local stream + camera lifecycle for the call host"
     expect(call.videoPublishState()).toBe("off");
   });
 });
+
+// ---- The light companion track (`light-stream.ts`) -----------------------
+
+describe("MultiJoinerCall: the light companion track", () => {
+  it("is kept under its peer's id and never becomes a participant, a sink or a camera flag", async () => {
+    call = await MultiJoinerCall.join(makeOpts());
+    seedRosterWithPeerX();
+    const before = callState.participants().map((p) => p.id);
+
+    const light = fakeRemote("peerX~light", "video", []);
+    (light.rt.stream as { getTracks: () => unknown[] }).getTracks = () => [light.track];
+    hooks.captured?.onRemoteTrack?.(light.rt);
+
+    expect(callState.participants().map((p) => p.id)).toEqual(before);
+    expect(camOn("peerX")).toBe(false);
+    expect(call.remoteStreams().size).toBe(0);
+    expect(call.remoteLightStreams().get("peerX")).toBe(light.rt.stream);
+    expect(call.remoteLightStreamFor("peer-peerX")).toBe(light.rt.stream);
+    expect(call.remoteStreamFor("peer-peerX")).toBeUndefined();
+  });
+
+  it("is pruned when its track ends and when its peer leaves", async () => {
+    call = await MultiJoinerCall.join(makeOpts());
+    seedRosterWithPeerX();
+
+    const first = fakeRemote("peerX~light", "video", []);
+    hooks.captured?.onRemoteTrack?.(first.rt);
+    first.track.readyState = "ended";
+    first.fireEnded();
+    expect(call.remoteLightStreams().has("peerX")).toBe(false);
+
+    const second = fakeRemote("peerX~light", "video", []);
+    hooks.captured?.onRemoteTrack?.(second.rt);
+    expect(call.remoteLightStreams().has("peerX")).toBe(true);
+    hooks.captured?.onPeerLeft?.("peerX");
+    expect(call.remoteLightStreams().has("peerX")).toBe(false);
+  });
+});

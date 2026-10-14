@@ -172,58 +172,6 @@ public fun resealOutcomeOf(err: Throwable?): ResealOutcome {
     }
 }
 
-// ---------------------------------------------------------------------------
-// A guest chooses a username (and its first password)
-// ---------------------------------------------------------------------------
-
-/** Where "Choose a username" stands. */
-public enum class UsernameClaimStep {
-    /** Nothing is saved: the name and the password are both to be given. */
-    Name,
-
-    /** The name is saved; the password is still owed. Only the password is
-     *  retried. */
-    Password,
-
-    /** Both are saved. */
-    Done,
-}
-
-/** The step a screen opens on. */
-public fun usernameClaimStep(hasUsername: Boolean, passwordOwed: Boolean): UsernameClaimStep = when {
-    !hasUsername -> UsernameClaimStep.Name
-    passwordOwed -> UsernameClaimStep.Password
-    else -> UsernameClaimStep.Done
-}
-
-/** The entry-point rule: "Choose a username" is offered only to an account
- *  without one (or whose first password is still owed after the name). */
-public fun usernameClaimOffered(hasUsername: Boolean, passwordOwed: Boolean = false): Boolean =
-    usernameClaimStep(hasUsername, passwordOwed) != UsernameClaimStep.Done
-
-/** What the one button does next, and what a failure leaves. */
-public data class UsernameClaimState(
-    val step: UsernameClaimStep,
-    val busy: Boolean = false,
-    val error: me.lakko.app.l10n.UiText? = null,
-) {
-    /** The username field is editable only until the name is saved. */
-    val nameEditable: Boolean get() = step == UsernameClaimStep.Name && !busy
-}
-
-/** The name landed: the password is next, whatever happens to it. */
-public fun afterUsernameSaved(state: UsernameClaimState): UsernameClaimState =
-    state.copy(step = UsernameClaimStep.Password, error = null)
-
-/** The password landed. */
-public fun afterFirstPasswordSaved(state: UsernameClaimState): UsernameClaimState =
-    state.copy(step = UsernameClaimStep.Done, busy = false, error = null)
-
-/** A failure: the step stays where it is (a saved name is kept), with the
- *  failing step's own line. */
-public fun afterUsernameClaimFailure(state: UsernameClaimState, line: me.lakko.app.l10n.UiText): UsernameClaimState =
-    state.copy(busy = false, error = line)
-
 /** The `Recovery phrase` row of Settings > Account. */
 public enum class RecoveryPhraseRow {
     /** No phrase saved: `Save a recovery phrase` (section 19.5). */
@@ -378,26 +326,26 @@ public class AccountProtectionStore(private val storage: MarkerStorage) {
     public fun phraseSaved(accountIdB64: String): Boolean = read(PHRASE_PREFIX + accountIdB64) != null
 
     public fun setPhraseSaved(accountIdB64: String, saved: Boolean) {
-        if (saved) write(PHRASE_PREFIX + accountIdB64, "1") else drop(PHRASE_PREFIX + accountIdB64)
+        if (saved) write(accountIdB64, PHRASE_PREFIX + accountIdB64, "1") else drop(PHRASE_PREFIX + accountIdB64)
     }
 
     public fun bannerDismissedAtMs(accountIdB64: String): Long? =
         read(BANNER_PREFIX + accountIdB64)?.toLongOrNull()
 
     public fun dismissBanner(accountIdB64: String, nowMs: Long): Unit =
-        write(BANNER_PREFIX + accountIdB64, nowMs.toString())
+        write(accountIdB64, BANNER_PREFIX + accountIdB64, nowMs.toString())
 
     /** The guest chose a username and its first password is not set yet. */
     public fun firstPasswordOwed(accountIdB64: String): Boolean = read(FIRST_PASSWORD_PREFIX + accountIdB64) != null
 
     public fun setFirstPasswordOwed(accountIdB64: String, owed: Boolean) {
-        if (owed) write(FIRST_PASSWORD_PREFIX + accountIdB64, "1") else drop(FIRST_PASSWORD_PREFIX + accountIdB64)
+        if (owed) write(accountIdB64, FIRST_PASSWORD_PREFIX + accountIdB64, "1") else drop(FIRST_PASSWORD_PREFIX + accountIdB64)
     }
 
     public fun protectStepOwed(accountIdB64: String): Boolean = read(STEP_PREFIX + accountIdB64) != null
 
     public fun setProtectStepOwed(accountIdB64: String, owed: Boolean) {
-        if (owed) write(STEP_PREFIX + accountIdB64, "1") else drop(STEP_PREFIX + accountIdB64)
+        if (owed) write(accountIdB64, STEP_PREFIX + accountIdB64, "1") else drop(STEP_PREFIX + accountIdB64)
     }
 
     /** Everything kept for [accountIdB64] (Forget device, a wipe). */
@@ -414,9 +362,11 @@ public class AccountProtectionStore(private val storage: MarkerStorage) {
         null
     }
 
-    private fun write(key: String, value: String) {
+    private fun write(accountIdB64: String, key: String, value: String) {
         try {
-            storage.set(key, value)
+            // Refused for a signed-out or wiped account
+            // ([me.lakko.app.account.AccountStoreGate]).
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.set(key, value) }
         } catch (_: Throwable) {
             // The flag then lives for this process only.
         }

@@ -3,6 +3,7 @@
 
 import Combine
 import Foundation
+import LakkoCore
 import SwiftUI
 import WebRTC
 
@@ -130,96 +131,50 @@ public final class CallUiState: ObservableObject {
         }
     }
 
-    /// In-call audio / video settings (S-3-A-settings).
-    /// Holds the device picks + processing toggles; the WebRTC
-    /// pod sprint reads from here when configuring the local
-    /// `RTCAudioSession` + capture chain.
+    /// Which microphone, camera and speaker the call uses
+    /// (`docs/ux/calls.md` section 4.1): the person's choices for this call
+    /// and the devices they were chosen from. A choice of `nil` is the system
+    /// default.
+    ///
+    /// The noise-suppression, echo-cancellation, gain, low-data and mirror
+    /// flags that used to sit here changed nothing or were switches in a
+    /// call; they went with the old settings panel.
     public struct CallSettings: Equatable {
         public var selectedAudioInput: String?
         public var selectedVideoInput: String?
         public var selectedAudioOutput: String?
         public var availableDevices: [CallDevice]
-        public var noiseSuppression: Bool
-        public var echoCancellation: Bool
-        public var autoGain: Bool
-        public var mirrorLocal: Bool
-        public var lowDataMode: Bool
+        /// This device's own picture is mirrored, as a mirror shows it
+        /// (`docs/ux/group-call-grid.md` section 5.3). Not a setting.
+        public let mirrorLocal: Bool = true
 
         public init(
             selectedAudioInput: String? = nil,
             selectedVideoInput: String? = nil,
             selectedAudioOutput: String? = nil,
-            availableDevices: [CallDevice] = [],
-            noiseSuppression: Bool = true,
-            echoCancellation: Bool = true,
-            autoGain: Bool = true,
-            mirrorLocal: Bool = true,
-            lowDataMode: Bool = false
+            availableDevices: [CallDevice] = []
         ) {
             self.selectedAudioInput = selectedAudioInput
             self.selectedVideoInput = selectedVideoInput
             self.selectedAudioOutput = selectedAudioOutput
             self.availableDevices = availableDevices
-            self.noiseSuppression = noiseSuppression
-            self.echoCancellation = echoCancellation
-            self.autoGain = autoGain
-            self.mirrorLocal = mirrorLocal
-            self.lowDataMode = lowDataMode
         }
 
         public static let `default` = CallSettings()
-    }
-
-    /// A single chat message inside the call (S-3-A-chat).
-    /// Same shape as the web `ChatMessage` and Android
-    /// counterpart.
-    public struct ChatMessage: Equatable, Identifiable {
-        public enum Kind: String, Equatable {
-            case text
-            case system
-        }
-        public let id: String
-        public let kind: Kind
-        /// Author participant id; `nil` for system events.
-        public let senderId: String?
-        public let senderName: String
-        public let text: String
-        /// Wall-clock timestamp.
-        public let ts: Date
-        /// A system event kept as the way to render it, so a line already in
-        /// the call chat follows a language switch (ADR-0061). `nil` for a
-        /// message a person typed, whose ``text`` is the whole of it.
-        public let systemText: UiText?
-
-        /// What the row shows: a system event in the language of the moment,
-        /// else the typed text.
-        public var displayText: String { systemText?.text ?? text }
-
-        public init(
-            id: String,
-            kind: Kind,
-            senderId: String?,
-            senderName: String,
-            text: String,
-            ts: Date,
-            systemText: UiText? = nil
-        ) {
-            self.id = id
-            self.kind = kind
-            self.systemText = systemText
-            self.senderId = senderId
-            self.senderName = senderName
-            self.text = text
-            self.ts = ts
-        }
     }
 
     // MARK: - Published state
 
     @Published public private(set) var phase: CallPhase = .preparing
     @Published public private(set) var participants: [Participant] = []
-    /// `nil` = follow active speaker.
+    /// The pinned person, or `nil`. A pin always means the Focus layout.
     @Published public private(set) var pinnedId: String?
+    /// The group layout the person chose for this call, or `nil` for the
+    /// default (`docs/ux/group-call-grid.md` section 3). Lasts for the call.
+    @Published private(set) var layoutChoice: GroupLayoutKind?
+    /// Who holds the floor and when each person last did, worked out on this
+    /// device from the audio it plays (section 7.3).
+    @Published private(set) var speech: StageSpeech = .none
     @Published public private(set) var participantListOpen: Bool = false
     @Published public private(set) var e2ee: E2eeState = .inactive
     /// `docs/ux/calls.md` section 4 — the other person's name for the status
@@ -228,14 +183,13 @@ public final class CallUiState: ObservableObject {
     @Published public private(set) var peerName: String?
     /// `docs/ux/calls.md` sections 4 and 5 — the encryption sheet is open.
     @Published public private(set) var encryptionSheetOpen: Bool = false
-    /// `docs/ux/calls.md` section 4.1 — the sound is on the loudspeaker. Held
-    /// here so the button's face is decided by one value the tests can read;
-    /// ``CallAudioRoute`` is what actually moves the audio.
-    @Published public private(set) var speakerOn: Bool = false
-    /// One plain line about this call's media, or `nil`. Today's only use is
-    /// section 3.2's "no camera on this device" downgrade; it sits under the
-    /// status line while the call rings out and goes when it connects.
+    /// One plain line about this call's media, or `nil`: section 3.2's "no
+    /// camera on this device" downgrade, and what the call did on the
+    /// person's behalf (a camera that could not start). It sits under the
+    /// status line; ``showNotice(_:)`` takes it away again after a few
+    /// seconds.
     @Published public private(set) var mediaNotice: UiText?
+    private var noticeTask: Task<Void, Never>?
     /// Participants (by roster id) at least one of whose incoming streams could
     /// not be SFrame-decrypted, because arming that receiver's decryptor
     /// failed. Their media is already discarded fail-closed by libwebrtc
@@ -251,24 +205,10 @@ public final class CallUiState: ObservableObject {
     @Published public private(set) var connectionDetail: ConnectionDetail = .unknown
     @Published public private(set) var qualityPopoverOpen: Bool = false
     @Published public private(set) var hasMultipleCameras: Bool = false
-    /// Gear-menu open / closed (S-3-A-settings).
-    @Published public private(set) var settingsOpen: Bool = false
     /// In-call audio / video settings + enumerated devices
     /// (S-3-A-settings). Mock-populated until the WebRTC pod
     /// sprint wires real device enumeration.
     @Published public private(set) var settings: CallSettings = .default
-
-    /// Chat panel open / closed (S-3-A-chat).
-    @Published public private(set) var chatOpen: Bool = false
-    /// Chat-message log — oldest first.
-    @Published public private(set) var chatMessages: [ChatMessage] = []
-    /// In-progress compose-box text (held in state so it
-    /// survives panel close / reopen during a call).
-    @Published public private(set) var composeText: String = ""
-    /// Unread-message count since the user last opened the
-    /// chat panel. System events do not count towards unread
-    /// — they are background context.
-    @Published public private(set) var chatUnreadCount: Int = 0
 
     /// G3-1-video-ui-screen — live local-camera track from the
     /// underlying `CallSession` (when one is attached via
@@ -310,6 +250,37 @@ public final class CallUiState: ObservableObject {
     /// wholesale on `reset()`, and per-entry on peer-left.
     @Published public private(set) var remoteVideoTracks: [String: RTCVideoTrack] = [:]
 
+    /// The light companion of a remote peer's camera, keyed on the roster
+    /// participant id like ``remoteVideoTracks`` (ADR-0067 step 5,
+    /// ``LightStream``). A second picture of a person already in the call:
+    /// an entry here is never a participant, a tile or a camera flag, and it
+    /// never replaces the main track. That person's tile draws it beside the
+    /// main one and shows it while the main one stands still. Dropped with
+    /// its peer (``participantLeft(_:)``), when the call ends, and on
+    /// ``reset()``.
+    @Published public private(set) var remoteLightVideoTracks: [String: RTCVideoTrack] = [:]
+
+    /// The middle track of a remote peer's camera (ADR-0070 step 5), keyed
+    /// on the roster participant id like ``remoteVideoTracks``: the same
+    /// camera at half size. Like the light companion it is a further picture
+    /// of a person already in the call, never a participant, a tile or a
+    /// camera flag. It is the heavy picture a tile watches when the shared
+    /// rule says `middle` (``VideoWants``). Dropped with its peer, when the
+    /// call ends, and on ``reset()``.
+    @Published public private(set) var remoteMiddleVideoTracks: [String: RTCVideoTrack] = [:]
+
+    /// What the SFU says it gives of each remote person's video, keyed on
+    /// the roster participant id (ADR-0070 step 6, ``VideoGiven``). Empty
+    /// until it says anything; a tile then shows what it wants.
+    @Published private(set) var remoteVideoGiven: [String: TileVideoQuality] = [:]
+
+    /// Where a tile's report of the picture it shows goes: the live SFU
+    /// call's session, which asks the SFU accordingly. Set by the call's
+    /// adapter; `nil` on a one-to-one call and when no call is live, where a
+    /// report is dropped. The first argument is the identity of an object
+    /// that lives as long as the tile, the second an SFU peer id.
+    var tileVideoQualitySink: ((ObjectIdentifier, String, TileVideoQuality?) -> Void)?
+
     /// B2a — mid-call camera-on lifecycle, driven by the bound session
     /// (1×1 `CallSession.videoPublishState` via `driveFrom`; SFU via
     /// `SfuCallUi`). `CallScreen` reads this for the camera-button
@@ -317,29 +288,7 @@ public final class CallUiState: ObservableObject {
     /// hint while `.starting`. Untouched by `seedMockState()`.
     @Published public private(set) var videoPublishState: VideoPublishState = .off
 
-    /// Monotone counter for client-side chat-message ids;
-    /// the WebRTC pod replaces this with MLS application-
-    /// message round-trip ids once 3a-pod-followup lands.
-    private var chatIdCounter: Int = 0
-    private func nextChatId() -> String {
-        chatIdCounter += 1
-        return "local-\(Int(Date().timeIntervalSince1970))-\(chatIdCounter)"
-    }
-
     // MARK: - Derived state
-
-    /// The tile the group stage draws large, or `nil` for an equal grid. The
-    /// rule is `CallScreenPresentation.featured` (section 4.4), shared with the
-    /// web and Android stores.
-    public var featuredParticipant: Participant? {
-        CallScreenPresentation.featured(participants: participants, pinnedId: pinnedId)
-    }
-
-    /// The grid: everyone but the featured tile in roster order, or everyone
-    /// when there is no featured tile.
-    public var galleryParticipants: [Participant] {
-        CallScreenPresentation.gallery(participants: participants, featured: featuredParticipant)
-    }
 
     /// Quality tier of the local participant — drives the
     /// header-bar QualityIndicator.
@@ -367,10 +316,18 @@ public final class CallUiState: ObservableObject {
 
     public func participantLeft(_ id: String) {
         participants.removeAll(where: { $0.id == id })
+        // If the pinned person leaves, the pin is cleared and the stage goes
+        // back to the speaker; the layout stays as it is
+        // (`docs/ux/group-call-grid.md` section 6.2).
         if pinnedId == id { pinnedId = nil }
         // A peer that left takes its undecryptable streams with it. Keeping the
         // id would make a later rejoin under the same id start out accused.
         undecryptable.remove(id)
+        // The light companion and the middle track are pictures of that
+        // peer and go with it, as does what the SFU said it gave of them.
+        remoteLightVideoTracks.removeValue(forKey: id)
+        remoteMiddleVideoTracks.removeValue(forKey: id)
+        remoteVideoGiven.removeValue(forKey: id)
     }
 
     /// Record that a participant's incoming media cannot be decrypted (an
@@ -419,15 +376,38 @@ public final class CallUiState: ObservableObject {
         }
     }
 
-    public func setSpeaking(_ id: String?) {
-        participants = participants.map { p in
-            Participant(
-                id: p.id, displayName: p.displayName, isLocal: p.isLocal,
-                micOn: p.micOn, camOn: p.camOn, handRaised: p.handRaised,
-                quality: p.quality, speaking: p.id == id,
-                screenSharing: p.screenSharing
-            )
+    /// What the sound levels say (``GroupSpeakingMonitor``): whose ring is on,
+    /// who holds the floor, and when each person last did. Several people can
+    /// be speaking at once; only one holds the floor.
+    ///
+    /// Writes the roster only when a ring actually changed, and the speech
+    /// only when the stage could read it differently: this runs several times
+    /// a second, and a new array on every reading would redraw every tile.
+    func setSpeech(speakingIds: Set<String>, speech next: StageSpeech) {
+        if participants.contains(where: { $0.speaking != speakingIds.contains($0.id) }) {
+            participants = participants.map { p in
+                let speaking = speakingIds.contains(p.id)
+                guard p.speaking != speaking else { return p }
+                return Participant(
+                    id: p.id, displayName: p.displayName, isLocal: p.isLocal,
+                    micOn: p.micOn, camOn: p.camOn, handRaised: p.handRaised,
+                    quality: p.quality, speaking: speaking,
+                    screenSharing: p.screenSharing
+                )
+            }
         }
+        // The floor's own timestamp moves on every reading; nothing reads it
+        // while the same person holds the floor, so only a change of holder
+        // (or of who has ever spoken) is worth a write.
+        if speech.activeSpeakerId != next.activeSpeakerId
+            || Set(speech.lastSpokeAtMs.keys) != Set(next.lastSpokeAtMs.keys) {
+            speech = next
+        }
+    }
+
+    /// The person's own choice of group layout for this call.
+    func setLayoutChoice(_ choice: GroupLayoutKind?) {
+        if layoutChoice != choice { layoutChoice = choice }
     }
 
     public func setMic(_ on: Bool) {
@@ -502,6 +482,24 @@ public final class CallUiState: ObservableObject {
         self.pinnedId = id
     }
 
+    /// The pin control of `id`'s tile was pressed
+    /// (`docs/ux/group-call-grid.md` section 6.2).
+    ///
+    /// On the pinned person it unpins and leaves the layout as it is: Focus
+    /// stays and the stage goes back to following the speaker. On anyone
+    /// else it pins them, which is asking to see them large, so the layout
+    /// choice becomes Focus; that is also where a later unpin, or the pinned
+    /// person leaving, leaves the screen. One pin at a time: pinning someone
+    /// else moves it.
+    func togglePin(_ id: String) {
+        if pinnedId == id {
+            pinnedId = nil
+            return
+        }
+        if layoutChoice != .focus { layoutChoice = .focus }
+        pinnedId = id
+    }
+
     public func setParticipantListOpen(_ open: Bool) {
         self.participantListOpen = open
     }
@@ -531,16 +529,27 @@ public final class CallUiState: ObservableObject {
         self.encryptionSheetOpen = open && e2ee.active
     }
 
-    /// `docs/ux/calls.md` section 4.1 — record where the sound is going. The
-    /// caller is ``CallAudioRoute``, which only records what the platform
-    /// accepted, so the button never claims a route the device refused.
-    public func setSpeakerOn(_ on: Bool) {
-        self.speakerOn = on
-    }
-
     /// Set (or clear) the one line under the status line.
     public func setMediaNotice(_ notice: UiText?) {
+        noticeTask?.cancel()
+        noticeTask = nil
         self.mediaNotice = notice
+    }
+
+    /// How long ``showNotice(_:)`` keeps its line on the screen.
+    public static let noticeSeconds: UInt64 = 8
+
+    /// Show one line under the status line for a few seconds, replacing any
+    /// line already up: what the call did on the person's behalf (the camera
+    /// could not start, camera access is off). These used to be written into
+    /// the call's chat, which nobody had open at the moment they mattered.
+    public func showNotice(_ notice: UiText) {
+        setMediaNotice(notice)
+        noticeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.noticeSeconds * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.mediaNotice = nil
+        }
     }
 
     public func setConnectionDetail(_ d: ConnectionDetail) {
@@ -555,17 +564,9 @@ public final class CallUiState: ObservableObject {
         self.hasMultipleCameras = many
     }
 
-    // MARK: - Settings (S-3-A-settings)
+    // MARK: - Settings (`docs/ux/calls.md` section 4.1)
 
-    /// Open / close the gear menu.
-    public func setSettingsOpen(_ open: Bool) {
-        self.settingsOpen = open
-    }
-
-    /// Replace the enumerated devices snapshot. Called by the
-    /// WebRTC pod after `AVCaptureDevice.DiscoverySession`
-    /// (cameras) and `AVAudioSession.availableInputs` (mics)
-    /// have produced their lists.
+    /// Replace the devices the call can choose between (``CallDevices``).
     public func setAvailableDevices(_ devices: [CallDevice]) {
         self.settings.availableDevices = devices
     }
@@ -580,115 +581,9 @@ public final class CallUiState: ObservableObject {
         self.settings.selectedVideoInput = id
     }
 
-    /// Pick a speaker / headset (`nil` → OS default). On iOS
-    /// this is a hint — `AVAudioSession` overrides for BT and
-    /// wired connections.
+    /// Pick where the sound comes out (`nil` → the system's own choice).
     public func setSelectedAudioOutput(_ id: String?) {
         self.settings.selectedAudioOutput = id
-    }
-
-    public func setNoiseSuppression(_ on: Bool) {
-        self.settings.noiseSuppression = on
-    }
-
-    public func setEchoCancellation(_ on: Bool) {
-        self.settings.echoCancellation = on
-    }
-
-    public func setAutoGain(_ on: Bool) {
-        self.settings.autoGain = on
-    }
-
-    public func setMirrorLocal(_ on: Bool) {
-        self.settings.mirrorLocal = on
-    }
-
-    public func setLowDataMode(_ on: Bool) {
-        self.settings.lowDataMode = on
-    }
-
-    // MARK: - Chat (S-3-A-chat)
-
-    /// Open / close the chat panel. Opening clears the unread
-    /// badge.
-    public func setChatOpen(_ open: Bool) {
-        self.chatOpen = open
-        if open { self.chatUnreadCount = 0 }
-    }
-
-    /// Update the in-progress compose-box content.
-    public func setComposeText(_ text: String) {
-        self.composeText = text
-    }
-
-    /// Send a chat message from the local participant.
-    /// Returns the constructed message so the WebRTC pod can
-    /// hand it to MLS application-message encryption. Local-
-    /// echo: the message appears in `chatMessages`
-    /// immediately. Returns `nil` for whitespace-only input.
-    @discardableResult
-    public func sendChatMessage(_ text: String) -> ChatMessage? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let local = participants.first(where: { $0.isLocal })
-        let senderId = local?.id ?? "local"
-        let senderName = CallPeerName.tileLabel(
-            displayName: local?.displayName ?? "", isLocal: true)
-        let msg = ChatMessage(
-            id: nextChatId(),
-            kind: .text,
-            senderId: senderId,
-            senderName: senderName,
-            text: trimmed,
-            ts: Date()
-        )
-        self.chatMessages.append(msg)
-        self.composeText = ""
-        return msg
-    }
-
-    /// Receive a chat message from a remote participant
-    /// (decrypted MLS application message). If the chat panel
-    /// is closed, the unread badge increments.
-    public func receiveChatMessage(_ msg: ChatMessage) {
-        self.chatMessages.append(msg)
-        if !chatOpen, msg.kind == .text {
-            self.chatUnreadCount += 1
-        }
-    }
-
-    /// Append a system event ("Alice joined the call"). Does
-    /// NOT bump the unread counter — system events are
-    /// background context.
-    public func addSystemEvent(_ text: String) {
-        let msg = ChatMessage(
-            id: nextChatId(),
-            kind: .system,
-            senderId: nil,
-            senderName: "",
-            text: text,
-            ts: Date()
-        )
-        self.chatMessages.append(msg)
-    }
-
-    /// A system event kept as a message: the row renders it in the language
-    /// of the moment it is shown, so it follows a language switch.
-    public func addSystemEvent(_ text: UiText) {
-        let msg = ChatMessage(
-            id: nextChatId(),
-            kind: .system,
-            senderId: nil,
-            senderName: "",
-            text: text.text,
-            ts: Date(),
-            systemText: text
-        )
-        self.chatMessages.append(msg)
-    }
-
-    public func clearChatUnread() {
-        self.chatUnreadCount = 0
     }
 
     // MARK: - Live video track (G3-1-video-ui-screen)
@@ -732,6 +627,58 @@ public final class CallUiState: ObservableObject {
         }
     }
 
+    /// Set (or, with `nil`, remove) a remote peer's light companion track,
+    /// keyed on its roster participant id. Touches nothing else: no
+    /// participant is added, no camera flag changes, the main track stays.
+    public func setRemoteLightVideoTrack(_ track: RTCVideoTrack?, forParticipant id: String) {
+        if let track {
+            self.remoteLightVideoTracks[id] = track
+        } else {
+            self.remoteLightVideoTracks.removeValue(forKey: id)
+        }
+    }
+
+    /// Drop every light companion: the call ended.
+    public func clearRemoteLightVideoTracks() {
+        if !remoteLightVideoTracks.isEmpty { self.remoteLightVideoTracks = [:] }
+    }
+
+    /// Set (or, with `nil`, remove) a remote peer's middle track, keyed on
+    /// its roster participant id. Touches nothing else.
+    public func setRemoteMiddleVideoTrack(_ track: RTCVideoTrack?, forParticipant id: String) {
+        if let track {
+            self.remoteMiddleVideoTracks[id] = track
+        } else {
+            self.remoteMiddleVideoTracks.removeValue(forKey: id)
+        }
+    }
+
+    /// The SFU's latest `video-given` set, by SFU peer id: it replaces the
+    /// whole previous one.
+    func setRemoteVideoGiven(byPeerId given: [String: TileVideoQuality]) {
+        var next: [String: TileVideoQuality] = [:]
+        for (peerId, quality) in given { next["peer-\(peerId)"] = quality }
+        if next != remoteVideoGiven { remoteVideoGiven = next }
+    }
+
+    /// The call ended: drop every further picture of a remote person (light
+    /// companions and middle tracks) and what the SFU said it gave.
+    func clearRemoteVideoCopies() {
+        clearRemoteLightVideoTracks()
+        if !remoteMiddleVideoTracks.isEmpty { remoteMiddleVideoTracks = [:] }
+        if !remoteVideoGiven.isEmpty { remoteVideoGiven = [:] }
+    }
+
+    /// A tile says which picture of a participant it shows, or `nil` when it
+    /// stops showing one (``VideoWants``). Forwarded to the live SFU call;
+    /// dropped when there is none.
+    func reportTileVideoQuality(
+        tile: ObjectIdentifier, participantId: String, quality: TileVideoQuality?
+    ) {
+        tileVideoQualitySink?(
+            tile, CallScreenPresentation.sfuPeerId(ofParticipant: participantId), quality)
+    }
+
     /// B2a — push the mid-call camera-on lifecycle. Driven by the
     /// bound session (`driveFrom` for 1×1, `SfuCallUi` for the SFU
     /// path); exposed as a setter so both callers converge on the one
@@ -760,25 +707,19 @@ public final class CallUiState: ObservableObject {
         self.phase = .preparing
         self.participants = []
         self.pinnedId = nil
+        self.layoutChoice = nil
+        self.speech = .none
         self.participantListOpen = false
         self.e2ee = .inactive
         self.peerName = nil
         self.encryptionSheetOpen = false
-        self.speakerOn = false
-        self.mediaNotice = nil
+        setMediaNotice(nil)
         self.undecryptable = []
         self.connectionDetail = .unknown
         self.qualityPopoverOpen = false
-        self.settingsOpen = false
-        // Preferences (toggles + selected ids) survive a
-        // reset — only the enumerated-devices snapshot is
-        // cleared.
-        self.settings.availableDevices = []
-        // Chat is per-call — wipe.
-        self.chatOpen = false
-        self.chatMessages = []
-        self.composeText = ""
-        self.chatUnreadCount = 0
+        // A choice holds for the call, and the next call starts from the
+        // system's defaults.
+        self.settings = .default
         // Live media — drop both tracks so the next call
         // re-binds against a fresh CallSession.
         self.localVideoTrack = nil
@@ -786,6 +727,9 @@ public final class CallUiState: ObservableObject {
         self.remoteVideoFlowing = false
         // N-way SFU per-peer video tracks — drop them all.
         self.remoteVideoTracks = [:]
+        self.remoteLightVideoTracks = [:]
+        self.remoteMiddleVideoTracks = [:]
+        self.remoteVideoGiven = [:]
         // B2a — no camera-on in flight for a fresh call.
         self.videoPublishState = .off
     }

@@ -32,7 +32,8 @@ class PeerTagLabelsTest {
         "KEY_BOB" to "Bob",
         "KEY_MALLORY" to "Mallory",
     )
-    private val labelOf: (String) -> String = { key -> names[key] ?: "Member" }
+    /** `null` for a person this device has no name for. */
+    private val labelOf: (String) -> String? = { key -> names[key] }
 
     private fun contact(accountIdHex: String, key: String) = PeerTagSource(accountIdHex, key)
     private fun profile(accountIdHex: String, key: String) = PeerTagSource(accountIdHex, key)
@@ -75,7 +76,21 @@ class PeerTagLabelsTest {
     }
 
     @Test
-    fun `a profile arriving mid-call names a tile that was Participant N`() {
+    fun `a tag whose person this device cannot name is left unlabelled`() {
+        // KEY_NOBODY's account id is known (a contact row), its name is not:
+        // no placeholder word and no fingerprint lands on the tile.
+        val labels = buildPeerTagLabels(
+            sources = listOf(contact("aa", "KEY_ALICE"), contact("dd", "KEY_NOBODY")),
+            tagOf = tagOf,
+            labelOf = labelOf,
+        )
+        assertEquals("Alice", labels.labelFor("tag:aa"))
+        assertNull(labels.labelFor("tag:dd"))
+        assertTrue(labels.collided.isEmpty())
+    }
+
+    @Test
+    fun `a profile arriving mid-call names a tile that was unnamed`() {
         var version = 0L
         var sources = listOf(contact("aa", "KEY_ALICE"))
         val resolver = GroupCallNameResolver(
@@ -85,9 +100,8 @@ class PeerTagLabelsTest {
             labelOf = labelOf,
         )
         assertEquals("Alice", resolver.resolve("p1", "pseudo-1", "tag:aa"))
-        assertEquals("Participant 1", resolver.resolve("p2", "pseudo-2", "tag:bb"))
-        // Asked again for the same peer (welcome, then peer-joined): same number.
-        assertEquals("Participant 1", resolver.resolve("p2", "pseudo-2", "tag:bb"))
+        // Unnamed is the empty name: no number and nothing of the pseudonym.
+        assertEquals("", resolver.resolve("p2", "pseudo-2", "tag:bb"))
 
         // Bob's profile lands; the directory's version moves.
         sources = sources + profile("bb", "KEY_BOB")
@@ -111,26 +125,6 @@ class PeerTagLabelsTest {
     }
 
     @Test
-    fun `a later resolution never renumbers the other unresolved peers`() {
-        var version = 0L
-        var sources = emptyList<PeerTagSource>()
-        val resolver = GroupCallNameResolver(
-            sourcesVersion = { version },
-            sources = { sources },
-            tagOf = tagOf,
-            labelOf = labelOf,
-        )
-        assertEquals("Participant 1", resolver.resolve("p1", "", "tag:aa"))
-        assertEquals("Participant 2", resolver.resolve("p2", "", "tag:bb"))
-        sources = listOf(profile("aa", "KEY_ALICE"))
-        version += 1
-        assertEquals("Alice", resolver.resolve("p1", "", "tag:aa"))
-        // p2 keeps its number; nobody moves down into p1's slot.
-        assertEquals("Participant 2", resolver.resolve("p2", "", "tag:bb"))
-        assertEquals("Participant 3", resolver.resolve("p3", "", "tag:cc"))
-    }
-
-    @Test
     fun `reapply renames the tiles already on screen`() {
         var version = 0L
         var sources = emptyList<PeerTagSource>()
@@ -147,12 +141,12 @@ class PeerTagLabelsTest {
                 remote("peer-p2", resolver.resolve("p2", "", "tag:bb")),
             ),
         )
-        assertEquals(listOf("Participant 1", "Participant 2"), ui.participants.value.map { it.displayName })
+        assertEquals(listOf("", ""), ui.participants.value.map { it.displayName })
 
         sources = listOf(profile("bb", "KEY_BOB"))
         version += 1
         resolver.reapply(ui) { peerId -> "peer-$peerId" }
-        assertEquals(listOf("Participant 1", "Bob"), ui.participants.value.map { it.displayName })
+        assertEquals(listOf("", "Bob"), ui.participants.value.map { it.displayName })
     }
 
     @Test
@@ -180,9 +174,7 @@ class PeerTagLabelsTest {
         isLocal = false,
         micOn = true,
         camOn = false,
-        handRaised = false,
         quality = CallUiState.QualityTier.Good,
         speaking = false,
-        screenSharing = false,
     )
 }

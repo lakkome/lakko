@@ -221,6 +221,7 @@ mod session;
 mod throttle;
 mod totp;
 mod turn;
+mod unclaimed;
 mod webauthn;
 mod webauthn_action;
 
@@ -553,6 +554,9 @@ async fn main() -> Result<()> {
     // dormant (with a warning) when unset.
     let handle_pepper =
         login_handle::load_handle_pepper().context("load LAKKO_AUTH_HANDLE_PEPPER")?;
+    let names_enabled = handle_pepper.is_some();
+    let unclaimed_ttl_secs =
+        unclaimed::ttl_from_env().context("load LAKKO_AUTH_UNCLAIMED_ACCOUNT_TTL_SECS")?;
     login_handle::log_startup(handle_pepper.as_ref());
     // ADR-0054 S4 — attempt limits. Loud-fail on a malformed knob.
     let limits = Arc::new(
@@ -604,6 +608,10 @@ async fn main() -> Result<()> {
     // their 60 days.
     let _email_pruner = recovery_email::spawn_pruner(pool.clone());
     let _notice_pruner = account_notices::spawn_pruner(pool.clone());
+    // ADR-0032 guest lifecycle — an account nobody named within a day is
+    // deleted. Off where sign-in by name is not configured.
+    let _unclaimed_pruner =
+        unclaimed::spawn_pruner(pool.clone(), names_enabled, unclaimed_ttl_secs);
     // ADR-0033 — prune expired call-admission events + throttled-call rows.
     let _throttle_pruner = throttle::spawn_pruner(pool.clone(), throttle_config);
     // ADR-0054 — drop issuance-quota rows older than the previous epoch.

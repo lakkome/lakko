@@ -80,6 +80,26 @@ typedef NS_ENUM(NSInteger, LakkoSFrameAttachStatus) {
     LakkoSFrameAttachStatusNullArgument = 4,
 };
 
+/// The codec a sender negotiated, as far as the sealed-frame layout
+/// cares (ADR-0071). It decides how many leading bytes of each encoded
+/// frame stay in the clear so that a receiver without the generic frame
+/// descriptor still finds key frames: 10 of a VP8 key frame, 3 of any
+/// other VP8 frame, none for Opus and for every other codec.
+///
+/// The raw values are the `LAKKO_SFRAME_MEDIA_CODEC_*` constants of the
+/// `lakko-sframe-native` C ABI (`SFrameAttach.mm` asserts the match at
+/// compile time).
+typedef NS_ENUM(uint8_t, LakkoSFrameMediaCodec) {
+    /// Any codec without a rule (H.264, VP9, AV1, the RED / RTX / FEC
+    /// wrappers), and a codec that is not known yet. Nothing is left
+    /// clear. This is what an encryptor uses until it is told otherwise.
+    LakkoSFrameMediaCodecOther = 0,
+    /// VP8 video.
+    LakkoSFrameMediaCodecVP8 = 1,
+    /// Opus audio. Nothing is left clear.
+    LakkoSFrameMediaCodecOpus = 2,
+};
+
 @interface LakkoSFrameAttach : NSObject
 
 /// One-shot capability probe — runs once at app startup
@@ -114,6 +134,12 @@ typedef NS_ENUM(NSInteger, LakkoSFrameAttachStatus) {
 /// whole lifetime. Every `uint8_t` is a valid stream index — there
 /// is no fail-closed rejection on this argument.
 ///
+/// The fresh encryptor seals a VIDEO sender's frames as
+/// `LakkoSFrameMediaCodecOther` (nothing in the clear) until
+/// [+setCodec:forSender:] names the negotiated codec; an AUDIO sender
+/// needs no such call. Attaching again replaces the encryptor, so the
+/// codec has to be set again after a re-attach.
+///
 /// Returns `LakkoSFrameAttachStatusOK` on success.
 + (LakkoSFrameAttachStatus)attachEncryptorToSender:
                               (RTCRtpSender * _Nullable)sender
@@ -141,6 +167,41 @@ typedef NS_ENUM(NSInteger, LakkoSFrameAttachStatus) {
                               (RTCRtpReceiver * _Nullable)receiver
                                                   seed:(NSData *_Nullable)seed
     NS_SWIFT_NAME(attachDecryptor(toReceiver:seed:));
+
+/// Tell the encryptor attached to `sender` which codec the sender
+/// negotiated (ADR-0071). libwebrtc hands the encryptor a media type
+/// and no codec, so the Swift side reads it from the sender (the first
+/// entry of `sender.parameters.codecs` once the answer is applied) and
+/// calls this after every negotiation that could change it. A rekey
+/// keeps the codec; a re-attach does not.
+///
+/// Until this is called a video encryptor seals with nothing in the
+/// clear: the frames still open, but a receiver that has no generic
+/// frame descriptor (Firefox, Safari) cannot find key frames in them.
+/// Audio frames are sealed with nothing in the clear whatever is set.
+///
+/// Safe to call from any thread while media is flowing.
+///
+/// Returns `YES` when an encryptor was attached to `sender` and now
+/// holds `codec`; `NO` when `sender` is nil or carries no encryptor
+/// (nothing was changed).
++ (BOOL)setCodec:(LakkoSFrameMediaCodec)codec
+       forSender:(RTCRtpSender * _Nullable)sender
+    NS_SWIFT_NAME(setCodec(_:forSender:));
+
+/// The same as [+setCodec:forSender:], taking the codec by name: the
+/// `name` of an `RTCRtpCodecParameters` ("VP8", "opus") or the MIME
+/// form ("video/VP8", "audio/opus"), compared without regard to case.
+/// Any other name, and nil, is `LakkoSFrameMediaCodecOther`. The
+/// mapping is the bridge's (`LakkoFrameEncryptor::CodecFromName`), the
+/// one Android uses too.
++ (BOOL)setCodecName:(NSString * _Nullable)codecName
+           forSender:(RTCRtpSender * _Nullable)sender
+    NS_SWIFT_NAME(setCodecName(_:forSender:));
+
+/// The codec [+setCodecName:forSender:] would set for `codecName`.
++ (LakkoSFrameMediaCodec)codecForName:(NSString * _Nullable)codecName
+    NS_SWIFT_NAME(codec(forName:));
 
 /// Mid-call rekey (G-18, ADR-0029) — rotate the encryptor attached to
 /// `sender` to the new MLS epoch's 32-byte `seed`, keeping the SAME
@@ -192,6 +253,78 @@ typedef NS_ENUM(NSInteger, LakkoSFrameAttachStatus) {
 /// [+attachDecryptorToReceiver:seed:].
 + (void)detachFromReceiver:(RTCRtpReceiver * _Nullable)receiver
     NS_SWIFT_NAME(detach(fromReceiver:));
+
+@end
+
+// MARK: - A receiver's minimum playout delay (ADR-0070, note of 2026-10-12)
+
+/// What a set of a receiver's minimum playout delay says. The values are
+/// `lakko::receiver_delay::Status` verbatim.
+typedef NS_ENUM(NSInteger, LakkoReceiverDelayStatus) {
+    /// The delay was handed to the engine.
+    LakkoReceiverDelayStatusOK = 0,
+    /// Nothing was called: the setter is not available in this process
+    /// (see [+isAvailable]), the receiver is nil or carries no track of a
+    /// known kind, it has no Lakko decryptor to run the probe against, or
+    /// the decryptor associated with this `RTCRtpReceiver` object is not
+    /// the one the engine holds for it (a newer one was armed, or it was
+    /// detached, through another object for the same engine receiver).
+    /// Says nothing about the engine; other receivers are unaffected.
+    LakkoReceiverDelayStatusNotAvailable = 1,
+    /// The engine answered a probe question with something that is not
+    /// Lakko's (the wrong media kind, or a decryptor Lakko did not
+    /// create), so its layout cannot be trusted. Nothing is set for the
+    /// rest of the process.
+    LakkoReceiverDelayStatusProbeFailed = 2,
+};
+
+/// Sets a remote receiver's minimum playout delay through the engine's
+/// C++ `webrtc::RtpReceiverInterface::SetJitterBufferMinimumDelay`, which
+/// the framework's Objective-C surface does not wrap.
+///
+/// The engine object is reached through the framework's non-public
+/// `nativeRtpReceiver` accessor and called by vtable slot
+/// (`apps/shared/sframe-bridge/receiver-delay.h`, where the evidence for
+/// the slot and the calling convention is written down). That evidence
+/// was read from the binary of stasel/WebRTC 125.0.0, so the setter is
+/// offered only when the loaded WebRTC image IS that binary, by its
+/// Mach-O `LC_UUID`; for any other image the answer is "not available"
+/// and Lakko measures without setting.
+@interface LakkoReceiverDelay : NSObject
+
+/// The WebRTC package version the evidence was gathered for.
+@property(class, nonatomic, readonly) NSString *verifiedPackageVersion;
+
+/// The `LC_UUID` of every slice of that package the evidence covers
+/// (device arm64, simulator arm64, simulator x86_64), as `NSUUID`
+/// strings.
+@property(class, nonatomic, readonly) NSArray<NSString *> *verifiedEngineIdentities;
+
+/// The `LC_UUID` of the WebRTC image loaded in this process, or nil when
+/// it cannot be read (no `RTCRtpReceiver` class, no `nativeRtpReceiver`
+/// accessor, or an image without the load command).
+@property(class, nonatomic, readonly, nullable) NSString *loadedEngineIdentity;
+
+/// `YES` when a set can be attempted in this process: a 64-bit arm or
+/// x86 build, `RTCRtpReceiver` has the `nativeRtpReceiver` accessor with
+/// the type the evidence was read for, the loaded image is one of
+/// [+verifiedEngineIdentities], and the probe has not failed. The static
+/// part is decided once; a failed probe turns the answer to `NO` for the
+/// rest of the process.
++ (BOOL)isAvailable NS_SWIFT_NAME(isAvailable());
+
+/// Set the minimum playout delay of `receiver` to `delayMs` milliseconds;
+/// 0 gives the delay back to the engine. The receiver must carry the
+/// decryptor [LakkoSFrameAttach attachDecryptorToReceiver:seed:]
+/// attached, at least for the first set of the process: the probe asks
+/// the engine for it and compares.
+///
+/// Blocks until the engine's worker thread has run the call. Never call
+/// it on the main thread; use the queue the peer connection's other
+/// blocking calls run on.
++ (LakkoReceiverDelayStatus)setMinimumPlayoutDelayMs:(uint32_t)delayMs
+                                         forReceiver:(RTCRtpReceiver * _Nullable)receiver
+    NS_SWIFT_NAME(setMinimumPlayoutDelayMs(_:forReceiver:));
 
 @end
 

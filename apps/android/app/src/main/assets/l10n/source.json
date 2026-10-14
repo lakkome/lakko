@@ -264,8 +264,8 @@
       "security_critical": true
     },
     "backup.stale_restore.consequence": {
-      "text": "Restoring it will roll your account back to older state — older messages, and devices you removed may reappear.",
-      "comment": "What restoring an older backup does; \"devices you removed may reappear\" is the security consequence and must stay explicit.",
+      "text": "Restoring it brings back an older contact list and older settings. Changes you made to them since will be missing.",
+      "comment": "What restoring an older backup does. The backup holds contacts and settings only (no messages, no devices), so the consequence is limited to those.",
       "security_critical": true
     },
     "backup.stale_restore.reason.anchor_unreadable": {
@@ -464,8 +464,8 @@
       "comment": "Screen reader label of the button that opens a group call's menu."
     },
     "call.control.mute": {
-      "text": "Mute",
-      "comment": "Label under the in-call microphone button."
+      "text": "Microphone",
+      "comment": "Label under the in-call microphone button. It names the device, like Camera, and does not change when the microphone is muted."
     },
     "call.control.mute_a11y": {
       "text": "Mute microphone",
@@ -473,11 +473,15 @@
     },
     "call.control.participants": {
       "text": "Participants",
-      "comment": "Label under the group-call button that opens the list of people in the call; also the list's heading and accessible name."
+      "comment": "Label under the group-call button for the people in the call (their list and, on a call with a link, the ways to invite); also the list's heading, its accessible name and the menu item that opens it."
     },
     "call.control.participants_hide_a11y": {
       "text": "Hide participants",
       "comment": "Accessible name of the group-call button that closes the list of people in the call."
+    },
+    "call.control.participants_menu_a11y": {
+      "text": "Participants and invitations",
+      "comment": "Accessible name of the group-call Participants button when it opens a menu with the list of participants and the two ways to invite someone."
     },
     "call.control.participants_show_a11y": {
       "text": "Show participants",
@@ -486,6 +490,10 @@
     "call.control.raise_hand": {
       "text": "Raise hand",
       "comment": "Group call menu item that raises your hand so the others see you want to speak."
+    },
+    "call.control.settings": {
+      "text": "Settings",
+      "comment": "Label under the in-call button that opens the call settings: which microphone, camera and speaker to use."
     },
     "call.control.share_screen": {
       "text": "Share screen",
@@ -577,6 +585,26 @@
       "comment": "Title of the sheet that shows the call's safety number.",
       "security_critical": true
     },
+    "call.end_menu.a11y": {
+      "text": "End call options",
+      "comment": "Spoken name of the small menu the End button opens for the person who started a group call."
+    },
+    "call.end_menu.end_for_all": {
+      "text": "End call for everyone",
+      "comment": "Row in the menu the End button opens for the person who started a group call: ends the call for every person in it."
+    },
+    "call.end_menu.leave": {
+      "text": "Leave call",
+      "comment": "Row in the menu the End button opens for the person who started a group call: this person leaves and the call goes on for the others."
+    },
+    "call.ended.for_all": {
+      "text": "The call was ended for everyone",
+      "comment": "Line on the ended-call screen when the person who started the call ended it for everyone and the device cannot name that person."
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} ended the call for everyone",
+      "comment": "Line on the ended-call screen when the person who started the call ended it for everyone; {name} is that person's name."
+    },
     "call.error.encryption_setup": {
       "text": "Could not set up call encryption, so the call did not start.",
       "comment": "Shown when the device could not derive the call's encryption key; the call is refused rather than started unencrypted.",
@@ -623,6 +651,18 @@
       "text": "{name}'s camera",
       "comment": "Accessible name of the other person's video filling the call screen; {name} is who the call is with."
     },
+    "call.grid.next_a11y": {
+      "text": "Next page",
+      "comment": "Button on a group call's grid: go to the next page of people."
+    },
+    "call.grid.page_a11y": {
+      "text": "Page {page} of {total}",
+      "comment": "Screen reader label of one page dot of a group call's grid; {page} and {total} are numbers."
+    },
+    "call.grid.prev_a11y": {
+      "text": "Previous page",
+      "comment": "Button on a group call's grid: go to the previous page of people."
+    },
     "call.group_banner.join_video": {
       "text": "Video",
       "comment": "Button on the group call banner that joins the call with the camera on."
@@ -638,6 +678,10 @@
     "call.guest.default_name": {
       "text": "Guest",
       "comment": "Name prefilled for a visitor without an account who joins a call from a link; it becomes the new account's profile name."
+    },
+    "call.guest.note": {
+      "text": "You join as a guest. No account is needed.",
+      "comment": "Line under the Join button on a call-link page, shown to a visitor without an account."
     },
     "call.guest.working.title": {
       "text": "Getting you into the call...",
@@ -739,9 +783,29 @@
       "text": "Call link",
       "comment": "Screen reader label of the call link shown in the Invite panel of a call."
     },
+    "call.invite.menu_a11y": {
+      "text": "Invite to this call",
+      "comment": "Screen reader label of the menu the Invite button of a call opens."
+    },
+    "call.invite.menu_contact": {
+      "text": "Invite contacts",
+      "comment": "Menu item on the call screen: choose one or more conversations and send each an invitation to this call."
+    },
+    "call.invite.menu_copy": {
+      "text": "Copy invite link",
+      "comment": "Menu item on the call screen: copy the link to this call."
+    },
     "call.invite.minting": {
       "text": "Preparing a link to this call. This takes a few seconds.",
       "comment": "Line on the call screen while a link to the call is being prepared."
+    },
+    "call.invite.picker_empty": {
+      "text": "No contacts yet. Copy the invite link and send it another way.",
+      "comment": "Shown in the 'Invite to call' list when the person has no contacts to invite."
+    },
+    "call.invite.picker_title": {
+      "text": "Invite to call",
+      "comment": "Title of the list of conversations shown when inviting a contact to a call."
     },
     "call.invite.ready": {
       "text": "Anyone with this link can ask to join this call. You decide who comes in.",
@@ -750,6 +814,18 @@
     "call.invite.retry_a11y": {
       "text": "Try preparing the invite link again",
       "comment": "Screen reader label of the call's Invite button after preparing its link failed."
+    },
+    "call.invite.row_invited": {
+      "text": "Invited",
+      "comment": "Shown on a conversation in the invite list after the invitation to the call was sent to it."
+    },
+    "call.invite.send_failed": {
+      "text": "The invitation was not sent. Try again.",
+      "comment": "Shown when an invitation to a call could not be sent to the chosen conversation."
+    },
+    "call.invite.sent": {
+      "text": "Invitation sent to {name}.",
+      "comment": "Line on the call screen after the invitation to the call was sent into a conversation; {name} is that conversation's title."
     },
     "call.invite.share_a11y": {
       "text": "Share the invite link",
@@ -782,6 +858,14 @@
     "call.label.group": {
       "text": "Group call",
       "comment": "Name shown at the top of a group call screen and on the call bar when the group has no name."
+    },
+    "call.layout.focus_a11y": {
+      "text": "Show the speaker large",
+      "comment": "Button on a group call: switch to the layout with the person speaking in one large tile and the others in a row above."
+    },
+    "call.layout.grid_a11y": {
+      "text": "Show everyone the same size",
+      "comment": "Button on a group call: switch to the layout where every person's tile has the same size."
     },
     "call.link.connecting": {
       "text": "Connecting...",
@@ -943,6 +1027,10 @@
       "text": "Participant {number}",
       "comment": "Name of a call participant this device cannot identify. {number} tells two such participants apart, in the order they joined."
     },
+    "call.participant.pin_a11y": {
+      "text": "Pin {name}",
+      "comment": "Name and tooltip of the pin button on another person's tile in a group call: pressing it keeps that person in the large spot. {name} is the person's name."
+    },
     "call.participant.pinned": {
       "text": "Pinned",
       "comment": "Tooltip of the pin icon on the call tile that was pinned to the large spot."
@@ -958,6 +1046,10 @@
     "call.participant.unnamed": {
       "text": "Participant",
       "comment": "Name on a call tile or the call screen for a person the device cannot name."
+    },
+    "call.participant.unpin_a11y": {
+      "text": "Unpin {name}",
+      "comment": "Name and tooltip of the pin button on the pinned person's tile in a group call: pressing it lets the large spot follow the speaker again. {name} is the person's name."
     },
     "call.participant.you": {
       "text": "You",
@@ -1098,6 +1190,14 @@
     "call.settings.system_default": {
       "text": "System default",
       "comment": "Option in a call settings device picker: use the device the phone picks."
+    },
+    "call.settings.title": {
+      "text": "Call settings",
+      "comment": "Title of the in-call settings sheet and accessible name of the button that opens it."
+    },
+    "call.settings.unnamed_device": {
+      "text": "Device {n}",
+      "comment": "Name shown for a microphone, camera or speaker the system reports without a name; {n} is its position in the list, a number."
     },
     "call.settings.video": {
       "text": "Video",
@@ -1878,6 +1978,10 @@
     "chat.call.voice": {
       "text": "Call",
       "comment": "Header button that starts a voice call."
+    },
+    "chat.call_invite.title": {
+      "text": "Call invitation",
+      "comment": "Title of a message that is an invitation to a call; it has a Join button."
     },
     "chat.composer.attach": {
       "text": "Attach files",
@@ -5848,6 +5952,58 @@
       "text": "Neither step has a time limit. If nothing happens, you can send the request again.",
       "comment": "Second line on the group invite page while a join request is waiting: neither step has a deadline, and the request can be sent again."
     },
+    "guest.claim.error.generic": {
+      "text": "The account could not be created. Try again.",
+      "comment": "Generic error on the guest form."
+    },
+    "guest.claim.error.phrase_missing": {
+      "text": "This guest account cannot be kept on this device. You can create a new account from the sign-up screen.",
+      "comment": "Error when the guest account's recovery phrase is no longer stored on this device, so the account cannot be turned into a real one."
+    },
+    "guest.claim.username_taken_for_you": {
+      "text": "Your username is @{username}.",
+      "comment": "Shown in place of the username field when a username was already reserved for this guest in an earlier attempt. {username} is that username."
+    },
+    "guest.claim.working": {
+      "text": "Creating your account...",
+      "comment": "Busy text on the Create account button of the guest form."
+    },
+    "guest.in_call.return": {
+      "text": "Return to call",
+      "comment": "Button that brings the running call back to the screen."
+    },
+    "guest.in_call.title": {
+      "text": "You are in a call as a guest.",
+      "comment": "Shown to a guest who opened the app while their call is still running."
+    },
+    "guest.offer.body": {
+      "text": "You are here as a guest. Create an account to keep your name and to call or message people again.",
+      "comment": "Text under 'Keep using Lakko?', shown to a guest (a person who opened a call link without an account) when they are not in a call."
+    },
+    "guest.offer.decline": {
+      "text": "No, thanks",
+      "comment": "Button: the guest does not want an account. The guest account is deleted."
+    },
+    "guest.offer.decline_note": {
+      "text": "If you decline, the guest account is deleted right away.",
+      "comment": "Small line under the 'No, thanks' button on the guest offer."
+    },
+    "guest.offer.delete_failed": {
+      "text": "The guest account could not be deleted now. Try again; it is also deleted automatically within a day.",
+      "comment": "Error on the guest offer when deleting the guest account failed."
+    },
+    "guest.offer.deleted": {
+      "text": "The guest account was deleted.",
+      "comment": "Confirmation shown on the call-link page after a guest pressed 'No, thanks' and the guest account was deleted."
+    },
+    "guest.offer.deleting": {
+      "text": "Deleting...",
+      "comment": "Busy text on the 'No, thanks' button while the guest account is being deleted."
+    },
+    "guest.offer.title": {
+      "text": "Keep using Lakko?",
+      "comment": "Heading shown after a call to a person who joined it as a guest (no account of their own). Asks whether they want to keep the account."
+    },
     "invite.contact.accept_failed": {
       "text": "Could not accept the invite. Try again.",
       "comment": "Accepting a contact invite link failed for a reason that is not the link itself (a connection or server failure); Retry and Done follow."
@@ -7330,6 +7486,10 @@
       "text": "Reset account keys",
       "comment": "Button that resets the account keys (a last resort): the account gets new keys and a new recovery phrase.",
       "security_critical": true
+    },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "The new recovery phrase could not be stored on this device. Nothing was changed.",
+      "comment": "Creating a new identity was refused before anything changed: the device could not store the new recovery phrase, so the old identity is still in place."
     },
     "restore_identity.lost.sub": {
       "text": "Reset account keys",

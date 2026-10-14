@@ -46,7 +46,6 @@ import {
   protectionStatusKey,
   type EmailRowAction,
 } from "./account-protection";
-import { openUsernameClaim } from "../username-claim-host";
 import { heldAddress } from "./address-register";
 import { protectionStatus, refreshProtection } from "./protection-state";
 import { RecoveryEmailForm } from "./RecoveryEmailForm";
@@ -192,11 +191,6 @@ export function ProtectionCard(): JSX.Element {
                           : t("recovery_email.status.off")}
                   </span>
                 </div>
-                <Show when={email().actions.includes("choose-username")}>
-                  <button type="button" class="lk-card-row-action" onClick={openUsernameClaim}>
-                    {t("username.claim.title")}
-                  </button>
-                </Show>
                 <For each={email().actions.filter((a) => a !== "choose-username")}>
                   {(action) => (
                     <button

@@ -102,22 +102,13 @@ pub struct ParsedBackupPayload {
     pub ed25519_seed: Vec<u8>,
     /// Accepted-contacts list.
     pub accepted_contacts: Vec<BackupContactRecord>,
-    /// Whole-storage OpenMLS provider snapshot (Phase 2a3d1).
-    /// Empty `Vec` when the backup pre-dates 2a3d or no MLS
-    /// state had been published at upload time. The restore
-    /// path feeds this into `Identity.restoreStorage(...)`.
-    pub whole_storage_snapshot: Vec<u8>,
-    /// The MLS `group_id`s the backup was taken with.
+    /// The MLS `group_id`s of the conversations the account's devices knew
+    /// when the backup was taken. Empty for an account that knew none.
     ///
-    /// Empty for a payload written before v4, and for a device that knew no
-    /// groups - the two are indistinguishable, and a restore treats both the
-    /// same way: with no index it rebuilds nothing rather than guessing.
-    ///
-    /// Carried because [`Self::whole_storage_snapshot`] restores the provider,
-    /// which holds every group, but the provider offers no way to enumerate
-    /// them - so a client's chat list is built from a separately persisted
-    /// index of ids, and a restore without it lands a device holding every
-    /// group and showing none.
+    /// Names and nothing more: the backup carries no MLS state, so a
+    /// restored device learns from these which conversations exist before
+    /// any member has admitted it. Membership comes from the other members
+    /// (ADR-0050 section 2.5a), never from this list.
     pub known_group_ids: Vec<Vec<u8>>,
     /// The ADR-0058 folded synced state, as `SyncedState.toBytes()` wrote
     /// it; restore with `SyncedState.fromBytes(...)`. Empty = none held.
@@ -131,29 +122,28 @@ pub struct ParsedBackupPayload {
 /// Build the structured backup payload wire bytes that feed
 /// [`seal_backup`].
 ///
+/// The payload carries no MLS state. An OpenMLS provider snapshot belongs to
+/// the device that made it, so it is never backed up: a restored device is
+/// admitted to its conversations by other members (ADR-0050 section 2.5a).
+///
 /// # Errors
 ///
 /// * [`FfiError::Backup`] on wrong-length `account_id` (≠ 16) /
 ///   `ed25519_seed` (≠ 32), wrong-length contact pubkey
-///   (must be 32 bytes each), or over-cap display name.
+///   (must be 32 bytes each), over-cap display name, an over-long
+///   `group_id`, or a `synced_state` the fold refuses.
 #[uniffi::export(default(synced_state = None))]
 pub fn build_backup_payload(
     account_id: Vec<u8>,
     created_at_ms: u64,
     ed25519_seed: Vec<u8>,
     contacts: Vec<BackupContactRecord>,
-    // Phase 2a3d1 — whole-storage OpenMLS provider snapshot
-    // (the bytes `Identity.snapshotStorage()` emits). Pass an
-    // empty `Vec` when there's no MLS state to back up yet
-    // (signup baseline before the DeviceGroup-bootstrap path
-    // runs, etc.).
-    whole_storage_snapshot: Vec<u8>,
-    // The MLS `group_id`s this device knows about - the index the snapshot
-    // above cannot supply.
+    // The MLS `group_id`s of the conversations this account's devices know
+    // about, so a restored device knows which conversations exist before
+    // any member has admitted it.
     known_group_ids: Vec<Vec<u8>>,
     // ADR-0058: `SyncedState.toBytes()`, or `None` / empty when none is
-    // held. Defaults to `None`, so an existing six-argument call stays
-    // source-compatible.
+    // held. Defaults to `None`, so a five-argument call is valid.
     synced_state: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, FfiError> {
     if account_id.len() != 16 {
@@ -231,8 +221,6 @@ pub fn build_backup_payload(
         created_at_ms,
         ed25519_seed: seed,
         accepted_contacts,
-        mls_snapshots: Vec::new(),
-        whole_storage_snapshot,
         known_group_ids,
         synced_state: synced_state.unwrap_or_default(),
     };
@@ -265,7 +253,6 @@ pub fn parse_backup_payload(wire: Vec<u8>) -> Result<ParsedBackupPayload, FfiErr
         created_at_ms: inner.created_at_ms,
         ed25519_seed: inner.ed25519_seed.to_vec(),
         accepted_contacts,
-        whole_storage_snapshot: inner.whole_storage_snapshot,
         known_group_ids: inner.known_group_ids,
         synced_state: inner.synced_state,
     })
@@ -532,6 +519,24 @@ mod tests {
         }
     }
 
+    /// A real, non-empty ADR-0058 synced state: one folder.
+    fn sample_synced_state_bytes() -> Vec<u8> {
+        use lakko_sync::synced::{FolderMeta, SyncEntry, INCLUDE_GROUPS};
+        let mut state = lakko_sync::SyncedState::new();
+        state
+            .apply(
+                7,
+                SyncEntry::FolderMeta(FolderMeta {
+                    folder_id: [3; 16],
+                    name: "Work".into(),
+                    include_kinds: INCLUDE_GROUPS,
+                    exclude_flags: 0,
+                }),
+            )
+            .expect("apply");
+        state.to_bytes()
+    }
+
     #[test]
     fn account_id_round_trips_through_uniffi_surface() {
         // ADR-0021: a contact with a 16-byte account_id round-trips; one
@@ -547,7 +552,6 @@ mod tests {
             1,
             vec![0x42u8; 32],
             vec![with_id, sample_contact()],
-            vec![],
             Vec::new(),
             None,
         )
@@ -574,7 +578,6 @@ mod tests {
             1,
             vec![0x42u8; 32],
             vec![bad],
-            vec![],
             Vec::new(),
             None,
         );
@@ -586,13 +589,11 @@ mod tests {
         let account_id = vec![0xA1u8; 16];
         let seed = vec![0x42u8; 32];
         let contacts = vec![sample_contact()];
-        let snapshot = vec![0xEFu8; 8];
         let wire = build_backup_payload(
             account_id.clone(),
             1_700_000_000_000,
             seed.clone(),
             contacts,
-            snapshot.clone(),
             Vec::new(),
             None,
         )
@@ -603,7 +604,8 @@ mod tests {
         assert_eq!(parsed.ed25519_seed, seed);
         assert_eq!(parsed.accepted_contacts.len(), 1);
         assert_eq!(parsed.accepted_contacts[0].display_name, "alice");
-        assert_eq!(parsed.whole_storage_snapshot, snapshot);
+        assert!(parsed.known_group_ids.is_empty());
+        assert!(parsed.synced_state.is_empty());
     }
 
     #[test]
@@ -627,7 +629,6 @@ mod tests {
             seed.clone(),
             contacts,
             Vec::new(),
-            Vec::new(),
             None,
         )
         .expect("build");
@@ -640,16 +641,9 @@ mod tests {
 
     #[test]
     fn wrong_phrase_rejected() {
-        let payload = build_backup_payload(
-            vec![0u8; 16],
-            0,
-            vec![0u8; 32],
-            vec![],
-            Vec::new(),
-            Vec::new(),
-            None,
-        )
-        .expect("build");
+        let payload =
+            build_backup_payload(vec![0u8; 16], 0, vec![0u8; 32], vec![], Vec::new(), None)
+                .expect("build");
         let envelope = seal_backup(b"right".to_vec(), payload).expect("seal");
         let err = open_backup(b"wrong".to_vec(), envelope).expect_err("wrong phrase");
         match err {
@@ -659,23 +653,62 @@ mod tests {
     }
 
     #[test]
-    fn the_group_index_round_trips_so_a_restore_can_rebuild_the_chat_list() {
-        // The whole-storage snapshot holds every group but cannot be
-        // enumerated, so without this index a restore lands a device holding
-        // every group and showing none.
+    fn the_known_group_ids_round_trip_so_a_restore_knows_which_conversations_exist() {
+        // The backup carries no MLS state, so these ids are the only way a
+        // restored device knows which conversations exist before a member
+        // has admitted it.
         let ids = vec![vec![0x11u8; 32], vec![0x22u8; 32]];
+        let wire = build_backup_payload(vec![0u8; 16], 0, vec![0u8; 32], vec![], ids.clone(), None)
+            .expect("build");
+        let parsed = parse_backup_payload(wire).expect("parse");
+        assert_eq!(parsed.known_group_ids, ids);
+    }
+
+    #[test]
+    fn group_ids_and_synced_state_round_trip_together() {
+        let ids = vec![vec![0x11u8; 32], vec![0x22u8; 32]];
+        let state = sample_synced_state_bytes();
         let wire = build_backup_payload(
-            vec![0u8; 16],
-            0,
-            vec![0u8; 32],
-            vec![],
-            b"snapshot".to_vec(),
+            vec![0xA1u8; 16],
+            7,
+            vec![0x42u8; 32],
+            vec![sample_contact()],
             ids.clone(),
-            None,
+            Some(state.clone()),
         )
         .expect("build");
         let parsed = parse_backup_payload(wire).expect("parse");
         assert_eq!(parsed.known_group_ids, ids);
+        assert_eq!(parsed.synced_state, state);
+        assert_eq!(parsed.accepted_contacts.len(), 1);
+    }
+
+    #[test]
+    fn the_built_payload_is_wire_v6_and_a_v5_payload_is_refused() {
+        let wire = build_backup_payload(vec![0u8; 16], 0, vec![0u8; 32], vec![], Vec::new(), None)
+            .expect("build");
+        assert_eq!(wire[0], 6);
+        assert_eq!(wire[0], lakko_backup::PAYLOAD_VERSION);
+
+        // The retired v5 layout for the same empty payload: two extra
+        // zero-length snapshot fields between the contacts and the group
+        // ids. Refused as stored, and refused when stamped as current.
+        let mut v5 = vec![5u8];
+        v5.extend_from_slice(&[0u8; 16 + 8 + 32]);
+        v5.extend_from_slice(&[0u8; 4]); // accepted_contacts_count
+        v5.extend_from_slice(&[0u8; 4]); // mls_snapshots_count
+        v5.extend_from_slice(&[0u8; 4]); // whole_storage_snapshot_length
+        v5.extend_from_slice(&[0u8; 4]); // known_group_ids_count
+        v5.extend_from_slice(&[0u8; 4]); // synced_state_length
+        assert!(
+            matches!(parse_backup_payload(v5.clone()), Err(FfiError::Backup(_))),
+            "a v5 payload parsed"
+        );
+        v5[0] = lakko_backup::PAYLOAD_VERSION;
+        assert!(
+            matches!(parse_backup_payload(v5), Err(FfiError::Backup(_))),
+            "a v5 body stamped v6 parsed"
+        );
     }
 
     #[test]
@@ -685,7 +718,6 @@ mod tests {
             0,
             vec![0u8; 32],
             vec![],
-            Vec::new(),
             vec![vec![0u8; lakko_backup::payload::MAX_GROUP_ID_LEN + 1]],
             None,
         )
@@ -695,16 +727,8 @@ mod tests {
 
     #[test]
     fn wrong_length_account_id_rejected() {
-        let err = build_backup_payload(
-            vec![0u8; 8],
-            0,
-            vec![0u8; 32],
-            vec![],
-            Vec::new(),
-            Vec::new(),
-            None,
-        )
-        .expect_err("wrong len");
+        let err = build_backup_payload(vec![0u8; 8], 0, vec![0u8; 32], vec![], Vec::new(), None)
+            .expect_err("wrong len");
         match err {
             FfiError::Backup(msg) => assert!(msg.contains("16 bytes")),
             other => panic!("expected Backup variant, got {other:?}"),

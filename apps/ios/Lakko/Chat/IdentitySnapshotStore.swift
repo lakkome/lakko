@@ -96,6 +96,8 @@ public final class IdentitySnapshotStore {
     /// write falls back to the old `Application Support` location, so
     /// steady-state behaviour is unchanged on an unprovisioned build.
     public func putSnapshot(accountIdB64: String, blob: Data) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard let target = writeTarget(accountIdB64: accountIdB64) else { return }
         let wrapKey = SymmetricKey(data: KeychainWrapKey.loadOrCreate(
             service: Self.wrapKeyService, account: Self.wrapKeyAccount))
@@ -138,6 +140,8 @@ public final class IdentitySnapshotStore {
     /// torn envelope. `excludeFromBackup` failures are non-critical for
     /// durability and stay best-effort.
     public func putSnapshotDurable(accountIdB64: String, blob: Data) throws {
+        let gate = try AccountStoreGate.enterOrEnd(accountIdB64)
+        defer { gate.leave() }
         guard let target = writeTarget(accountIdB64: accountIdB64) else {
             throw IdentitySnapshotStoreError.unavailable(
                 "no directory available to persist the MLS snapshot"

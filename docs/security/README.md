@@ -60,6 +60,7 @@ Then, as references rather than narratives:
 - [`multi-device.md`](./multi-device.md) — two-tier identity
   ([ADR-0007](../adr/0007-multi-device-identity.md)), DeviceGroup pairing,
   remove-device, the history catch-up bundle, cross-device sync.
+- [`known-gaps-closed.md`](./known-gaps-closed.md) — `G-` entries with nothing left open, moved out of the file below
 - [`known-gaps.md`](./known-gaps.md) — the `G-` class: what is not audit-ready, so a
   reviewer does not spend the engagement rediscovering it. Each entry states what it
   is, why it is open, and what closes it.
@@ -74,7 +75,7 @@ pinned in its source document but missing from the index, or the reverse:
 | **I-** | 8 | I-1..I-8 | [`mls-state-machine.md`](./mls-state-machine.md) |
 | **C-** | 71 | C-1..C-71 | [`calls.md`](./calls.md) |
 | **T-** | 16 | T-1..T-16 | [`transport.md`](./transport.md) |
-| **G-** | 45 | G-1..G-45 | [`known-gaps.md`](./known-gaps.md) |
+| **G-** | 45 | G-1..G-46 | [`known-gaps.md`](./known-gaps.md) |
 
 The gate cross-checks the summary *numbers* only for the `G-` class. A stale `T-`
 count therefore survived in the index from the T-16 commit until 2026-09-02, which is

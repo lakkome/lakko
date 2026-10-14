@@ -102,6 +102,8 @@ public final class MessageLogStore {
     }
 
     public func putLog(accountIdB64: String, payload: MessageLogPayload) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard let target = writeTarget(accountIdB64: accountIdB64) else { return }
         let plaintext: Data
         do {

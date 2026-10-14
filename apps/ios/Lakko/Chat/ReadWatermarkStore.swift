@@ -50,6 +50,8 @@ public final class ReadWatermarkStore {
         sender: MemberIdentity,
         upTo: Int64
     ) -> PresenceOps.ReadWatermarkMap? {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return nil }
+        defer { gate.leave() }
         let before = load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         let after = PresenceOps.foldReadWatermark(before, sender: sender, upTo: upTo)
         guard after != before else { return nil }
@@ -61,6 +63,8 @@ public final class ReadWatermarkStore {
 
     /// Forget one group's watermarks (the group was deleted locally).
     public func remove(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var current = map(accountIdB64: accountIdB64)
         current[groupIdHex] = nil
         defaults.set(current, forKey: Self.key(accountIdB64))

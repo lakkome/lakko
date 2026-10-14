@@ -18,6 +18,7 @@
  * tabs so the lists showing a channel's count reload.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 import {
   advanceChannelRead,
@@ -95,6 +96,7 @@ async function saveFeedMarks(accountIdB64: string, deviceKey: CryptoKey, marks: 
   ciphertext.set(ct, IV_LEN);
   const db = await openDb();
   try {
+    if (!accountStoresWritable(accountIdB64)) return;
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put({ accountId: accountIdB64, ciphertext });
     await done(tx);

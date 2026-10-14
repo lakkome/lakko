@@ -157,6 +157,8 @@ extension PredecessorMailbox {
             var map = (defaults.dictionary(forKey: Self.key(accountIdB64: accountIdB64)) as? [String: NSNumber]) ?? [:]
             if let held = map[keyB64]?.int64Value { return held }
             map[keyB64] = NSNumber(value: nowMs)
+            guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return nowMs }
+            defer { gate.leave() }
             defaults.set(map, forKey: Self.key(accountIdB64: accountIdB64))
             return nowMs
         }

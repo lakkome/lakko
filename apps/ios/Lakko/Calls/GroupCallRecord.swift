@@ -149,6 +149,16 @@ struct OngoingGroupCall: Equatable, Codable {
     /// heartbeat from the people actually in that call was dropped, leaving the
     /// chat with no idea a call was running.
     let initiatorLeaf: UInt32?
+    /// The person (account key, base64) whose device announced the call,
+    /// resolved from the MLS sender of the `GroupCallStart` at receipt (C-68) —
+    /// never the leaf the body names. For a call this device started, its own
+    /// person key. Only this person may end the call for everyone
+    /// (`docs/ux/calls.md` section 4.1.2).
+    ///
+    /// `nil` is "unknown": the sender did not resolve, the record was adopted
+    /// from a Join, or it was stored before this field existed. A call whose
+    /// starter is unknown can never be ended for everyone.
+    var initiatorPersonKey: MemberIdentity? = nil
     /// The announce's `created_at_ms`, bounded above by the DS row's
     /// server-assigned `created_at` — a sender cannot keep its call "fresh" by
     /// claiming a future start.
@@ -250,7 +260,8 @@ enum GroupCallReducer {
     /// - Parameters:
     ///   - participant: the row's MLS sender resolved at receipt. A join or
     ///     leave with no resolvable sender is dropped; a start and an end do not
-    ///     need one.
+    ///     need one. A start records its sender's person as the call's starter
+    ///     (``OngoingGroupCall/initiatorPersonKey``), unknown without one.
     ///   - rowCreatedAtMs: the DS row's server-assigned time (or, for this
     ///     device's own signals, which are never echoed back, the local time of
     ///     the publish). Also the instant at which a competing start is judged,
@@ -269,6 +280,7 @@ enum GroupCallReducer {
                 audio: audio,
                 video: video,
                 initiatorLeaf: initiatorLeaf,
+                initiatorPersonKey: participant?.personKey,
                 startedAtMs: min(claimed, rowCreatedAtMs),
                 joined: [:],
                 lastActivityMs: rowCreatedAtMs

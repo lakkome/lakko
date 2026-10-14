@@ -36,12 +36,15 @@ describe("the stale-backup restore confirmation", () => {
     expect(c.body).toContain(staleRestoreConsequence());
   });
 
-  it("states what a rollback costs, in the terms ADR-0037 names", () => {
-    // Older messages, and devices the user removed reappearing — the second
-    // is the one with a security consequence, so it is named explicitly
-    // rather than folded into "older state".
-    expect(staleRestoreConsequence()).toContain("older messages");
-    expect(staleRestoreConsequence()).toContain("devices you removed may reappear");
+  it("states what a rollback costs, and nothing the backup cannot do", () => {
+    // The backup holds contacts and settings only (payload v6: no MLS state,
+    // no messages, no device list), so an older one brings back older
+    // contacts and settings. It cannot bring back messages or removed
+    // devices, and the sentence must not say it can.
+    expect(staleRestoreConsequence()).toContain("older contact list");
+    expect(staleRestoreConsequence()).toContain("older settings");
+    expect(staleRestoreConsequence()).not.toContain("messages");
+    expect(staleRestoreConsequence()).not.toContain("devices");
   });
 
   it("labels the action as the override it is", () => {

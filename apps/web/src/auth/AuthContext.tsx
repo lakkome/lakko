@@ -69,6 +69,7 @@
 import {
   createContext,
   createEffect,
+  createMemo,
   createSignal,
   onCleanup,
   onMount,
@@ -88,7 +89,7 @@ import {
   type KeyResetResult,
 } from "./client";
 import { loadPersistedAccount, savePersistedAccount } from "./persisted-account";
-import { wipeAccountLocalData, wipeAccountStaged } from "./wipe-account";
+import { accountStoreIds, wipeAccountLocalData, wipeAccountStaged } from "./wipe-account";
 import {
   deleteRecallRecord,
   getRecallRecord,
@@ -107,6 +108,11 @@ import {
   type RecallEndNotice,
 } from "./recall";
 import { base64Decode, base64Encode, base64UrlDecodeNoPad } from "./account-id";
+import {
+  installAccountStorageGate,
+  openAccountStores,
+  sealAccountSession,
+} from "./account-store-gate";
 import { resolveRecoverUsername } from "./recover-resolution";
 import {
   accessByName,
@@ -117,9 +123,6 @@ import {
   type NameTarget,
 } from "./login-handle";
 import { createLoginHandleSync } from "./login-handle-sync";
-import { mergeSyncStateFromBackup } from "../devices/sync/sync-state-idb";
-import { mergeRestoredFold } from "../devices/sync/synced-projection";
-import { announceRestoredSyncedState } from "../devices/sync/synced-state-source";
 import { decideSilentRestore } from "./silent-restore";
 import { sessionTokens } from "./session-token-provider";
 import { sessionPairOf, type SessionPair } from "./session-pair";
@@ -183,7 +186,7 @@ import { accountKey as transparencyAccountKey } from "../transparency/account-ke
 import { DiscoveryClient, DiscoveryHttpError } from "../discovery/client";
 import { bindContactsAccount } from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
-import { deleteMlsSnapshot, saveMlsSnapshot } from "../chat/mls-store";
+import { deleteMlsSnapshot } from "../chat/mls-store";
 import { deleteOutboxForAccount } from "../chat/commit-outbox";
 // ADR-0045 — the pending-request observation store follows the outbox's
 // hygiene: a prior session's request ages must never be read by a later one.
@@ -205,6 +208,7 @@ import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
+import { SessionBinding, StaleBindingError } from "./binding-epoch";
 import { releaseWakeBinding } from "../push/wake-binding";
 import { anonTokens } from "../tokens/anon-token-pool";
 import {
@@ -213,6 +217,7 @@ import {
 } from "./device-restore-name-check";
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
 import { startAutoBackup } from "../backup/auto-backup-driver";
+import { markBackupDirty } from "../backup/auto-backup";
 import {
   readDevicePhrase,
   readDevicePhraseWith,
@@ -282,7 +287,18 @@ import { rootEndorsementFor } from "../devices/lifecycle";
 import { transferRoot, transferRootWithAttestation } from "../ds/ownership";
 import { DsClient } from "../ds/client";
 import { journalHex } from "../ds/access";
-import { clearRestored, markRestored } from "./restore-marker";
+import { deletePhrase } from "../backup/phrase-store";
+import {
+  clearGuestAccount,
+  guestAccountState,
+  guestDeletePlan,
+  guestExpired,
+  guestPhraseKey,
+  guestRestoreAction,
+  markGuestAccount,
+  noteGuestUsernameClaimed,
+  type GuestAccountState,
+} from "./guest-account";
 import {
   openPasskeyVault,
   passkeyKeysOutcome,
@@ -292,7 +308,9 @@ import {
 } from "../recovery/passkey-vault";
 import {
   clearSignupPhraseOwed,
+  freshPhraseDisposition,
   isSignupPhraseOwed,
+  owedPhraseCompletesPark,
   markSignupPhraseOwed,
 } from "./phrase-gate";
 import {
@@ -315,10 +333,6 @@ import {
   usernameRegisterAction,
   usernameWritePending,
 } from "./username-register";
-import { restoreFromServerBackupFromPhraseString } from "../backup/restore";
-import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
-import { KeyedError } from "../l10n/keyed-error";
-import { t } from "../l10n";
 import {
   bindDecision,
   bindRefusal,
@@ -339,6 +353,14 @@ import {
   runServerLogout,
   type LogoutAttempt,
 } from "./logout-owed";
+import { restoreAccountBackup, restoreOwedAccountBackup } from "../backup/restore";
+import { isBackupRestoreOwed, markBackupRestoreOwed } from "../backup/restore-owed";
+import {
+  backupKnownGroupIds,
+  pruneJoinedRestoredGroups,
+} from "../backup/restored-known-groups";
+import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
+import { KeyedError } from "../l10n/keyed-error";
 
 /** Account record exposed to the UI when a session is active. */
 export interface SessionAccount {
@@ -404,6 +426,31 @@ export interface SignupOutcome {
  *  bundle. Surfaced to the UI as "doesn't match this account" — we
  *  refuse rather than cache a forked identity that would break
  *  every contact's pin. */
+/**
+ * A guest account cannot be kept because this device no longer holds its
+ * recovery phrase (the browser's storage was cleared, or the device key
+ * changed). Nothing can show the phrase again, and an account whose phrase
+ * was never seen cannot be recovered, so the only thing left is to delete it.
+ */
+export class GuestPhraseUnavailableError extends Error {
+  constructor() {
+    super("the guest account's recovery phrase is not on this device");
+    this.name = "GuestPhraseUnavailableError";
+  }
+}
+
+/**
+ * `Create account` was pressed for a guest account past its lifetime. The
+ * account has been deleted and the session is over by the time this is
+ * thrown.
+ */
+export class GuestAccountExpiredError extends Error {
+  constructor() {
+    super("the guest account has expired");
+    this.name = "GuestAccountExpiredError";
+  }
+}
+
 export class SupersessionPhraseMismatch extends Error {
   /** Where the refused seed came from: a phrase (typed, or opened from a
    *  passkey's stored keys), or another device. The screen renders its sentence from this (ADR-0061
@@ -647,7 +694,18 @@ export interface AuthApi {
    *  `replacePassword` run once without a proof. Only for a signed-in
    *  account that has no username. Throws `UsernameTakenError`, or what the
    *  bind or the register threw. Resolves the canonical name and the
-   *  username certificate the register call returned. */
+   *  username certificate the register call returned.
+   *
+   *  This is the first half of keeping a guest account
+   *  (`GuestAccountOffer`, asked after the call): a guest past its lifetime
+   *  is deleted instead ({@link GuestAccountExpiredError}), one whose phrase
+   *  this device no longer holds cannot be kept
+   *  ({@link GuestPhraseUnavailableError}), and the name is recorded on the
+   *  guest marker so `No, thanks` frees it again. The account stops being a
+   *  guest when its first password is set
+   *  (`replacePassword({ firstPassword: true })`), which also moves the
+   *  phrase under the account's own key, uploads the first backup and owes
+   *  the "Protect your account" step. The phrase is never shown. */
   claimGuestUsername(
     username: string,
   ): Promise<{ readonly username: string; readonly certificate: Uint8Array | null }>;
@@ -734,18 +792,32 @@ export interface AuthApi {
     options?: { readonly signal?: AbortSignal },
   ): Promise<SignupOutcome>;
   /** ADR-0032 guest join — create a FULL account with NO username and no
-   *  user-chosen password, so an anonymous `/c/<slug>` visitor can join a
-   *  call without a login. Reuses the `signup` machinery verbatim: OPAQUE
-   *  registration with a RANDOM 32-byte password (never shown to the user;
-   *  recovery is phrase-only) + device-root-key derivation + the first-ever
-   *  identity-bundle publish (with the genesis `leafAuth`) — but SKIPS
-   *  `registerUsername`, yielding a username-less account. Lands in the
-   *  `save-fresh-phrase` state (mirroring `mintFreshIdentity`) so the
-   *  existing `SaveFreshPhrasePrompt` shows the recovery phrase;
-   *  `confirmFreshPhraseSaved` then lands the session. Claiming a username
-   *  (`registerUsername`) is a later onboarding step. Returns the recovery
-   *  phrase (the caller shows it / it is surfaced by the prompt). */
-  signupGuest(options?: { readonly signal?: AbortSignal }): Promise<SignupOutcome>;
+   *  user-chosen password, so a visitor who opened a `/c/` link without an
+   *  account goes straight into the call. Reuses the `signup` machinery:
+   *  OPAQUE registration under a RANDOM 32-byte password nobody sees, the
+   *  device root key, the first identity-bundle publish (with the genesis
+   *  `leafAuth`) — but no username, and NO recovery-phrase screen: the
+   *  session lands at once and the account is marked as a guest
+   *  (`guest-account.ts`). The phrase is kept on this device, wrapped under
+   *  the device key, until the person decides: {@link claimGuestUsername}
+   *  and the first password keep the account,
+   *  {@link discardGuestAccount} destroys it. */
+  signupGuest(options?: { readonly signal?: AbortSignal }): Promise<void>;
+  /** The session is a guest account (`guest-account.ts`): made to join a
+   *  call from a link, not yet kept. */
+  readonly isGuest: Accessor<boolean>;
+  /** Delete a guest account at once: on the servers (in the order
+   *  `guestDeletePlan` gives, which frees a username an unfinished
+   *  `Create account` took), and every trace of it on this device. Lands
+   *  signed out. Throws, with nothing removed locally, when a required
+   *  delete failed. */
+  discardGuestAccount(): Promise<void>;
+  /** If the session is a guest account past its lifetime
+   *  (`GUEST_LIFETIME_MS`), delete it the way `No, thanks` does, except that
+   *  a server that cannot be reached does not stop the device wipe: the
+   *  servers remove an unkept account on their own clock. Resolves `true`
+   *  when the account was removed (the session is over). */
+  expireGuestIfDue(): Promise<boolean>;
   /** Run the OPAQUE-PAKE login flow.
    *
    *  ADR-0054 S5: signs in by name. The start carries the login handle of
@@ -945,7 +1017,14 @@ export interface AuthApi {
    *  device key, rebuild the canonical AccountIdentity from it, and
    *  flip to a full `session`. Throws on a bad / mismatched phrase
    *  (the derived pubkey does not match the account's published
-   *  bundle) so the user cannot silently fork their identity. */
+   *  bundle) so the user cannot silently fork their identity.
+   *
+   *  Every way this route gets the phrase ends here (the typed phrase, a
+   *  passkey that carries the keys), and like the restore screen it
+   *  then fetches and applies the account's backup (`backup/restore.ts`):
+   *  contacts, synced state and the list of conversations, never MLS
+   *  state. A missing backup or a failed fetch does not fail the sign-in;
+   *  a failed fetch is retried on the next session landing. */
   provideRecoveryPhrase(mnemonicPhrase: string): Promise<void>;
   /** Whether the "Choose a new password" step (UX spec 7.1) is owed: a
    *  forgot-password route succeeded and this device holds the keys. The
@@ -1217,9 +1296,41 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // state, BEFORE the signal moves, so nothing the new state renders can read
   // the previous account's contacts. Every state change goes through here.
   const setState = (next: AuthState): void => {
+    if (next.kind !== "anon" && next.kind !== "loading") {
+      // An account landed (a session, or its restore / new-phrase prompt):
+      // every sign-in round trip that started before this is overtaken.
+      binding.landed();
+      openStoresFor(next.account.accountId);
+      // Whatever was parked for a DIFFERENT account goes with it. A parked
+      // new phrase is not lost by this: it was cached and marked owed before
+      // its screen was shown (`mintFreshIdentity`).
+      const landed = next.account.accountId;
+      const parked = pendingRecovery();
+      if (parked !== null && parked.accountIdB64 !== landed) setPendingRecovery(null);
+      const fresh = pendingFreshPhrase();
+      if (fresh !== null && fresh.accountIdB64 !== landed) {
+        fresh.seed.fill(0);
+        setPendingFreshPhrase(null);
+      }
+    }
     bindContactsAccount(next.kind === "session" ? next.account.accountId : null);
     setStateSignal(next);
   };
+  // The storage-level backstop of the binding below (`account-store-gate.ts`):
+  // Forget device seals an account's stores before it deletes them, a
+  // sign-out seals its session-token row, and a landing opens them again.
+  onCleanup(installAccountStorageGate());
+  /** `accountIdB64` is landing on this browser: its local stores accept
+   *  writes again. Called where a flow first holds the account id of a
+   *  session it was just given, and at every landing. */
+  function openStoresFor(accountIdB64: string): void {
+    openAccountStores(accountStoreIds(accountIdB64));
+  }
+  /** The binding of this browser to an account (`binding-epoch.ts`): ended by
+   *  every sign-out (`logout`, `forgetDevice`) and by every landing
+   *  (`setState` above). A sign-in flow captures it before its first await
+   *  and stops, writing nothing, once it has moved. */
+  const binding = new SessionBinding();
   // 1.16d3c: in-memory Identity secrets. Filled on signup /
   // login / recover, dropped on logout, NOT populated on a
   // session restore from IDB (the export key isn't persisted).
@@ -1287,6 +1398,82 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // client-side bound is applied only after an explicit sign-in in this page
   // (a silent restore is not one).
   let explicitSignInThisPage = false;
+  // The guest marker lives in `localStorage`, which is not reactive: every
+  // write below bumps this so `isGuest` re-reads it.
+  const [guestMarkerVersion, setGuestMarkerVersion] = createSignal(0);
+  const guestStorage = plainStorage;
+  const guestState = createMemo(() => {
+    guestMarkerVersion();
+    const s = state();
+    if (s.kind !== "session") return null;
+    return guestAccountState(guestStorage(), s.account.accountId);
+  });
+
+  /** Counts the flows that installed something (a bearer token, identities),
+   *  so a landing refused after a sign-out undoes only its own installs. */
+  let landingSeq = 0;
+  /** Accounts owed their phrase screen whose stored marker could not be
+   *  written (storage blocked); holds for this page's lifetime. */
+  const phraseOwedInMemory = new Set<string>();
+  /** One sign-in flow's view of the binding it started under. */
+  interface FlowBinding {
+    /** The binding is still the one the flow started under. */
+    current(): boolean;
+    /** Throws `StaleBindingError` once it is not: the flow is abandoned. */
+    require(): void;
+  }
+  /** Call BEFORE the flow's first await; `require()` after every await,
+   *  before any write or state change. */
+  function startFlow(): FlowBinding {
+    const current = binding.capture();
+    return {
+      current,
+      require: () => {
+        if (!current()) throw new StaleBindingError();
+      },
+    };
+  }
+  /** The login-handle re-bind of `accessByName`, skipped once the flow that
+   *  asked for it was overtaken. */
+  function bindIfCurrent(flow: FlowBinding): (token: string, handle: string) => Promise<void> {
+    return (token, handle) => (flow.current() ? bindByName(token, handle) : Promise.resolve());
+  }
+  /** Record that `accountIdB64` is owed its recovery-phrase screen: its next
+   *  session landing on this browser shows the phrase from the device-key
+   *  wrapped cache before any route (`restoreOwedSignupPhrase`). */
+  function owePhraseScreen(accountIdB64: string): void {
+    markSignupPhraseOwed(guestStorage(), accountIdB64);
+    if (!isSignupPhraseOwed(guestStorage(), accountIdB64)) {
+      // eslint-disable-next-line no-console
+      console.warn("the owed-phrase marker could not be stored; it holds until this page is closed");
+      phraseOwedInMemory.add(accountIdB64);
+    }
+  }
+  /** The account the auth state names, `null` for `anon` / `loading`. */
+  function boundAccountId(): string | null {
+    const s = state();
+    return s.kind === "anon" || s.kind === "loading" ? null : s.account.accountId;
+  }
+  /** The account the push subscription was asked for is still signed in. */
+  function subscribePushFor(accountIdB64: string): Promise<unknown> {
+    return subscribeToPush(accountIdB64, () => {
+      const s = state();
+      return s.kind === "session" && s.account.accountId === accountIdB64;
+    });
+  }
+  /** `parked` is still the context that is parked. A refreshed session pair
+   *  replaces the parked object with a copy that carries the new pair
+   *  (`sessionTokens` listener, `adoptProofSession`), so the comparison is on
+   *  the account-id buffer every copy shares, never on the object. */
+  function stillParked(parked: PendingRecovery): boolean {
+    return pendingRecovery()?.accountIdBytes === parked.accountIdBytes;
+  }
+  /** A completion of the restore prompt found its parked context gone: the
+   *  person signed out (or another completion landed) while it ran. */
+  function requireStillParked(pending: PendingRecovery, flow: FlowBinding): void {
+    if (!stillParked(pending)) throw new StaleBindingError();
+    flow.require();
+  }
 
   const client = new AuthClient();
   const discovery = new DiscoveryClient();
@@ -1539,6 +1726,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
     }),
   );
+  /** A sign-in flow installing the session it was just given. Counted, so a
+   *  landing refused after a sign-out does not take this session down with
+   *  its own installs (`finishCanonicalSession`). */
+  function installFlowSession(accountIdB64: string, pair: SessionPair): void {
+    landingSeq += 1;
+    installSession(accountIdB64, pair);
+  }
   // ADR-0054 S5: sign-in by name needs the account's login handle bound at
   // auth. Signup and a sign-in by name bind it themselves (and record that
   // here); every other way a session lands - reload restore, passkey, device
@@ -1647,29 +1841,45 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     startAutoBackup({
       accountId: () => identitySecrets()?.accountId ?? null,
       // `null` until the chat layer has loaded, so an empty list during
-      // startup is never mistaken for "left every group".
-      knownGroupIds: () =>
-        chats.identity() === null ? null : chats.groups().map((g) => g.groupIdB64),
+      // startup is never mistaken for "left every group". The list is the
+      // groups this device holds plus the ones a restored backup named that
+      // it has not joined yet, so the first upload after a restore does not
+      // erase the account's record of its conversations.
+      knownGroupIds: () => {
+        const id = identitySecrets()?.accountId;
+        if (id === undefined || chats.identity() === null) return null;
+        return backupKnownGroupIds(
+          base64Encode(id),
+          chats.groups().map((g) => g.groupIdB64),
+        );
+      },
       accountIdB64: () => {
         const id = identitySecrets()?.accountId;
         return id === undefined ? null : base64Encode(id);
       },
-      // The signing seed lives on the canonical Identity, not in the auth
-      // secrets: the backup envelope is sealed under the recovery phrase but
-      // signed with this.
-      ed25519Seed: () => chats.identity()?.ed25519Seed ?? null,
+      // The ACCOUNT identity's signing seed, as the signup and recover
+      // baselines carry it - never `chats.identity()`, which since ADR-0050
+      // is this device's own leaf identity and belongs to no backup.
+      ed25519Seed: () => chats.accountIdentity()?.ed25519Seed ?? null,
       deviceKey: async () => {
         const id = identitySecrets()?.accountId;
         if (id === undefined) return null;
         return getDeviceKey(base64Encode(id));
       },
       sessionToken: () => identitySecrets()?.sessionToken ?? null,
-      snapshot: () => {
-        const id = chats.identity();
-        return id === null ? null : id.snapshotStorage();
-      },
     }),
   );
+
+  // A conversation a restored backup named leaves the "not joined yet" set
+  // the moment this device holds it (`backup/restored-known-groups.ts`). The
+  // automatic backup prunes on its own tick too; this keeps the set exact in
+  // between, so a chat joined and then deleted is not listed again.
+  createEffect(() => {
+    const id = identitySecrets()?.accountId;
+    const held = chats.groups().map((g) => g.groupIdB64);
+    if (id === undefined || held.length === 0) return;
+    pruneJoinedRestoredGroups(base64Encode(id), held);
+  });
 
   // The account the KeyPackage publisher publishes for. Set the moment a
   // canonical identity is installed for a session, cleared on logout /
@@ -1776,7 +1986,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
     // A logout (or another sign-in) while the fetch was out: this identity is
     // no longer the session's, so it must neither sign out nor publish.
-    if (chats.identity() !== canonical) return "unknown";
+    // Compared with the ACCOUNT identity: since ADR-0050 `chats.identity()`
+    // is the device identity, never this instance.
+    if (chats.accountIdentity() !== canonical) return "unknown";
     const verdict = landingVerdict(
       current === undefined
         ? undefined
@@ -1852,7 +2064,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
    */
   async function restoreOwedSignupPhrase(accountIdB64: string): Promise<void> {
     const storage = typeof localStorage === "undefined" ? undefined : localStorage;
-    if (!isSignupPhraseOwed(storage, accountIdB64)) return;
+    if (!isSignupPhraseOwed(storage, accountIdB64) && !phraseOwedInMemory.has(accountIdB64)) return;
     // ADR-0075 (alignment I): new words are shown only to a phrase-protected
     // account. The owner of any other account was never shown words, so none
     // are shown after a rotation, a reset or a recall either, and a guest
@@ -1864,6 +2076,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         : (loadPersisted()?.username ?? "");
     if (!newWordsShown(isPhraseProtected(storage, accountIdB64), knownUsername.trim().length > 0)) {
       clearSignupPhraseOwed(storage, accountIdB64);
+      phraseOwedInMemory.delete(accountIdB64);
       return;
     }
     // A reset whose publish is owed: the identity the phrase belongs to is
@@ -1912,6 +2125,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
      *  binding is minted again, which happens only while this device holds
      *  no conversation; `null` is returned when nothing was re-minted. */
     live = false,
+    /** The caller's binding still holds. Asked after the awaits below: once
+     *  it does not, the identities installed by now are not this caller's
+     *  (a sign-out freed them, or another landing replaced them), nothing
+     *  more is installed and `null` is returned. */
+    stillBound: () => boolean = () => true,
   ): Promise<Uint8Array | null> {
     // A live session that already answers to an earlier key learns nothing
     // here, and its predecessor identity may hold state (the account's
@@ -1965,6 +2183,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         const seed = await ensureDeviceIdentitySeed(accountIdB64, deviceKey);
         const stored = await getDeviceBinding(accountIdB64);
         let boundKeyB64: string | null = null;
+        /** Overtaken: nothing parsed here was handed to the chats yet. */
+        const abandon = (): null => {
+          for (const p of predecessors) p.identity.free();
+          for (const s of seeds) s.fill(0);
+          device?.free();
+          device = null;
+          return null;
+        };
+        if (!stillBound()) return abandon();
         if (stored !== null) {
           try {
             device = wasm.Identity.fromSeedWithBinding(seed, stored);
@@ -1987,6 +2214,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             holdsConversations = true;
           }
         }
+        if (!stillBound()) return abandon();
         const verdict = bindingVerdict({
           boundKeyB64,
           currentKeyB64,
@@ -2045,6 +2273,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // eslint-disable-next-line no-console
       console.warn("device identity install failed; chats fall back to the account identity", err);
       device = null;
+    }
+    if (!stillBound()) {
+      (device as WasmIdentity | null)?.free();
+      conversationSeedBytes?.fill(0);
+      return null;
     }
     if (live && (keepLiveDevice || device === null)) return null;
     if (device === null) {
@@ -2365,13 +2598,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     accountIdB64: string,
     mode: "full" | "staged" = "full",
   ): Promise<void> {
+    // A sign-out like any other: a session landing still in flight must not
+    // land after this.
+    binding.signedOut();
+    phraseOwedInMemory.delete(accountIdB64);
     dropSession();
     // ADR-0042, "A wake is shown only for the signed-in account": the local
     // service-worker wake binding goes first (no network), so every wake
     // from here on is dropped and this account's notifications leave the
     // screen with it.
     await releaseWakeBinding();
-    clearRestored();
     setSignupPhrase(null);
     bindContactsAccount(null);
     chats.clear();
@@ -2584,7 +2820,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     recallHeld?.record.oldSeed.fill(0);
     recallHeld = null;
     setSignedOut(null);
-    setStateSignal({ kind: "loading" });
+    setState({ kind: "loading" });
     void restoreSessionOnLoad();
   }
 
@@ -3096,7 +3332,41 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     session: SessionPair;
     username: string;
     silentRestore?: boolean;
+    /** The recovery phrase, when this landing came from the phrase prompt
+     *  (`provideRecoveryPhrase`): the account-backup restore it owes runs
+     *  with it and is awaited. Every other landing leaves it out and retries
+     *  an owed restore, if any, from the device's phrase cache. */
+    restorePhrase?: string;
+    /** A guest account landing in its call (`guest-account.ts`): no push
+     *  registration. A person who was sent a call link is not asked whether
+     *  this site may send notifications. */
+    guest?: boolean;
+    /** The landing of an account whose registration has just finished on the
+     *  server (guest signup). It is completed whatever else landed meanwhile;
+     *  only a sign-out stops it. */
+    registered?: boolean;
   }): Promise<void> {
+    // A landing runs across many awaits, and Sign out is on screen during
+    // some of them (the restore prompt). A sign-out that lands in one must
+    // win: nothing below may install a session after it. So must another
+    // account's landing: this one was started for a binding that is gone.
+    const notSignedOut = binding.captureSignOut();
+    const stillBound = args.registered === true ? notSignedOut : binding.capture();
+    const mine = ++landingSeq;
+    const requireNotSignedOut = (): void => {
+      if (stillBound()) return;
+      // Undo what THIS landing installed after the sign-out cleared the
+      // session - unless a later flow has installed since, whose installs
+      // these would be, or an account is on screen (it landed meanwhile and
+      // owns what is installed now).
+      if (!notSignedOut() && landingSeq === mine && boundAccountId() === null) {
+        keyPackageAccount = null;
+        chats.clear();
+        dropSession();
+      }
+      throw new StaleBindingError();
+    };
+    openStoresFor(args.accountIdB64);
     const canonical = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
     // The keys are on this device now; nothing is left to explain.
     setRestoreNotice(null);
@@ -3104,7 +3374,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       args.wasm,
       canonical,
       args.accountIdB64,
+      false,
+      stillBound,
     );
+    requireNotSignedOut();
     keyPackageAccount = {
       accountIdBytes: args.accountIdBytes,
       accountIdB64: args.accountIdB64,
@@ -3113,10 +3386,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
     // Rehydrate BEFORE any KeyPackage is minted: `restoreStorage` REPLACES the
     // provider storage, so a KeyPackage created earlier would lose its private
-    // key to it.
+    // key to it. This is the device's OWN locally persisted MLS state; an
+    // account backup never supplies any (`backup/restore.ts`).
     await rehydrateMlsState(chats, args.accountIdB64);
+    requireNotSignedOut();
 
     await restoreOwedSignupPhrase(args.accountIdB64);
+    requireNotSignedOut();
     settleOwedKeyResetPublish(args.accountIdB64, args.accountIdBytes, args.accountIdentitySeed);
 
     const secrets: IdentitySecrets = {
@@ -3145,6 +3421,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         kind: "session",
         account: { accountId: args.accountIdB64, username: args.username },
       });
+      void restoreOwedBackupOnLanding(args);
       void (async (): Promise<void> => {
         // ADR-0073 section 4.2: the published identity is read BEFORE any
         // upload, a reload included; a stale device shows the signed-out
@@ -3160,7 +3437,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           });
           await ensureGenesisRecorded(args.accountIdB64, canonical);
         }
-        if (chats.identity() !== canonical || landingSignsOut(verdict)) return;
+        // (The account identity, as in `refreshPublishedIdentity`.)
+        if (chats.accountIdentity() !== canonical || landingSignsOut(verdict)) return;
         // A KeyPackage on every session start, reload included: the one the
         // directory serves may have been consumed by a Welcome this device
         // processed in an earlier page lifetime.
@@ -3180,12 +3458,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // the separate post-login snapshot write used to do. The upload binds the
     // session to this device first (ADR-0074 section 0.4).
     await publishKeyPackageBestEffort("sign-in");
+    requireNotSignedOut();
     // The bind may have ended the session (this device was removed, or the
     // session named another device): nothing lands then.
     if (sessionTokens.accountIdB64() !== args.accountIdB64) return;
     // ADR-0074 section 0.1: record the account key at auth, on every landing
     // until it has succeeded once.
     await ensureGenesisRecorded(args.accountIdB64, canonical);
+    requireNotSignedOut();
 
     setIdentitySecrets(secrets);
     setPendingRecovery(null);
@@ -3193,10 +3473,94 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       kind: "session",
       account: { accountId: args.accountIdB64, username: args.username },
     });
-    void subscribeToPush(args.accountIdB64).catch((err) => {
+    if (args.guest !== true) {
+      void subscribePushFor(args.accountIdB64).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("push subscribe failed", err);
+      });
+    }
+    // The account backup, on every route that restores the identity from
+    // the phrase: awaited when this landing holds the phrase (the prompt,
+    // an email code, a passkey that carries the keys), a background retry
+    // otherwise. Never fails the sign-in.
+    const owedRestore = restoreOwedBackupOnLanding(args);
+    if (args.restorePhrase !== undefined) await owedRestore;
+  }
+
+  /**
+   * The session-landing step of the account-backup restore
+   * (`backup/restore.ts`). A no-op unless a fetch of this account's backup
+   * is owed: a route that restores the identity marks it just before it
+   * lands the session, and a fetch that failed (or a tab closed
+   * mid-restore) leaves it set, so the next landing - reload, sign-in,
+   * passkey - runs it once more. Never throws. Contacts, synced state and
+   * the list of conversations only: MLS state is never loaded from a backup.
+   */
+  function restoreOwedBackupOnLanding(args: {
+    accountIdBytes: Uint8Array;
+    accountIdB64: string;
+    session: SessionPair;
+    restorePhrase?: string;
+  }): Promise<void> {
+    return restoreOwedAccountBackup({
+      accountIdBytes: args.accountIdBytes,
+      accountIdB64: args.accountIdB64,
+      sessionToken: args.session.sessionToken,
+      deviceKey: () => getDeviceKey(args.accountIdB64),
+      ...(args.restorePhrase !== undefined ? { phrase: args.restorePhrase } : {}),
+    }).then(() => undefined);
+  }
+
+  /**
+   * Upload a baseline of the account backup under `phrase` (contacts, synced
+   * state and the list of conversations; never MLS state). Run by every
+   * route that ends with the keys on this device under a phrase the server's
+   * blob is not sealed with yet: the first sign-up, a key reset, a key
+   * rotation, a recall, a guest account that was just kept. Skipped while a
+   * restore of the account's backup is still owed, so the blob that restore
+   * has to read is not replaced. Best effort: never throws.
+   */
+  async function uploadBackupBaseline(args: {
+    accountIdBytes: Uint8Array;
+    accountIdB64: string;
+    accountIdentitySeed: Uint8Array;
+    deviceKey: CryptoKey;
+    sessionToken: string;
+    phrase: string;
+    context: string;
+  }): Promise<void> {
+    try {
+      if (isBackupRestoreOwed(args.accountIdB64)) return;
+      const wasm = await loadWasm();
+      const identity = wasm.Identity.fromSeed(args.accountIdentitySeed);
+      let ed25519Seed: Uint8Array;
+      try {
+        ed25519Seed = identity.ed25519Seed;
+      } finally {
+        identity.free();
+      }
+      try {
+        await bootstrapBackupFromPhraseString(
+          {
+            accountId: args.accountIdBytes,
+            accountIdB64: args.accountIdB64,
+            ed25519Seed,
+            deviceKey: args.deviceKey,
+            sessionToken: args.sessionToken,
+            knownGroupIds: backupKnownGroupIds(
+              args.accountIdB64,
+              chats.groups().map((g) => g.groupIdB64),
+            ),
+          },
+          args.phrase,
+        );
+      } finally {
+        ed25519Seed.fill(0);
+      }
+    } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn("push subscribe failed", err);
-    });
+      console.warn(`backup baseline (${args.context}) failed`, err);
+    }
   }
 
   /**
@@ -3236,10 +3600,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     accountIdBytes: Uint8Array,
     accountIdB64: string,
     session: SessionPair,
+    /** The binding the recovery round trip started under; the caller has
+     *  just checked it. */
+    flow: FlowBinding,
     restoreKeys?: () => Promise<boolean>,
   ): Promise<void> {
+    openStoresFor(accountIdB64);
     // Install the fresh session everywhere a request draws on it.
-    installSession(accountIdB64, session);
+    installFlowSession(accountIdB64, session);
     // Persist the localStorage account marker so a reload knows
     // the account (important on a fresh browser where no row
     // existed).
@@ -3260,11 +3628,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       console.warn("device-key probe failed (access recover)", err);
       deviceKey = null;
     }
+    flow.require();
     let accountIdentitySeed: Uint8Array | null = null;
     if (deviceKey !== null) {
       // Refresh the persisted session pair under the existing device key.
       // Best-effort, same posture as login.
       await persistSessionPair(accountIdB64, session, "access recover");
+      flow.require();
       try {
         accountIdentitySeed = await getAccountIdentitySeed(
           accountIdB64,
@@ -3281,6 +3651,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdentitySeed = null;
       }
     }
+    if (!flow.current()) {
+      accountIdentitySeed?.fill(0);
+      throw new StaleBindingError();
+    }
 
     if (deviceKey !== null && accountIdentitySeed !== null) {
       // Same-device case: the cached seed rebuilds the canonical
@@ -3295,6 +3669,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         console.warn("export-key cache decrypt failed (access recover)", err);
       }
       const wasm = await loadWasm();
+      if (!flow.current()) {
+        accountIdentitySeed.fill(0);
+        throw new StaleBindingError();
+      }
       await finishCanonicalSession({
         wasm,
         accountIdentitySeed,
@@ -3315,19 +3693,104 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // prior password login on this browser whose seed cache is
     // missing), carry it — overwriting it with an identity-seed-
     // derived key would orphan every wrapped store.
-    setPendingRecovery({
-      accountIdBytes,
-      accountIdB64,
-      exportKey: new Uint8Array(0),
-      deviceKey,
-      session,
-      username,
-    });
-    if (restoreKeys !== undefined && (await restoreKeys())) return;
+    await parkForRestore(
+      {
+        accountIdBytes,
+        accountIdB64,
+        exportKey: new Uint8Array(0),
+        deviceKey,
+        session,
+        username,
+      },
+      flow,
+      restoreKeys,
+    );
+  }
+
+  /**
+   * Park an authenticated account whose AccountIdentity seed is not readable
+   * on this device, and show the restore prompt - unless this device itself
+   * still holds a phrase that account was never shown.
+   *
+   * That is the account whose phrase screen is owed (`owePhraseScreen`): the
+   * phrase sits in its device-key-wrapped cache, and asking the person to
+   * type a phrase they have not seen would lock them out of an identity this
+   * browser can restore. So the park is completed from the kept phrase through
+   * the ordinary `provideRecoveryPhrase` path, with its fail-closed check
+   * against the published identity; the landing then shows the phrase first.
+   * Anything short of that (no marker, no device key, an unreadable row, a
+   * phrase the directory does not confirm, a network failure) falls back to
+   * the prompt.
+   *
+   * `restoreKeys` is the passkey route's hook (`landAfterAccessRecovery`): it
+   * runs after the park and before the prompt, and returns `true` when it
+   * landed the session itself.
+   */
+  async function parkForRestore(
+    parked: PendingRecovery,
+    flow: FlowBinding,
+    restoreKeys?: () => Promise<boolean>,
+  ): Promise<void> {
+    setPendingRecovery(parked);
+    if (await completeParkFromOwedPhrase(parked, flow)) return;
+    if (restoreKeys !== undefined) {
+      const landed = await restoreKeys();
+      if (landed) return;
+      // Overtaken while the passkey's keys were being opened: what this flow
+      // parked goes (a sign-out or the other landing has usually cleared it).
+      if (!flow.current()) {
+        if (stillParked(parked)) setPendingRecovery(null);
+        throw new StaleBindingError();
+      }
+    }
     setState({
       kind: "needs-recovery-phrase",
-      account: { accountId: accountIdB64, username },
+      account: { accountId: parked.accountIdB64, username: parked.username },
     });
+  }
+  async function completeParkFromOwedPhrase(
+    parked: PendingRecovery,
+    flow: FlowBinding,
+  ): Promise<boolean> {
+    const deviceKey = parked.deviceKey;
+    const owed =
+      isSignupPhraseOwed(guestStorage(), parked.accountIdB64) ||
+      phraseOwedInMemory.has(parked.accountIdB64);
+    if (deviceKey === null || !owedPhraseCompletesPark({ owed, deviceKeyPresent: true })) {
+      return false;
+    }
+    let phrase: string | null = null;
+    try {
+      phrase = await readDevicePhraseWith(parked.accountIdB64, deviceKey);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("reading the owed recovery phrase for a parked sign-in failed", err);
+    }
+    // Overtaken while the cache was read: what this flow parked goes.
+    if (!flow.current()) {
+      if (stillParked(parked)) setPendingRecovery(null);
+      throw new StaleBindingError();
+    }
+    if (phrase === null) return false;
+    try {
+      await api.provideRecoveryPhrase(phrase);
+      return true;
+    } catch (err) {
+      if (err instanceof StaleBindingError) throw err;
+      // eslint-disable-next-line no-console
+      console.warn(
+        "completing a parked sign-in from the owed recovery phrase failed; showing the restore prompt",
+        err instanceof Error ? err.name : "unknown",
+      );
+      if (!flow.current()) {
+        if (stillParked(parked)) setPendingRecovery(null);
+        throw new StaleBindingError();
+      }
+      // `provideRecoveryPhrase` leaves the parked context in place when it
+      // refuses; park again if it did not.
+      if (!stillParked(parked)) setPendingRecovery(parked);
+      return false;
+    }
   }
 
   /**
@@ -3561,6 +4024,133 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     return false;
   }
 
+  /** The recovery phrase of a guest account, from the guest's own row of the
+   *  phrase store, else the account's row (a keep that was interrupted after
+   *  the phrase moved). `null` when this device cannot read it. */
+  async function readGuestPhrase(accountIdB64: string): Promise<string | null> {
+    let deviceKey: CryptoKey | null = null;
+    try {
+      deviceKey = await getDeviceKey(accountIdB64);
+    } catch {
+      deviceKey = null;
+    }
+    if (deviceKey === null) return null;
+    return (
+      (await readDevicePhraseWith(guestPhraseKey(accountIdB64), deviceKey)) ??
+      (await readDevicePhraseWith(accountIdB64, deviceKey))
+    );
+  }
+
+  /**
+   * A guest account has its username and its first password: it is an
+   * account from here on. The phrase moves under the account's own key (a
+   * device that holds the keys holds the phrase), the "Protect your account"
+   * step is owed exactly as after a sign-up (the phrase is NOT shown), the
+   * guest marker goes, the first backup is uploaded and push is asked for.
+   * The protect marker is written before the guest marker is cleared, so the
+   * guards go from the guest screen straight to that step.
+   */
+  async function keepGuestAccount(args: {
+    accountIdBytes: Uint8Array;
+    accountIdB64: string;
+    accountIdentitySeed: Uint8Array;
+    sessionToken: string;
+    phrase: string;
+  }): Promise<void> {
+    const { accountIdB64 } = args;
+    let deviceKey: CryptoKey | null = null;
+    try {
+      deviceKey = await getDeviceKey(accountIdB64);
+    } catch {
+      deviceKey = null;
+    }
+    let moved = false;
+    if (deviceKey !== null) {
+      moved = await storeDevicePhrase(accountIdB64, args.phrase, deviceKey, "guest-kept");
+    }
+    if (moved) {
+      try {
+        await deletePhrase(guestPhraseKey(accountIdB64));
+      } catch (err) {
+        // The device wipe removes it.
+        // eslint-disable-next-line no-console
+        console.warn("removing the guest recovery phrase row failed", err);
+      }
+    }
+    markProtectStepOwed(plainStorage(), accountIdB64);
+    clearGuestAccount(guestStorage(), accountIdB64);
+    setGuestMarkerVersion((v) => v + 1);
+    setProtectVersion((v) => v + 1);
+    if (deviceKey !== null) {
+      void uploadBackupBaseline({
+        accountIdBytes: args.accountIdBytes,
+        accountIdB64,
+        accountIdentitySeed: args.accountIdentitySeed,
+        deviceKey,
+        sessionToken: args.sessionToken,
+        phrase: args.phrase,
+        context: "guest kept",
+      });
+    }
+    void subscribePushFor(accountIdB64).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn("push subscribe (guest kept) failed", err);
+    });
+  }
+
+  /**
+   * Delete a guest account on the servers, in the order and with the
+   * strictness `guestDeletePlan` gives. `strict: false` (an expired guest)
+   * swallows every failure: both deletes are idempotent and the servers
+   * sweep an unkept account themselves.
+   *
+   * Auth deletes an account that has no login handle and no passkey on its
+   * session alone, and releases the handle of an account younger than the
+   * unclaimed lifetime the same way. So a guest whose half-finished claim
+   * bound a handle releases it FIRST, then deletes. No fresh-auth grant is
+   * held for a guest. An unexpected `403 fresh-auth-required` does not stop
+   * the delete on this device: auth removes an account nobody named on its
+   * own clock.
+   */
+  async function deleteGuestOnServers(
+    guest: GuestAccountState,
+    sessionToken: string,
+    strict: boolean,
+  ): Promise<void> {
+    for (const step of guestDeletePlan(guest)) {
+      try {
+        if (step.service === "auth") {
+          if (guest.claimedUsername !== null) {
+            await client.releaseLoginHandle(sessionToken).catch((releaseErr: unknown) => {
+              // The delete below then answers for it.
+              // eslint-disable-next-line no-console
+              console.warn("guest account: login handle not released", releaseErr);
+            });
+          }
+          const webauthn = new WebauthnClient();
+          webauthn.setSessionToken(sessionToken);
+          try {
+            await webauthn.deleteAccount(null);
+          } catch (err) {
+            const refused =
+              err instanceof WebauthnHttpError &&
+              isFreshAuthRequired({ status: err.status, errorCode: errorCodeOf(err.body) });
+            if (!refused) throw err;
+            // eslint-disable-next-line no-console
+            console.warn("guest account: auth asked for a fresh proof; left to the server's sweep");
+          }
+        } else {
+          discovery.setSessionToken(sessionToken);
+          await discovery.deleteAccount();
+        }
+      } catch (err) {
+        if (strict && step.required) throw err;
+        // eslint-disable-next-line no-console
+        console.warn(`guest account: ${step.service} rows not deleted`, err);
+      }
+    }
+  }
+
   async function restoreSessionOnLoad(): Promise<void> {
     if (await restoreOwedRecall()) return;
     const probe = await probeStoredSecrets();
@@ -3598,6 +4188,32 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     if (decision.kind === "anon") {
       setState({ kind: "anon" });
       return;
+    }
+    // A guest account (`guest-account.ts`) is never left as a cached,
+    // signed-out account, and never outlives its day: nobody knows its
+    // password, so a guest that cannot be restored, or is too old, leaves
+    // the device here, before any state lands.
+    if (probe.cachedAccount !== null) {
+      const guestId = probe.cachedAccount.accountIdB64;
+      const guest = guestAccountState(guestStorage(), guestId);
+      const action = guestRestoreAction({
+        guest,
+        restorable:
+          decision.kind === "restore" && probe.deviceKey !== null && probe.identitySeed !== null,
+        nowMs: Date.now(),
+      });
+      if (guest !== null && action !== "none") {
+        probe.identitySeed?.fill(0);
+        if (action === "discard" && decision.kind === "restore") {
+          await deleteGuestOnServers(guest, decision.sessionPair.sessionToken, false);
+          discovery.setSessionToken(null);
+        }
+        await wipeAccountLocalData(guestId);
+        anonTokens.forgetAccount(guestId);
+        setGuestMarkerVersion((v) => v + 1);
+        if (state().kind === "loading") setState({ kind: "anon" });
+        return;
+      }
     }
     if (
       decision.kind === "anon-cached" ||
@@ -3651,6 +4267,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // Never a half state: undo whatever the restore installed and land
       // signed out, with the username pre-filled for `/login`.
       // eslint-disable-next-line no-console
+      // A sign-out won the race: it already cleared everything, and what is
+      // installed now (if anything) is not this restore's to undo.
+      if (err instanceof StaleBindingError) {
+        seed.fill(0);
+        return;
+      }
       console.warn("session restore on load failed; signing out", err);
       keyPackageAccount = null;
       chats.clear();
@@ -3702,7 +4324,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // and the phrase under the device key, and the "publish owed" record
     // with the attestation. From here on a crash or a failure is a retry
     // of the publishing steps, never a second ctx.reset.
-    installSession(ctx.accountIdB64, ctx.reset.session);
+    //
+    // Another account may be signed in (or sit in its own prompt) by now:
+    // the reset happened on the server, so everything of THIS account is
+    // still stored below, but the other account's session, chats and screen
+    // are left alone. The new keys then wait for this account's next
+    // landing, which retries the publish (`settleOwedKeyResetPublish`) and
+    // shows the words first (`restoreOwedSignupPhrase`).
+    const overtaken = (): boolean =>
+      freshPhraseDisposition({ mintedFor: ctx.accountIdB64, boundAccount: boundAccountId() }) ===
+      "owe";
+    openStoresFor(ctx.accountIdB64);
+    if (!overtaken()) installFlowSession(ctx.accountIdB64, ctx.reset.session);
     let deviceKey = ctx.deviceKey;
     if (deviceKey === null) {
       // The ACCESS-only fresh-browser case (no password, hence no OPAQUE
@@ -3733,7 +4366,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // phrase"). The signup-phrase marker makes a reload show the words
     // first, once nothing is owed.
     await storeDevicePhrase(ctx.accountIdB64, ctx.phrase, deviceKey, "fresh-identity");
-    markSignupPhraseOwed(plainStorage(), ctx.accountIdB64);
+    // A reset (and a recall, which is one) ends with new keys under a new
+    // phrase: the account backup is uploaded again under it by the automatic
+    // backup once the session lands (no MLS state, as always).
+    markBackupDirty(ctx.accountIdB64);
+    owePhraseScreen(ctx.accountIdB64);
     const record: KeyResetOwed = {
       v: 1,
       attestationB64Url: ctx.reset.attestationB64Url,
@@ -3757,7 +4394,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     // a superseded key, and ends a rotation this device was finishing.
     clearRotation(plainStorage(), ctx.accountIdB64);
     clearRotatedNotice(plainStorage(), ctx.accountIdB64);
-    chats.setPredecessorAccountIdentity(null);
+    if (!overtaken()) chats.setPredecessorAccountIdentity(null);
     try {
       await deleteKeyRotationState(ctx.accountIdB64);
     } catch (err) {
@@ -3777,6 +4414,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("clearing the old generation's chat bookkeeping failed", err);
+    }
+    if (overtaken()) {
+      ctx.seed.fill(0);
+      await ctx.afterPersist?.();
+      throw new StaleBindingError();
     }
     setKeyResetNote(true);
 
@@ -3899,6 +4541,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }));
     await putAccountIdentitySeed(ctx.accountIdB64, seed, ctx.deviceKey);
     await storeDevicePhrase(ctx.accountIdB64, phrase, ctx.deviceKey, "key-rotation");
+    // The account backup on the server is sealed under the phrase just left:
+    // the automatic backup uploads it again under the new one (no MLS state,
+    // as always) once the session runs on the new keys.
+    markBackupDirty(ctx.accountIdB64);
     // ADR-0074 section 3.5a rule 4: the mailbox of the key just left is read
     // for 30 days from now, then left. Its own window: an earlier
     // predecessor's is not started again.
@@ -4619,6 +5265,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           typeof localStorage === "undefined" ? undefined : localStorage,
           s.account.accountId,
         );
+        phraseOwedInMemory.delete(s.account.accountId);
       }
       setSignupPhrase(null);
     },
@@ -4629,6 +5276,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         throw new KeyedError("common.error.session_not_ready");
       }
       const accountIdB64 = s.account.accountId;
+      const guest = guestState() !== null;
+      if (guest) {
+        // An account past its lifetime is not kept: the servers are about to
+        // delete it, or already have.
+        if (await api.expireGuestIfDue()) throw new GuestAccountExpiredError();
+        // The phrase first: an account whose phrase this device cannot read
+        // cannot be kept, so no name is taken for it.
+        if ((await readGuestPhrase(accountIdB64)) === null) throw new GuestPhraseUnavailableError();
+      }
       const token = sessionTokens.peek() ?? secrets.sessionToken;
       // The sign-up's order (ADR-0054 S5): the login handle at auth FIRST,
       // then the name at discovery; a discovery failure releases the handle.
@@ -4648,6 +5304,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // marker (before the state moves, so a reload in between retries only
       // the password), then the live session.
       savePersisted({ v: 1, accountIdB64, username: reg.normalisedUsername });
+      if (guest) {
+        // `No, thanks` after this point frees the name at the directory
+        // first (`guestDeletePlan`).
+        noteGuestUsernameClaimed(guestStorage(), accountIdB64, reg.normalisedUsername);
+        setGuestMarkerVersion((v) => v + 1);
+      }
       markFirstPasswordOwed(plainStorage(), accountIdB64);
       setConfirmedUsername({ accountIdB64, username: reg.normalisedUsername });
       rememberUsername(accountIdB64, reg.normalisedUsername);
@@ -4680,6 +5342,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       setProtectVersion((v) => v + 1);
     },
     async landEmailPasswordRecovery(username, accountId, session) {
+      // Called with the session a mailed code just returned; from here the
+      // landing is overtaken like any other sign-in.
+      const flow = startFlow();
       const accountIdB64 = base64Encode(accountId);
       setRestoreNotice(null);
       explicitSignInThisPage = true;
@@ -4688,7 +5353,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // A mailed code is not a fresh-auth proof (the finish mints none).
       sessionLanding = "other";
       freshGrants.clear();
-      await landAfterAccessRecovery(username, accountId, accountIdB64, session);
+      await landAfterAccessRecovery(username, accountId, accountIdB64, session, flow);
     },
     landingDeviceIdFor(username) {
       return landingDevice({ username });
@@ -4742,12 +5407,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         utf8(password),
         options?.signal !== undefined ? { signal: options.signal } : {},
       );
+      // The commit point: the registration has finished on the server. From
+      // here the account is completed and landed whatever happened on this
+      // device meanwhile (a sign-out, another landing), so nothing below
+      // asks the binding.
       const accountIdB64 = base64Encode(result.accountId);
       explicitSignInThisPage = true;
       // Install the fresh session so the registerUsername /
       // uploadIdentityBundle / uploadKeyPackage round-trip below
       // sails through the auth::require_session middleware.
-      installSession(accountIdB64, result.session);
+      openStoresFor(accountIdB64);
+      installFlowSession(accountIdB64, result.session);
       // The password was typed just now: the signup finish mints a
       // fresh-auth grant, so the passkey offer of the onboarding asks for
       // nothing more.
@@ -4976,26 +5646,25 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // a no-op when the build has no VAPID public key set or the
       // user denies the Notification permission prompt — fall
       // back to foreground polling without throwing.
-      void subscribeToPush(accountIdB64).catch((err) => {
+      void subscribePushFor(accountIdB64).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn("push subscribe (signup) failed", err);
       });
       return { recoveryPhrase: result.recoveryPhrase };
     },
     async signupGuest(options) {
-      // ADR-0032 guest join. This is the `signup` flow VERBATIM up to (but
-      // NOT including) the username claim: OPAQUE registration under a
-      // RANDOM password, a device root key derived from the resulting
-      // export key, the first-ever identity-bundle publish, and the
-      // AccountIdentity-seed cache. It then parks the recovery phrase and
-      // flips to `save-fresh-phrase` (like `mintFreshIdentity`) instead of
-      // landing the session directly, so the existing `SaveFreshPhrasePrompt`
-      // + `confirmFreshPhraseSaved` render + land it unchanged.
+      // ADR-0032 guest join. This is the `signup` flow up to (but NOT
+      // including) the username claim: OPAQUE registration under a RANDOM
+      // password, a device root key derived from the resulting export key,
+      // the first-ever identity-bundle publish, and the AccountIdentity-seed
+      // cache. Then the session lands at once: no recovery-phrase screen
+      // stands between the person and the call they were invited to
+      // (2026-10-02; the first version showed the phrase first).
       //
-      // The password is 32 random bytes the user NEVER sees — recovery is
-      // phrase-only, matching the ACCESS-only convention the recovery
-      // cascade already uses. No username is claimed; the account is
-      // username-less until the onboarding step below.
+      // The password is 32 random bytes nobody sees, and no username is
+      // claimed. Whether this becomes an account is asked after the call
+      // (`claimGuestUsername` / `discardGuestAccount`); the servers delete an
+      // account that never got a username a day after it was made.
       const randomPassword = base64Encode(
         crypto.getRandomValues(new Uint8Array(32)),
       );
@@ -5003,17 +5672,19 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         utf8(randomPassword),
         options?.signal !== undefined ? { signal: options.signal } : {},
       );
+      // The commit point, as in `signup`: the registration has finished on
+      // the server, so the account is completed and landed whatever else
+      // landed on this device meanwhile. Only a sign-out during the landing
+      // itself stops it (`registered` below).
       const accountIdB64 = base64Encode(result.accountId);
       explicitSignInThisPage = true;
       // Install the fresh session for the protected writes below.
-      installSession(accountIdB64, result.session);
-
-      // TODO(ADR-0032 onboarding): claiming a username is a LATER step —
-      // the user calls `discovery.registerUsername(accountId, chosenName)`
-      // (via a future "claim your username" UI) once they want to be
-      // discoverable / recover cross-device. We intentionally SKIP
-      // `registerUsername` here so the guest account stays username-less
-      // and the user can claim their preferred (immutable) handle later.
+      openStoresFor(accountIdB64);
+      installFlowSession(accountIdB64, result.session);
+      // The grant the sign-up finish minted is NOT kept: nobody proved
+      // anything for a guest, and its delete needs none.
+      sessionLanding = "other";
+      freshGrants.clear();
 
       if (result.recoveryPhrase === undefined) {
         throw new Error(
@@ -5061,12 +5732,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // eslint-disable-next-line no-console
         console.warn("account-identity-seed persist (signupGuest) failed", err);
       }
-      await storeDevicePhrase(accountIdB64, result.recoveryPhrase, deviceKey, "signup-guest");
-      // A reload before the phrase is acknowledged lands a session from the
-      // stored keys; the owed marker makes that session show the phrase
-      // first (it is read back from the device).
-      markSignupPhraseOwed(plainStorage(), accountIdB64);
-
       // Persist the localStorage account marker — username EMPTY (unclaimed).
       savePersisted({ v: 1, accountIdB64, username: "" });
 
@@ -5099,24 +5764,65 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         canonical.free();
       }
 
-      // Park the completion context + flip to `save-fresh-phrase` so the UI
-      // shows the recovery phrase before the session lands (the
-      // `SaveFreshPhrasePrompt` → `confirmFreshPhraseSaved` path builds the
-      // canonical Identity, uploads the KeyPackage, and lands the session).
-      setPendingFreshPhrase({
-        seed: accountIdentitySeed,
+      // The phrase stays on this device, wrapped under the device key, under
+      // the guest's own key in the phrase store and NOT the account's: the
+      // backup reads it by the account id, finds nothing, and so keeps
+      // nothing on a server for an account the person has not decided to
+      // keep. Fail loud: an account whose phrase is not kept could never be
+      // kept afterwards (the email vault, a new device and "Save a recovery
+      // phrase" all need it). It moves under the account's own key when the
+      // first password is set (`replacePassword`).
+      const guestPhraseKept = await storeDevicePhrase(
+        guestPhraseKey(accountIdB64),
+        result.recoveryPhrase,
+        deviceKey,
+        "signup-guest",
+      );
+      if (!guestPhraseKept) {
+        throw new Error("the guest account's recovery phrase could not be kept on this device");
+      }
+      markGuestAccount(guestStorage(), accountIdB64, Date.now());
+      setGuestMarkerVersion((v) => v + 1);
+
+      await finishCanonicalSession({
+        wasm,
+        accountIdentitySeed,
         accountIdBytes: result.accountId,
         accountIdB64,
+        exportKey: result.exportKey,
         session: result.session,
         username: "",
-        phrase: result.recoveryPhrase,
-        deviceKey,
+        guest: true,
+        registered: true,
       });
-      setState({
-        kind: "save-fresh-phrase",
-        account: { accountId: accountIdB64, username: "" },
-      });
-      return { recoveryPhrase: result.recoveryPhrase };
+    },
+    isGuest: () => guestState() !== null,
+    async discardGuestAccount() {
+      const current = state();
+      const secrets = identitySecrets();
+      const guest = guestState();
+      if (current.kind !== "session" || secrets === null || guest === null) {
+        throw new Error("no guest account to delete");
+      }
+      // The servers first. A required delete that fails leaves everything in
+      // place so the person can try again; the order frees a username an
+      // unfinished Create account took (`guestDeletePlan`).
+      await deleteGuestOnServers(guest, sessionTokens.peek() ?? secrets.sessionToken, true);
+      // Everything on this device, the guest marker and the phrase row
+      // included (`wipe-account.ts`). Lands signed out.
+      await api.forgetDevice();
+      setGuestMarkerVersion((v) => v + 1);
+    },
+    async expireGuestIfDue() {
+      const current = state();
+      const secrets = identitySecrets();
+      const guest = guestState();
+      if (current.kind !== "session" || secrets === null || guest === null) return false;
+      if (!guestExpired(guest, Date.now())) return false;
+      await deleteGuestOnServers(guest, sessionTokens.peek() ?? secrets.sessionToken, false);
+      await api.forgetDevice();
+      setGuestMarkerVersion((v) => v + 1);
+      return true;
     },
     async login(username, password) {
       // ADR-0054 S5: sign in by name. The start carries the login handle
@@ -5124,7 +5830,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // before the session exists: the account id comes back in the finish.
       // An unknown name reads as a wrong password (the server's stand-in).
       // The handle is re-bound once the session exists (idempotent).
+      //
+      // The binding this sign-in starts under. If the person signs out, or
+      // another session lands on this device (a guest account from a call
+      // link, a passkey sign-in), before the round trip returns, the late
+      // response is dropped: nothing is installed, persisted or shown.
+      const flow = startFlow();
       const target = await nameTargetFor(username);
+      flow.require();
       const resolvedUsername = target.username;
       // A password sign-in owes no new-password step and explains nothing.
       setNewPasswordOwed(false);
@@ -5133,13 +5846,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         target,
         run: (handle) =>
           client.login(handle, utf8(password), landingDevice({ username: target.username })),
-        bind: bindByName,
+        bind: bindIfCurrent(flow),
       });
+      flow.require();
       const accountIdBytes = result.accountId;
       const accountIdB64 = base64Encode(accountIdBytes);
       explicitSignInThisPage = true;
       // Install the fresh session for any protected writes that follow.
-      installSession(accountIdB64, result.session);
+      openStoresFor(accountIdB64);
+      installFlowSession(accountIdB64, result.session);
       // The password was proven just now: keep the fresh-auth grant (memory
       // only). A sign-in that brought none drops whatever an earlier one
       // left.
@@ -5162,9 +5877,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // so deriving here yields the same bytes every login.
         deviceKey = await deriveDeviceRootKey(result.exportKey, accountIdB64);
       }
+      flow.require();
       // Upsert is harmless; also persist the (accountId, username)
       // marker so subsequent reloads skip the lookup round-trip.
       await putDeviceKey(accountIdB64, deviceKey);
+      flow.require();
       // Refresh the persisted session pair alongside the device key. Same
       // best-effort posture as signup: a persistence failure does not block
       // login.
@@ -5174,6 +5891,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // eslint-disable-next-line no-console
         console.warn("session-pair persist (login) failed", err);
       }
+      flow.require();
       // Phase 2a2c2 — refresh the cached export key. Same
       // best-effort posture.
       try {
@@ -5182,6 +5900,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // eslint-disable-next-line no-console
         console.warn("export-key persist (login) failed", err);
       }
+      flow.require();
       // Phase 2a3b0 (ADR-0007) — ensure DeviceIdentity seed.
       // Idempotent: a returning user with a seed already on
       // file gets the cached one; first-login generates fresh
@@ -5192,6 +5911,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // eslint-disable-next-line no-console
         console.warn("device-identity ensure (login) failed", err);
       }
+      flow.require();
       savePersisted({ v: 1, accountIdB64, username: resolvedUsername });
 
       // ADR-0017: the canonical AccountIdentity is seeded from the
@@ -5204,6 +5924,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // contact's pin. Instead we flip to the `needs-recovery-phrase`
       // fail-safe state and let the user supply their phrase.
       const wasm = await loadWasm();
+      flow.require();
       let accountIdentitySeed: Uint8Array | null = null;
       try {
         accountIdentitySeed = await getAccountIdentitySeed(
@@ -5218,23 +5939,26 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         console.warn("account-identity-seed decrypt failed (login)", err);
         accountIdentitySeed = null;
       }
+      if (!flow.current()) {
+        accountIdentitySeed?.fill(0);
+        throw new StaleBindingError();
+      }
 
       if (accountIdentitySeed === null) {
         // Fresh-device fail-safe (ADR-0017). Auth succeeded; identity
         // restore is pending the phrase. Stash the context and flip
         // state — `provideRecoveryPhrase` finishes from here.
-        setPendingRecovery({
-          accountIdBytes,
-          accountIdB64,
-          exportKey: result.exportKey,
-          deviceKey,
-          session: result.session,
-          username: resolvedUsername,
-        });
-        setState({
-          kind: "needs-recovery-phrase",
-          account: { accountId: accountIdB64, username: resolvedUsername },
-        });
+        await parkForRestore(
+          {
+            accountIdBytes,
+            accountIdB64,
+            exportKey: result.exportKey,
+            deviceKey,
+            session: result.session,
+            username: resolvedUsername,
+          },
+          flow,
+        );
         return;
       }
 
@@ -5254,18 +5978,26 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // grants ACCESS; what happens next is the shared ACCESS-only landing,
       // with one addition on a device without the keys: this passkey is
       // asked for them before the restore prompt is shown.
+      //
+      // Overtaken like `login`: the ceremony can sit behind the browser's
+      // passkey sheet for a long time, and whatever landed on this device in
+      // the meantime stays.
+      const flow = startFlow();
       const assertion = await runPasskeyCeremony();
+      flow.require();
       const accountIdB64 = assertion.account_id_b64;
       const accountIdBytes = base64Decode(accountIdB64);
       const assertionSession = sessionPairOf(assertion);
       setRestoreNotice(null);
       explicitSignInThisPage = true;
-      installSession(accountIdB64, assertionSession);
+      openStoresFor(accountIdB64);
+      installFlowSession(accountIdB64, assertionSession);
       const cached = loadPersisted();
       const username =
         cached !== null && cached.accountIdB64 === accountIdB64
           ? cached.username
           : await usernameNamingAccount(usernameHint, accountIdBytes);
+      flow.require();
       // A passkey sign-in is a fresh-auth proof like a password one.
       sessionLanding = "passkey";
       const passkeyGrant = freshGrantOf(assertion);
@@ -5277,6 +6009,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdBytes,
         accountIdB64,
         assertionSession,
+        flow,
         async () => {
           try {
             const outcome = await keysFromPasskey(assertion, assertionSession.sessionToken);
@@ -5297,7 +6030,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       if (pending === null) {
         throw new KeyedError("restore_identity.error.nothing");
       }
+      const flow = startFlow();
       const assertion = await runPasskeyCeremony(pending.accountIdB64);
+      // Signed out, or another account landed, behind the passkey sheet.
+      requireStillParked(pending, flow);
       if (assertion.account_id_b64 !== pending.accountIdB64) {
         throw new KeyedError("auth.passkey.error.wrong_account");
       }
@@ -5342,6 +6078,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         throw new FreshAuthRequiredError();
       }
       const accountIdB64 = s.account.accountId;
+      // A guest keeping its account (`GuestAccountOffer`): its phrase is
+      // read BEFORE the password is set, so an account that cannot be kept
+      // is refused with its random password still in place.
+      const keptGuest = options?.firstPassword === true && guestState() !== null;
+      let guestPhrase: string | null = null;
+      if (keptGuest) {
+        if (await api.expireGuestIfDue()) throw new GuestAccountExpiredError();
+        guestPhrase = await readGuestPhrase(accountIdB64);
+        if (guestPhrase === null) throw new GuestPhraseUnavailableError();
+      }
       const target = await nameTargetFor(s.account.username);
       // `AuthClient.recover` uses the seed as the OPAQUE recovery input; hand
       // it a copy so the in-memory secret is never the buffer that is wiped.
@@ -5379,6 +6125,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           keyGeneration: result.session.keyGeneration,
         });
         setNewPasswordOwed(false);
+        if (guestPhrase !== null) {
+          await keepGuestAccount({
+            accountIdBytes: secrets.accountId,
+            accountIdB64,
+            accountIdentitySeed: secrets.accountIdentitySeed,
+            sessionToken: result.session.sessionToken,
+            phrase: guestPhrase,
+          });
+        }
         // A guest's first password is set: the ungated change is over.
         clearFirstPasswordOwed(plainStorage(), s.account.accountId);
         setProtectVersion((v) => v + 1);
@@ -5391,7 +6146,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
     },
     async provideRecoveryPhrase(mnemonicPhrase) {
-      markRestored("phrase");
       // ADR-0017 fresh-device fail-safe completion. Only valid while
       // a `pendingRecovery` is parked (set by login / passkey when
       // the auth succeeded but no AccountIdentity seed was cached).
@@ -5401,7 +6155,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           "no pending identity recovery — sign in first",
         );
       }
+      const flow = startFlow();
       const wasm = await loadWasm();
+      requireStillParked(pending, flow);
       // Parse the phrase → derive the BIP39 seed → fail-closed
       // verification of the derived pubkey against the account's
       // PUBLISHED bundle (shared with the ADR-0018 pairing
@@ -5418,6 +6174,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdBytes: pending.accountIdBytes,
         accountIdentitySeed,
       });
+      // Signed out, or another account landed, while the bundle was being
+      // fetched: persist nothing.
+      if (!stillParked(pending) || !flow.current()) {
+        accountIdentitySeed.fill(0);
+        throw new StaleBindingError();
+      }
 
       // ADR-0018 factor (c): a TOTP-recovered fresh browser parked
       // with NO device root key (no password ⇒ no export key to
@@ -5452,6 +6214,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         );
       }
       // Strictly after the fail-closed check: the phrase is the account's.
+      // (The account-backup restore below reads it again from here if its
+      // fetch fails, and it is what lets this device keep the backup current
+      // afterwards.)
       await storeDevicePhrase(pending.accountIdB64, canonicalPhrase, deviceKey, "provide-phrase");
       // On a bootstrapped key the pending session token was never
       // persisted (there was no key at park time) — land it now so a
@@ -5468,6 +6233,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
       }
 
+      // This route restores the identity from the phrase, so it owes the
+      // account's backup (contacts, synced state, the list of conversations)
+      // like the restore screen does. Marked BEFORE the session lands: the
+      // automatic backup uploads nothing while it is owed, so it cannot
+      // replace the blob the restore is about to read.
+      if (!stillParked(pending) || !flow.current()) {
+        accountIdentitySeed.fill(0);
+        throw new StaleBindingError();
+      }
+      markBackupRestoreOwed(pending.accountIdB64);
+
       await finishCanonicalSession({
         wasm,
         accountIdentitySeed,
@@ -5476,10 +6252,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         exportKey: pending.exportKey,
         session: pending.session,
         username: pending.username,
+        restorePhrase: canonicalPhrase,
       });
     },
     async completeFromPairing(phraseEntropy, session, persistJoinState) {
-      markRestored("device");
       // ADR-0018 factor (a), path (a) — same precondition as
       // `provideRecoveryPhrase`: only valid while a login/passkey
       // auth is parked in the `needs-recovery-phrase` fail-safe.
@@ -5488,7 +6264,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         phraseEntropy.fill(0);
         throw new Error("no pending identity recovery — sign in first");
       }
+      const flow = startFlow();
       const wasm = await loadWasm();
+      if (!stillParked(pending) || !flow.current()) {
+        phraseEntropy.fill(0);
+        throw new StaleBindingError();
+      }
       // Recovery payload v2: rebuild the phrase and the 64-byte seed from
       // the transferred entropy (which is zeroized here). Nothing is
       // written before the check below.
@@ -5507,6 +6288,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdentitySeed: phraseSeed,
         source: "device",
       });
+      // Signed out, or another account landed, while the bundle was being
+      // fetched: persist nothing.
+      if (!stillParked(pending) || !flow.current()) {
+        phraseSeed.fill(0);
+        throw new StaleBindingError();
+      }
 
       // ADR-0018 factor (c): a TOTP-recovered fresh browser parked
       // with NO device root key. Bootstrap it from the VERIFIED
@@ -5566,6 +6353,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
       }
 
+      // The anonymous join (no device key at pairing time) held its
+      // DeviceIdentity seed in memory and fetched the history and state
+      // bundles without applying them: land all of it under the device key
+      // that now exists, before the session does. Best-effort, as in
+      // `completeFromDeviceRestore` - a failure orphans the DeviceGroup leaf
+      // locally and a re-pair recovers it.
       if (persistJoinState !== undefined) {
         try {
           await persistJoinState(deviceKey);
@@ -5578,6 +6371,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
       }
 
+      if (!stillParked(pending) || !flow.current()) {
+        phraseSeed.fill(0);
+        throw new StaleBindingError();
+      }
       await finishCanonicalSession({
         wasm,
         accountIdentitySeed: phraseSeed,
@@ -5589,7 +6386,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     async completeFromDeviceRestore(restoreArgs) {
-      markRestored("device");
       // ADR-0018 factor (a), path (b) — NO-PASSWORD bootstrap. The
       // caller ran the anonymous pairing and holds the transferred
       // seed + the REDEEMED session token (the only ACCESS here).
@@ -5603,7 +6399,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         forgotPassword,
       } = restoreArgs;
       explicitSignInThisPage = true;
+      // The binding this restore starts under. Overtaken (a sign-out, or
+      // another account landing while the gates below ran): the transferred
+      // secret is zeroed and nothing is persisted, attached or landed.
+      const flow = startFlow();
       const wasm = await loadWasm();
+      if (!flow.current()) {
+        phraseEntropy.fill(0);
+        throw new StaleBindingError();
+      }
       // Recovery payload v2: rebuild the phrase and the 64-byte seed from
       // the transferred entropy (which is zeroized here). Nothing is
       // written before the gates below.
@@ -5611,9 +6415,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         wasm,
         phraseEntropy,
       );
+      const requireCurrent = (): void => {
+        if (flow.current()) return;
+        phraseSeed.fill(0);
+        throw new StaleBindingError();
+      };
       // The persistence and the session landing; runs only after every
       // gate below passed.
       const landDeviceRestore = async (): Promise<void> => {
+        requireCurrent();
+        openStoresFor(accountIdB64);
         // Bootstrap the device root key FROM the identity seed — there
         // is no password (hence no OPAQUE export key) on this device
         // yet. Later password logins PREFER this stored key over
@@ -5623,7 +6434,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           phraseSeed,
           accountIdB64,
         );
+        requireCurrent();
         await putDeviceKey(accountIdB64, deviceKey);
+        requireCurrent();
         try {
           await putAccountIdentitySeed(accountIdB64, phraseSeed, deviceKey);
         } catch (err) {
@@ -5633,8 +6446,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             err,
           );
         }
+        requireCurrent();
         // This device now holds the phrase like the one that confirmed it.
         await storeDevicePhrase(accountIdB64, transferredPhrase, deviceKey, "device-restore");
+        requireCurrent();
         // The redeemed pair is REQUIRED on this path — persist it so a
         // reload re-attaches without any credential. Best-effort.
         try {
@@ -5646,6 +6461,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             err,
           );
         }
+        requireCurrent();
         savePersisted({ v: 1, accountIdB64, username });
         // Land the pairing's in-memory DeviceIdentity seed +
         // DeviceGroup snapshot under the fresh device key. Best-effort
@@ -5662,8 +6478,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             );
           }
         }
+        requireCurrent();
 
-        installSession(accountIdB64, session);
+        installFlowSession(accountIdB64, session);
         setPendingRecovery(null);
         if (forgotPassword === true) setNewPasswordOwed(true);
         await finishCanonicalSession({
@@ -5690,28 +6507,43 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // lookup spends an anonymous token drawn with the redeemed session;
       // a mismatch, an unknown name or a lookup that cannot run refuses
       // with the seed zeroed and the session dropped, nothing persisted.
-      await runNameCheckedDeviceRestore({
-        username,
-        accountIdBytes,
-        phraseSeed,
-        sessionToken: session.sessionToken,
-        verifySeed: () =>
-          verifySeedAgainstPublishedIdentity({
-            wasm,
-            discovery,
-            accountIdBytes,
-            accountIdentitySeed: phraseSeed,
-            source: "device",
-          }),
-        attachSession: (token) => anonTokens.setSessionToken(token),
-        dropSession: () => {
-          dropSession();
-          // The account's tokens stay stored for its next sign-in.
-          anonTokens.unbind();
-        },
-        lookup: discoveryAccountLookup(discovery),
-        land: landDeviceRestore,
-      });
+      try {
+        await runNameCheckedDeviceRestore({
+          username,
+          accountIdBytes,
+          phraseSeed,
+          sessionToken: session.sessionToken,
+          verifySeed: async () => {
+            await verifySeedAgainstPublishedIdentity({
+              wasm,
+              discovery,
+              accountIdBytes,
+              accountIdentitySeed: phraseSeed,
+              source: "device",
+            });
+            // Before the redeemed session is attached to the token pool.
+            requireCurrent();
+          },
+          attachSession: (token) => anonTokens.setSessionToken(token),
+          dropSession: () => {
+            // Overtaken: the session installed now is another account's.
+            if (!flow.current()) return;
+            dropSession();
+            // The account's tokens stay stored for its next sign-in.
+            anonTokens.unbind();
+          },
+          lookup: discoveryAccountLookup(discovery),
+          land: landDeviceRestore,
+        });
+      } catch (err) {
+        // Whatever a gate answered after the binding ended, the person has
+        // moved on: an abandonment, not a refusal to show.
+        if (!flow.current() && !(err instanceof StaleBindingError)) {
+          phraseSeed.fill(0);
+          throw new StaleBindingError();
+        }
+        throw err;
+      }
     },
     freshProofLive() {
       return api.freshProof() !== null;
@@ -5827,7 +6659,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           "no pending identity recovery — sign in first",
         );
       }
+      const flow = startFlow();
       const wasm = await loadWasm();
+      requireStillParked(pending, flow);
 
       // 0. The proof (UX 17.2): the server refuses a reset without a
       // fresh-auth grant. The screen obtained one (password or passkey)
@@ -5906,8 +6740,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         throw new KeyedError("recovery_phrase.fresh.publish_owed");
       }
       const wasm = await loadWasm();
-      // The phrase was shown and acknowledged on this screen.
-      clearSignupPhraseOwed(plainStorage(), pending.accountIdB64);
+      // Signed out during the load: `logout` zeroed the seed and dropped
+      // the stash.
+      if (pendingFreshPhrase()?.seed !== pending.seed) throw new StaleBindingError();
       // A guest account has no username and so no password to replace; a
       // reset reached through "Forgot password?" keeps the offer (its
       // recovery credential now belongs to the new phrase, so the reset
@@ -5915,6 +6750,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       if (pending.username === "") setNewPasswordOwed(false);
       // CONSUME the stash so the parked seed cannot be replayed.
       setPendingFreshPhrase(null);
+      // The person has just confirmed the phrase is saved: it is no longer
+      // owed, and the landing below must not show it a second time.
+      clearSignupPhraseOwed(plainStorage(), pending.accountIdB64);
+      phraseOwedInMemory.delete(pending.accountIdB64);
       await finishCanonicalSession({
         wasm,
         accountIdentitySeed: pending.seed,
@@ -5927,25 +6766,32 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     async recover(mnemonicPhrase, newPassword, username) {
-      // The full phrase on /recover ends here, so this is where a
-      // phrase-based restore is recorded for the chat list's honest empty
-      // state (ADR-0049 section 5). The password is replaced on this path,
-      // so no new-password step is owed.
-      markRestored("phrase");
+      // Every route on /recover that holds the whole phrase ends here (the
+      // typed phrase, three words checked on this device, an email code).
+      // The password is replaced on this path, so no new-password step is
+      // owed.
       setNewPasswordOwed(false);
       explicitSignInThisPage = true;
       // ADR-0054 S5: the reset is addressed by the name's login handle (the
       // typed name, else the account cached on this device) and the account
       // id comes back in the finish. No lookup runs before the session.
+      //
+      // Overtaken like `login`: a reset whose round trip returns after a
+      // sign-out or another landing changes nothing on this device. (The
+      // password it set on the server stays set; that part cannot be undone
+      // from here.)
+      const flow = startFlow();
       const target = await nameTargetFor(
         resolveRecoverUsername({ cached: loadPersisted(), username }),
       );
+      flow.require();
       const resolvedUsername = target.username;
       // Parse the phrase up front so a bad mnemonic surfaces
       // before we spend a limited attempt. `fromPhrase` collapses
       // unknown-word and bad-checksum into one error message —
       // by design (preserves BIP39's no-probing property).
       const wasm = await loadWasm();
+      flow.require();
       const mnemonic = wasm.RecoveryMnemonic.fromPhrase(mnemonicPhrase);
       const canonicalPhrase = mnemonic.phrase;
       const seed = mnemonic.toSeed();
@@ -5981,11 +6827,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
               utf8(newPassword),
               landingDevice({ username: target.username }),
             ),
-          bind: bindByName,
+          bind: bindIfCurrent(flow),
         });
+        flow.require();
         const accountIdBytes = result.accountId;
         const accountIdB64 = base64Encode(accountIdBytes);
-        installSession(accountIdB64, result.session);
+        openStoresFor(accountIdB64);
+        installFlowSession(accountIdB64, result.session);
         // Re-derive the device root key from the NEW export key.
         // The previous device key (if any) is no longer reachable
         // from the new password; the upsert in IDB drops it.
@@ -5993,7 +6841,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           result.exportKey,
           accountIdB64,
         );
+        flow.require();
         await putDeviceKey(accountIdB64, deviceKey);
+        flow.require();
         // Persist the localStorage account marker — important on the
         // fresh-device recover path where there was no cached row.
         savePersisted({ v: 1, accountIdB64, username: resolvedUsername });
@@ -6006,6 +6856,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("session-pair persist (recover) failed", err);
         }
+        flow.require();
         // Phase 2a2c2 — refresh the cached export key under the
         // freshly-rotated device key. Any prior cached value was
         // wrapped under the OLD device key and is now
@@ -6016,6 +6867,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("export-key persist (recover) failed", err);
         }
+        flow.require();
         // ADR-0017: cache the AccountIdentity (phrase) seed under
         // the freshly-rotated device key. This is what makes the
         // warm same-device path (and a later passkey resume) rebuild
@@ -6033,6 +6885,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             err,
           );
         }
+        flow.require();
         // Phase 2a3b0 (ADR-0007) — DeviceIdentity seed is
         // decoupled from the OPAQUE password (ADR-0007 §
         // "Lifecycle"), so recovery does NOT rotate it. But
@@ -6050,6 +6903,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("device-identity ensure (recover) failed", err);
         }
+        flow.require();
 
         // 1.16e6c1: post-recovery the user's password (and so
         // the export key) has changed, which means any
@@ -6065,6 +6919,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("deleteMlsSnapshot during recover failed", err);
         }
+        flow.require();
         // The DeviceGroup snapshot was wrapped under the old device key too,
         // and the device identity above was regenerated, so the old leaf is
         // orphaned either way: drop the snapshot rather than leave a row the
@@ -6075,6 +6930,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("deleteDeviceGroupSnapshot during recover failed", err);
         }
+        flow.require();
         // Re-cache the phrase under the new device key so the backup keeps
         // working from this device.
         try {
@@ -6083,6 +6939,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("phrase cache (recover) failed", err);
         }
+        flow.require();
         // ADR-0040 (G-35) — purge any pending-commit outbox entries for the old
         // session too; they reference the now-discarded MLS snapshot and must
         // never be swept into the fresh state.
@@ -6102,6 +6959,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("deleteOutboxForAccount during recover failed", err);
         }
+        flow.require();
 
         // ADR-0017: build the new canonical Identity from the
         // (UNCHANGED) BIP39 phrase seed — NOT the rotated export
@@ -6110,7 +6968,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // never re-verify. ChatProvider free()s the prior
         // (pre-recovery) Identity if anything was lingering.
         const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
-        await installSessionIdentities(wasm, canonical, accountIdB64);
+        await installSessionIdentities(wasm, canonical, accountIdB64, false, flow.current);
+        flow.require();
         keyPackageAccount = { accountIdBytes, accountIdB64 };
 
         // 1.16e6c3: rehydrate path is a guaranteed no-op here —
@@ -6118,6 +6977,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // through the same helper keeps the auth flows uniform
         // and resilient to future re-orderings.
         await rehydrateMlsState(chats, accountIdB64);
+        flow.require();
 
         // Re-publish the identity bundle + a fresh KeyPackage.
         //
@@ -6165,8 +7025,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("post-recover identity bundle upload failed", err);
         }
+        flow.require();
         // Fresh KeyPackage: create -> durable persist -> upload.
         await publishKeyPackageBestEffort("recover");
+        // The last question before this reset lands. From the landing on,
+        // what follows (the backup restore and baseline, the vault, push)
+        // is this account's own work and names the account explicitly.
+        flow.require();
+
+        // The account's backup is fetched and applied below. Marked owed
+        // BEFORE the session lands: the automatic backup uploads nothing
+        // while it is, so it cannot replace the blob the restore is about
+        // to read; and a tab closed before the restore ran leaves the flag
+        // for the next landing to retry.
+        markBackupRestoreOwed(accountIdB64);
 
         // 1.16d3c: stash the new export key so ContactsClient
         // works without a re-login round-trip.
@@ -6191,172 +7063,36 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             username: resolvedUsername,
           },
         });
-        // Phase 2a1d: post-recovery the prior accepted-contacts
-        // list only lives inside the encrypted backup envelope
-        // the previous device uploaded. Fetch + decrypt + apply
-        // BEFORE the bootstrap re-uploads, so the new baseline
-        // carries the merged set instead of overwriting the
-        // server blob with an empty list.
+        // The account's backup: fetch it, run the ADR-0037 head gate, and
+        // apply the contacts, the synced state and the list of
+        // conversations (`backup/restore.ts`, the one function every
+        // phrase route runs) BEFORE the baseline below re-uploads, so the
+        // new baseline carries the merged set instead of overwriting the
+        // server blob with an empty one. No MLS state comes from a backup:
+        // this device's MLS state is whatever it held locally, which on
+        // this route is nothing (the snapshot was dropped above), and the
+        // other members admit it to its chats (ADR-0050 section 2.5a).
         //
-        // Phase 2a1c: post-recovery backup bootstrap. Same
-        // shape as the signup-side call above — re-caches the
-        // phrase under the freshly-rotated device root key and
-        // posts a baseline backup envelope. Best-effort end-to-end;
-        // each step logs and continues on failure.
-        //
-        // G-10 (ADR-0015 area / known-gaps): this is AWAITED, not
-        // fire-and-forget. The baseline re-seals the backup envelope
-        // under the freshly-rotated export-key material; until it
-        // lands, the server still holds the pre-recover envelope.
-        // Awaiting folds the rewrite into the recover round-trip so
-        // the "stale envelope" window collapses to the upload latency
-        // instead of "whenever the next baseline happens to fire".
-        // The bootstrap is wrapped best-effort so a backup hiccup
-        // still does not fail the recover itself.
-        await (async () => {
-          // Phase 2a3d4 — capture the restored MLS snapshot (if
-          // any) so the post-restore bootstrap re-uploads the
-          // same state instead of nuking the server-side
-          // snapshot with an empty one.
-          let restoredSnapshot: Uint8Array = new Uint8Array(0);
-          try {
-            const restored = await restoreFromServerBackupFromPhraseString(
-              {
-                sessionToken: result.session.sessionToken,
-                // ADR-0037 §6: arm the rollback gate — verify the auth-signed
-                // backup head against the pinned attest key before trusting
-                // the served envelope. Fresh install (no floor) → freshness
-                // window; a returning device with a persisted floor → hard
-                // monotonic floor. A stale head prompts the user; a tampered
-                // head refuses outright.
-                gate: {
-                  accountId: accountIdBytes,
-                  accountIdB64,
-                  deviceKey,
-                },
-              },
-              mnemonicPhrase,
-            );
-            if (restored.kind === "rollback-blocked") {
-              // ADR-0037 §6: refuse + alarm. `hard` = an unambiguous tamper /
-              // corruption; non-hard = the user was offered the stale override
-              // and declined. Either way we do NOT load the served state.
-              if (restored.hard) {
-                // eslint-disable-next-line no-console
-                console.error(
-                  "restoreFromServerBackup BLOCKED a rolled-back / tampered " +
-                    "backup (recover):",
-                  restored.reason,
-                );
-                if (typeof window !== "undefined" && typeof window.alert === "function") {
-                  window.alert(t("backup.rollback_refused.body"));
-                }
-              } else {
-                // eslint-disable-next-line no-console
-                console.warn(
-                  "restoreFromServerBackup: user declined a stale backup " +
-                    "(recover):",
-                  restored.reason,
-                );
-              }
-            } else if (restored.kind === "restored") {
-              // ADR-0058 section 5.2 — seed the synced state (pins, drafts,
-              // folders) before the sync runtime's first poll. Only when
-              // this device holds none; best effort.
-              try {
-                await mergeSyncStateFromBackup(
-                  accountIdB64,
-                  deviceKey,
-                  restored.syncedState,
-                  (localBytes, backupBytes) => {
-                    const backupFold = wasm.SyncedState.fromBytes(backupBytes);
-                    if (localBytes === null) {
-                      backupFold.free();
-                      return backupBytes;
-                    }
-                    let localFold: InstanceType<typeof wasm.SyncedState> | null = null;
-                    try {
-                      localFold = wasm.SyncedState.fromBytes(localBytes);
-                    } catch {
-                      // A stored row this build cannot read holds nothing to keep.
-                      backupFold.free();
-                      return backupBytes;
-                    }
-                    mergeRestoredFold(localFold, backupFold);
-                    const out = localFold.toBytes();
-                    localFold.free();
-                    backupFold.free();
-                    return out;
-                  },
-                );
-                // The session landed before this restore, so the sync
-                // runtime may already be running on an empty fold.
-                announceRestoredSyncedState(accountIdB64, restored.syncedState);
-              } catch (err) {
-                // eslint-disable-next-line no-console
-                console.warn("post-restore synced-state seed failed", err);
-              }
-              if (restored.wholeStorageSnapshot.length > 0) {
-                // Apply to the freshly-derived canonical Identity
-                // so the new device lands with the same MLS group
-                // state the upload-side device had. The state
-                // mutates the provider's storage in place;
-                // `chats.persistSnapshot` below picks up the
-                // updated bytes via `id.snapshotStorage()`.
-                try {
-                  canonical.restoreStorage(
-                    restored.wholeStorageSnapshot,
-                  );
-                  restoredSnapshot = restored.wholeStorageSnapshot;
-                  // Re-persist the IDB snapshot so the on-device
-                  // copy carries the restored state instead of
-                  // the just-bootstrapped empty one.
-                  try {
-                    // NOT `chats.persistSnapshot`, which writes the group
-                    // index from the in-memory list - empty on a fresh
-                    // device, because nothing has rehydrated yet. That left
-                    // the restored provider holding every group while
-                    // `rehydrate` (whose only source is this index) rebuilt
-                    // none of them, so the person saw no chats at all. The
-                    // backup carries the index for exactly this moment.
-                    await saveMlsSnapshot(
-                      accountIdB64,
-                      deviceKey,
-                      canonical.snapshotStorage(),
-                      restored.knownGroupIds,
-                      base64Encode(canonical.signaturePublicKey),
-                    );
-                  } catch (err) {
-                    // eslint-disable-next-line no-console
-                    console.warn(
-                      "post-restore MLS snapshot write failed",
-                      err,
-                    );
-                  }
-                  // `restoreStorage` REPLACED the provider, so the
-                  // KeyPackage published a moment ago lost its private
-                  // key — the directory is serving a package this device
-                  // can no longer open. Publish a new one.
-                  void publishKeyPackageBestEffort("post-restore");
-                } catch (err) {
-                  // eslint-disable-next-line no-console
-                  console.warn(
-                    "post-restore Identity.restoreStorage threw",
-                    err,
-                  );
-                }
-              }
-            } else if (restored.kind !== "no-backup") {
-              // eslint-disable-next-line no-console
-              console.warn(
-                "restoreFromServerBackup outcome (recover):",
-                restored.kind,
-              );
-            }
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.warn("restoreFromServerBackup threw (recover)", err);
-          }
+        // G-10: AWAITED, not fire-and-forget. The baseline re-seals the
+        // backup envelope; until it lands the server still holds the
+        // pre-recover one. Awaiting folds the rewrite into the recover
+        // round-trip. Both halves are best-effort: a backup hiccup never
+        // fails the recover itself.
+        const restoreOutcome = await restoreAccountBackup({
+          accountIdBytes,
+          accountIdB64,
+          deviceKey,
+          sessionToken: result.session.sessionToken,
+          phrase: canonicalPhrase,
+        });
+        if (restoreOutcome.kind === "deferred") {
+          // The backup could not be fetched. Uploading a baseline now would
+          // replace it with this device's empty state before the retry on
+          // the next landing can read it. The phrase is already cached
+          // above, so the retry and the later automatic backup both work.
+          // eslint-disable-next-line no-console
+          console.warn("post-recover backup baseline skipped: the restore is still owed");
+        } else {
           try {
             await bootstrapBackupFromPhraseString(
               {
@@ -6365,7 +7101,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
                 ed25519Seed: canonical.ed25519Seed,
                 deviceKey,
                 sessionToken: result.session.sessionToken,
-                wholeStorageSnapshot: restoredSnapshot,
+                // The groups this device holds plus the ones the restored
+                // backup named that it has not joined yet.
+                knownGroupIds: backupKnownGroupIds(
+                  accountIdB64,
+                  chats.groups().map((g) => g.groupIdB64),
+                ),
               },
               mnemonicPhrase,
             );
@@ -6373,15 +7114,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             // eslint-disable-next-line no-console
             console.warn("post-recover backup bootstrap failed", err);
           }
-        })();
+        }
         // 1.20b: best-effort push subscribe after recovery —
         // the new password changes the device key, but the
         // device push pseudonym persists in localStorage so
         // the server's existing token row simply gets re-keyed.
-        void subscribeToPush(accountIdB64).catch((err) => {
+        void subscribePushFor(accountIdB64).catch((err) => {
           // eslint-disable-next-line no-console
           console.warn("push subscribe (recover) failed", err);
         });
+      } catch (err) {
+        // Abandoned before it landed: the identity seed copy never reached
+        // the in-memory secrets, so it is this call's to zero.
+        if (err instanceof StaleBindingError) accountIdentitySeed.fill(0);
+        throw err;
       } finally {
         // Best-effort wipe of the seed buffer. It's a Uint8Array
         // we own; zeroing it now means the next GC pass cannot
@@ -6402,14 +7148,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       // ADR-0054 S5: addressed by the name's login handle; the account id
       // comes back in the response, after the code verified. No lookup.
+      const flow = startFlow();
       const target = await nameTargetFor(trimmed);
+      flow.require();
       const resolvedUsername = target.username;
       const result = await accessByName({
         target,
         run: (handle) =>
           client.totpRecover(handle, code, landingDevice({ username: target.username })),
-        bind: bindByName,
+        bind: bindIfCurrent(flow),
       });
+      // Overtaken while the code was being verified: dropped, like `login`.
+      flow.require();
       const accountIdBytes = result.accountId;
       const accountIdB64 = base64Encode(accountIdBytes);
       setRestoreNotice(null);
@@ -6422,7 +7172,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       freshGrants.clear();
       // ADR-0018 ACCESS-only landing (warm cached-seed finish OR cold
       // fail-safe park).
-      await landAfterAccessRecovery(resolvedUsername, accountIdBytes, accountIdB64, result.session);
+      await landAfterAccessRecovery(resolvedUsername, accountIdBytes, accountIdB64, result.session, flow);
     },
     async threeWordsAccount() {
       const found = await threeWordsContext();
@@ -6434,6 +7184,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // Maintainer decision 2026-10-02: the three words are checked HERE,
       // against the phrase this device holds, like a wallet does. The
       // server takes no part in the check and stores nothing about it.
+      const flow = startFlow();
       const found = await threeWordsContext();
       if (found === null) {
         throw new KeyedError("recovery.words.error.unavailable");
@@ -6480,8 +7231,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
               throw err;
             }
           },
-          bind: bindByName,
+          bind: bindIfCurrent(flow),
         });
+        // Overtaken while the sign-in was out: dropped, like `login`.
+        flow.require();
         if (base64Encode(result.accountId) !== found.accountIdB64) {
           // The name answered for another account than the one cached
           // here. Adopt nothing.
@@ -6496,7 +7249,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         sessionLanding = "other";
         freshGrants.clear();
         phraseCheckedAtMs = Date.now();
-        await landAfterAccessRecovery(target.username, result.accountId, found.accountIdB64, result.session);
+        await landAfterAccessRecovery(target.username, result.accountId, found.accountIdB64, result.session, flow);
         return true;
       } finally {
         seed.fill(0);
@@ -6559,7 +7312,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // binding goes FIRST, so the service worker drops every wake from here
       // on, and this account's notifications leave the screen with it.
       void releaseWakeBinding();
-      clearRestored();
+      // A session landing still in flight must not land after this.
+      binding.signedOut();
       // Keep localStorage + IDB device key intact. Re-login on
       // this device remains cheap, and the device key stays
       // available for any encrypted local stores 1.16f wires up.
@@ -6606,6 +7360,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // the per-session bearer dies. Fire-and-forget — the API
       // contract is sync and the deletion is best-effort.
       //
+      // Sealed first (`account-store-gate.ts`): a session write still in
+      // flight when this runs (a sign-in's best-effort persist) must not
+      // put the row back after the delete. Nothing else of the account is
+      // closed by a sign-out; its next landing opens the row again.
+      {
+        const bound = boundAccountId();
+        if (bound !== null) sealAccountSession(bound);
+        if (cached !== null) sealAccountSession(cached.accountIdB64);
+        if (heldAccount !== null) sealAccountSession(heldAccount);
+      }
       // ADR-0074: the row is deleted once the server holds the logout; while
       // that is owed it stays for the one retry, and the marker keeps a
       // reload from restoring a session out of it.
@@ -6652,7 +7416,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // ADR-0042 — as in `logout`: the wake binding first, then this app's
       // delivered notifications.
       await releaseWakeBinding();
-      clearRestored();
+      // A session landing still in flight must not land after this.
+      binding.signedOut();
       const cached = loadPersisted();
       const current = state();
       const sessionAccountIdB64 =
@@ -6704,6 +7469,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const wipeTarget = cached?.accountIdB64 ?? sessionAccountIdB64;
       if (wipeTarget !== null) {
         await wipeAccountLocalData(wipeTarget);
+        phraseOwedInMemory.delete(wipeTarget);
       }
       // 1.20b: full wipe of push state too — unsubscribe on the
       // browser side, drop the push pseudonym from localStorage,

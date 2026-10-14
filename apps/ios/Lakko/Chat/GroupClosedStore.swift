@@ -329,6 +329,9 @@ public final class GroupClosedStore {
         guard let key = storageKey(groupIdB64) else { return false }
         let json = GroupClosedRules.encodeRow([groupIdB64: value])
         guard let sealed = try? sealer.seal(Data(json.utf8)) else { return false }
+        guard let gate = AccountStoreGate.enterUnlessWiped(
+            ownerAccountIdB64 ?? AcceptedContactsStore.boundAccountIdB64 ?? "") else { return false }
+        defer { gate.leave() }
         defaults.set(sealed, forKey: key)
         return true
     }

@@ -236,8 +236,6 @@ public fun AddDeviceScreen(
     /** ADR-0050 — admit the new device to every chat after a scan. */
     chatRepository: me.lakko.app.chat.ChatRepository? = null,
     modifier: Modifier = Modifier,
-    /** Opens "Choose a username" for a guest account. */
-    onChooseUsername: (() -> Unit)? = null,
 ) {
     val authState by authRepository.state.collectAsStateWithLifecycle()
     val identitySecrets by authRepository.identitySecrets.collectAsStateWithLifecycle()
@@ -294,10 +292,6 @@ public fun AddDeviceScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                // A guest chooses a username (and its first password) here.
-                if (onChooseUsername != null) {
-                    Button(onClick = onChooseUsername) { Text(t("username.claim.title")) }
-                }
                 return@Column
             }
             when (mode) {
@@ -436,6 +430,7 @@ private fun PairSection(
                                             )
                                             state = PairUi.Done
                                         } catch (cause: Throwable) {
+                                            me.lakko.app.rethrowIfCancelled(cause)
                                             Log.w(TAG, "WARN accept failed: ${cause.javaClass.simpleName}")
                                             state = PairUi.Error(LINK_FAILED)
                                         }
@@ -448,6 +443,7 @@ private fun PairSection(
                                     }
                                 }
                             } catch (cause: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(cause)
                                 Log.w(TAG, "WARN pairing failed: ${cause.javaClass.simpleName}")
                                 state = PairUi.Error(LINK_FAILED)
                             }

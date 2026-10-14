@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Combine
+import LakkoCore
 import SwiftUI
 import WebRTC
 
@@ -27,15 +28,19 @@ import WebRTC
 ///     self-view a small draggable rectangle in a corner and the flip-camera
 ///     button on that rectangle, where the thing it changes is visible;
 ///   * **one row of equal round buttons** in a single rounded translucent bar
-///     floating above the bottom safe area — Speaker, Mute, End for a voice
-///     call, plus Camera for a video one, with no `More` menu in a 1x1 call at
-///     all;
+///     floating above the bottom safe area — Microphone, Camera, Settings, End
+///     (a group call adds Participants), with no `More` menu on any call;
 ///   * **the off state is the loud one**, so a muted microphone is solid white
 ///     and unmissable rather than tinted in the accent colour, which read as
 ///     "this is on".
 ///
-/// A group call keeps the tile grid and puts participants, chat and settings
-/// behind one overflow button, which is the only place a menu is allowed.
+/// **A group call** (`docs/ux/group-call-grid.md`) is one of two layouts and
+/// never a scroll: a grid of equal tiles that fills the space between the
+/// status line and the control bar, with pages when there are more people than
+/// a page holds, or the speaker / pinned person large in the middle with
+/// everyone else in a row above. Its controls are one row with no menu behind
+/// it: the chat, the settings sheet and the overflow button that held them are
+/// gone, because the chat sent nothing anywhere.
 ///
 /// What decides the shape — which controls exist, which can be pressed, what
 /// the status line says, when the row hides itself — is
@@ -217,6 +222,9 @@ private struct CallStatusLine: View {
     let notice: String?
     /// Large, centred type for the portrait; compact for the overlay on video.
     let prominent: Bool
+    /// A group call, or a call joined from a link: nobody is being called, so
+    /// its first seconds read `Connecting...` (section 3.4).
+    var groupCall: Bool = false
     let onEncryptionTap: () -> Void
 
     var body: some View {
@@ -252,13 +260,15 @@ private struct CallStatusLine: View {
             TimelineView(.periodic(from: connectedAt, by: 1)) { context in
                 let elapsed = Int64(max(0, context.date.timeIntervalSince(connectedAt)) * 1000)
                 line(
-                    CallStatusText.line(phase: phase, durationMs: elapsed),
-                    spoken: CallStatusText.spokenLine(phase: phase, durationMs: elapsed))
+                    CallStatusText.line(phase: phase, durationMs: elapsed, groupCall: groupCall),
+                    spoken: CallStatusText.spokenLine(
+                        phase: phase, durationMs: elapsed, groupCall: groupCall))
             }
         } else {
             line(
-                CallStatusText.line(phase: phase, durationMs: nil),
-                spoken: CallStatusText.spokenLine(phase: phase, durationMs: nil))
+                CallStatusText.line(phase: phase, durationMs: nil, groupCall: groupCall),
+                spoken: CallStatusText.spokenLine(
+                    phase: phase, durationMs: nil, groupCall: groupCall))
         }
     }
 
@@ -368,13 +378,41 @@ private struct QualityIndicator: View {
 
 // MARK: - ParticipantTile (group calls)
 
-/// A tile in a group call's grid. A 1x1 call has no tiles at all any more — it
-/// is a portrait or a full-screen video.
+/// One person's tile in a group call (`docs/ux/group-call-grid.md` section
+/// 7). A 1x1 call has no tiles at all: it is a portrait or a full-screen
+/// video.
+///
+/// The tile is drawn at exactly the size it is given: the shared grid rule
+/// decides the size, and a tile that kept a shape of its own is what made the
+/// old grid scroll.
 private struct ParticipantTile: View {
     @ObservedObject var l10n = Localization.shared
     let participant: CallUiState.Participant
-    let large: Bool
+    let size: CGSize
     @ObservedObject var state: CallUiState
+    /// The tile is the stage of the Focus layout: with the pin, what counts
+    /// as the large tile when the picture is chosen (section 7.6).
+    let isStage: Bool
+    /// The tile's controls are up after a tap (section 6.2).
+    let controlsRevealed: Bool
+    /// A tap on the tile: bring its controls up. It never pins. `nil` for
+    /// this device's own tile, which has no controls (section 5.3).
+    let onTap: (() -> Void)?
+    /// The pin control was pressed: pin, or unpin the pinned person.
+    let onPin: (() -> Void)?
+
+    /// This tile's width as the call's picture rule reads it, and its
+    /// identity in the call's book of wants (section 7.6).
+    @StateObject private var video = TileVideoWant()
+    @Environment(\.displayScale) private var displayScale
+    /// A screen reader cannot bring the controls up with a tap that does
+    /// nothing else, so for it they are always there.
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+
+    private static let corner: CGFloat = 12
+    /// Section 7.3: the ring is a border inside the tile edge, so the tile
+    /// does not change size when someone starts to speak.
+    private static let ringWidth: CGFloat = 3
 
     var isPinned: Bool { state.pinnedId == participant.id }
 
@@ -395,6 +433,7 @@ private struct ParticipantTile: View {
                             .font(.caption)
                         Text(UndecryptableMedia.tileLabel)
                             .font(.caption)
+                            .lineLimit(1)
                     }
                     .foregroundColor(Color.lakkoDanger)
                     .padding(.horizontal, 10)
@@ -416,60 +455,164 @@ private struct ParticipantTile: View {
                     Text(l10n.t("call.self.starting_camera"))
                         .font(.caption)
                         .foregroundColor(Color.lakkoText)
+                        .lineLimit(1)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .background(Color.lakkoBackground.opacity(0.55))
                 .clipShape(Capsule())
             }
-            if !participant.micOn && !participant.isLocal {
-                Image(systemName: "mic.slash.fill")
-                    .font(large ? .title : .body)
-                    .foregroundColor(Color.lakkoDanger)
-                    .padding(large ? 16 : 10)
-                    .background(Color.lakkoBackground.opacity(0.55))
-                    .clipShape(Circle())
-            }
-            VStack {
-                Spacer()
-                HStack(spacing: 8) {
-                    if !participant.micOn {
-                        Image(systemName: "mic.slash.fill")
-                            .font(.caption)
-                            .foregroundColor(Color.lakkoDanger)
-                    }
-                    Text(displayLabel)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    QualityDot(tier: participant.quality, interactive: false, onTap: {})
-                    if isPinned {
-                        Image(systemName: "pin.fill")
-                            .font(.caption2)
-                            .foregroundColor(Color.lakkoAccent)
-                    }
-                }
-                .font(.caption)
-                .foregroundColor(Color.lakkoText)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(Color.lakkoBackground.opacity(0.45))
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                nameStrip
             }
         }
-        .aspectRatio(large ? 16.0 / 9.0 : 4.0 / 3.0, contentMode: .fit)
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(
-                    participant.speaking ? Color.lakkoAccent : Color.lakkoBorder,
-                    lineWidth: participant.speaking ? 2 : 1
-                )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .frame(width: size.width, height: size.height)
         .background(Color.lakkoSurface)
-        .onTapGesture {
-            guard !participant.isLocal else { return }
-            state.pin(isPinned ? nil : participant.id)
+        .clipShape(RoundedRectangle(cornerRadius: Self.corner, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Self.corner, style: .continuous)
+                .strokeBorder(
+                    participant.speaking ? Color.lakkoAccent : Color.lakkoBorder,
+                    lineWidth: participant.speaking ? Self.ringWidth : 1))
+        .contentShape(Rectangle())
+        // A tap brings this tile's controls up and does nothing else: a tile
+        // is never itself the pin control (section 6.2). A drag that turns
+        // the page moves too far to be a tap, so a swipe is not one.
+        .onTapGesture { onTap?() }
+        .accessibilityElement(children: .combine)
+        // Over the tile and outside its combined element, so the control is
+        // an element of its own with its own name.
+        .overlay(alignment: .topTrailing) { pinControlView }
+        .onAppear { measure() }
+        .onChange(of: size.width) { _, _ in measure() }
+        .onChange(of: displayScale) { _, _ in measure() }
+        .modifier(
+            TileVideoWantReport(
+                state: state, participantId: participant.id, quality: reportedQuality))
+    }
+
+    // MARK: Which picture (section 7.6)
+
+    private func measure() {
+        video.measured(VideoWants.physicalTileWidth(points: size.width, scale: displayScale))
+    }
+
+    /// The picture this tile asks for: the shared rule over the people in
+    /// the call, this tile's settled width in physical pixels, and whether
+    /// it is the pinned person or the stage. `nil` for this device's own
+    /// tile and until the tile was measured.
+    private var askedQuality: TileVideoQuality? {
+        guard !participant.isLocal, let widthPx = video.widthPx else { return nil }
+        return VideoWants.askedQuality(
+            VideoWants.tileQuality(
+                people: state.participants.count, tileWidthPx: widthPx,
+                pinnedOrStage: isStage || isPinned),
+            hasLight: state.remoteLightVideoTracks[participant.id] != nil)
+    }
+
+    /// What the call is told this tile shows. A tile that draws no picture
+    /// of the person (camera off, no track yet, not measured yet) shows
+    /// none.
+    private var reportedQuality: TileVideoQuality? {
+        guard participant.camOn, state.remoteVideoTracks[participant.id] != nil else {
+            return nil
         }
+        return askedQuality
+    }
+
+    // MARK: The pin control (section 6.2)
+
+    private var pinControl: TilePinControl {
+        guard onPin != nil else { return .none }
+        return TilePinControl.of(
+            isLocal: participant.isLocal, isPinned: isPinned,
+            revealed: controlsRevealed || voiceOver)
+    }
+
+    @ViewBuilder
+    private var pinControlView: some View {
+        switch pinControl {
+        case .none:
+            EmptyView()
+        case .pinButton:
+            Button {
+                onPin?()
+            } label: {
+                Image(systemName: "pin")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(Color.lakkoText)
+                    .frame(width: 32, height: 32)
+                    .background(Color.lakkoBackground.opacity(0.6))
+                    .clipShape(Circle())
+                    .frame(
+                        width: TilePinControl.touchTarget, height: TilePinControl.touchTarget)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                l10n.t("call.participant.pin_a11y", texts: ["name": displayLabel]))
+        case .pinnedChip:
+            // The pinned tile carries the chip for as long as it is pinned;
+            // a press on it unpins.
+            Button {
+                onPin?()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2)
+                    Text(l10n.t("call.participant.pinned"))
+                        .font(.caption)
+                        .lineLimit(1)
+                }
+                .foregroundColor(Color.lakkoAccent)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.lakkoBackground.opacity(0.6))
+                .clipShape(Capsule())
+                .frame(
+                    minWidth: TilePinControl.touchTarget, minHeight: TilePinControl.touchTarget)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                l10n.t("call.participant.unpin_a11y", texts: ["name": displayLabel]))
+            .accessibilityAddTraits(.isSelected)
+        }
+    }
+
+    /// The scrim along the bottom edge: mic-off glyph, name, connection, pin.
+    /// Anything in its normal state is absent (section 7.2): the strip of a
+    /// healthy, unmuted, unpinned person is only their name.
+    private var nameStrip: some View {
+        HStack(spacing: 6) {
+            if !participant.micOn {
+                Image(systemName: "mic.slash.fill")
+                    .font(.caption)
+                    .foregroundColor(Color.lakkoDanger)
+                    .accessibilityLabel(l10n.t("call.participant.muted_a11y"))
+            }
+            Text(CallScreenPresentation.tileName(displayLabel, tileWidth: size.width))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            // A connection is drawn only when it is fair or worse. A dot on
+            // every healthy tile says nothing.
+            if CallScreenPresentation.connectionIsWorthShowing(participant.quality) {
+                QualityDot(tier: participant.quality, interactive: false, onTap: {})
+            }
+            if isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.caption2)
+                    .foregroundColor(Color.lakkoAccent)
+                    .accessibilityLabel(l10n.t("call.participant.pinned"))
+            }
+        }
+        .font(.caption)
+        .foregroundColor(Color.lakkoText)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.lakkoBackground.opacity(0.45))
     }
 
     @ViewBuilder
@@ -480,26 +623,42 @@ private struct ParticipantTile: View {
                     track: track,
                     mirrored: state.settings.mirrorLocal,
                     contentMode: .scaleAspectFill)
+            } else if !participant.isLocal, let track = state.remoteVideoTracks[participant.id] {
+                // An SFU call: the heavy picture this tile watches (the
+                // person's main track or their middle one, the lower of what
+                // the tile wants and what the SFU gives) and, when their
+                // device sends one, the light companion, in the same box. The
+                // tile shows the light one while the heavy one stands still
+                // (`docs/ux/group-call-grid.md` sections 7.5 and 7.6).
+                let light = state.remoteLightVideoTracks[participant.id]
+                LayeredRemoteVideoView(
+                    heavy: VideoGiven.heavyTrack(
+                        wanted: askedQuality ?? .main,
+                        given: state.remoteVideoGiven[participant.id],
+                        main: track,
+                        middle: state.remoteMiddleVideoTracks[participant.id],
+                        hasLight: light != nil),
+                    light: light,
+                    peerId: CallScreenPresentation.sfuPeerId(ofParticipant: participant.id))
             } else if !participant.isLocal,
-                let track = state.remoteVideoTracks[participant.id]
-                    ?? (participant.id == state.soleRemoteParticipantId
-                        ? state.remoteVideoTrack
-                        : nil) {
-                // Remote video is never mirrored — the viewer wants the other
-                // party's true orientation. `.id(participant.id)` ties the
-                // renderer's identity to the participant so a gallery reorder
-                // never reuses one peer's view for another peer's stream.
+                participant.id == state.soleRemoteParticipantId,
+                let track = state.remoteVideoTrack {
+                // Remote video is never mirrored: the viewer wants the other
+                // party's true orientation.
                 LocalVideoPreviewView(track: track, mirrored: false, contentMode: .scaleAspectFill)
-                    .id(participant.id)
             } else {
                 Color.lakkoSurfaceSunken
             }
         } else {
+            // No picture: the initials, scaled to the tile so a strip tile and
+            // a full-screen tile both read, and lifted clear of the name strip.
             ZStack {
                 Color.lakkoSurfaceSunken
                 InitialsAvatar(
                     name: displayLabel, identity: participant.id,
-                    size: large ? 96 : 56, placeholderSymbol: "person.fill")
+                    size: CallScreenPresentation.tileInitialsDiameter(tileSize: size),
+                    placeholderSymbol: "person.fill")
+                    .padding(.bottom, min(24, size.height * 0.2))
             }
         }
     }
@@ -509,6 +668,236 @@ private struct ParticipantTile: View {
     private var displayLabel: String {
         CallPeerName.tileLabel(
             displayName: participant.displayName, isLocal: participant.isLocal)
+    }
+}
+
+// MARK: - GroupCallArea (group calls)
+
+/// The tiles of a group call (`docs/ux/group-call-grid.md` sections 3 to 6).
+///
+/// Two layouts and no scrolling. **Grid**: everyone the same size, filling the
+/// space between the status line and the control bar; more people than a page
+/// holds means pages. **Focus**: the person speaking, or the pinned one, large
+/// in the middle, and everyone else in a row above.
+///
+/// The geometry and the choice of the stage are the shared rules
+/// (``GroupCallLayout`` over `lakko-ui-rules`); this view measures its own
+/// area and draws the answer. Tiles are keyed by participant id, so a tile is
+/// moved when the grid changes shape and redrawn when its speaking ring
+/// changes, never rebuilt: a rebuilt tile restarts its video.
+private struct GroupCallArea: View {
+    @ObservedObject var state: CallUiState
+    @ObservedObject var l10n = Localization.shared
+    /// The one tile whose controls a tap brought up (section 6.2).
+    @ObservedObject var reveal: TileControlsRevealModel
+    let rules: GroupCallRules
+    /// A finished drag that did not turn the page (the collapse swipe).
+    let onOtherDrag: (CGSize) -> Void
+
+    @State private var page = 0
+    /// Section 4.4: no slide under reduced motion.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// The room the page dots take under the grid.
+    private static let dotsHeight: CGFloat = 20
+
+    var body: some View {
+        GeometryReader { geo in
+            let people = state.participants
+            let kind = GroupCallLayout.kind(
+                choice: state.layoutChoice, pinnedId: state.pinnedId, people: people)
+            Group {
+                switch kind {
+                case .grid: grid(people: people, area: geo.size)
+                case .focus: focus(people: people, area: geo.size)
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+    }
+
+    // MARK: Grid
+
+    @ViewBuilder
+    private func grid(people: [CallUiState.Participant], area: CGSize) -> some View {
+        // Whether the call spills over a page depends on the count and the
+        // width only, so it is asked first and the dots' room taken out after.
+        let whole = GroupCallLayout.gridLayout(
+            rules, count: people.count, width: area.width, height: area.height)
+        let paged = whole.pages > 1
+        let gridArea = CGSize(
+            width: area.width, height: paged ? max(0, area.height - Self.dotsHeight) : area.height)
+        let layout = paged
+            ? GroupCallLayout.gridLayout(
+                rules, count: people.count, width: gridArea.width, height: gridArea.height)
+            : whole
+        let shown = GroupCallLayout.gridPage(people, perPage: Int(layout.perPage), page: page)
+        let frames = GroupCallLayout.gridFrames(
+            count: shown.tiles.count, grid: layout, area: gridArea)
+
+        VStack(spacing: 0) {
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(shown.tiles.enumerated()), id: \.element.id) { index, person in
+                    if frames.indices.contains(index) {
+                        tile(person, size: frames[index].size)
+                            .position(x: frames[index].midX, y: frames[index].midY)
+                    }
+                }
+            }
+            .frame(width: gridArea.width, height: gridArea.height, alignment: .topLeading)
+            .contentShape(Rectangle())
+            // A horizontal swipe turns the page (section 4.5). Recognised
+            // alongside the tiles' own tap, never instead of it.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 20).onEnded { value in
+                    if let next = GroupCallLayout.pageAfterSwipe(
+                        translation: value.translation, page: shown.page, pages: shown.pages) {
+                        page = next
+                    } else {
+                        onOtherDrag(value.translation)
+                    }
+                })
+            .accessibilityAction(named: Text(l10n.t("call.grid.next_a11y"))) {
+                page = min(max(shown.pages - 1, 0), shown.page + 1)
+            }
+            .accessibilityAction(named: Text(l10n.t("call.grid.prev_a11y"))) {
+                page = max(0, shown.page - 1)
+            }
+            if paged {
+                pageDots(page: shown.page, pages: shown.pages)
+                    .frame(height: Self.dotsHeight)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: shown.tiles.map(\.id))
+    }
+
+    /// One dot per page under the grid, the current one filled. Each dot is
+    /// also a control.
+    private func pageDots(page: Int, pages: Int) -> some View {
+        HStack(spacing: 8) {
+            ForEach(0..<pages, id: \.self) { index in
+                Button {
+                    self.page = index
+                } label: {
+                    Circle()
+                        .fill(Color.white.opacity(index == page ? 0.95 : 0.3))
+                        .frame(width: 8, height: 8)
+                        .frame(width: 16, height: Self.dotsHeight)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(l10n.t(
+                    "call.grid.page_a11y",
+                    texts: [
+                        "page": (index + 1).formatted(.number.locale(l10n.locale)),
+                        "total": pages.formatted(.number.locale(l10n.locale)),
+                    ]))
+                .accessibilityAddTraits(index == page ? .isSelected : [])
+            }
+        }
+    }
+
+    // MARK: Focus
+
+    @ViewBuilder
+    private func focus(people: [CallUiState.Participant], area: CGSize) -> some View {
+        let stage = GroupCallLayout.stagePerson(
+            rules, people: people, pinnedId: state.pinnedId, speech: state.speech)
+        let strip = GroupCallLayout.stripPeople(people, stage: stage)
+        let metrics = GroupCallLayout.stripMetrics(areaWidth: area.width)
+        let stageSize = GroupCallLayout.stageSize(
+            rules, areaWidth: area.width, areaHeight: area.height)
+
+        VStack(spacing: metrics.gap) {
+            // The strip is the one place scrolling is allowed: its tiles are
+            // secondary, and the stage never moves when it scrolls.
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: metrics.gap) {
+                    ForEach(strip) { person in
+                        tile(
+                            person,
+                            size: CGSize(width: metrics.tileWidth, height: metrics.tileHeight))
+                    }
+                }
+                .frame(minWidth: area.width)
+            }
+            .frame(width: area.width, height: metrics.tileHeight)
+            if let stage {
+                tile(stage, size: stageSize, isStage: true)
+                    .id(stage.id)
+            }
+        }
+        .frame(width: area.width, height: area.height)
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 20).onEnded { value in
+                onOtherDrag(value.translation)
+            })
+    }
+
+    // MARK: A tile
+
+    private func tile(
+        _ person: CallUiState.Participant, size: CGSize, isStage: Bool = false
+    ) -> some View {
+        ParticipantTile(
+            participant: person,
+            size: size,
+            state: state,
+            isStage: isStage,
+            controlsRevealed: reveal.tileId == person.id,
+            // Never this device's own tile (section 5.3). A tap only brings
+            // the controls up; pinning is the pin control's alone.
+            onTap: person.isLocal ? nil : { reveal.tap(person.id) },
+            onPin: person.isLocal
+                ? nil
+                : {
+                    state.togglePin(person.id)
+                    reveal.hide()
+                })
+            // Where the tile is, so a press can be told apart: on the tile
+            // whose controls are up, or anywhere else (section 6.2).
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: TileFramesKey.self, value: [person.id: proxy.frame(in: .global)])
+                })
+    }
+}
+
+// MARK: - CallLayoutGlyph
+
+/// The layout button's picture: four equal tiles for the grid, a row of small
+/// tiles over one large one for Focus. Drawn here so the two read as a pair.
+private struct CallLayoutGlyph: Shape {
+    let kind: GroupLayoutKind
+
+    func path(in rect: CGRect) -> Path {
+        // Drawn on a 24 x 24 grid, the same numbers as the web icons.
+        let unit = min(rect.width, rect.height) / 24
+        let origin = CGPoint(
+            x: rect.midX - 12 * unit, y: rect.midY - 12 * unit)
+        func box(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat, _ r: CGFloat) -> Path {
+            Path(
+                roundedRect: CGRect(
+                    x: origin.x + x * unit, y: origin.y + y * unit,
+                    width: w * unit, height: h * unit),
+                cornerRadius: r * unit)
+        }
+        var path = Path()
+        switch kind {
+        case .grid:
+            path.addPath(box(3.5, 4.5, 7.5, 6.5, 1.5))
+            path.addPath(box(13, 4.5, 7.5, 6.5, 1.5))
+            path.addPath(box(3.5, 13, 7.5, 6.5, 1.5))
+            path.addPath(box(13, 13, 7.5, 6.5, 1.5))
+        case .focus:
+            path.addPath(box(3.5, 4.5, 4.5, 3.5, 1))
+            path.addPath(box(9.75, 4.5, 4.5, 3.5, 1))
+            path.addPath(box(16, 4.5, 4.5, 3.5, 1))
+            path.addPath(box(3.5, 10, 17, 9.5, 1.5))
+        }
+        return path
     }
 }
 
@@ -541,7 +930,9 @@ private struct ParticipantListDrawer: View {
                 VStack(spacing: 0) {
                     ForEach(state.participants) { p in
                         HStack(spacing: 10) {
-                            QualityDot(tier: p.quality, interactive: false, onTap: {})
+                            if CallScreenPresentation.connectionIsWorthShowing(p.quality) {
+                                QualityDot(tier: p.quality, interactive: false, onTap: {})
+                            }
                             Text(CallPeerName.tileLabel(
                                 displayName: p.displayName, isLocal: p.isLocal))
                                 .foregroundColor(Color.lakkoText)
@@ -565,6 +956,58 @@ private struct ParticipantListDrawer: View {
     }
 }
 
+// MARK: - AnchoredBarMenu
+
+/// A menu opened from a control in the group row, placed directly above its
+/// own button: centred on the button's centre, slid inward to keep
+/// ``CallScreenPresentation/menuEdgeGap`` from the screen's left and right
+/// edges, at the same height above the bar as before. The rule of the web
+/// call screen's `anchorToControl`.
+///
+/// Both the button's frame and this layer's own frame are measured in the
+/// call screen's named coordinate space, so the placement does not depend on
+/// where the layer happens to start. Until the button and the menu have been
+/// measured the menu is centred, as it was before anchoring.
+private struct AnchoredBarMenu<Content: View>: View {
+    let buttonFrame: CGRect?
+    let bottomInset: CGFloat
+    let space: String
+    @ViewBuilder let content: Content
+
+    @State private var area: CGRect?
+    @State private var menuWidth: CGFloat?
+
+    var body: some View {
+        let leading = leadingOffset
+        content
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.width
+            } action: { width in
+                menuWidth = width
+            }
+            .offset(x: leading ?? 0)
+            .padding(.bottom, bottomInset)
+            .frame(
+                maxWidth: .infinity, maxHeight: .infinity,
+                alignment: leading == nil ? .bottom : .bottomLeading)
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .named(space))
+            } action: { frame in
+                area = frame
+            }
+    }
+
+    private var leadingOffset: CGFloat? {
+        guard let buttonFrame, let area, let menuWidth, menuWidth > 0, area.width > 0 else {
+            return nil
+        }
+        return CallScreenPresentation.anchoredMenuLeading(
+            buttonMidX: buttonFrame.midX - area.minX,
+            menuWidth: menuWidth,
+            areaWidth: area.width)
+    }
+}
+
 // MARK: - CallEndedOverlay
 
 private struct CallEndedOverlay: View {
@@ -573,6 +1016,9 @@ private struct CallEndedOverlay: View {
     /// is the difference between a call and an attempt, and is why the duration
     /// is not simply printed as `0:00`.
     let durationMs: Int64?
+    /// Why the call closed, when somebody else closed it: the starter of a
+    /// group call ended it for everyone (section 4.1.2). `nil` otherwise.
+    var reason: String? = nil
     let onDismiss: () -> Void
 
     var body: some View {
@@ -583,6 +1029,13 @@ private struct CallEndedOverlay: View {
                     .font(.title2)
                     .fontWeight(.semibold)
                     .foregroundStyle(.white)
+                if let reason {
+                    Text(reason)
+                        .font(.callout)
+                        .foregroundStyle(Color.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
                 if let durationMs {
                     Text(CallTranscriptRow.durationLabel(ms: durationMs))
                         .font(.callout)
@@ -608,9 +1061,11 @@ public struct CallScreen: View {
     @ObservedObject private var l10n = Localization.shared
     /// One sound controller per CallScreen lifetime; deallocated with the view.
     @StateObject private var sounds = CallSoundsObservable()
-    /// Last observed remote-participant ids, used to fire join / leave cues +
-    /// chat system events on deltas while the call is connected.
-    @State private var lastRemoteIds: [String] = []
+    /// Which sound this call makes and when: the outgoing tone by the shared
+    /// rule, and the two short cues on the change only (``CallSoundCues``).
+    @State private var cues: CallSoundCues
+    /// The shared rules a group call's screen asks (`lakko-ui-rules`).
+    private let rules: GroupCallRules = SharedGroupCallRules()
     private let session: CallSession?
     @State private var sessionBindings: [AnyCancellable] = []
     /// `true` when the screen renders an externally-owned `CallUiState` (the
@@ -636,11 +1091,30 @@ public struct CallScreen: View {
     /// `nil` on every call that cannot offer one: a 1x1 call, a group call in a
     /// chat, and a link call this device joined rather than founded.
     private let invite: CallInviteOffer?
+    /// End the call for every person in it (`docs/ux/calls.md` section 4.1.2).
+    /// Given only to the person who started a group or link call; while anyone
+    /// else is in the call, `End` then opens a choice between leaving and
+    /// this. `nil` on every other call, a 1x1 call included.
+    private let onEndForEveryone: (() -> Void)?
+    /// The line under `Call ended` when the call's starter ended it for
+    /// everyone, or `nil`.
+    private let endedLine: String?
+    /// The choice behind `End` is open.
+    /// The one group-call tile whose controls a tap brought up
+    /// (`docs/ux/group-call-grid.md` section 6.2).
+    @StateObject private var tileReveal = TileControlsRevealModel()
+    @Environment(\.displayScale) private var displayScale
+    @State private var endMenuOpen = false
+    /// Where each control of the group row sits, in ``menuSpace``: a menu
+    /// opened from a control is placed above its own button.
+    @State private var controlFrames: [CallControl: CGRect] = [:]
 
     /// Section 4 — the controls fade out on a connected video call and come
     /// back on a tap; on a voice call they never hide.
     @State private var controlsVisible = true
     @State private var hideTask: Task<Void, Never>?
+    /// The call's settings sheet is open (`docs/ux/calls.md` section 4.1).
+    @State private var settingsOpen = false
     /// Where the user dragged the self-view to.
     @State private var selfViewOffset: CGSize = .zero
     @GestureState private var selfViewDrag: CGSize = .zero
@@ -674,8 +1148,11 @@ public struct CallScreen: View {
         self.peerName = peerName
         self.notice = notice
         self.invite = nil
+        self.onEndForEveryone = nil
+        self.endedLine = nil
         self.onCollapse = onCollapse
         _connectedAt = State(initialValue: connectedAt)
+        _cues = State(initialValue: CallSoundCues(groupCall: false))
         self.onExit = onExit
     }
 
@@ -686,6 +1163,8 @@ public struct CallScreen: View {
         externalState: CallUiState,
         invite: CallInviteOffer? = nil,
         connectedAt: Date? = nil,
+        endedLine: String? = nil,
+        onEndForEveryone: (() -> Void)? = nil,
         onCollapse: (() -> Void)? = nil,
         onExit: @escaping () -> Void
     ) {
@@ -695,8 +1174,12 @@ public struct CallScreen: View {
         self.peerName = nil
         self.notice = nil
         self.invite = invite
+        self.onEndForEveryone = onEndForEveryone
+        self.endedLine = endedLine
         self.onCollapse = onCollapse
         _connectedAt = State(initialValue: connectedAt)
+        // A group call, or a call joined from a link: it rings nobody.
+        _cues = State(initialValue: CallSoundCues(groupCall: true))
         self.onExit = onExit
     }
 
@@ -757,9 +1240,21 @@ public struct CallScreen: View {
     /// `docs/ux/calls.md` section 4.1 — the same four controls on both kinds of
     /// call, because the camera button is what turns a voice call into a video
     /// one. Nothing about the row depends on what the call is carrying right
-    /// now.
+    /// now. A group call has no Speaker, and adds `Participants` where it
+    /// leads somewhere.
     private var controls: [CallControl] {
-        CallScreenPresentation.controls(layout: layout)
+        CallScreenPresentation.controls(
+            layout: layout, canInvite: invite != nil, hasOthers: !remoteParticipants.isEmpty)
+    }
+
+    /// Where the call is, as the shared rules read it. A 1x1 call reads its
+    /// session, because the session tells a call ringing HERE from one this
+    /// device placed and the screen's own phase does not.
+    private var barPhase: CallBarPhase {
+        if let session {
+            return CallBarPresentation.phase(oneToOne: session.state)
+        }
+        return CallBarPresentation.phase(external: state.phase)
     }
 
     private var displayName: String {
@@ -790,20 +1285,11 @@ public struct CallScreen: View {
                 }
                 connectedAt = nil
             }
-            switch newPhase {
-            case .preparing:
-                sounds.controller.stopAll()
-            case .calling, .connecting:
-                sounds.controller.startLoop(.ringbackOutgoing)
-            case .connected:
-                sounds.controller.stopLoop(.ringbackOutgoing)
-                sounds.controller.playOnce(.join)
-            case .reconnecting:
-                sounds.controller.stopLoop(.ringbackOutgoing)
-            case .ended:
-                sounds.controller.stopAll()
-                sounds.controller.playOnce(.leave)
-            }
+            // A call that is over has nothing left to choose about.
+            if case .ended = newPhase { endMenuOpen = false }
+            // Section 3.4: the outgoing tone asks the shared rule, and a group
+            // call never rings. The two short cues play on the change only.
+            cues.phaseChanged(barPhase, sounds: sounds.controller, rules: rules)
             restartAutoHide()
         }
         // A call becomes a video call when the first remote frame lands, not
@@ -813,37 +1299,25 @@ public struct CallScreen: View {
             logLayout()
             restartAutoHide()
         }
-        // Peer arrival / departure cues + chat system events. The id-based diff
-        // catches "Alice left, Bob joined" in the same tick.
+        // Someone joined, someone left: one short cue each.
         .onChange(of: state.participants.map(\.id)) { _, _ in
-            let remote = remoteParticipants
-            let remoteIds = remote.map(\.id)
-            if case .connected = state.phase, !lastRemoteIds.isEmpty {
-                for p in remote where !lastRemoteIds.contains(p.id) {
-                    sounds.controller.playOnce(.join)
-                    let displayName = p.displayName
-                    state.addSystemEvent(UiText {
-                        Localization.text(
-                            "call.chat.joined",
-                            texts: ["name": CallPeerName.tileLabel(displayName: displayName, isLocal: false)])
-                    })
-                }
-                let currentIds = Set(remoteIds)
-                for prevId in lastRemoteIds where !currentIds.contains(prevId) {
-                    sounds.controller.playOnce(.leave)
-                    state.addSystemEvent(UiText.key("call.chat.left"))
-                }
-            }
-            lastRemoteIds = remoteIds
+            var connected = false
+            if case .connected = state.phase { connected = true }
+            cues.rosterChanged(
+                remoteIds: remoteParticipants.map(\.id), connected: connected,
+                sounds: sounds.controller)
         }
         .onAppear {
             if let session, sessionBindings.isEmpty {
                 sessionBindings = state.driveFrom(session: session, peerName: peerName)
             }
             if let notice { state.setMediaNotice(notice) }
+            // The tone follows the rule from the first moment; no cue is
+            // played for a call that was already where it is.
+            cues.begin(
+                phase: barPhase, remoteIds: remoteParticipants.map(\.id),
+                sounds: sounds.controller, rules: rules)
             logLayout()
-            // The route the platform actually settled on, not one we assumed.
-            state.setSpeakerOn(CallAudioRoute.isSpeakerOn())
             restartAutoHide()
         }
         // A name that resolves mid-call reaches the status line straight away.
@@ -874,8 +1348,8 @@ public struct CallScreen: View {
         } message: { message in
             Text(message.text)
         }
-        // `Invite`, when this call has a link to offer.
-        .modifier(CallInvitePanel(offer: invite))
+        // `Invite contacts`, when this call has a link to offer.
+        .modifier(CallInvitePicker(offer: invite))
         // Calls are dark by design on every platform (UX spec section 4).
         .preferredColorScheme(.dark)
     }
@@ -884,13 +1358,76 @@ public struct CallScreen: View {
 
     private var callView: some View {
         GeometryReader { geo in
-            callView(width: geo.size.width)
+            if layout == .gallery {
+                groupCallView(size: geo.size)
+            } else {
+                callView(width: geo.size.width)
+                    // No tile is drawn for the one other person of an SFU
+                    // call, so the screen says what it shows of them.
+                    .modifier(
+                        TileVideoWantReport(
+                            state: state,
+                            participantId: state.soleRemoteParticipantId ?? "",
+                            quality: soleRemoteWant(
+                                widthPx: VideoWants.physicalTileWidth(
+                                    points: geo.size.width, scale: displayScale))))
+            }
         }
+    }
+
+    /// The picture this screen asks for of the one other person of an SFU
+    /// call (`docs/ux/group-call-grid.md` section 7.6): the shared rule's
+    /// answer for a full-screen picture, which with two people is the full
+    /// one. `nil` (nothing heavy) when this is not an SFU call, there is not
+    /// exactly one other person, or their camera is off.
+    private func soleRemoteWant(widthPx: UInt32) -> TileVideoQuality? {
+        guard externallyDriven, let sole = state.soleRemoteParticipantId,
+            state.remoteVideoTracks[sole] != nil,
+            state.participants.first(where: { $0.id == sole })?.camOn == true
+        else { return nil }
+        return VideoWants.askedQuality(
+            VideoWants.tileQuality(
+                people: state.participants.count, tileWidthPx: widthPx, pinnedOrStage: true),
+            hasLight: state.remoteLightVideoTracks[sole] != nil)
     }
 
     /// The bar's margin from each screen edge.
     private static let barMargin: CGFloat = 12
 
+    /// The tap target under a 1x1 call's controls, and the downward swipe that
+    /// puts any call away.
+    ///
+    /// It is a layer of its own rather than a gesture on the ZStack because
+    /// the thing underneath is a `UIView`: `RTCMTLVideoView` fills the screen
+    /// on a video call. A live call found the controls faded after five
+    /// seconds and tapping the middle of the screen, which is the video,
+    /// brought nothing back, leaving no way to mute or hang up. Sitting ABOVE
+    /// the content and BELOW the self-view and the controls, this is hit
+    /// first and still lets their own buttons through.
+    private var tapLayer: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if state.qualityPopoverOpen { state.setQualityPopoverOpen(false) }
+                // A tap beside every tile puts a tile's controls away.
+                tileReveal.hide()
+                showControls()
+            }
+            // Section 4.5's other way back — a downward swipe on the screen,
+            // the idiom iOS already teaches for putting something away.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 20)
+                    .onEnded { value in collapseIfSwipedDown(value.translation) }
+            )
+    }
+
+    private func collapseIfSwipedDown(_ translation: CGSize) {
+        guard let onCollapse, CallBarPresentation.isCollapseSwipe(translation) else { return }
+        collapsing = true
+        onCollapse()
+    }
+
+    /// A portrait or a full-screen video: the 1x1 call.
     private func callView(width: CGFloat) -> some View {
         ZStack {
             CallBackdrop(identity: tintIdentity)
@@ -898,50 +1435,13 @@ public struct CallScreen: View {
             switch layout {
             case .portrait:
                 portrait
-            case .video:
+            case .video, .gallery:
                 remoteVideo
-            case .gallery:
-                gallery
             }
 
-            // The tap target, covering the whole surface at every stage.
-            //
-            // It is a layer of its own rather than a gesture on the ZStack
-            // because the thing underneath is a `UIView`: `RTCMTLVideoView`
-            // fills the screen on a video call and, like any UIView, wins hit
-            // testing against a SwiftUI ancestor's gesture. A live call found
-            // exactly that — the controls faded after five seconds and tapping
-            // the middle of the screen, which is the video, brought nothing
-            // back, leaving no way to mute or hang up. Sitting ABOVE the
-            // content and BELOW the self-view and the controls, this is hit
-            // first and still lets their own buttons through.
-            Color.clear
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    if state.qualityPopoverOpen { state.setQualityPopoverOpen(false) }
-                    showControls()
-                }
-                // Section 4.5's other way back — a downward swipe on the screen,
-                // the idiom iOS already teaches for putting something away.
-                //
-                // On this layer for the reason the tap is: `RTCMTLVideoView`
-                // fills a video call and wins hit testing against any SwiftUI
-                // ancestor's gesture, so a swipe attached higher up would work
-                // on a portrait and not on the video. `simultaneousGesture`
-                // rather than `gesture` so the gallery's scroll view keeps
-                // whatever it has: this recognises alongside, never instead of.
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 20)
-                        .onEnded { value in
-                            guard let onCollapse,
-                                  CallBarPresentation.isCollapseSwipe(value.translation)
-                            else { return }
-                            collapsing = true
-                            onCollapse()
-                        }
-                )
+            tapLayer
 
-            if layout != .gallery, local?.camOn == true, let track = state.localVideoTrack {
+            if local?.camOn == true, let track = state.localVideoTrack {
                 selfView(track: track)
             }
 
@@ -972,6 +1472,108 @@ public struct CallScreen: View {
             if case .ended = displayPhase {
                 CallEndedOverlay(durationMs: endedDurationMs, onDismiss: onExit).zIndex(30)
             }
+        }
+        .animation(.easeInOut(duration: 0.2), value: controlsVisible)
+        .modifier(encryptionSheet)
+    }
+
+    /// The two sheets every call has: the safety number, only when asked for
+    /// (section 5), and the call's settings (section 4.1).
+    private var encryptionSheet: some ViewModifier {
+        CallSheetsModifier(state: state, settingsOpen: $settingsOpen)
+    }
+
+    // MARK: - A group call
+
+    /// A group call (`docs/ux/group-call-grid.md`): the status line, the tile
+    /// area, the control bar, top to bottom with nothing overlapping. The
+    /// tile area ends above the bar and starts below the status line, so no
+    /// tile is ever drawn under either, and the bar never hides.
+    private func groupCallView(size: CGSize) -> some View {
+        let margin = GroupCallLayout.sideMargin(screenWidth: size.width)
+        let fit = CallScreenPresentation.fitGroupControlBar(
+            availableWidth: size.width - 2 * Self.barMargin, screenSize: size,
+            count: controls.count)
+        // The compact bar hugs the bottom edge; the roomy one floats above it.
+        let barBottom: CGFloat = fit.showsLabels ? 24 : 12
+        return ZStack {
+            CallBackdrop(identity: tintIdentity)
+
+            // Under the tiles here: a tap on a tile brings that tile's
+            // controls up, and this layer only catches the taps and the
+            // downward swipe that land beside them.
+            tapLayer
+
+            InviteScope(offer: invite) { offer in
+                ZStack {
+                    VStack(spacing: 0) {
+                        groupHeader(inviteLine: offer?.statusLine)
+                        GroupCallArea(
+                            state: state, reveal: tileReveal, rules: rules,
+                            onOtherDrag: collapseIfSwipedDown
+                        )
+                        .padding(.horizontal, margin)
+                        .padding(.vertical, 8)
+                        groupControlsBar(fit: fit, offer: offer)
+                            .padding(.bottom, barBottom)
+                    }
+
+                    // Participants: a menu of the app's own above the bar,
+                    // over a scrim that closes it. Never the system's share
+                    // sheet.
+                    if let offer, offer.menuOpen {
+                        Color.black.opacity(0.001)
+                            .ignoresSafeArea()
+                            .contentShape(Rectangle())
+                            .onTapGesture { offer.closeMenu() }
+                            .accessibilityHidden(true)
+                            .zIndex(12)
+                        AnchoredBarMenu(
+                            buttonFrame: controlFrames[.participants],
+                            bottomInset: fit.barHeight + barBottom + 10,
+                            space: Self.menuSpace
+                        ) {
+                            CallParticipantsMenu(
+                                offer: offer,
+                                hasOthers: !remoteParticipants.isEmpty,
+                                onParticipants: {
+                                    offer.closeMenu()
+                                    state.setParticipantListOpen(true)
+                                })
+                        }
+                        .zIndex(13)
+                    }
+                }
+            }
+
+            // End, for the person who started the call: leave, or end it for
+            // everyone (section 4.1.2). The same shape as the Participants
+            // menu, over a scrim that closes it and does nothing else; the
+            // first press never ends the call.
+            if endMenuOpen, let onEndForEveryone {
+                Color.black.opacity(0.001)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { endMenuOpen = false }
+                    .accessibilityHidden(true)
+                    .zIndex(14)
+                AnchoredBarMenu(
+                    buttonFrame: controlFrames[.end],
+                    bottomInset: fit.barHeight + barBottom + 10,
+                    space: Self.menuSpace
+                ) {
+                    CallEndMenu(
+                        onLeave: {
+                            endMenuOpen = false
+                            endCall()
+                        },
+                        onEndForEveryone: {
+                            endMenuOpen = false
+                            onEndForEveryone()
+                        })
+                }
+                .zIndex(15)
+            }
 
             if state.participantListOpen {
                 HStack {
@@ -979,32 +1581,110 @@ public struct CallScreen: View {
                     ParticipantListDrawer(state: state)
                         .transition(.move(edge: .trailing))
                 }
-                .zIndex(10)
+                .zIndex(20)
+            }
+
+            if case .ended = displayPhase {
+                CallEndedOverlay(
+                    durationMs: endedDurationMs, reason: endedLine, onDismiss: onExit
+                ).zIndex(30)
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: controlsVisible)
+        .coordinateSpace(.named(Self.menuSpace))
+        .onPreferenceChange(TileFramesKey.self) { frames in
+            Task { @MainActor in tileReveal.tileFrames = frames }
+        }
+        // Every press that begins inside the call area is seen here, beside
+        // whatever it lands on and never instead of it: a tile's controls go
+        // at once on a press anywhere but their own tile, the control bar and
+        // the empty space of the grid included (section 6.2). Idempotent, so
+        // the later movements of the same press change nothing.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .onChanged { value in tileReveal.pressBegan(at: value.startLocation) })
         .animation(.easeInOut(duration: 0.2), value: state.participantListOpen)
-        .sheet(
-            isPresented: Binding(
-                get: { state.settingsOpen }, set: { state.setSettingsOpen($0) })
-        ) {
-            SettingsSheet(state: state)
+        .modifier(encryptionSheet)
+    }
+
+    /// The coordinate space of the group call screen, in which a bar
+    /// control's frame and the menu it opens are both measured.
+    fileprivate static let menuSpace = "lakko.call.group.menus"
+
+    /// The status line of a group call, with the collapse chevron at the top
+    /// left and its twin, the layout button, at the top right.
+    private func groupHeader(inviteLine: String?) -> some View {
+        HStack(alignment: .top) {
+            collapseChevron
+                .padding(.top, 4)
+            Spacer(minLength: 8)
+            CallStatusLine(
+                name: displayName,
+                phase: displayPhase,
+                connectedAt: connectedAt,
+                e2eeActive: state.e2ee.active,
+                // One line under the status row: where the call's link went,
+                // else what the call did on the person's behalf.
+                notice: inviteLine ?? state.mediaNotice?.text,
+                prominent: false,
+                groupCall: true,
+                onEncryptionTap: { state.setEncryptionSheetOpen(true) })
+            Spacer(minLength: 8)
+            layoutSwitch
+                .padding(.top, 4)
         }
-        .sheet(
-            isPresented: Binding(get: { state.chatOpen }, set: { state.setChatOpen($0) })
-        ) {
-            ChatSheet(state: state)
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 2)
+    }
+
+    /// Switch between the two group layouts, top right; the twin of the
+    /// collapse chevron (`docs/ux/group-call-grid.md` section 3).
+    ///
+    /// It shows the layout a press leads to. While someone is pinned it
+    /// unpins and returns to the grid. Absent while alone: there is nobody to
+    /// put in a strip. A clear spacer of the same size keeps the status line
+    /// centred either way.
+    @ViewBuilder
+    private var layoutSwitch: some View {
+        let kind = GroupCallLayout.kind(
+            choice: state.layoutChoice, pinnedId: state.pinnedId, people: state.participants)
+        if remoteParticipants.isEmpty {
+            Color.clear.frame(width: 44, height: 44)
+        } else {
+            Button {
+                let next = GroupCallLayout.afterLayoutSwitch(from: kind)
+                if next.clearsPin { state.pin(nil) }
+                state.setLayoutChoice(next.choice)
+            } label: {
+                CallLayoutGlyph(kind: kind == .grid ? .focus : .grid)
+                    .stroke(Color.white, style: StrokeStyle(lineWidth: 1.6, lineJoin: .round))
+                    .frame(width: 22, height: 22)
+                    .frame(width: 44, height: 44)
+                    .background(Circle().fill(Color.white.opacity(0.12)))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                l10n.t(kind == .grid ? "call.layout.focus_a11y" : "call.layout.grid_a11y"))
         }
-        // Section 5 — the safety number, only when asked for.
-        .sheet(
-            isPresented: Binding(
-                get: { state.encryptionSheetOpen },
-                set: { state.setEncryptionSheetOpen($0) })
-        ) {
-            EncryptionSheet(
-                peerName: state.peerName,
-                safetyNumber: state.e2ee.shortFingerprint,
-                onDone: { state.setEncryptionSheetOpen(false) })
+    }
+
+    /// The group row: one line, sized by its own rule, with no menu behind
+    /// it.
+    private func groupControlsBar(fit: CallControlBarFit, offer: CallInviteOffer?) -> some View {
+        CallControlsBar(explicitFit: fit) {
+            ForEach(controls) { control in
+                if control == .end { CallControlsEndSpacer() }
+                controlButton(control, offer: offer)
+                    // The real frame of the button, so a menu it opens sits
+                    // above it and follows it when the row re-fits or the
+                    // screen rotates.
+                    .onGeometryChange(for: CGRect.self) { proxy in
+                        proxy.frame(in: .named(Self.menuSpace))
+                    } action: { frame in
+                        controlFrames[control] = frame
+                    }
+            }
         }
     }
 
@@ -1036,35 +1716,29 @@ public struct CallScreen: View {
     /// A video call: the other person, full screen.
     @ViewBuilder
     private var remoteVideo: some View {
-        if hasRemotePicture, let track = soleRemoteVideoTrack {
+        if hasRemotePicture, let sole = state.soleRemoteParticipantId,
+            let track = state.remoteVideoTracks[sole] {
+            // An SFU call with one other person: their main track and, when
+            // their device sends one, the light companion
+            // (`docs/ux/group-call-grid.md` section 7.5).
+            // With one other person the picture is the full one at any size
+            // (section 7.6); the SFU may still give less.
+            let light = state.remoteLightVideoTracks[sole]
+            LayeredRemoteVideoView(
+                heavy: VideoGiven.heavyTrack(
+                    wanted: .main,
+                    given: state.remoteVideoGiven[sole],
+                    main: track,
+                    middle: state.remoteMiddleVideoTracks[sole],
+                    hasLight: light != nil),
+                light: light,
+                peerId: CallScreenPresentation.sfuPeerId(ofParticipant: sole))
+                .ignoresSafeArea()
+                .accessibilityHidden(true)
+        } else if hasRemotePicture, let track = soleRemoteVideoTrack {
             LocalVideoPreviewView(track: track, mirrored: false, contentMode: .scaleAspectFill)
                 .ignoresSafeArea()
                 .accessibilityHidden(true)
-        }
-    }
-
-    private var gallery: some View {
-        ScrollView {
-            VStack(spacing: 12) {
-                if let featured = state.featuredParticipant {
-                    ParticipantTile(participant: featured, large: true, state: state)
-                }
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 160), spacing: 10)], spacing: 10
-                ) {
-                    ForEach(state.galleryParticipants) { p in
-                        ParticipantTile(participant: p, large: false, state: state)
-                    }
-                }
-            }
-            // Section 4.4: the tiles never sit under the status line or the
-            // control bar. The header floats over the top of this scroll view
-            // and the bar over its bottom, so the content reserves the height
-            // of each: the first row starts below the header, the last row
-            // clears the bar even when the list scrolls to its end.
-            .padding(.horizontal, 16)
-            .padding(.top, 72)
-            .padding(.bottom, 156)
         }
     }
 
@@ -1136,7 +1810,13 @@ public struct CallScreen: View {
                     contentMode: .scaleAspectFill)
                 if session?.canFlipCamera == true {
                     Button {
-                        Task { await session?.flipCamera() }
+                        Task {
+                            await session?.flipCamera()
+                            // The flip is a choice of camera like the one in
+                            // the settings sheet, so the sheet shows it.
+                            LocalCameraCapture.preferredDeviceId =
+                                LocalCameraCapture.active?.deviceId
+                        }
                     } label: {
                         Image(systemName: "arrow.triangle.2.circlepath.camera")
                             .font(.system(size: 13, weight: .semibold))
@@ -1175,25 +1855,15 @@ public struct CallScreen: View {
         CallControlsBar(availableWidth: width, count: controls.count) {
             ForEach(controls) { control in
                 if control == .end { CallControlsEndSpacer() }
-                controlButton(control)
+                controlButton(control, offer: nil)
             }
         }
     }
 
     @ViewBuilder
-    private func controlButton(_ control: CallControl) -> some View {
+    private func controlButton(_ control: CallControl, offer: CallInviteOffer?) -> some View {
         let enabled = CallScreenPresentation.isEnabled(control, phase: displayPhase)
         switch control {
-        case .speaker:
-            CallControlButton(
-                control: .speaker,
-                systemImage: "speaker.wave.2.fill",
-                on: state.speakerOn,
-                enabled: enabled,
-                action: {
-                    state.setSpeakerOn(CallAudioRoute.setSpeakerOn(!state.speakerOn))
-                    showControls()
-                })
         case .microphone:
             let on = local?.micOn ?? true
             CallControlButton(
@@ -1217,50 +1887,65 @@ public struct CallScreen: View {
                     setCamera(!on)
                     showControls()
                 })
-        case .overflow:
-            overflowButton(enabled: enabled)
+        case .participants:
+            // One control about the people of a group call. On a call that
+            // can hand out a link it opens the app's own menu above the bar
+            // (who is in the call, copy the link, invite contacts); on a call
+            // placed inside a conversation it opens the list of people
+            // directly.
+            let press = CallScreenPresentation.participantsPress(
+                canInvite: offer != nil, hasOthers: !remoteParticipants.isEmpty)
+            CallControlButton(
+                control: .participants,
+                systemImage: "person.2.fill",
+                on: state.participantListOpen,
+                enabled: enabled,
+                // While the call's link is being made the control shows that
+                // and waits, rather than paying for a second link.
+                busy: offer?.busy == true,
+                spokenLabel: CallStatusText.spokenParticipantsLabel(
+                    press: press, listOpen: state.participantListOpen),
+                action: {
+                    switch press {
+                    case .menu: offer?.toggleMenu()
+                    case .participants:
+                        state.setParticipantListOpen(!state.participantListOpen)
+                    case .nothing: break
+                    }
+                })
+        case .settings:
+            // Which microphone, camera and speaker the call uses. Live from
+            // the first second: a person who cannot be heard wants it before
+            // anyone answers.
+            CallControlButton(
+                control: .settings,
+                systemImage: "gearshape.fill",
+                on: false,
+                enabled: enabled,
+                action: {
+                    settingsOpen = true
+                    showControls()
+                })
         case .end:
             CallControlButton(
                 control: .end,
                 systemImage: "phone.down.fill",
                 on: false,
                 enabled: true,
-                action: endCall)
+                action: pressEnd)
         }
     }
 
-    /// The one menu a call is allowed: a group call's participants, chat,
-    /// settings and — when this call has a link to offer — `Invite`. A 1x1
-    /// call never reaches this: its whole set is in the row.
-    private func overflowButton(enabled: Bool) -> some View {
-        Menu {
-            if let invite {
-                CallInviteMenuButton(offer: invite)
-            }
-            Button {
-                state.setParticipantListOpen(!state.participantListOpen)
-            } label: {
-                Label(l10n.t("call.control.participants"), systemImage: "person.3")
-            }
-            Button {
-                state.setChatOpen(!state.chatOpen)
-            } label: {
-                Label(
-                    state.chatUnreadCount > 0
-                        ? l10n.t("call.control.chat_unread", counts: ["count": UInt64(state.chatUnreadCount)])
-                        : l10n.t("call.control.chat"),
-                    systemImage: "bubble.left.and.bubble.right")
-            }
-            Button {
-                state.setSettingsOpen(!state.settingsOpen)
-            } label: {
-                Label(l10n.t("nav.settings"), systemImage: "gearshape")
-            }
-        } label: {
-            CallControlMenuLabel(control: .overflow, systemImage: "ellipsis", enabled: enabled)
+    /// `End`. For the person who started a group call, while anyone else is in
+    /// it, the press opens the choice (or closes it again) and never ends the
+    /// call; for everyone else, and alone, it ends at once.
+    private func pressEnd() {
+        if EndForEveryone.endOpensMenu(
+            isStarter: onEndForEveryone != nil, othersInCall: remoteParticipants.count) {
+            endMenuOpen.toggle()
+            return
         }
-        .disabled(!enabled)
-        .accessibilityLabel(CallStatusText.spokenControlLabel(.overflow, on: false))
+        endCall()
     }
 
     private func endCall() {
@@ -1352,217 +2037,57 @@ public struct CallScreen: View {
     }
 }
 
-// MARK: - SettingsSheet (group calls)
+// MARK: - Observing the invite
 
-/// In-call settings — device pickers + processing toggles. Reachable from a
-/// group call's overflow button; a 1x1 call has no menu at all.
-private struct SettingsSheet: View {
-    @ObservedObject var state: CallUiState
-    @ObservedObject var l10n = Localization.shared
-
-    private var audioInputs: [CallUiState.CallDevice] {
-        state.settings.availableDevices.filter { $0.kind == .audioInput }
-    }
-    private var videoInputs: [CallUiState.CallDevice] {
-        state.settings.availableDevices.filter { $0.kind == .videoInput }
-    }
-    private var audioOutputs: [CallUiState.CallDevice] {
-        state.settings.availableDevices.filter { $0.kind == .audioOutput }
-    }
+/// Draws `content` with the call's invite offer observed, or with `nil` on a
+/// call that has none.
+///
+/// The offer is optional and an `@ObservedObject` cannot be: the inner view is
+/// what observes it, and this one is what decides whether there is anything
+/// to observe.
+private struct InviteScope<Content: View>: View {
+    let offer: CallInviteOffer?
+    @ViewBuilder let content: (CallInviteOffer?) -> Content
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section(header: Text(l10n.t("call.settings.devices"))) {
-                    devicePicker(
-                        title: l10n.t("call.settings.microphone"),
-                        devices: audioInputs,
-                        selection: Binding(
-                            get: { state.settings.selectedAudioInput },
-                            set: { state.setSelectedAudioInput($0) }))
-                    devicePicker(
-                        title: l10n.t("call.control.camera"),
-                        devices: videoInputs,
-                        selection: Binding(
-                            get: { state.settings.selectedVideoInput },
-                            set: { state.setSelectedVideoInput($0) }))
-                    devicePicker(
-                        title: l10n.t("call.control.speaker"),
-                        devices: audioOutputs,
-                        selection: Binding(
-                            get: { state.settings.selectedAudioOutput },
-                            set: { state.setSelectedAudioOutput($0) }))
-                }
-                // No "Audio processing" section: echo cancellation, noise
-                // suppression and gain control are always on in the engine, and
-                // the three switches that sat here changed a stored flag nothing
-                // read. A switch that does nothing is worse than none.
-                Section(header: Text(l10n.t("call.settings.video"))) {
-                    Toggle(
-                        l10n.t("call.settings.mirror"),
-                        isOn: Binding(
-                            get: { state.settings.mirrorLocal },
-                            set: { state.setMirrorLocal($0) }))
-                }
-                Section(
-                    header: Text(l10n.t("settings.section.network")),
-                    footer: Text(l10n.t("call.settings.low_data_hint"))
-                ) {
-                    Toggle(
-                        l10n.t("call.settings.low_data"),
-                        isOn: Binding(
-                            get: { state.settings.lowDataMode },
-                            set: { state.setLowDataMode($0) }))
-                }
-            }
-            .navigationTitle(l10n.t("nav.settings"))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(l10n.t("common.done")) { state.setSettingsOpen(false) }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func devicePicker(
-        title: String,
-        devices: [CallUiState.CallDevice],
-        selection: Binding<String?>
-    ) -> some View {
-        Picker(title, selection: selection) {
-            Text(l10n.t("call.settings.system_default")).tag(String?.none)
-            ForEach(devices) { device in
-                Text(device.label.isEmpty ? title : device.label)
-                    .tag(String?.some(device.id))
-            }
-        }
-    }
-}
-
-// MARK: - ChatSheet (group calls)
-
-/// In-call chat. Text-only; system events ("Alice joined") render inline as
-/// centred muted lines. Reachable from a group call's overflow button.
-private struct ChatSheet: View {
-    @ObservedObject var state: CallUiState
-    @ObservedObject var l10n = Localization.shared
-    @FocusState private var composerFocused: Bool
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 10) {
-                            if state.chatMessages.isEmpty {
-                                Text(l10n.t("call.chat.empty"))
-                                    .font(.system(size: 13))
-                                    .foregroundColor(Color.lakkoTextMuted)
-                                    .multilineTextAlignment(.center)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.top, 40)
-                                    .padding(.horizontal, 16)
-                            } else {
-                                ForEach(state.chatMessages) { msg in
-                                    ChatMessageRow(msg: msg).id(msg.id)
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 12)
-                    }
-                    .onChange(of: state.chatMessages.count) { _, _ in
-                        if let last = state.chatMessages.last {
-                            withAnimation(.easeOut(duration: 0.15)) {
-                                proxy.scrollTo(last.id, anchor: .bottom)
-                            }
-                        }
-                    }
-                }
-
-                Divider().background(Color.lakkoBorder)
-
-                HStack(spacing: 8) {
-                    TextField(
-                        l10n.t("chat.composer.placeholder"),
-                        text: Binding(
-                            get: { state.composeText }, set: { state.setComposeText($0) })
-                    )
-                    .focused($composerFocused)
-                    .textFieldStyle(.roundedBorder)
-                    .submitLabel(.send)
-                    .onSubmit(send)
-
-                    Button(action: send) {
-                        Text(l10n.t("chat.composer.send"))
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(
-                                canSend ? Color.lakkoAccentForeground : Color.lakkoTextMuted)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(
-                                RoundedRectangle(cornerRadius: LakkoRadius.control)
-                                    .fill(canSend ? Color.lakkoAccent : Color.lakkoSurfaceSunken))
-                    }
-                    .disabled(!canSend)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-            }
-            .background(Color.lakkoBackground)
-            .navigationTitle(l10n.t("call.control.chat"))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(l10n.t("common.done")) { state.setChatOpen(false) }
-                }
-            }
-            .onAppear { composerFocused = true }
-        }
-    }
-
-    private var canSend: Bool {
-        !state.composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private func send() {
-        state.sendChatMessage(state.composeText)
-    }
-}
-
-private struct ChatMessageRow: View {
-    @ObservedObject var l10n = Localization.shared
-    let msg: CallUiState.ChatMessage
-
-    var body: some View {
-        if msg.kind == .system {
-            HStack {
-                Spacer()
-                // Rendered now, so a system line follows a language switch.
-                Text(msg.displayText)
-                    .font(.system(size: 12).italic())
-                    .foregroundColor(Color.lakkoTextMuted)
-                    .multilineTextAlignment(.center)
-                Spacer()
-            }
+        if let offer {
+            Observed(offer: offer, content: content)
         } else {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 8) {
-                    Text(msg.senderName)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(Color.lakkoAccent)
-                    // The environment locale the root injects (ADR-0061).
-                    Text(msg.ts, format: .dateTime.hour().minute())
-                        .font(.system(size: 12))
-                        .foregroundColor(Color.lakkoTextMuted)
-                }
-                Text(msg.text)
-                    .font(.system(size: 14))
-                    .foregroundColor(Color.lakkoText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            content(nil)
         }
+    }
+
+    private struct Observed: View {
+        @ObservedObject var offer: CallInviteOffer
+        let content: (CallInviteOffer?) -> Content
+
+        var body: some View { content(offer) }
+    }
+}
+
+// MARK: - The call's two sheets
+
+/// `docs/ux/calls.md` section 5 — the safety number, only when asked for; and
+/// section 4.1 — the call's settings. One modifier, so the 1x1 screen and the
+/// group one present the same two sheets.
+private struct CallSheetsModifier: ViewModifier {
+    @ObservedObject var state: CallUiState
+    @Binding var settingsOpen: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(
+                isPresented: Binding(
+                    get: { state.encryptionSheetOpen },
+                    set: { state.setEncryptionSheetOpen($0) })
+            ) {
+                EncryptionSheet(
+                    peerName: state.peerName,
+                    safetyNumber: state.e2ee.shortFingerprint,
+                    onDone: { state.setEncryptionSheetOpen(false) })
+            }
+            .sheet(isPresented: $settingsOpen) {
+                CallSettingsSheet(state: state, onDone: { settingsOpen = false })
+            }
     }
 }

@@ -6,14 +6,17 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Share a saved feed (`docs/ux/feed.md` section 4.1): a link that carries
-/// the rule in its fragment, never its path, and a `.lakkofeed` file, both
-/// through the share sheet. Specific conversations are left out. Mirror of
-/// the web share dialog in `routes/Feed.tsx`.
+/// the rule in its fragment, never its path, and a `.lakkofeed` file. The
+/// link is copied; the file is saved through the system's save picker.
+/// Neither goes through the share sheet. Specific conversations are left
+/// out. Mirror of the web share dialog in `routes/Feed.tsx`.
 struct FeedShareSheet: View {
     let saved: SavedFeedView
 
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
+    /// The `.lakkofeed` file the system's save picker is up for.
+    @State private var exporting: ExportedFile?
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
@@ -49,11 +52,11 @@ struct FeedShareSheet: View {
                         copied = true
                     }
                     .buttonStyle(.borderedProminent)
-                    if let url = URL(string: shared.link) {
-                        ShareLink(l10n.t("feed.share.share_link"), item: url)
-                    }
                     if let fileURL = shared.fileURL {
-                        ShareLink(l10n.t("feed.share.share_file"), item: fileURL)
+                        Button(l10n.t("feed.share.download")) {
+                            exporting = ExportedFile(url: fileURL)
+                        }
+                        .buttonStyle(.bordered)
                     }
                 } else {
                     Text(l10n.t("feed.share.unshareable"))
@@ -71,6 +74,7 @@ struct FeedShareSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
+        .fileExport($exporting)
     }
 }
 

@@ -88,14 +88,16 @@ public object CallHistoryStore {
     public fun record(context: Context, accountIdB64: String?, entry: CallHistoryEntry) {
         if (accountIdB64.isNullOrEmpty()) return
         val store = prefs(context) ?: return
-        try {
-            val next = callHistoryWith(load(context, accountIdB64), entry)
-            store.edit()
-                .putString(key(accountIdB64), next.joinToString("\n", transform = ::encodeCallHistoryEntry))
-                .apply()
-            changed.value += 1
-        } catch (cause: Throwable) {
-            android.util.Log.w(TAG, "recording the call history entry failed", cause)
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                val next = callHistoryWith(load(context, accountIdB64), entry)
+                store.edit()
+                    .putString(key(accountIdB64), next.joinToString("\n", transform = ::encodeCallHistoryEntry))
+                    .apply()
+                changed.value += 1
+            } catch (cause: Throwable) {
+                android.util.Log.w(TAG, "recording the call history entry failed", cause)
+            }
         }
     }
 

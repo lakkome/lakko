@@ -106,6 +106,17 @@ public object MessageLogStore {
         context: Context,
         accountIdB64: String,
         payload: MessageLogPayload,
+    ): Boolean =
+        // `false` as well when the account's session has ended: nothing is
+        // written back for it (see [me.lakko.app.account.AccountStoreGate]).
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            putLogWhileOpen(context, accountIdB64, payload)
+        } ?: false
+
+    private fun putLogWhileOpen(
+        context: Context,
+        accountIdB64: String,
+        payload: MessageLogPayload,
     ): Boolean {
         val plaintext = try {
             json.encodeToString(MessageLogPayload.serializer(), payload).toByteArray(Charsets.UTF_8)

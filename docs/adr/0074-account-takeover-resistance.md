@@ -38,7 +38,8 @@
   section 18 (added with this ADR).
 
 Renumbered from 0066 on 2026-10-13: the main branch had taken 0064 to 0071 for
-other decisions. Commit messages before that date name this ADR as 0066.
+other decisions. Commit messages before that date name this ADR as 0066, and so do the
+migration files of this work, whose bytes are checksummed and were left as written.
 
 ## Context
 
@@ -615,7 +616,7 @@ can reset, which is recallable.
   {"error":"account-key-required"}`. Every delete writes a tombstone
   `(account_id, device_id, deleted_at)` in a new table, kept 30 days, and
   the route comes under the generation floor (closing the ADR-0073
-  residual, G-45's last clause).
+  residual, G-46's last clause).
 - An attested key change (reset, recall, rotation) deletes the account's
   tombstones with its KeyPackage rows.
 
@@ -1572,7 +1573,7 @@ recall; the new key must be new; the expired anchor; deletion refused with
 rewritten for item 1.
 
 Not done in T3: fuzzing against a budget, the bindings and native
-libraries, any client change, `docs/security/*` (C-number, G-45's text),
+libraries, any client change, `docs/security/*` (C-number, G-46's text),
 `CLAUDE.md`, `docs/PRODUCT-READINESS.md`, and the `lakko-security` pass
 this sprint needs before it merges (three anonymous routes, a stored
 password verifier of the past, and a changed refusal order in the session
@@ -1865,7 +1866,7 @@ both stores and through the router.
 Not done in T5: fuzzing against a budget (the three new targets compile;
 none was run), a rebuild of the native libraries and the wasm package, any
 client change, `docs/security/*` (the ordering rule of item 5 has no
-C-number; G-45's text), `CLAUDE.md`, `docs/PRODUCT-READINESS.md`, and the
+C-number; G-46's text), `CLAUDE.md`, `docs/PRODUCT-READINESS.md`, and the
 `lakko-security` pass this sprint needs before it merges (a route that
 moves the account's identity key, a route that exchanges a superseded
 credential for a current one, and two verifiers that now parse a proof).

@@ -108,6 +108,8 @@ enum OwnedChannelGenerations {
         defaults: UserDefaults = .standard
     ) {
         guard !channelIds.isEmpty else { return }
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         var map = load(accountIdB64: accountIdB64, defaults: defaults)
         for id in channelIds { map[id] = generation }
         defaults.set(map.mapValues { NSNumber(value: $0) }, forKey: key(accountIdB64))

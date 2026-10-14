@@ -504,7 +504,10 @@ final class FeedViewModel: ObservableObject {
         let groups = await chatRepository.pollAllGroupsReporting()
         // The channel sync reports its own tally (``ChannelPostSync/onSyncDone``).
         await postSync.syncAndWait()
-        refreshCenter.record(.groups, groups)
+        // A refresh called off (the screen was left mid-pull) reached nobody
+        // because it was stopped, not because nobody answered: it neither
+        // raises nor clears "Couldn't check for new messages."
+        if !Task.isCancelled { refreshCenter.record(.groups, groups) }
         nowMs = Self.clockMs()
         rebuild()
         showPending()

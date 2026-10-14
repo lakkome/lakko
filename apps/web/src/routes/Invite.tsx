@@ -45,6 +45,7 @@ import {
   createMemo,
   createResource,
   createSignal,
+  onCleanup,
   onMount,
   Show,
   type JSX,
@@ -296,6 +297,15 @@ function ConnectPanel(props: {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createLiveText();
   const [notice, setNotice] = createLiveText();
+  // The pause before leaving for the contact list (see `window.setTimeout`
+  // below). A person who leaves this screen first - during the send, or
+  // during the pause - must not be pulled to the contact list afterwards.
+  let doneTimer: number | undefined;
+  let disposed = false;
+  onCleanup(() => {
+    disposed = true;
+    if (doneTimer !== undefined) window.clearTimeout(doneTimer);
+  });
   // 1.18d2a-web: when the server reports 410 Gone (or 404 on
   // /consume — same fold-pattern as fetch), we lock the panel
   // into a "this invite has been used up / revoked" state and
@@ -445,7 +455,7 @@ function ConnectPanel(props: {
       setNotice(() => t("invite.contact.sent", { name: labelOrFingerprint }));
       // Brief pause so the user reads the notice; then navigate
       // to /contacts where the accepted-state UI lives.
-      window.setTimeout(props.onDone, 1500);
+      if (!disposed) doneTimer = window.setTimeout(props.onDone, 1500);
     } catch (err) {
       // ADR-0054 S3: the consume spends an anonymous token; that failure,
       // like every other, renders from its kind (`contacts/errors.ts`).

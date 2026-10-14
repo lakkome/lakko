@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import {
+  freshPhraseDisposition,
+  owedPhraseCompletesPark,
   anonymousGuardView,
   clearSignupPhraseOwed,
   isSignupPhraseOwed,
@@ -128,6 +133,36 @@ function memoryStorage(): MarkerStorage & { size: () => number } {
   };
 }
 
+describe("a guest account never lands in the app", () => {
+  it("shows the guest screen in place of a protected route", () => {
+    expect(sessionGuardView("session", false, false, false, true)).toBe("guest");
+  });
+
+  it("leaves an ordinary session alone", () => {
+    expect(sessionGuardView("session", false, false, false, false)).toBe("children");
+  });
+
+  it("puts owed recovery words first", () => {
+    expect(sessionGuardView("session", true, false, false, true)).toBe("save-signup-phrase");
+  });
+
+  it("comes before the steps of a kept account", () => {
+    // While the marker is there the person is asked the guest question,
+    // whatever else is owed.
+    expect(sessionGuardView("session", false, true, true, true)).toBe("guest");
+  });
+
+  it("a guest that kept its account lands on Protect your account, shown no phrase", () => {
+    // `keepGuestAccount` marks the step owed and then clears the marker.
+    expect(sessionGuardView("session", false, false, true, false)).toBe("protect-account");
+  });
+
+  it("means nothing without a session", () => {
+    expect(sessionGuardView("anon", false, false, false, true)).toBe("redirect-login");
+    expect(sessionGuardView("loading", false, false, false, true)).toBe("loading");
+  });
+});
+
 describe("the owed-phrase marker (surviving a reload)", () => {
   it("is set at signup and cleared on acknowledgement", () => {
     const storage = memoryStorage();
@@ -166,5 +201,71 @@ describe("the owed-phrase marker (surviving a reload)", () => {
     };
     expect(() => markSignupPhraseOwed(blocked, "acct")).not.toThrow();
     expect(isSignupPhraseOwed(blocked, "acct")).toBe(false);
+  });
+});
+
+describe("a freshly minted phrase after its identity was published", () => {
+  it("is shown while the browser is still the minting account's", () => {
+    // Binding unchanged (still parked), or the same account parked again.
+    expect(freshPhraseDisposition({ mintedFor: "alice", boundAccount: "alice" })).toBe("show");
+  });
+
+  it("is shown after a mere sign-out", () => {
+    expect(freshPhraseDisposition({ mintedFor: "alice", boundAccount: null })).toBe("show");
+  });
+
+  it("is not shown over another account, and stays owed to the minting one", () => {
+    expect(freshPhraseDisposition({ mintedFor: "alice", boundAccount: "bob" })).toBe("owe");
+    // What `mintFreshIdentity` does with "owe": the marker is the minting
+    // account's own, so bob's sign-ins never see it and alice's next one does.
+    const storage = memoryStorage();
+    markSignupPhraseOwed(storage, "alice");
+    expect(isSignupPhraseOwed(storage, "bob")).toBe(false);
+    expect(isSignupPhraseOwed(storage, "alice")).toBe(true);
+    // Shown as the unacknowledged-phrase screen once alice's session lands.
+    expect(sessionGuardView("session", true)).toBe("save-signup-phrase");
+    clearSignupPhraseOwed(storage, "alice");
+    expect(isSignupPhraseOwed(storage, "alice")).toBe(false);
+  });
+});
+
+describe("a sign-in that would park while its phrase is still owed", () => {
+  it("is completed from the kept phrase only when it is owed and a device key holds it", () => {
+    expect(owedPhraseCompletesPark({ owed: true, deviceKeyPresent: true })).toBe(true);
+    expect(owedPhraseCompletesPark({ owed: false, deviceKeyPresent: true })).toBe(false);
+    expect(owedPhraseCompletesPark({ owed: true, deviceKeyPresent: false })).toBe(false);
+  });
+
+  // `AuthContext.tsx` needs a Solid runtime this suite does not have.
+  const src = readFileSync(fileURLToPath(new URL("./AuthContext.tsx", import.meta.url)), "utf8");
+
+  it("every park with a device key goes through the owed-phrase completion", () => {
+    // The password sign-in and the access-recovery landing, which every
+    // ACCESS-only route shares (a passkey, an authenticator code, three
+    // words, a mailed code).
+    expect(src.match(/await parkForRestore\(/g)?.length).toBe(2);
+    // No direct park is left: the restore prompt is put up in one place.
+    expect(src.match(/kind: "needs-recovery-phrase",\n/g)?.length).toBe(1);
+    // The owed phrase is tried first, then the passkey route's own hook.
+    expect(src).toMatch(
+      /if \(await completeParkFromOwedPhrase\(parked, flow\)\) return;\s*if \(restoreKeys !== undefined\) \{/,
+    );
+    // Through the ordinary, fail-closed phrase path - never a second one.
+    expect(src).toMatch(/await api\.provideRecoveryPhrase\(phrase\);\s*return true;/);
+  });
+
+  it("a plain sign-out keeps the owed marker and the cached phrase", () => {
+    const start = src.indexOf("\n    logout() {");
+    const end = src.indexOf("\n    async forgetDevice() {");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const logout = src.slice(start, end);
+    expect(logout).not.toContain("clearSignupPhraseOwed");
+    expect(logout).not.toContain("deletePhrase");
+    expect(logout).not.toContain("phraseOwedInMemory.delete");
+    // Forget-device wipes both (`wipe-account.ts`).
+    const wipe = readFileSync(fileURLToPath(new URL("./wipe-account.ts", import.meta.url)), "utf8");
+    expect(wipe).toContain("deletePhrase(accountIdB64)");
+    expect(wipe).toContain("clearSignupPhraseOwed(storage, accountIdB64)");
   });
 });

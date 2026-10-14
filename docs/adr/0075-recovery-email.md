@@ -22,7 +22,8 @@
   section 19.
 
 Renumbered from 0067 on 2026-10-13: the main branch had taken 0064 to 0071 for
-other decisions. Commit messages before that date name this ADR as 0067.
+other decisions. Commit messages before that date name this ADR as 0067, and so do the
+migration files of this work, whose bytes are checksummed and were left as written.
 
 ## Context
 

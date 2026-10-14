@@ -8,8 +8,6 @@
 
 package me.lakko.app.ui.chat
 
-import android.content.Context
-import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -219,6 +217,8 @@ public fun ChatScreen(
     onOpenConversation: (groupIdHex: String) -> Unit = {},
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    // Saving an attachment asks the system where to put the file.
+    val fileSaver = me.lakko.app.ui.components.rememberFileSaver()
     val listState = rememberLazyListState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1001,9 +1001,18 @@ public fun ChatScreen(
                                             cached?.readBytes() ?: AttachmentBridge.downloadAndDecrypt(ref)
                                         }.getOrNull()
                                     } ?: return@launch
-                                    withContext(Dispatchers.IO) {
-                                        shareDecryptedBytes(context, ref, bytes)
-                                    }
+                                    // A file leaves the app through the
+                                    // system's save picker, never a share
+                                    // sheet. The name is the sender's, so it
+                                    // is sanitized before it is suggested.
+                                    fileSaver.save(
+                                        name = AttachmentBridge.safeFileName(
+                                            ref.name,
+                                            fallback = "attachment-${AttachmentBridge.hex(ref.blobId).take(8)}",
+                                        ),
+                                        mime = ref.mime,
+                                        bytes = bytes,
+                                    )
                                 }
                             },
                             // ADR-0023 — open the pre-filled edit dialog.
@@ -1692,6 +1701,72 @@ private fun DateSeparatorPill(label: String) {
 }
 
 /**
+ * How a call invitation's `Join` opens the call
+ * (`docs/ux/call-links.md` section 3): handed the link as the one string the
+ * app's own `/c/` handling takes, the same a tapped or a pasted link arrives
+ * as. `null`, the default, means nothing here can open a call, and an
+ * invitation is then drawn as the text it is rather than with a button that
+ * leads nowhere.
+ */
+internal val LocalOpenCallLink = androidx.compose.runtime.staticCompositionLocalOf<((String) -> Unit)?> { null }
+
+/**
+ * A call invitation in a conversation (`docs/ux/call-links.md` section 3): a
+ * phone glyph, `Call invitation`, and `Join`, in the bubble's own colours.
+ *
+ * It is drawn for a message that is exactly one call link of this deployment
+ * ([me.lakko.app.calls.callInviteOf]); a link to another host, or a link with
+ * other text around it, stays ordinary text. `Join` opens the call inside the
+ * app. A long press still opens the message's menu ([bubbleControl]).
+ */
+@Composable
+private fun CallInviteCard(
+    bubbleColor: Color,
+    contentColor: Color,
+    onLongPress: (() -> Unit)?,
+    onJoin: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier.widthIn(min = 220.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .background(contentColor.copy(alpha = 0.14f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Filled.Call,
+                contentDescription = null,
+                tint = contentColor,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        Text(
+            text = t("chat.call_invite.title"),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+            modifier = Modifier.weight(1f),
+        )
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(percent = 50))
+                .background(contentColor)
+                .bubbleControl(onLongPress = onLongPress, role = Role.Button, onClick = onJoin)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        ) {
+            Text(
+                text = t("chat.call.join_short"),
+                style = MaterialTheme.typography.labelLarge,
+                color = bubbleColor,
+            )
+        }
+    }
+}
+
+/**
  * `internal` rather than `private` only so a UI test can render one bubble.
  * The long press that opens the action menu starts on this composable's own
  * Surface, so "a long press opens the menu and nothing else does" cannot be
@@ -1895,7 +1970,29 @@ internal fun Bubble(
                                 onClick = { onJumpToReply(reply.target) },
                             )
                         }
-                        if (msg.text.isNotEmpty()) {
+                        // docs/ux/call-links.md section 3 — a message whose
+                        // whole text is one call link of this deployment is an
+                        // invitation: a card with a Join button, not a line of
+                        // characters to copy.
+                        val openCallLink = LocalOpenCallLink.current
+                        val callInvite = remember(msg.text, openCallLink != null) {
+                            if (openCallLink == null) {
+                                null
+                            } else {
+                                me.lakko.app.calls.callInviteOf(
+                                    msg.text,
+                                    me.lakko.app.calls.CALL_INVITE_DEFAULT_ORIGIN,
+                                )
+                            }
+                        }
+                        if (callInvite != null) {
+                            CallInviteCard(
+                                bubbleColor = background,
+                                contentColor = contentColor,
+                                onLongPress = openMenu,
+                                onJoin = { openCallLink?.invoke(callInvite.argument) },
+                            )
+                        } else if (msg.text.isNotEmpty()) {
                             Text(
                                 text = msg.text,
                                 style = MaterialTheme.typography.bodyMedium,
@@ -2087,8 +2184,10 @@ internal fun Bubble(
 /** UX 3.1 — how long a jumped-to row stays lit: "about a second and a half". */
 internal const val REPLY_HIGHLIGHT_MS: Long = 1_500L
 
-/** Where an attachment handed to another app is written (the FileProvider
- *  `cache-path`). Plaintext; forget device deletes the directory. */
+/** Where an attachment handed to another app used to be written, in
+ *  plaintext, for the share sheet. Nothing writes here any more (a saved file
+ *  goes straight to the document the person picks); the name is kept so
+ *  forget device still deletes what an older build left behind. */
 internal const val SHARED_ATTACHMENTS_DIR: String = "shared-attachments"
 
 /** The strip's close control, by name, for TalkBack and the UI tests. */
@@ -3008,50 +3107,6 @@ private fun decodeImageBitmap(bytes: ByteArray): ImageBitmap? {
     }.getOrNull()
 }
 
-/** Write `bytes` to the app's cache directory under the
- *  attachment's name (or a blob-id-derived fallback) and fire
- *  an ACTION_SEND chooser so the user can route to Files /
- *  Drive / etc. Best-effort: any IO / Intent failure is
- *  swallowed because we're already on a coroutine off the UI
- *  thread + can't surface a snackbar from this scope. */
-private fun shareDecryptedBytes(
-    context: Context,
-    ref: AttachmentRef,
-    bytes: ByteArray,
-) {
-    // `ref.name` is sender-controlled: sanitize it, write into a fresh
-    // per-share directory so no existing file can be overwritten, and refuse
-    // anything that still resolves outside that directory.
-    val baseName = AttachmentBridge.safeFileName(
-        ref.name,
-        fallback = "attachment-${AttachmentBridge.hex(ref.blobId).take(8)}",
-    )
-    runCatching {
-        val shareDir = java.io.File(
-            java.io.File(context.cacheDir, SHARED_ATTACHMENTS_DIR),
-            java.util.UUID.randomUUID().toString(),
-        ).apply { mkdirs() }
-        val outFile = java.io.File(shareDir, baseName)
-        check(outFile.canonicalFile.parentFile == shareDir.canonicalFile) {
-            "attachment name resolved outside the share directory"
-        }
-        outFile.writeBytes(bytes)
-        val authority = "${context.packageName}.fileprovider"
-        val uri = androidx.core.content.FileProvider
-            .getUriForFile(context, authority, outFile)
-        val send = Intent(Intent.ACTION_SEND).apply {
-            putExtra(Intent.EXTRA_STREAM, uri)
-            type = ref.mime ?: "application/octet-stream"
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(
-            Intent.createChooser(send, me.lakko.app.l10n.Localization.strings.value["chat.attachment.save_title"])
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        )
-    }
-}
-
 // =============================================================================
 // A4 — group-membership sheet: add a member by @username (G-4-verified) and
 // view / remove the live MLS roster. Names resolve through the accepted
@@ -3708,9 +3763,6 @@ private fun MembersSheet(
                                 TextButton(onClick = { clipboard.setText(AnnotatedString(link)) }) {
                                     Text(t("chat.invite_link.copy"))
                                 }
-                                TextButton(
-                                    onClick = { me.lakko.app.ui.contacts.launchShareIntent(context, link) },
-                                ) { Text(t("chat.invite_link.share")) }
                                 TextButton(
                                     onClick = viewModel::onRevokeInviteLink,
                                     enabled = !busy,

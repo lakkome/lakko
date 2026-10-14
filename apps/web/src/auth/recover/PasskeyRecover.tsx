@@ -15,6 +15,7 @@
  */
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
+import { isAbandoned } from "../binding-epoch";
 import { passkeyErrorMessage } from "../auth-error-copy";
 import { WebauthnClient } from "../webauthn-client";
 import { KeyedError } from "../../l10n/keyed-error";
@@ -40,6 +41,8 @@ export function PasskeyRecover(props: {
     try {
       await auth.loginWithPasskey(props.username(), { forgotPassword: true });
     } catch (err) {
+      // Overtaken by another session on this device: nothing to report.
+      if (isAbandoned(err)) return;
       // Dismissing the browser's sheet is not an error: back to idle.
       if (err instanceof KeyedError && err.key === "auth.passkey.error.server_disabled") {
         // Passkeys are switched off on this server.

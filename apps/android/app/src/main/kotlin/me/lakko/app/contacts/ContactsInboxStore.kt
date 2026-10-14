@@ -117,13 +117,17 @@ public class SharedPreferencesContactsInboxStore(context: Context) : ContactsInb
     }
 
     override fun saveCursor(accountIdB64: String, cursor: Long) {
-        val key = cursorKey(accountIdB64)
-        val advanced = advanceInboxCursor(prefs.getLong(key, 0L), cursor)
-        prefs.edit().putLong(key, advanced).apply()
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val key = cursorKey(accountIdB64)
+            val advanced = advanceInboxCursor(prefs.getLong(key, 0L), cursor)
+            prefs.edit().putLong(key, advanced).apply()
+        }
     }
 
     override fun savePending(accountIdB64: String, pending: List<IncomingContactRequest>) {
-        prefs.edit().putString(pendingKey(accountIdB64), encodePendingRequests(pending)).apply()
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            prefs.edit().putString(pendingKey(accountIdB64), encodePendingRequests(pending)).apply()
+        }
     }
 
     override fun delete(accountIdB64: String) {
@@ -443,7 +447,7 @@ public class InboxMailboxStore(private val storage: me.lakko.app.auth.MarkerStor
 
     public fun setOwnerKey(accountIdB64: String, keyB64: String) {
         try {
-            storage.set(OWNER_PREFIX + accountIdB64, keyB64)
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.set(OWNER_PREFIX + accountIdB64, keyB64) }
         } catch (_: Throwable) {
             // Recorded at the next poll.
         }
@@ -460,7 +464,7 @@ public class InboxMailboxStore(private val storage: me.lakko.app.auth.MarkerStor
     public fun advance(accountIdB64: String, keyB64: String, cursor: Long) {
         if (cursor <= cursor(accountIdB64, keyB64)) return
         try {
-            storage.set(CURSOR_PREFIX + accountIdB64 + ":" + keyB64, cursor.toString())
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.set(CURSOR_PREFIX + accountIdB64 + ":" + keyB64, cursor.toString()) }
         } catch (_: Throwable) {
             // Read again from the old cursor next time.
         }

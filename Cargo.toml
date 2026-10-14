@@ -33,6 +33,7 @@ members = [
     "crates/lakko-mnemonic",
     "crates/lakko-ui-rules",
     "crates/lakko-feed",
+    "crates/lakko-vault",
     "crates/lakko-l10n",
     "crates/lakko-discovery-client",
     "crates/lakko-tuf",
@@ -75,11 +76,14 @@ exclude = [
     # to drop the unmaintained `instant` (RUSTSEC-2024-0384); consumed via
     # `[patch.crates-io]` below, not a workspace member.
     "crates/vendor/fluvio-wasm-timer",
-    # Vendored fork of str0m 0.19.0 carrying ONE additive change: the
-    # packetizer tells an `ExtensionSerializer` which packet of the frame it
-    # is writing (`ExtensionValues::frame_position`). Needed so the SFU can
-    # relay the RFC-less generic frame descriptor, whose first/last-packet
-    # bits differ per packet. Upstream MIT/Apache-2.0 third-party code with
+    # Vendored fork of str0m 0.19.0 carrying fifteen changes, each described
+    # above the `[patch.crates-io]` line below and pinned by
+    # `services/sfu/tests/fork_delta_guard.rs`: the packetizer tells an
+    # `ExtensionSerializer` which packet of the frame it is writing
+    # (`ExtensionValues::frame_position`), the receive-side NACK register
+    # keeps asking for a lost packet for about 1.4 s, audio `red` (RFC 2198)
+    # can be negotiated, and so can video `red` + `ulpfec` (opt-in, off in
+    # the SFU). Upstream MIT/Apache-2.0 third-party code with
     # its own deps, so it sits outside our workspace lint / forbid-unsafe
     # posture; consumed via `[patch.crates-io]` below.
     "crates/vendor/str0m",
@@ -162,6 +166,7 @@ lakko-anon-token-server = { path = "crates/lakko-anon-token-server", version = "
 lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
 lakko-ui-rules = { path = "crates/lakko-ui-rules", version = "0.0.0" }
 lakko-feed = { path = "crates/lakko-feed", version = "0.0.0" }
+lakko-vault = { path = "crates/lakko-vault", version = "0.0.0" }
 lakko-l10n = { path = "crates/lakko-l10n", version = "0.0.0" }
 lakko-discovery-client = { path = "crates/lakko-discovery-client", version = "0.0.0" }
 
@@ -257,6 +262,109 @@ fluvio-wasm-timer = { path = "crates/vendor/fluvio-wasm-timer" }
 # per-packet fields. Two source files, additive only; no behaviour changes for
 # any existing serializer, since they all ignore the new field.
 #
-# `services/sfu/tests/fork_delta_guard.rs` pins both files so an accidental
-# edit fails CI. Drop this patch if the capability lands upstream.
+# A second change (ADR-0067, 2026-10-03): the receive-side NACK register asks
+# for a missing packet up to ten times over about 1.4 s (doubling from 33 ms
+# to a 200 ms cap) and tracks holes within 512 packets, instead of five times
+# in 165 ms within 100 packets; on a live call every upstream retry fell
+# inside a one-second loss burst and the packet was lost for good.
+#
+# A third change (ADR-0067 step 3, 2026-10-04): an audio `red` payload type
+# (RFC 2198 redundant audio, `red/48000/2` with fmtp `111/111`) can be
+# negotiated and carried. Upstream parses `red` as an unknown codec and drops
+# it from every answer, so no client sends RED. It is opt-in
+# (`CodecConfig::enable_red`), listed before Opus in `m=audio` because
+# libwebrtc sends RED only then, and answered only when the offer's red fmtp
+# names the offer's own Opus payload type. str0m never looks inside a RED
+# payload; the SFU forwards it by payload type.
+#
+# A fourth change (ADR-0067 step 4, 2026-10-04): the video FEC pair,
+# `red/90000` (with an RTX payload type) and `ulpfec/90000` (RFC 5109), can
+# be negotiated and carried. Upstream knows neither and drops both from
+# every answer. It is opt-in (`CodecConfig::enable_video_fec`), kept only
+# when a media line has both, and listed after the video codecs without
+# RTCP feedback lines. str0m never looks inside a RED or FEC payload; the
+# SFU maps the cleartext RED header byte per subscriber
+# (`services/sfu/src/video_fec.rs`) and uses a publisher's FEC itself (see
+# 6 below), behind `LAKKO_SFU_VIDEO_FEC`, off by default.
+#
+# 5. ADR-0067: the loss fraction in a receiver report is clamped as RFC 3550
+# appendix A.3 says. Upstream cast a negative interval loss (packets repaired
+# by NACK arriving in a later interval) to a byte, which reported about 97%
+# loss for a healthy stream and made the sending browser cut its bitrate.
+#
+# 6. ADR-0067 step 4, part 1 (2026-10-04): the SFU can run forward error
+# correction over a receive stream. `DirectApi::keep_received_rtp` /
+# `take_received_rtp` hand out a received RTP packet whole, as it was on the
+# wire after SRTP decryption (upstream keeps the parsed header values and the
+# payload, not the header extension block's bytes, which ULPFEC covers), and
+# `DirectApi::handle_recovered_rtp` registers a packet rebuilt from FEC as
+# received, so it is no longer asked for by NACK or reported lost, and
+# returns it in the form `Event::RtpPacket` carries. Off unless asked for;
+# two files, additive. The SFU uses it behind `LAKKO_SFU_VIDEO_FEC`
+# (`services/sfu/src/fec_receive.rs`).
+#
+# 7. ADR-0067 step 4, part 2 (2026-10-04): the SFU can compute forward error
+# correction over a send stream. `StreamTx::keep_sent_rtp` makes a send
+# stream keep each packet as it is serialized for its first transmission
+# (fixed header, header extension block, payload and padding, before SRTP;
+# never an RTX or padding packet), and `DirectApi::take_sent_rtp` hands them
+# out oldest first, at most 1024 held. ULPFEC covers the header extension
+# block, which str0m writes at send time (`mid` is present only until the
+# receiver has reported on the SSRC), so the bytes are not knowable before
+# the packet is serialized. Off unless asked for; three files, additive. The
+# SFU uses it behind `LAKKO_SFU_VIDEO_FEC` (`services/sfu/src/fec_send.rs`).
+#
+# 8. ADR-0067: a missing packet is asked for at a steady gap of about 66 ms,
+# up to 25 times, instead of with gaps doubling to 200 ms, and queued
+# retransmissions are no longer discarded past 15% of the bytes sent
+# (`DEFAULT_RTX_RATIO_CAP` is `None`).
+#
+# 9. ADR-0070 step 3 (2026-10-05): a receive stream can be given a NACK retry
+# interval of its own (`StreamRx::set_nack_retry_interval`), and the session
+# then builds NACKs at least that often instead of on its 33 ms tick. A
+# stream without one keeps the schedule of change 8. The SFU asks for a
+# missing packet of a publisher's light video every 20 ms.
+#
+# 10. ADR-0070 step 3: `StreamTx::resend(seq_no, now)` queues a
+# retransmission of a cached packet without a NACK, on the RTX stream. The
+# SFU sends each packet of a light companion track to a subscriber twice.
+#
+# 11. ADR-0070 step 4: `StreamTx::nacked_packets`, `receiver_reports` and
+# `last_fraction_lost`, read-only counters of what the receiver of a send
+# stream asked for and reported. The SFU sees a burst of loss on a
+# subscriber's downlink from them. (The playout-delay header extension the
+# same step stamps needed no change: upstream knows it.)
+#
+# 12. ADR-0070 step 6 (2026-10-05): `DirectApi::set_twcc_on_local_media_only`.
+# With it on, a media line the remote side offered is answered without the
+# transport-wide sequence number extension and without `transport-cc`
+# feedback, while a media line this side offers carries both. Upstream
+# negotiates both per session. The SFU needs transport-wide feedback for
+# what it sends a subscriber and must give a publisher none for what it
+# publishes (ADR-0068). Off by default; three files.
+#
+# 13. ADR-0070 step 6: `DirectApi::keep_twcc_feedback` and
+# `DirectApi::take_twcc_feedback`, the records of the receiver's
+# transport-wide feedback (per packet sent: send time, size, reported
+# arrival time or none). The SFU runs its own estimate of a subscriber's
+# downlink from them; str0m's own estimator stays off. Off by default,
+# read-only, bounded; two files.
+#
+# 14. A retransmission (RTX packet) is sent without RTP padding (2026-10-07).
+# Upstream pads every packet to the SRTP block size; a libwebrtc receiver
+# restores the original behind a copy of the RTX header, padding bit
+# included, without the padding, and the restored packet loses its tail.
+# Seen on a live call: one in sixteen second copies of light frames arrived
+# intact. One file.
+#
+# 15. `StreamRx::give_up_missing` (2026-10-09, ADR-0070 note of that day):
+# stop asking the sender for the packets of a receive stream that are
+# missing right now; later losses are asked for as usual. The SFU calls it
+# when it has asked a publisher for a key frame at the end of a burst of
+# loss that was not repaired, so the retransmissions of that burst do not
+# compete with the key frame. Three files.
+#
+# `services/sfu/tests/fork_delta_guard.rs` pins the touched files so an
+# accidental edit fails CI. Drop this patch if all fifteen changes land
+# upstream.
 str0m = { path = "crates/vendor/str0m" }

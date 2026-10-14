@@ -12,9 +12,7 @@
  */
 import { createEffect, createSignal, on, Show, type JSX } from "solid-js";
 
-import { useAuth } from "../auth/AuthContext";
-import { usernameClaimEntry } from "../auth/username-claim";
-import { openUsernameChange, openUsernameClaim } from "../auth/username-claim-host";
+import { openUsernameChange } from "../auth/username-claim-host";
 import { useProfiles } from "../profile/ProfileContext";
 import { createDisplayNameCheck } from "../profile/username-field";
 import { maySaveDisplayName, savedDisplayName } from "../profile/rules";
@@ -24,7 +22,6 @@ import { t } from "../l10n";
 
 export default function Profile(): JSX.Element {
   const profiles = useProfiles();
-  const auth = useAuth();
   const [name, setName] = createSignal(profiles.ownProfile().displayName ?? "");
   const [busy, setBusy] = createSignal(false);
   const [notice, setNotice] = createSignal<string | null>(null);
@@ -130,34 +127,18 @@ export default function Profile(): JSX.Element {
               <Show
                 when={profiles.ownUsername()}
                 fallback={
-                  // A guest account: the place that would show the username
-                  // is the way to choose one.
-                  <button type="button" onClick={openUsernameClaim}>
-                    {t("username.claim.title")}
-                  </button>
+                  // This browser does not know the account's username (a
+                  // passkey sign-in with no name typed).
+                  <span>{t("settings.profile.username.none")}</span>
                 }
               >
                 {(u) => (
                   <>
                     <code>@{u()}</code>
-                    {/* The name is saved and the first password is not. */}
-                    <Show
-                      when={usernameClaimEntry(u(), auth.firstPasswordOwed()) === "finish"}
-                      fallback={
-                        // ADR-0076: the name can be changed from where it is shown.
-                        <>
-                          {" "}
-                          <button type="button" onClick={openUsernameChange}>
-                            {t("username.change.title")}
-                          </button>
-                        </>
-                      }
-                    >
-                      {" "}
-                      <button type="button" onClick={openUsernameClaim}>
-                        {t("username.claim.title")}
-                      </button>
-                    </Show>
+                    {/* ADR-0076: the name can be changed from where it is shown. */}{" "}
+                    <button type="button" onClick={openUsernameChange}>
+                      {t("username.change.title")}
+                    </button>
                   </>
                 )}
               </Show>

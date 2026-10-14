@@ -4,6 +4,7 @@
 import Combine
 import Foundation
 import LakkoCore
+import UIKit
 
 /// A running call-link call as ``LinkCallHost`` drives it. ``MultiJoinerCall``
 /// in production; a fake in tests.
@@ -16,6 +17,9 @@ protocol LinkCallHandle: AnyObject {
     func setCameraEnabled(_ on: Bool)
     func publishVideo() async throws
     var sessionState: SfuCallSession.State { get }
+    /// Tell every member the call is over (`docs/ux/calls.md` section 4.1.2).
+    /// Acts only for the link's owner; best-effort.
+    func endForEveryone()
 }
 
 extension MultiJoinerCall: LinkCallHandle {}
@@ -71,6 +75,21 @@ final class LinkCallHost: ObservableObject {
         var mintInviteLink: @MainActor (_ callId: Data) async throws -> String = { _ in
             throw LinkCallHostError.signedOut
         }
+        /// Put the call's link on the clipboard (`Copy link`). `nil` where
+        /// there is no clipboard to reach; the link is then shown instead.
+        var copyToClipboard: ((String) throws -> Void)? = nil
+        /// The session is a guest account: its `Participants` menu offers the
+        /// link alone, never `Invite contacts`.
+        var isGuest: @MainActor () -> Bool = { false }
+        /// Sleep for `ms`; `false` when the sleep was cancelled.
+        var sleepMs: @MainActor (_ ms: Int64) async -> Bool = { ms in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+                return true
+            } catch {
+                return false
+            }
+        }
     }
 
     /// The link call in the slot.
@@ -125,6 +144,21 @@ final class LinkCallHost: ObservableObject {
     /// nobody is founding — the offer is therefore absent rather than failing
     /// later, and the control is absent with it.
     @Published private(set) var invite: CallInviteOffer?
+    /// "{name} ended the call for everyone", for a few seconds after the owner
+    /// of the link call this device was in ended it
+    /// (`docs/ux/calls.md` section 4.1.2). Never an alert.
+    @Published private(set) var endedForEveryoneNotice: UiText?
+
+    /// The contacts an invitation can be sent to (`docs/ux/call-links.md`
+    /// section 3). Empty for someone with no contacts; `Invite contacts` is
+    /// offered all the same and its list says so. Wired once at app start
+    /// (``wireInvitations(chat:contacts:)``).
+    var inviteTargets: @MainActor () -> [InviteContactRow] = { [] }
+    /// Send a plain text message to a contact (``InviteContactRow/id``): into
+    /// the one-to-one with them, founded first when there is none.
+    var sendInvitation: @MainActor (_ contactId: String, _ text: String) async throws -> Void = { _, _ in
+        throw CallInviteOfferError.noSendPath
+    }
 
     /// The call occupying the app's one call slot, across all three kinds.
     var slotOccupant: @MainActor () -> CallKind? = { nil }
@@ -143,6 +177,12 @@ final class LinkCallHost: ObservableObject {
     /// The landings currently on screen. A set of tokens rather than a count,
     /// so a repeated `onAppear` cannot leave the notice hidden for good.
     private var visibleLandings: Set<UUID> = []
+    private var endedNoticeTask: Task<Void, Never>?
+    /// The session of a call its owner ended for everyone, out of the slot
+    /// but kept up for ``EndForEveryone/hangUpDelayMs`` so the sealed end
+    /// leaves the socket before the hang-up closes it.
+    private var lingering: LinkCallHandle?
+    private var lingerTask: Task<Void, Never>?
 
     init(ports: Ports) {
         self.ports = ports
@@ -223,6 +263,9 @@ final class LinkCallHost: ObservableObject {
         case .start:
             break
         }
+        // A call ended for everyone a moment ago may still hold its session:
+        // close it before a new one exists.
+        closeLingeringSession()
         guard let session = ports.session() else {
             return .failed(message: .key("common.error.session_ended"))
         }
@@ -235,12 +278,28 @@ final class LinkCallHost: ObservableObject {
         self.attempt = attempt
         controls.removeAll()
         handle = nil
+        // The screen of a call that is over (its "Call ended" overlay, not
+        // dismissed yet) belongs to that call. Kept, it would be shown with
+        // this call's `Invite`, and this call's own screen would never be
+        // presented.
+        presentation = nil
+        presentationId = nil
+        presentationSlug = nil
         // A new call starts with no link: the first `Invite` makes one, and
         // every later one in the same call re-offers it.
-        invite = request.isOwner ? CallInviteOffer(mint: { [weak self] in
-            guard let self else { throw LinkCallHostError.identityUnavailable }
-            return try await self.ports.mintInviteLink(request.callId)
-        }) : nil
+        invite = request.isOwner ? CallInviteOffer(
+            mint: { [weak self] in
+                guard let self else { throw LinkCallHostError.identityUnavailable }
+                return try await self.ports.mintInviteLink(request.callId)
+            },
+            copy: ports.copyToClipboard,
+            contacts: { [weak self] in self?.inviteTargets() ?? [] },
+            send: { [weak self] contactId, text in
+                guard let self else { throw CallInviteOfferError.noSendPath }
+                try await self.sendInvitation(contactId, text)
+            },
+            isGuest: ports.isGuest
+        ) : nil
         let ui = CallUiState()
         self.ui = ui
         slot = Slot(
@@ -272,6 +331,9 @@ final class LinkCallHost: ObservableObject {
             onError: { [weak self] error in
                 NSLog("multi-joiner call: failed: %@", String(describing: error))
                 self?.apply(attempt, .error, errorMessage: CallErrorText.reasonText(for: error))
+            },
+            onEndedForEveryone: { [weak self] peerId in
+                self?.endedForEveryone(attempt, peerId: peerId)
             }
         )
         let started: LinkCallHandle
@@ -279,6 +341,9 @@ final class LinkCallHost: ObservableObject {
             started = try await ports.startCall(request, session, base, joinWithVideo, ui, callbacks)
         } catch {
             NSLog("multi-joiner call: start failed: %@", String(describing: error))
+            // Left or replaced while the start was in flight: whatever it
+            // threw afterwards is not this person's failed call.
+            guard self.attempt == attempt else { return .started }
             let reason = CallErrorText.reasonText(for: error)
             apply(attempt, .error, errorMessage: reason)
             return .failed(message: reason ?? .key("call.link.error.generic"))
@@ -292,7 +357,7 @@ final class LinkCallHost: ObservableObject {
         bindControls(ui: ui, handle: started)
         apply(attempt, .signalingOpen(owner: request.isOwner))
         if request.mediaVideo && !cameraAllowed {
-            ui.addSystemEvent(CameraPermission.deniedText)
+            ui.showNotice(CameraPermission.deniedText)
         }
         return .started
     }
@@ -317,6 +382,80 @@ final class LinkCallHost: ObservableObject {
             let h = handle
             handle = nil
             h?.hangUp()
+        }
+    }
+
+    // MARK: - Ending for everyone (`docs/ux/calls.md` section 4.1.2)
+
+    /// This device made the link of the call it is in, so `End` offers to end
+    /// the call for everyone.
+    var startedCall: Bool { occupiesSlot && slot?.isOwner == true }
+
+    /// End the link call for every person in it. Only the link's owner. If
+    /// the end could not be sent the owner has still left, and nothing is
+    /// shown.
+    ///
+    /// The slot is released at once, as after `End`, and nothing more of this
+    /// person is sent; the session itself is hung up
+    /// ``EndForEveryone/hangUpDelayMs`` later, because the end rides the
+    /// socket the hang-up closes. A link call started inside that window
+    /// closes the old session first (``start(_:)``).
+    func endForEveryone() {
+        guard let handle, startedCall else { return }
+        handle.endForEveryone()
+        // The person has left: the microphone and the camera stop now, not
+        // when the session closes.
+        handle.setMicrophoneTrackEnabled(false)
+        handle.setCameraEnabled(false)
+        attempt = nil
+        controls.removeAll()
+        self.handle = nil
+        slot = nil
+        invite = nil
+        ui?.endCall()
+        closeLingeringSession()
+        lingering = handle
+        let sleepMs = ports.sleepMs
+        lingerTask = Task { @MainActor [weak self] in
+            guard await sleepMs(EndForEveryone.hangUpDelayMs), !Task.isCancelled else { return }
+            guard let self else {
+                handle.hangUp()
+                return
+            }
+            if self.lingering === handle { self.closeLingeringSession() }
+        }
+    }
+
+    /// Hang up the session ``endForEveryone()`` left up, if any. Idempotent.
+    private func closeLingeringSession() {
+        lingerTask?.cancel()
+        lingerTask = nil
+        let h = lingering
+        lingering = nil
+        h?.hangUp()
+    }
+
+    /// The link's owner ended the call for everyone: say who, then end it
+    /// here the way a call that ended on its own ends. The orchestrator has
+    /// already checked the sender against the owner key of the signed
+    /// capability; `peerId` only names the tile the notice reads its name off.
+    private func endedForEveryone(_ attempt: UUID, peerId: String) {
+        guard self.attempt == attempt, occupiesSlot else { return }
+        let name = ui?.participants
+            .first { $0.id == SfuCallUi.participantId(forPeer: peerId) }?.displayName
+        showEndedForEveryone(starterName: name)
+        ui?.endCall()
+        apply(attempt, .ended)
+    }
+
+    private func showEndedForEveryone(starterName: String?) {
+        endedForEveryoneNotice = EndForEveryone.endedText(starterName: starterName)
+        endedNoticeTask?.cancel()
+        endedNoticeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(EndForEveryone.noticeMs) * 1_000_000)
+            guard !Task.isCancelled else { return }
+            self?.endedForEveryoneNotice = nil
+            self?.endedNoticeTask = nil
         }
     }
 
@@ -352,6 +491,10 @@ final class LinkCallHost: ObservableObject {
     /// Logout / account switch.
     func reset() {
         leave()
+        closeLingeringSession()
+        endedNoticeTask?.cancel()
+        endedNoticeTask = nil
+        endedForEveryoneNotice = nil
         invite = nil
         presentation = nil
         presentationId = nil
@@ -420,7 +563,7 @@ final class LinkCallHost: ObservableObject {
             // layered half.
             guard await self?.ports.cameraGranted(true) ?? false else {
                 ui.setCamera(false)
-                ui.addSystemEvent(CameraPermission.deniedText)
+                ui.showNotice(CameraPermission.deniedText)
                 return
             }
             do {
@@ -429,7 +572,7 @@ final class LinkCallHost: ObservableObject {
                 // Fail-safe (invariant #4): revert the toggle and say why; the
                 // call stays up audio-only.
                 ui.setCamera(false)
-                ui.addSystemEvent(CallErrorText.cameraFailureText(error))
+                ui.showNotice(CallErrorText.cameraFailureText(error))
                 NSLog("multi-joiner call: publishVideo failed: %@", String(describing: error))
             }
         }
@@ -464,13 +607,17 @@ extension LinkCallHost {
                     sessionToken: session.sessionToken,
                     audio: true,
                     video: video,
-                    resolveDisplayName: nil,
+                    // Tiles are named by the one resolver: a member's sealed
+                    // profile is filed like any received profile (which
+                    // verifies a claimed username), and a person this device
+                    // already knows is named before they announce.
+                    naming: .live(callIdHex: hexEncode(request.callId), directory: .shared),
                     authBaseUrl: nil,
                     // Section 4.4: the own tile carries the profile name from
                     // the first second, and the same profile is announced to
                     // every other member inside the call group.
                     localDisplayName: GroupCallHost.ownTileName(),
-                    ownProfileEnvelope: { ProfileDirectory.shared.ownProfileEnvelope() }
+                    ownProfileEnvelope: { ProfileDirectory.shared.ownProfileEnvelopeForCall() }
                 )
                 if request.isOwner {
                     // Owner founds + hosts; `onJoined` fires inside `host`.
@@ -517,8 +664,54 @@ extension LinkCallHost {
                         linkId: mintedLinkId, blobId: blobId, kind: LinkReach.callKind)
                 }
                 return composed.url
-            }
+            },
+            copyToClipboard: { UIPasteboard.general.string = $0 },
+            isGuest: { [weak authRepository] in authRepository?.isGuest ?? false }
         ))
+    }
+
+    /// `Invite contacts` (`docs/ux/call-links.md` section 3): the list is the
+    /// person's contacts, named and ordered the way the Contacts list does
+    /// it, and the invitation goes into the one-to-one with the chosen
+    /// contact (``InviteContactSend``): the existing one by the rule Contacts
+    /// uses (``ContactConversation``), else one founded through the contact
+    /// flows' own creation path, then the conversation's normal send path,
+    /// which records the sent row.
+    func wireInvitations(chat: ChatRepository, contacts: ContactsRepository) {
+        inviteTargets = { [weak contacts] in
+            guard let contacts else { return [] }
+            return InviteContacts.rows(contacts.state.accepted) { contact in
+                let resolved = ProfileDirectory.shared.resolve(signatureKey: contact.request.fromPubkey)
+                return InviteContactRow(
+                    key: contact.request.fromPubkey,
+                    name: resolved.name,
+                    username: resolved.verifiedUsername,
+                    isPlaceholder: resolved.isPlaceholder,
+                    nameIsUsername: resolved.source == .verifiedUsername)
+            }
+        }
+        sendInvitation = { [weak chat, weak contacts] contactId, text in
+            guard let chat, let contacts, let key = Data(base64Encoded: contactId) else {
+                throw CallInviteOfferError.noSendPath
+            }
+            try await InviteContactSend.run(
+                contactKey: key,
+                text: text,
+                ports: InviteContactSend.Ports(
+                    contact: { key in
+                        contacts.state.accepted.first { $0.request.fromPubkey == key }
+                    },
+                    conversationWith: { contact in
+                        chat.oneToOneConversation(
+                            contactKey: contact.request.fromPubkey,
+                            linkedGroupIdHex: contact.groupIdHex)
+                    },
+                    found: { contact in try await contacts.foundOneToOne(with: contact) },
+                    send: { groupIdHex, text in
+                        try await chat.sendMessage(groupIdHex: groupIdHex, plaintext: text)
+                    }
+                ))
+        }
     }
 }
 

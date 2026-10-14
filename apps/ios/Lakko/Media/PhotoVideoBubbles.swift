@@ -351,6 +351,9 @@ private enum MediaShareCopy {
 private struct ViewerBar: View {
     let shareURL: URL?
     let onClose: () -> Void
+    /// The file the system's save picker is up for. A file leaving the app
+    /// goes through that picker, never the share sheet.
+    @State private var exporting: ExportedFile?
 
     var body: some View {
         HStack {
@@ -362,7 +365,9 @@ private struct ViewerBar: View {
             .accessibilityLabel(Localization.text("common.close"))
             Spacer()
             if let shareURL {
-                ShareLink(item: shareURL) {
+                Button {
+                    exporting = ExportedFile(url: shareURL)
+                } label: {
                     Label(Localization.text("common.save"), systemImage: "square.and.arrow.down")
                         .font(.body.weight(.medium))
                         .frame(minHeight: 44)
@@ -371,6 +376,7 @@ private struct ViewerBar: View {
         }
         .foregroundStyle(Color.white)
         .padding(.horizontal, 8)
+        .fileExport($exporting)
     }
 }
 

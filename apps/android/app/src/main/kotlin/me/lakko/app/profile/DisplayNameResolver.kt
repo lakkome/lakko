@@ -78,6 +78,17 @@ public fun accountIdHexOrNull(accountId: ByteArray?): String? =
     accountId?.takeIf { it.size == ACCOUNT_ID_BYTES }
         ?.joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
+/** A decoded profile envelope as the profile store takes it
+ *  ([ProfileDirectory.onProfileReceived]). */
+public fun peerProfileOf(profile: uniffi.lakko_ffi_uniffi.FfiProfile): PeerProfile =
+    PeerProfile(
+        displayName = profile.displayName,
+        username = profile.username,
+        updatedAtMs = profile.updatedAtMs,
+        accountIdHex = accountIdHexOrNull(profile.accountId),
+        usernameCertificateHex = profile.usernameCertificate?.let { me.lakko.app.reach.reachHex(it) },
+    )
+
 /**
  * The roster / sender label for a person nothing is known about, in the
  * interface language at the moment it is read (`chat.members.unnamed`,

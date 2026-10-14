@@ -60,9 +60,18 @@ vi.mock("./welcome-courier", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./welcome-courier")>();
   return { ...actual, pollForHistoryBundle: vi.fn(async () => ({ kind: "timeout" as const })) };
 });
+// The state row the scanner published, when a test drives one.
+const stateRow = vi.hoisted(() => ({ sealed: null as Uint8Array | null }));
 vi.mock("./state-bundle", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./state-bundle")>();
-  return { ...actual, pollForStateBundle: vi.fn(async () => ({ kind: "timeout" as const })) };
+  return {
+    ...actual,
+    pollForStateBundle: vi.fn(async () =>
+      stateRow.sealed === null
+        ? { kind: "timeout" as const }
+        : { kind: "received" as const, sealed: stateRow.sealed },
+    ),
+  };
 });
 
 import {
@@ -70,6 +79,15 @@ import {
   prepareAnonymousJoinFlow,
   runJoinerRecovery,
 } from "./orchestrator";
+import {
+  STATE_EXPORTER_KEY_LENGTH,
+  STATE_EXPORTER_LABEL,
+  encodeStateBundle,
+  loadKnownGroupIds,
+  type StateBundleV2,
+} from "./state-bundle";
+import { loadAccepted } from "../contacts/local-store";
+import { FakeIndexedDb, MemoryStorage } from "../test/fake-storage";
 
 beforeAll(async () => {
   const wasmPath = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -79,6 +97,7 @@ beforeAll(async () => {
 afterEach(() => {
   vi.unstubAllGlobals();
   recoveryRow.sealed = null;
+  stateRow.sealed = null;
 });
 
 interface Seen {
@@ -350,6 +369,158 @@ describe("the anonymous join (the no-password restore)", () => {
     expect((err as Error).message).toBe(JOINED_WRONG_ACCOUNT);
     expect(deviceRestoreErrorMessage(err)).toBe(JOINED_WRONG_ACCOUNT);
     session.dispose();
+  });
+});
+
+describe("the anonymous join applies the pairing state bundle", () => {
+  const ACCOUNT = new Uint8Array(16).fill(0x42);
+  const ACCOUNT_B64 = btoa(String.fromCharCode(...ACCOUNT));
+  const GROUP = "Z3JvdXAtb25lLWlkLWJ5dGVzLTMyLWxvbmctIQ==";
+  const BUNDLE: StateBundleV2 = {
+    v: 2,
+    contacts: [{ signaturePubkeyB64: "cGVlci1rZXk=", displayName: "Peer", acceptedAtMs: 5 }],
+    pins: [],
+    knownGroupIdsB64: [GROUP],
+    ownPredecessors: [],
+  };
+
+  /** The confirming device, as in the suite above, publishing a state row. */
+  function confirmWithState(payload: Uint8Array): Uint8Array {
+    const founderIdentity = wasm.Identity.fromSeed(new Uint8Array(32).fill(7));
+    const founder = wasm.DeviceGroup.createFounder(founderIdentity, ACCOUNT);
+    const decoded = parsePairingQrPayloadWith(wasm, payload, alice());
+    const added = founder.addDeviceFromWire(founderIdentity, decoded.keyPackage);
+    // ADR-0050 section 2.9: the recovery row and the state bundle, each
+    // sealed under its own post-add exporter, as `runScanFlow` publishes them.
+    const recoveryKey = founder.exportSecret(
+      founderIdentity,
+      RECOVERY_EXPORTER_LABEL,
+      decoded.rendezvousPseudonym,
+      RECOVERY_EXPORTER_KEY_LENGTH,
+    );
+    recoveryRow.sealed = wasm.sealWithKey(
+      recoveryKey,
+      buildRecoveryPayload(new Uint8Array(32).fill(0x11), new Uint8Array(16).fill(0x22)),
+    );
+    const stateKey = founder.exportSecret(
+      founderIdentity,
+      STATE_EXPORTER_LABEL,
+      decoded.rendezvousPseudonym,
+      STATE_EXPORTER_KEY_LENGTH,
+    );
+    stateRow.sealed = wasm.sealWithKey(stateKey, encodeStateBundle(BUNDLE));
+    const welcome = added.welcome;
+    founder.free();
+    founderIdentity.free();
+    return welcome;
+  }
+
+  it("holds the bundle until the device key exists, and applies it in persistTo", async () => {
+    vi.stubGlobal("localStorage", new MemoryStorage());
+    vi.stubGlobal("indexedDB", new FakeIndexedDb());
+    stubFetch(() => ({
+      status: 200,
+      json: {
+        account_id_b64: b64url(ACCOUNT),
+        session_token: "v2.tok",
+        session_expires_at_ms: 9,
+        refresh_token: "r1.tok",
+        refresh_expires_at_ms: 99,
+        key_generation: 1,
+      },
+    }));
+    const session = await prepareAnonymousJoinFlow({ loginHandle: alice() });
+    const welcome = confirmWithState(session.qrPayload);
+    const outcome = await session.accept(welcome, { welcomeCursor: 1 });
+    expect(outcome.recovery?.accountIdBytes).toEqual(ACCOUNT);
+    // Fetched at accept, applied nowhere yet: there is no device key.
+    expect(loadAccepted(ACCOUNT_B64)).toEqual([]);
+    expect(loadKnownGroupIds(ACCOUNT_B64)).toEqual([]);
+
+    const deviceKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+      "encrypt",
+      "decrypt",
+    ]);
+    const info = console.info;
+    console.info = (): void => {};
+    try {
+      await session.persistTo(deviceKey);
+    } finally {
+      console.info = info;
+    }
+    expect(loadAccepted(ACCOUNT_B64).map((c) => c.signaturePubkeyB64)).toEqual(["cGVlci1rZXk="]);
+    expect(loadKnownGroupIds(ACCOUNT_B64)).toEqual([GROUP]);
+    session.dispose();
+  });
+
+  it("a session disposed before persistTo cannot apply it", async () => {
+    vi.stubGlobal("localStorage", new MemoryStorage());
+    vi.stubGlobal("indexedDB", new FakeIndexedDb());
+    stubFetch(() => ({
+      status: 200,
+      json: {
+        account_id_b64: b64url(ACCOUNT),
+        session_token: "v2.tok",
+        session_expires_at_ms: 9,
+        refresh_token: "r1.tok",
+        refresh_expires_at_ms: 99,
+        key_generation: 1,
+      },
+    }));
+    const session = await prepareAnonymousJoinFlow({ loginHandle: alice() });
+    await session.accept(confirmWithState(session.qrPayload), { welcomeCursor: 1 });
+    session.dispose();
+    const deviceKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+      "encrypt",
+      "decrypt",
+    ]);
+    await expect(session.persistTo(deviceKey)).rejects.toThrow(/disposed/);
+    expect(loadAccepted(ACCOUNT_B64)).toEqual([]);
+  });
+
+  // `persistTo` is the only place the anonymous join applies the bundle, so
+  // every caller of `prepareAnonymousJoinFlow` must reach it, with the join
+  // still alive. The screens need a Solid runtime this suite does not have;
+  // the wiring is pinned on the source.
+  const read = (rel: string): string =>
+    readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+
+  it("the no-session restore screen hands persistTo to completeFromDeviceRestore", () => {
+    const src = read("../auth/recover/DeviceRecover.tsx");
+    expect(src).toMatch(/prepareAnonymousJoinFlow\(/);
+    expect(src).toMatch(/persistJoinState: \(deviceKey: CryptoKey\): Promise<void> => session\.persistTo\(deviceKey\)/);
+  });
+
+  it("the parked sign-in with no device key hands persistTo to completeFromPairing", () => {
+    const src = read("../auth/RestoreIdentityPrompt.tsx");
+    expect(src).toMatch(/prepareAnonymousJoinFlow\(/);
+    expect(src).toMatch(/persistAnonymousJoin = \(key\) => anon\.persistTo\(key\)/);
+    const call = src.slice(src.indexOf("await auth.completeFromPairing("));
+    expect(call.slice(0, call.indexOf(");"))).toMatch(/persistAnonymousJoin \?\? undefined/);
+  });
+
+  it("both completions call the persist hook after the device key exists and before the session lands", () => {
+    const auth = read("../auth/AuthContext.tsx");
+    for (const [name, next] of [
+      ["completeFromPairing", "completeFromDeviceRestore"],
+      ["completeFromDeviceRestore", "mintFreshIdentity"],
+    ] as const) {
+      const start = auth.indexOf(`    async ${name}(`);
+      const body = auth.slice(start, auth.indexOf(`    async ${next}(`, start));
+      const key = body.indexOf("await putDeviceKey(");
+      const persist = body.indexOf("await persistJoinState(deviceKey)");
+      const land = body.indexOf("await finishCanonicalSession(");
+      expect(key, name).toBeGreaterThan(-1);
+      expect(persist, name).toBeGreaterThan(key);
+      expect(land, name).toBeGreaterThan(persist);
+    }
+  });
+
+  it("the panel disposes the join only after the caller's completion resolved", () => {
+    const src = read("./RestoreViaDevicePanel.tsx");
+    const restored = src.indexOf("await props.onRestored(recovery);");
+    expect(restored).toBeGreaterThan(-1);
+    expect(src.slice(restored).trimStart().split("\n")[1]?.trim()).toBe("flow.dispose();");
   });
 });
 

@@ -30,6 +30,8 @@
  * the store.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
+
 export const SUPERSEDED_MIRROR_DB = "lakko-superseded-keys";
 const DB_VERSION = 2;
 export const SUPERSEDED_MIRROR_STORE = "rows";
@@ -100,6 +102,8 @@ export async function writeSupersededMirror(
   if (sameMirrorRow(lastWritten, row)) return;
   const db = await openDb();
   try {
+    // A wiped account takes no late write (`auth/account-store-gate.ts`).
+    if (!accountStoresWritable(accountIdB64)) return;
     const tx = db.transaction(SUPERSEDED_MIRROR_STORE, "readwrite");
     tx.objectStore(SUPERSEDED_MIRROR_STORE).put(row);
     await awaitTx(tx);

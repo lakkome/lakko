@@ -217,6 +217,9 @@ public final class ProvenPredecessorStore {
             NSLog("ProvenPredecessorStore: no account bound; nothing written")
             return
         }
+        guard let gate = AccountStoreGate.enterUnlessWiped(
+            ownerAccountIdB64 ?? AcceptedContactsStore.boundAccountIdB64 ?? "") else { return }
+        defer { gate.leave() }
         if map.isEmpty {
             defaults.removeObject(forKey: storageKey)
         } else if let data = try? JSONEncoder().encode(map) {

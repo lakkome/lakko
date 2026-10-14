@@ -29,7 +29,8 @@
 //! The core stays **time-source-free**: the caller supplies `now_ms` on rekey +
 //! prune; the ring never reads a clock.
 
-use crate::sframe::{CallKey, ParticipantKey, CALL_KEY_LEN};
+use crate::media_frame::MediaFrameParts;
+use crate::sframe::{media_frame_refusal, CallKey, ParticipantKey, CALL_KEY_LEN};
 use crate::{Error, Result};
 
 /// Default SFrame epoch-overlap window — the previous-epoch key is retained this
@@ -98,17 +99,23 @@ impl CallKeyRing {
     /// Pass `u64::MAX` for a previous key that never auto-expires (the caller
     /// then owns the drop via [`Self::drop_previous`]).
     ///
-    /// **A rotation to an IDENTICAL seed is a no-op** (S2 defense-in-depth): the
-    /// current key is left in place and no previous key is stashed (an already-
-    /// retained previous key, if any, is left untouched). Rotating to the same
-    /// seed would leave `current` unchanged in value yet — the catastrophic case
-    /// — a caller that then re-derives a
-    /// [`ParticipantKey`](crate::sframe::ParticipantKey) would resume from a
-    /// FRESH counter 0 under the UNCHANGED seed, reusing a `(key, nonce)` pair
-    /// with frames already sealed on it. A genuine MLS epoch advance always
-    /// yields a distinct exporter seed; an equal seed means no epoch advanced.
+    /// **A rotation to an IDENTICAL seed is a no-op**: the current key is left
+    /// in place and no previous key is stashed (an already-retained previous
+    /// key, if any, is left untouched). A genuine MLS epoch advance always
+    /// yields a distinct exporter seed; an equal seed means no epoch advanced,
+    /// so there is nothing to rotate and no reason to prompt a caller to derive
+    /// a new seal key.
+    ///
+    /// This guard is defence in depth. It used to be the only thing between a
+    /// spurious same-seed refresh and a reused nonce, because a key derived
+    /// again under an unchanged seed restarted its counter at zero. Since
+    /// ADR-0069 a derived [`ParticipantKey`](crate::sframe::ParticipantKey)
+    /// starts at a random counter in `[0, 2^62)`, so a key derived again under
+    /// an unchanged seed reuses a nonce only with probability at most
+    /// `(L1 + L2) / 2^62` for `L1` and `L2` frames sealed.
     pub fn rekey(&mut self, next: CallKey, expires_at_ms: u64) {
-        // S2 no-op guard — see the doc-comment. Constant-time seed compare
+        // Same-seed no-op guard (defence in depth since ADR-0069) — see the
+        // doc-comment. Constant-time seed compare
         // (`CallKey::seed_eq`), so nothing about the live key material leaks
         // through a variable-time branch on the byte prefix.
         if self.current.seed_eq(&next) {
@@ -134,10 +141,11 @@ impl CallKeyRing {
     /// Clock-aware rotate straight from a 32-byte seed — the entry point the FFI
     /// wraps for the client media workers on a mid-call epoch change.
     ///
-    /// A `seed` identical to the current one is a **no-op** (S2) — see
+    /// A `seed` identical to the current one is a **no-op** — see
     /// [`Self::rekey`]. The caller (the client media layer) is still expected to
-    /// invoke this only on a genuine epoch change; the no-op is defense-in-depth
-    /// against a spurious same-seed refresh resetting the seal counter.
+    /// invoke this only on a genuine epoch change; the no-op is defence in depth
+    /// (ADR-0069: a key derived again under an unchanged seed starts at its own
+    /// random counter).
     pub fn rekey_from_seed_at(&mut self, seed: [u8; CALL_KEY_LEN], now_ms: u64, overlap_ms: u64) {
         self.rekey_at(CallKey::from_seed(seed), now_ms, overlap_ms);
     }
@@ -161,6 +169,9 @@ impl CallKeyRing {
     /// Seal always uses the current epoch. Keying on the full KID keeps every
     /// one of a participant's concurrent streams on a distinct key + nonce-salt
     /// space, so their independent counters cannot reuse a `(key, nonce)` pair.
+    /// The returned key starts at a uniformly random counter in `[0, 2^62)`
+    /// (ADR-0069), so calling this again for the same KID under an unchanged
+    /// seed is safe; see [`CallKey::participant_key`] for the bound.
     ///
     /// # Errors
     ///
@@ -187,7 +198,7 @@ impl CallKeyRing {
         kid: u64,
         aad: &[u8],
         ciphertext: &[u8],
-        frame_counter: u32,
+        frame_counter: u64,
     ) -> Result<Vec<u8>> {
         let current = self.current.participant_key(kid)?;
         match current.open(aad, ciphertext, frame_counter) {
@@ -231,6 +242,41 @@ impl CallKeyRing {
         Err(Error::Crypto(
             "framed frame failed authentication under current key (no overlap window active)"
                 .into(),
+        ))
+    }
+
+    /// Open a sealed media frame in the ADR-0071 layout
+    /// (`clear_prefix || ciphertext_and_tag || sframe_header || trailer`) with
+    /// the same overlap behaviour as [`Self::try_open_with_overlap`], and
+    /// return the encoded frame `clear_prefix || plaintext`.
+    ///
+    /// The frame is split once; the KID that selects the per-stream key
+    /// (ADR-0035) is read from the frame's own SFrame header, so the caller
+    /// passes nothing but the bytes. The current key is tried first and, on
+    /// an authentication failure, the retained previous key. The header, the
+    /// clear prefix and the trailer do not depend on the seed, so a late
+    /// frame from the old epoch splits the same way.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Crypto`] when the frame is malformed (returned at once, with
+    ///   no key tried) or authenticates under **neither** key. Nothing of the
+    ///   input is returned.
+    pub fn try_open_media_frame_with_overlap(&self, wire: &[u8]) -> Result<Vec<u8>> {
+        let parts = MediaFrameParts::split(wire).map_err(|e| media_frame_refusal(&e))?;
+        let kid = parts.header.kid;
+        let current = self.current.participant_key(kid)?;
+        match current.open_media_parts(&parts) {
+            Ok(frame) => return Ok(frame),
+            Err(Error::Crypto(_)) => {},
+            Err(other) => return Err(other),
+        }
+        if let Some(prev) = self.previous.as_ref() {
+            let prev_key = prev.key.participant_key(kid)?;
+            return prev_key.open_media_parts(&parts);
+        }
+        Err(Error::Crypto(
+            "media frame failed authentication under current key (no overlap window active)".into(),
         ))
     }
 
@@ -322,12 +368,11 @@ mod tests {
         );
     }
 
-    /// S2 defense-in-depth (crypto audit): a rotation to an IDENTICAL seed is a
-    /// no-op — no previous key is stashed, the current key is unchanged, and no
-    /// overlap window opens. A same-seed rekey means no MLS epoch advanced, so
-    /// the ring must not present the "rotation happened" state that would tempt a
-    /// caller to re-derive a fresh counter-0 key under the unchanged seed. A
-    /// DISTINCT seed still rotates normally.
+    /// Defence in depth (ADR-0069 keeps the guard): a rotation to an IDENTICAL
+    /// seed is a no-op — no previous key is stashed, the current key is
+    /// unchanged, and no overlap window opens. A same-seed rekey means no MLS
+    /// epoch advanced, so the ring must not present the "rotation happened"
+    /// state. A DISTINCT seed still rotates normally.
     #[test]
     fn rekey_from_seed_at_is_a_noop_when_the_seed_is_unchanged() {
         let mut ring = CallKeyRing::from_seed(SEED_A);
@@ -351,18 +396,20 @@ mod tests {
         assert!(ring.previous().is_none());
 
         // The seal side keeps advancing on ONE key across a spurious same-seed
-        // refresh — no reset to counter 0. A receiver holding the single current
-        // key opens both frames by their DISTINCT header counters.
+        // refresh — its counter is untouched. A receiver holding the single
+        // current key opens both frames by their DISTINCT header counters.
         let mut pk = ring.participant_key(kid_of(LEAF)).expect("pk");
+        let start = pk.counter();
         let wire1 = pk.seal_framed(b"frame-1").expect("seal 1");
         ring.rekey_from_seed_at(SEED_A, 3_000, OVERLAP_DEFAULT_MS); // spurious no-op
         let wire2 = pk.seal_framed(b"frame-2").expect("seal 2");
         let (h1, _) = SframeHeader::decode(&wire1).unwrap();
         let (h2, _) = SframeHeader::decode(&wire2).unwrap();
-        assert_eq!(h1.ctr, 1);
+        assert_eq!(h1.ctr, start + 1);
         assert_eq!(
-            h2.ctr, 2,
-            "counter kept advancing — no reset to 0 on the unchanged seed"
+            h2.ctr,
+            start + 2,
+            "counter kept advancing — untouched by the same-seed refresh"
         );
         assert_eq!(
             ring.try_open_framed_with_overlap(kid_of(LEAF), &wire1)
@@ -380,6 +427,62 @@ mod tests {
         assert!(
             ring.previous().is_some(),
             "a distinct seed genuinely rotates and retains the previous key"
+        );
+    }
+
+    /// ADR-0069 through the ring: two seal keys taken from one ring for one
+    /// KID (a rejoin, a republished track) share the AEAD key and start at
+    /// different random counters below `2^62`; sealing 2048 frames each, they
+    /// never seal the same counter, and the ring opens every frame of both.
+    /// Probabilistic: the ranges overlap with probability at most
+    /// `4096 / 2^62 = 2^-50`, so a failure means a broken RNG, not bad luck.
+    #[test]
+    fn two_seal_keys_from_one_ring_never_seal_the_same_counter() {
+        let ring = CallKeyRing::from_seed(SEED_A);
+        let mut first = ring.participant_key(kid_of(LEAF)).expect("first");
+        let mut second = ring.participant_key(kid_of(LEAF)).expect("second");
+        assert_eq!(first.key_bytes(), second.key_bytes());
+        assert!(first.counter() < 1 << 62);
+        assert!(second.counter() < 1 << 62);
+        assert_ne!(first.counter(), second.counter());
+
+        let mut seen = std::collections::BTreeSet::new();
+        for pk in [&mut first, &mut second] {
+            for _ in 0..2048 {
+                let wire = pk.seal_framed(b"frame").expect("seal");
+                let (header, _) = SframeHeader::decode(&wire).expect("header");
+                assert!(seen.insert(header.ctr), "counter sealed twice");
+                assert_eq!(
+                    ring.try_open_framed_with_overlap(kid_of(LEAF), &wire)
+                        .expect("ring opens"),
+                    b"frame"
+                );
+            }
+        }
+        assert_eq!(seen.len(), 4096);
+    }
+
+    /// The ring's open accepts a counter above 32 bits on both the framed and
+    /// the raw path, and through the overlap fall-back (ADR-0069).
+    #[test]
+    fn overlap_open_accepts_a_64_bit_counter() {
+        let mut ring = CallKeyRing::from_seed(SEED_A);
+        let mut pk = ring.participant_key(kid_of(LEAF)).expect("pk");
+        pk.set_counter_for_test(u64::MAX - 2);
+        let wire = pk.seal_framed(b"wide").expect("seal framed");
+        let (counter, cipher) = pk.seal(b"aad", b"raw-wide").expect("seal raw");
+        assert_eq!(counter, u64::MAX);
+
+        ring.rekey_from_seed_at(SEED_B, 1_000, OVERLAP_DEFAULT_MS);
+        assert_eq!(
+            ring.try_open_framed_with_overlap(kid_of(LEAF), &wire)
+                .expect("framed via overlap"),
+            b"wide"
+        );
+        assert_eq!(
+            ring.try_open_with_overlap(kid_of(LEAF), b"aad", &cipher, counter)
+                .expect("raw via overlap"),
+            b"raw-wide"
         );
     }
 

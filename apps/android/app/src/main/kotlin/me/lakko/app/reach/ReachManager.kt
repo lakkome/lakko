@@ -257,6 +257,20 @@ public class ReachManager internal constructor(
     /** The bound account's signature public key, or `null`. */
     public fun ownAccountKey(): ByteArray? = binding.get()?.accountKey?.copyOf()
 
+    /**
+     * The account bound at one moment, for work that is handed something FOR
+     * that account and runs later (a launched intake): it passes this back
+     * and the manager does nothing when another account, or none, is bound by
+     * then. A sign-out and a new sign-in to the SAME account is a new one.
+     */
+    public class BoundAccount internal constructor(internal val token: Any)
+
+    /** The account bound now, or `null`. */
+    public fun boundAccount(): BoundAccount? = binding.get()?.let(::BoundAccount)
+
+    /** Whether [account] is still the bound one. */
+    public fun isBound(account: BoundAccount): Boolean = binding.get() === account.token
+
     // -----------------------------------------------------------------
     // ADR-0074 section 3.5a - the mailbox after a key rotation
     // -----------------------------------------------------------------
@@ -381,6 +395,7 @@ public class ReachManager internal constructor(
         val scope = ByteArray(REPLY_SCOPE_LEN).also(random::nextBytes)
         val scopeHex = reachHex(scope)
         lock.withLock {
+            if (binding.get() !== b) throw IllegalStateException("no session")
             doc = doc.copy(
                 replies = doc.replies + StoredReply(scopeHex, replyExpiry(nowMs), toKey?.let(::reachHex)),
             )
@@ -399,6 +414,7 @@ public class ReachManager internal constructor(
         val keysHex = personKeys(fromKey)
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 val kept = doc.replies.filterNot { it.toKeyHex in keysHex }
                 if (kept.size == doc.replies.size) return@withLock
                 doc = doc.copy(replies = kept)
@@ -417,6 +433,7 @@ public class ReachManager internal constructor(
         val b = binding.get() ?: throw IllegalStateException("no session")
         val linkHex = reachHex(linkId)
         lock.withLock {
+            if (binding.get() !== b) throw IllegalStateException("no session")
             doc = doc.copy(links = doc.links.filterNot { it.linkIdHex == linkHex } + StoredLink(linkHex, expiresAtMs))
             store.save(b.accountIdB64, doc)
             if (!syncLocked(b, System.currentTimeMillis())) throw IllegalStateException("link key not registered")
@@ -431,6 +448,7 @@ public class ReachManager internal constructor(
         val linkHex = reachHex(linkId)
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(
                     links = doc.links.map { if (it.linkIdHex == linkHex) it.copy(blobIdHex = reachHex(blobId)) else it },
                 )
@@ -451,6 +469,7 @@ public class ReachManager internal constructor(
         val b = binding.get() ?: return
         val linkHex = reachHex(linkId)
         lock.withLock {
+            if (binding.get() !== b) return@withLock
             doc = doc.copy(links = doc.links.filterNot { it.linkIdHex == linkHex })
             store.save(b.accountIdB64, doc)
             syncLocked(b, System.currentTimeMillis())
@@ -465,6 +484,7 @@ public class ReachManager internal constructor(
         if (normalised == doc.joinedGroups) return
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(joinedGroups = normalised)
                 store.save(b.accountIdB64, doc)
                 syncLocked(b, System.currentTimeMillis())
@@ -479,6 +499,7 @@ public class ReachManager internal constructor(
         if (normalised == doc.channels) return
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(channels = normalised)
                 store.save(b.accountIdB64, doc)
                 syncLocked(b, System.currentTimeMillis())
@@ -496,6 +517,7 @@ public class ReachManager internal constructor(
         val b = binding.get() ?: return
         val slot = ReachSlot(kind, if (kind.scopeless) "" else scopeHex.lowercase())
         val envelope = lock.withLock {
+            if (binding.get() !== b) return
             val next = versionOf(doc, slot) + 1
             doc = doc.copy(
                 versions = doc.versions.filterNot { it.kind == kind.name && it.scopeHex == slot.scopeHex } +
@@ -506,6 +528,9 @@ public class ReachManager internal constructor(
             syncLocked(b, System.currentTimeMillis())
             envelope
         }
+        // An envelope composed for an account that is gone is not sent
+        // through the next account's devices.
+        if (binding.get() !== b) return
         envelope?.let(::publishToDevices)
     }
 
@@ -676,6 +701,7 @@ public class ReachManager internal constructor(
             }
             decided
         }
+        if (binding.get() !== b) return
         // Sent as returned, never re-stamped here.
         adoption.sendWire?.let(::publishToDevices)
         if (adoption.storeWire != null) currentVisibility()?.let { rerunAfterAdopt(it) }
@@ -765,8 +791,12 @@ public class ReachManager internal constructor(
                     open = openChange,
                 )
             }
-            // The account's keys were rotated while this ran: what it
-            // registered is on the OLD mailbox and is not recorded.
+            // The account's keys were rotated while this ran (what it
+            // registered is on the OLD mailbox and is not recorded), or
+            // the account signed out (or another bound) while the request was
+            // out: [doc] is no longer this account's document. Writing it
+            // here would save an empty or a foreign document under this
+            // account, losing its setting and its version counters.
             if (binding.get() !== b) return false
             doc = doc.copy(
                 registered = desired.map { (pk, key) ->
@@ -944,10 +974,14 @@ public class ReachManager internal constructor(
         mutableVisibility.value = stamped
         mutableStatus.value = ReachApplyStatus.APPLYING
         lock.withLock {
+            if (binding.get() !== b) return
             doc = doc.copy(visibilityHex = reachHex(envelope))
             store.save(b.accountIdB64, doc)
             syncLocked(b, System.currentTimeMillis())
         }
+        // Signed out while the mailbox was reconciled: the setting is saved
+        // for its account; nothing is sent as whoever is bound now.
+        if (binding.get() !== b) return
         // ADR-0060 §7 — the account's other devices take the same setting.
         publishToDevices(envelope)
         try {
@@ -1040,6 +1074,7 @@ public class ReachManager internal constructor(
         doc = doc.copy(usernameCertHex = hex)
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(usernameCertHex = hex)
                 store.save(b.accountIdB64, doc)
             }
@@ -1058,6 +1093,7 @@ public class ReachManager internal constructor(
         doc = doc.copy(publishedPublic = public, publishedKey = key)
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(publishedPublic = public, publishedKey = key)
                 store.save(b.accountIdB64, doc)
             }
@@ -1165,6 +1201,7 @@ public class ReachManager internal constructor(
         val ownerKeys = personKeys(ownerKey)
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(held = doc.held.filterNot { it.ownerKeyHex in ownerKeys })
                 store.save(b.accountIdB64, doc)
             }
@@ -1356,8 +1393,14 @@ public class ReachManager internal constructor(
     /** Keep the introduction record [senderKey] offered in the one-to-one
      *  conversation (the caller checked it came from the other participant).
      *  The newest per contact wins. */
-    public suspend fun keepIntroductionOffer(senderKey: ByteArray, record: ByteArray) {
+    public suspend fun keepIntroductionOffer(
+        senderKey: ByteArray,
+        record: ByteArray,
+        /** The account the offer was received for; `null` = whoever is bound. */
+        boundAs: BoundAccount? = null,
+    ) {
         val b = binding.get() ?: return
+        if (boundAs != null && boundAs.token !== b) return
         val senderHex = reachHex(senderKey)
         val recordHex = reachHex(record)
         lock.withLock {
@@ -1369,8 +1412,15 @@ public class ReachManager internal constructor(
 
     /** Keep the bundle [senderKey] relayed, when strictly newer than the one
      *  held (`bundleIsNewer`: a re-send carries its original stamp). */
-    public suspend fun keepIntroductionsBundle(senderKey: ByteArray, wire: ByteArray, updatedAtMs: ULong) {
+    public suspend fun keepIntroductionsBundle(
+        senderKey: ByteArray,
+        wire: ByteArray,
+        updatedAtMs: ULong,
+        /** The account the bundle was received for; `null` = whoever is bound. */
+        boundAs: BoundAccount? = null,
+    ) {
         val b = binding.get() ?: return
+        if (boundAs != null && boundAs.token !== b) return
         val senderHex = reachHex(senderKey)
         lock.withLock {
             if (binding.get() !== b) return@withLock
@@ -1448,6 +1498,9 @@ public class ReachManager internal constructor(
             syncLocked(b, System.currentTimeMillis())
             envelope
         }
+        // An envelope composed for an account that is gone is not sent
+        // through the next account's devices.
+        if (binding.get() !== b) return
         envelope?.let(::publishToDevices)
     }
 
@@ -1488,6 +1541,7 @@ public class ReachManager internal constructor(
         )
         scope.launch {
             lock.withLock {
+                if (binding.get() !== b) return@withLock
                 doc = doc.copy(
                     delegations = doc.delegations.filterNot {
                         it.groupHex == entry.groupHex && it.senderKeyHex == entry.senderKeyHex &&

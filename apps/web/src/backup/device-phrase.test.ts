@@ -55,6 +55,7 @@ describe("every path that lands a device with keys stores the phrase", () => {
     expect([...PHRASE_LANDING_PATHS]).toEqual([
       "signup",
       "signup-guest",
+      "guest-kept",
       "recover",
       "provide-phrase",
       "device-pairing",

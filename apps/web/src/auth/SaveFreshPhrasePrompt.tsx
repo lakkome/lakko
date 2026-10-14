@@ -23,6 +23,7 @@
  * from `auth.freshPhrase()`, lives in memory only and is gone once the
  * session lands.
  */
+import { isAbandoned } from "./binding-epoch";
 import { createEffect, createSignal, Show, type JSX } from "solid-js";
 import { newWordsShown, publishOwedTextKey } from "./protect/account-protection";
 import { phraseProtectedHere } from "./protect/protection-state";
@@ -102,6 +103,8 @@ export default function SaveFreshPhrasePrompt(): JSX.Element {
       await auth.confirmFreshPhraseSaved();
       // No navigation: the state flips to `session` and the guard re-renders.
     } catch (err) {
+      // Signed out while the landing ran: nothing to report.
+      if (isAbandoned(err)) return;
       setError(
         isOffline(err)
           ? t("common.error.offline")

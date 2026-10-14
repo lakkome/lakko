@@ -195,7 +195,9 @@ export default function JoinGroup() {
    *  restart of something that never stopped. */
   const [requesting, setRequesting] = createSignal(false);
   let pollTimer: number | undefined;
+  let unmounted = false;
   onCleanup(() => {
+    unmounted = true;
     if (pollTimer !== undefined) clearInterval(pollTimer);
   });
 
@@ -237,6 +239,12 @@ export default function JoinGroup() {
         void reachSession()?.closeRepliesTo(journalHex(groupId));
         navigate(paths.chat(base64UrlEncodeNoPad(groupId)));
       };
+      // The page was left while the request was on its way. `onCleanup` has
+      // already run, so a timer armed now would never be cleared: it would
+      // tick until the group landed and then open the chat over whatever the
+      // person is doing. The request stands, and the mailbox loop joins the
+      // group when the Welcome arrives; the chat appears in the list.
+      if (unmounted) return;
       pollTimer = window.setInterval(() => {
         const landed = chats.get(groupIdB64);
         if (landed === undefined) return;

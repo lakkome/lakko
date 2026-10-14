@@ -264,6 +264,29 @@ final class InviteLinkShapeTests: XCTestCase {
         XCTAssertEqual(vm.preview?.inviterName, "Anna")
     }
 
+    /// The screen's `.task` is cancelled when the person leaves it. A lookup
+    /// stopped that way is not a link that failed: no failure card, and the
+    /// run-once latch is released so the next appearance looks it up again.
+    func testALookupCancelledByLeavingTheScreenIsNotAFailedLink() async throws {
+        let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
+        let vm = try landing(
+            slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug,
+            fragment: base64UrlEncodeNoPad(mint.linkSecret),
+            scope: GroupInviteDiscoveryURLProtocol.freshScope(.capability(mint.sealed)))
+        // Cancelled before the request is made, so the order is fixed.
+        let left = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            await vm.run()
+        }
+        await left.value
+        XCTAssertEqual(vm.state, .loading, "a cancellation is not reported")
+        XCTAssertNil(vm.preview)
+
+        await vm.run()
+        XCTAssertEqual(vm.state, .ready, "the next appearance looks the link up again")
+        XCTAssertEqual(vm.preview?.groupName, "Hiking club")
+    }
+
     func testTheLandingRefusesTheOldFragmentWithoutARequest() async throws {
         let scope = GroupInviteDiscoveryURLProtocol.freshScope(.ok)
         let vm = try landing(

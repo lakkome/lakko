@@ -105,6 +105,11 @@ public final class ReachCenter: ObservableObject {
     }
     private var syncTask: Task<Void, Never>?
     private var syncAgain = false
+    /// Which ``sync()`` run ``syncTask`` belongs to. ``deactivate()`` moves
+    /// it on, so a run it cancelled, finishing later, cannot clear the
+    /// reference to the run the next account started (a second run would
+    /// then start beside it).
+    private var syncRun: UInt64 = 0
 
     /// ADR-0074 section 3.5a — who an account key is NOW: the proven
     /// predecessors of the people this account knows and this account's own
@@ -323,6 +328,8 @@ public final class ReachCenter: ObservableObject {
     public func deactivate() {
         syncTask?.cancel()
         syncTask = nil
+        syncAgain = false
+        syncRun &+= 1
         accountIdB64 = nil
         accountSeed = nil
         ownAccountKey = nil
@@ -354,13 +361,17 @@ public final class ReachCenter: ObservableObject {
             syncAgain = true
             return
         }
+        let run = syncRun
         syncTask = Task { @MainActor [weak self] in
             guard let self else { return }
             repeat {
+                // A run the account left behind neither consumes the next
+                // run's follow-up request nor starts another pass.
+                guard self.syncRun == run else { return }
                 self.syncAgain = false
                 _ = await self.syncOnce()
-            } while self.syncAgain && !Task.isCancelled
-            self.syncTask = nil
+            } while self.syncRun == run && self.syncAgain && !Task.isCancelled
+            if self.syncRun == run { self.syncTask = nil }
         }
     }
 
@@ -1230,7 +1241,7 @@ public final class ReachCenter: ObservableObject {
     /// username; on leaving `public: false`. Best effort; retried on the next
     /// sync.
     public func applyEveryone(discovery: DiscoveryClient? = nil) async {
-        guard isActive, let token = sessionTokenProvider() else { return }
+        guard isActive, let token = sessionTokenProvider(), let accountIdB64 else { return }
         let wantPublic = setting.mode == .everyone
         let own = ownNameProvider()
         let name = own.displayName ?? ""
@@ -1269,12 +1280,20 @@ public final class ReachCenter: ObservableObject {
                 publicRecord = try composePublicRecord(
                     payload: payload, termOprfs: recordTermOutputs, issuedAtMs: Self.nowMs())
             }
+            // The account changed while the terms were being evaluated: what
+            // was composed is the old account's and is not published with
+            // whatever token is live now.
+            guard self.accountIdB64 == accountIdB64 else { return }
             try await client.putVisibility(
                 public: wantPublic, nameTermLookupKeys: nameTermLookupKeys, publicRecord: publicRecord)
+            // ...and the bookkeeping is not written into the next account's
+            // record.
+            guard self.accountIdB64 == accountIdB64 else { return }
             record.publishedEveryone = wantPublic
             publishedEveryoneFor = wantPublic ? publishKey : nil
             persist()
         } catch {
+            guard self.accountIdB64 == accountIdB64 else { return }
             NSLog("ADR-0060: Everyone publish failed: \(error)")
             if status == .applied { status = Self.isOffline(error) ? .pendingOffline : .failed }
         }
@@ -1287,7 +1306,8 @@ public final class ReachCenter: ObservableObject {
     /// term costs one OPRF evaluation (one lookup token), so it is recomposed
     /// only when the name, the username or the `fof` version changed.
     public func ownIntroductionRecord(discovery: DiscoveryClient = DiscoveryClient()) async -> Data? {
-        guard isActive, let fof = fofGrant(), let identityPk = ownAccountKey else { return nil }
+        guard isActive, let fof = fofGrant(), let identityPk = ownAccountKey,
+              let accountIdB64 else { return nil }
         let own = ownNameProvider()
         guard let accountId = own.accountId, accountId.count == 16 else { return nil }
         let cacheKey = "\(fof.version)|\(own.displayName ?? "")|\(own.username ?? "")|"
@@ -1313,6 +1333,10 @@ public final class ReachCenter: ObservableObject {
             NSLog("ADR-0060: introduction terms not evaluated: \(error)")
             return nil
         }
+        // The account changed while the terms were being evaluated: its
+        // record is neither cached in the next account's reach record nor
+        // handed to a caller that would send it.
+        guard self.accountIdB64 == accountIdB64 else { return nil }
         guard !termOutputs.isEmpty else { return nil }
         let payload = FfiIntroductionPayload(
             identityPk: identityPk, accountId: accountId, displayName: own.displayName,

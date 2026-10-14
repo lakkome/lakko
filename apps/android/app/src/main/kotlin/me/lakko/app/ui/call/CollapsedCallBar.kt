@@ -56,6 +56,7 @@ import me.lakko.app.calls.LinkCallHost
 import me.lakko.app.calls.OneToOneCallHost
 import me.lakko.app.calls.callBarMicControl
 import me.lakko.app.calls.callBarPhaseOf
+import me.lakko.app.calls.groupCallBarPhaseOf
 import me.lakko.app.calls.callBarStatusText
 import me.lakko.app.calls.callScreenTitle
 import me.lakko.app.calls.showsCallEncryptionChip
@@ -209,7 +210,7 @@ private fun hostedCallBar(
     val local = participants.firstOrNull { it.isLocal }
     return callBarModel(
         who = callScreenTitle(groupName = groupName, peerName = null, groupCall = true, strings = LocalStrings.current),
-        phase = callBarPhaseOf(phase),
+        phase = groupCallBarPhaseOf(phase),
         collapsed = collapsed,
         connectedSinceMs = connectedSince,
         showsLock = showsCallEncryptionChip(e2ee.active, e2ee.shortFingerprint),

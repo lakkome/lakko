@@ -201,18 +201,16 @@ impl GroupCallSession {
     /// **Idempotent across the same epoch — a same-seed
     /// refresh is a no-op.** Calling at the same epoch
     /// re-derives the identical seed; the core **refuses to
-    /// rotate** in that case (S2 defense-in-depth) — no
-    /// previous key is stashed, no counter is reset, and
-    /// `needs_rekey` stays unset. This is load-bearing on the
-    /// SEND side: were a same-seed refresh to rotate, the next
-    /// [`Self::own_participant_key`] would hand back a **fresh
-    /// counter-0** key under the **unchanged** seed, and
-    /// resuming sealing on it would reuse a `(key, nonce)` pair
-    /// with frames already sealed — catastrophic AEAD nonce
-    /// reuse. (A same-seed refresh is harmless only on the
-    /// RECEIVE / overlap-open side, where a late frame decodes
-    /// under either slot; the caller MUST NOT resume sealing
-    /// from a key freshly derived off an unchanged seed.) Only
+    /// rotate** in that case — no previous key is stashed and
+    /// `needs_rekey` stays unset, so the platform is not
+    /// prompted to swap its seal key when nothing rotated. The
+    /// guard is defence in depth: since ADR-0069 a key from
+    /// [`Self::own_participant_key`] starts at a random counter
+    /// in `[0, 2^62)`, so even a seal key derived again under
+    /// an unchanged seed reuses a `(key, nonce)` pair only with
+    /// probability at most `(L1 + L2) / 2^62` for `L1` and `L2`
+    /// frames sealed; the guard is no longer the only thing
+    /// between a spurious refresh and a reused nonce. Only
     /// a genuine epoch advance (a distinct exporter seed)
     /// rotates. Calling across N epochs in rapid succession
     /// only retains the **most recent previous** epoch's seed;
@@ -259,13 +257,13 @@ impl GroupCallSession {
         expires_at_ms: u64,
     ) -> Result<()> {
         let next = CallKey::derive(group, identity, &self.call_id)?;
-        // S2 defense-in-depth (crypto audit): a same-seed refresh (no MLS epoch
-        // advanced) is a total no-op. `CallKeyRing::rekey` already refuses to
-        // stash a previous key for an unchanged seed; suppressing `needs_rekey`
-        // here is the load-bearing companion — raising it on a same-seed refresh
-        // would prompt the platform to re-derive a fresh counter-0 seal key under
-        // the UNCHANGED seed and resume sealing, reusing a (key, nonce) pair with
-        // frames already sealed on it. Only a genuine rotation (a distinct seed)
+        // Defence in depth: a same-seed refresh (no MLS epoch advanced) is a
+        // total no-op. `CallKeyRing::rekey` already refuses to stash a previous
+        // key for an unchanged seed; suppressing `needs_rekey` here is its
+        // companion — nothing rotated, so the platform is not prompted to derive
+        // a new seal key. Were it to derive one anyway, that key starts at its
+        // own random counter (ADR-0069), so this guard is no longer what keeps a
+        // nonce from being reused. Only a genuine rotation (a distinct seed)
         // touches the ledger. Constant-time seed compare (`CallKey::seed_eq`).
         if self.ring.current().seed_eq(&next) {
             return Ok(());
@@ -412,7 +410,9 @@ impl GroupCallSession {
     /// resulting KID `(own_leaf << 8) | stream_index` into the derivation
     /// (ADR-0035) keeps each of the local participant's streams on a distinct
     /// key + nonce-salt space so their independent counters cannot reuse a
-    /// `(key, nonce)` pair.
+    /// `(key, nonce)` pair. The returned key starts at a uniformly random
+    /// counter in `[0, 2^62)` (ADR-0069), so deriving it again under an
+    /// unchanged seed is safe; see [`CallKey::participant_key`] for the bound.
     ///
     /// # Errors
     ///
@@ -497,8 +497,8 @@ impl GroupCallSession {
     /// [`Self::drop_previous_call_key`] — this collapses to
     /// "current key only" and the second path is skipped.
     ///
-    /// `frame_counter` is the explicit counter the SFrame
-    /// header carries (RFC 9605 §4.4); the producer's
+    /// `frame_counter` is the explicit 64-bit counter the SFrame
+    /// header carries (RFC 9605 §4.3, ADR-0069); the producer's
     /// monotonic seal-side counter survives the rotation
     /// because the receiver doesn't need to know which
     /// epoch produced a frame — just whether the AEAD
@@ -519,7 +519,7 @@ impl GroupCallSession {
         kid: u64,
         aad: &[u8],
         ciphertext: &[u8],
-        frame_counter: u32,
+        frame_counter: u64,
     ) -> Result<Vec<u8>> {
         self.ring
             .try_open_with_overlap(kid, aad, ciphertext, frame_counter)
@@ -752,13 +752,11 @@ mod tests {
         assert!(!s.has_live_previous(u64::MAX));
     }
 
-    /// S2 defense-in-depth (crypto audit): a `refresh_call_key*` that re-derives
-    /// the SAME seed (no MLS epoch advanced) is a total no-op — it stashes NO
-    /// previous key, leaves the current seed unchanged, and does NOT raise
-    /// `needs_rekey`. Raising `needs_rekey` would prompt the platform to
-    /// re-derive a fresh counter-0 seal key under the UNCHANGED seed, reusing a
-    /// `(key, nonce)` pair with frames already sealed on it. A genuine rotation
-    /// (a distinct seed) is unaffected (proven by the timing tests above).
+    /// Defence in depth (ADR-0069 keeps the guard): a `refresh_call_key*` that
+    /// re-derives the SAME seed (no MLS epoch advanced) is a total no-op — it
+    /// stashes NO previous key, leaves the current seed unchanged, and does NOT
+    /// raise `needs_rekey`, since nothing rotated. A genuine rotation (a
+    /// distinct seed) is unaffected (proven by the timing tests above).
     #[test]
     fn same_seed_refresh_is_a_noop_and_does_not_flag_rekey() {
         let (mut s, g, id) = fixture_session();

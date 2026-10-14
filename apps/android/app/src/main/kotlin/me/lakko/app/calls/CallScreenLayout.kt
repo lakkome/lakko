@@ -20,8 +20,8 @@ import me.lakko.app.l10n.Strings
  * portrait: the other person's avatar large and centred in the upper half,
  * their name under it in the largest type on the screen." "A video call fills
  * the screen with the other person, and the self-view is a small rounded
- * rectangle in a corner." The tiled grid survives only for a group call, which
- * section 9 puts out of scope for this redesign.
+ * rectangle in a corner." A group call has tiles, laid out by
+ * `GroupCallLayout.kt` (`docs/ux/group-call-grid.md`).
  *
  * Pure and Android-free, so the choice is unit-tested on the host JVM.
  */
@@ -48,7 +48,8 @@ public enum class CallStage {
      */
     LOCAL_VIDEO,
 
-    /** More than one other person: the tiled grid, unchanged (section 9). */
+    /** A group call: its tiles, in the grid or the focus layout
+     *  ([groupLayoutKind]). */
     GRID,
 }
 
@@ -63,10 +64,9 @@ public enum class CallStage {
  *
  * [groupCall] is what KIND of call this is, not how many people are in it right
  * now, and it decides before anything else. A group call whose second
- * participant has not joined yet still has a roster, a chat and an invite to
- * offer, and painting it as a 1x1 portrait would take all three away until
- * somebody else arrived — so a group call keeps its grid throughout, camera or
- * no camera.
+ * participant has not joined yet still has a roster and an invite to offer,
+ * and painting it as a 1x1 portrait would take both away until somebody else
+ * arrived — so a group call keeps its tiles throughout, camera or no camera.
  */
 public fun callStage(
     remoteParticipants: Int,
@@ -132,22 +132,6 @@ public fun callScreenTitle(
     return if (groupCall) group ?: strings["call.label.group"] else peer ?: strings["chat.call.voice"]
 }
 
-/**
- * What an unresolved participant is called — `docs/ux/calls.md` section 4 and
- * the ADR-0021 roster rule ("unique hit -> displayName, else … Participant N").
- *
- * Never the SFU pseudonym. A pseudonym looks exactly like something the reader
- * ought to recognise and cannot: it is stable, it is theirs, and it says
- * nothing. `Participant 2` is honest about the one thing that is actually true
- * — this device does not know who that is — and it stays readable next to the
- * names that did resolve.
- *
- * [ordinal] is 1-based in arrival order among the participants that failed to
- * resolve, so the numbering is stable for the length of a call.
- */
-public fun unresolvedParticipantLabel(ordinal: Int, strings: Strings = Localization.strings.value): String =
-    strings.format("call.participant.numbered", mapOf("number" to (if (ordinal < 1) 1 else ordinal).toString()))
-
 /** How long the controls stay up before fading on a connected video call. */
 public const val CALL_CONTROLS_AUTO_HIDE_MS: Long = 5_000L
 
@@ -181,38 +165,3 @@ public fun controlsMayAutoHide(
     connected &&
         !alone &&
         (stage == CallStage.REMOTE_VIDEO || stage == CallStage.LOCAL_VIDEO)
-
-/**
- * The tile a group call draws large, or `null` for an equal grid
- * (`docs/ux/calls.md` section 4.4): pinned, else speaking with video, else the
- * first in roster order with video, else nobody. The user's own tile is never
- * featured while anyone else is present; alone, their preview is the only thing
- * there is to show. `speaking` is a hint the transport may never set, and the
- * rule reads the same when it is always `false`.
- *
- * What this replaced picked the first remote whatever they were sending, so
- * the first person to join held the big slot for the whole call with an avatar
- * in it while other people's cameras ran in the small tiles.
- */
-public fun featuredParticipant(
-    participants: List<CallUiState.Participant>,
-    pinnedId: String?,
-): CallUiState.Participant? {
-    if (pinnedId != null) {
-        participants.firstOrNull { it.id == pinnedId }?.let { return it }
-    }
-    val remotes = participants.filter { !it.isLocal }
-    if (remotes.isEmpty()) return participants.firstOrNull { it.isLocal }
-    return remotes.firstOrNull { it.speaking && it.camOn }
-        ?: remotes.firstOrNull { it.camOn }
-}
-
-/**
- * The grid under (or instead of) the featured tile: everyone but the featured
- * one, in roster order; everyone, when there is none.
- */
-public fun galleryParticipants(
-    participants: List<CallUiState.Participant>,
-    featured: CallUiState.Participant?,
-): List<CallUiState.Participant> =
-    if (featured == null) participants else participants.filter { it.id != featured.id }

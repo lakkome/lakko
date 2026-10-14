@@ -63,13 +63,16 @@ public class SharedPreferencesCoPublishedJournalMarks(
 ) : CoPublishedJournalMarks {
     override fun mark(journalIdHex: String) {
         val acct = account() ?: return
-        synchronized(LOCK) {
-            val key = keyOf(acct)
-            val current = prefs.getStringSet(key, emptySet()).orEmpty()
-            val hex = journalIdHex.lowercase()
-            if (hex in current) return
-            // A fresh set: the one `getStringSet` returns must not be mutated.
-            prefs.edit().putStringSet(key, current + hex).apply()
+        // The gate outside this store's own lock (its order with the wipe).
+        me.lakko.app.account.AccountStoreGate.write(acct) {
+            synchronized(LOCK) {
+                val key = keyOf(acct)
+                val current = prefs.getStringSet(key, emptySet()).orEmpty()
+                val hex = journalIdHex.lowercase()
+                if (hex in current) return
+                // A fresh set: the one `getStringSet` returns must not be mutated.
+                prefs.edit().putStringSet(key, current + hex).apply()
+            }
         }
     }
 

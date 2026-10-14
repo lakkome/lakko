@@ -193,8 +193,10 @@ public object GroupNameStore {
         load(context, accountIdB64, groupIdHex)?.name?.takeIf { it.isNotBlank() }
 
     public fun save(context: Context, accountIdB64: String, groupIdHex: String, value: StoredGroupName) {
-        prefs(context).edit().putString(key(accountIdB64, groupIdHex), encodeStoredGroupName(value)).apply()
-        mutableVersion.value += 1
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            prefs(context).edit().putString(key(accountIdB64, groupIdHex), encodeStoredGroupName(value)).apply()
+            mutableVersion.value += 1
+        }
     }
 
     /** Forget every group name held for [accountIdB64] (forget device). */

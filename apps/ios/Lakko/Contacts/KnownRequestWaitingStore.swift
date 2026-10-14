@@ -64,6 +64,8 @@ public final class KnownRequestWaitingStore {
     }
 
     private func save(_ waiting: [IncomingContactRequest], accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         let key = Self.storageKey(accountIdB64: accountIdB64)
         if waiting.isEmpty {
             defaults.removeObject(forKey: key)

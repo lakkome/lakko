@@ -1085,36 +1085,27 @@ final class KeyRotationRunnerTests: XCTestCase {
         XCTAssertEqual(KeyRotationPlan.remaining(old), [.profile])
     }
 
-    func testWithNoSnapshotTheBackupStaysOwedAndNothingIsUploaded() async throws {
+    /// The account backup carries no MLS state, so the step waits for one
+    /// thing only: a chat layer that knows the account's group list.
+    func testUntilTheChatLayerIsReadyTheBackupStaysOwedAndNothingIsUploaded() async throws {
         let world = try World(seed: oldSeed, roster: [own, target])
         let store = store()
-        var snapshot: Data?
-        var bootstrapped = true
-        var uploads: [(snapshot: Data, groups: [String])] = []
+        var bootstrapped = false
+        var uploads: [[String]] = []
         var all = ports(world)
         all.resealBackup = {
             try await KeyRotationBackup.reseal(
                 chatBootstrapped: bootstrapped,
-                snapshot: { snapshot },
                 knownGroupIdsHex: { ["aa"] },
-                upload: { taken, groups in uploads.append((taken, groups)) })
+                upload: { groups in uploads.append(groups) })
         }
         let runner = KeyRotationRunner(ports: all, store: store)
 
         _ = await runner.rotate(deviceId: target, attestation: nil)
 
-        XCTAssertTrue(uploads.isEmpty, "an empty snapshot must never overwrite the server's copy")
+        XCTAssertTrue(uploads.isEmpty, "an envelope listing no conversation must never overwrite the server's copy")
         XCTAssertEqual(KeyRotationPlan.remaining(try XCTUnwrap(store.load(accountIdB64: accountIdB64))), [.backup])
 
-        // An empty snapshot is no snapshot.
-        snapshot = Data()
-        await runner.resumeOwed()
-        XCTAssertTrue(uploads.isEmpty)
-        XCTAssertEqual(KeyRotationPlan.remaining(try XCTUnwrap(store.load(accountIdB64: accountIdB64))), [.backup])
-
-        // A snapshot from a chat layer that has not bootstrapped is not used.
-        snapshot = Data([1, 2, 3])
-        bootstrapped = false
         await runner.resumeOwed()
         XCTAssertTrue(uploads.isEmpty)
         XCTAssertEqual(KeyRotationPlan.remaining(try XCTUnwrap(store.load(accountIdB64: accountIdB64))), [.backup])
@@ -1122,8 +1113,7 @@ final class KeyRotationRunnerTests: XCTestCase {
         bootstrapped = true
         await runner.resumeOwed()
         XCTAssertEqual(uploads.count, 1)
-        XCTAssertEqual(uploads.first?.snapshot, Data([1, 2, 3]))
-        XCTAssertEqual(uploads.first?.groups, ["aa"])
+        XCTAssertEqual(uploads.first, ["aa"])
         if let after = store.load(accountIdB64: accountIdB64) {
             XCTAssertTrue(after.backupDone)
         }
@@ -1132,22 +1122,16 @@ final class KeyRotationRunnerTests: XCTestCase {
     func testTheBackupStepThrowsWhatTheUploadThrewAndNamesWhyItDidNotRun() async {
         do {
             try await KeyRotationBackup.reseal(
-                chatBootstrapped: true, snapshot: { Data([9]) }, knownGroupIdsHex: { [] },
-                upload: { _, _ in throw Down() })
+                chatBootstrapped: true, knownGroupIdsHex: { [] },
+                upload: { _ in throw Down() })
             XCTFail("a failed upload must throw")
         } catch { XCTAssertTrue(error is Down) }
         do {
             try await KeyRotationBackup.reseal(
-                chatBootstrapped: false, snapshot: { Data([9]) }, knownGroupIdsHex: { [] },
-                upload: { _, _ in XCTFail("no upload before the chat layer is ready") })
+                chatBootstrapped: false, knownGroupIdsHex: { [] },
+                upload: { _ in XCTFail("no upload before the chat layer is ready") })
             XCTFail("must throw")
         } catch { XCTAssertEqual(error as? KeyRotationBackup.NotReady, .chatNotBootstrapped) }
-        do {
-            try await KeyRotationBackup.reseal(
-                chatBootstrapped: true, snapshot: { nil }, knownGroupIdsHex: { [] },
-                upload: { _, _ in XCTFail("no upload without a snapshot") })
-            XCTFail("must throw")
-        } catch { XCTAssertEqual(error as? KeyRotationBackup.NotReady, .noSnapshot) }
     }
 
     func testTheDirectoryRefusingTheProofFallsBackToTheAttestationAlone() async throws {

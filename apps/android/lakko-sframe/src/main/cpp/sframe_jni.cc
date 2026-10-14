@@ -33,8 +33,14 @@
 
 #include <jni.h>
 
-#include <cstdint>
+#include <android/log.h>
+#include <link.h>
 
+#include <atomic>
+#include <cstdint>
+#include <cstring>
+
+#include "receiver-delay.h"
 #include "sframe-bridge.h"
 
 // SPDX: every JNI entry point below has the canonical
@@ -143,6 +149,47 @@ Java_me_lakko_sframe_LakkoFrameEncryptor_nativeRekey(
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
+// Negotiated codec (ADR-0071). Tell the encryptor which codec its sender
+// negotiated, as one of the `LAKKO_SFRAME_MEDIA_CODEC_*` values (0 other,
+// 1 VP8, 2 Opus; any other value is stored and sealed as "other"). It
+// decides how many leading bytes of each frame stay in the clear. Only
+// the low 8 bits of `codec` are used; the Kotlin facade passes 0..=2. A
+// null pointer is a no-op. An atomic store on the bridge side, so it is
+// safe against a concurrent Encrypt on the codec thread.
+JNIEXPORT void JNICALL
+Java_me_lakko_sframe_LakkoFrameEncryptor_nativeSetCodec(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/,
+    jlong native_ptr,
+    jint codec) {
+    if (native_ptr == 0) {
+        return;
+    }
+    auto* enc = reinterpret_cast<lakko::sframe::LakkoFrameEncryptor*>(native_ptr);
+    enc->SetCodec(static_cast<uint8_t>(codec));
+}
+
+// Map a negotiated codec name ("VP8", "opus", "video/VP8", "audio/opus",
+// any case) to its `LAKKO_SFRAME_MEDIA_CODEC_*` value; anything else and
+// null map to 0 (other). The one mapping iOS uses too
+// (`LakkoFrameEncryptor::CodecFromName`).
+JNIEXPORT jint JNICALL
+Java_me_lakko_sframe_LakkoFrameEncryptor_nativeCodecFromName(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring name) {
+    if (name == nullptr) {
+        return static_cast<jint>(LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+    }
+    const char* chars = env->GetStringUTFChars(name, /*isCopy=*/nullptr);
+    if (chars == nullptr) {
+        return static_cast<jint>(LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+    }
+    const uint8_t codec = lakko::sframe::LakkoFrameEncryptor::CodecFromName(chars);
+    env->ReleaseStringUTFChars(name, chars);
+    return static_cast<jint>(codec);
+}
+
 // ---------------------------------------------------------------
 // LakkoFrameDecryptor
 // ---------------------------------------------------------------
@@ -245,6 +292,256 @@ Java_me_lakko_sframe_LakkoFrameDecryptor_nativePrune(
     }
     auto* dec = reinterpret_cast<lakko::sframe::LakkoFrameDecryptor*>(native_ptr);
     dec->Prune(static_cast<uint64_t>(now_ms));
+}
+
+}  // extern "C"
+
+// ---------------------------------------------------------------
+// ReceiverPlayoutDelay (ADR-0070, note of 2026-10-12)
+// ---------------------------------------------------------------
+//
+// A remote receiver's minimum playout delay, set through the engine's
+// `webrtc::RtpReceiverInterface::SetJitterBufferMinimumDelay`, which
+// `org.webrtc.RtpReceiver` does not bind. The call goes by vtable slot
+// (`apps/shared/sframe-bridge/receiver-delay.h`, where the evidence for
+// the slot, the slot encoding of each ABI and the calling convention is
+// written down). That evidence was read from the machine code of
+// `libjingle_peerconnection_so.so` of io.github.webrtc-sdk:android
+// 125.6422.07, so nothing is called unless the library loaded in this
+// process IS that binary, by its ELF build id.
+
+namespace {
+
+const char kDelayLogTag[] = "lakko.receiver-delay";
+const char kEngineLibrarySuffix[] = "libjingle_peerconnection_so.so";
+
+// The GNU build id of the slice of 125.6422.07 this library is built for.
+// The two slices do not share a vtable encoding (arm64-v8a is built with
+// relative vtables, x86_64 with absolute ones), so each is pinned by itself.
+#if defined(__aarch64__)
+const uint8_t kVerifiedBuildId[] = {0x7b, 0x8b, 0x82, 0x9c,
+                                    0xed, 0x80, 0x02, 0x1d};
+#elif defined(__x86_64__)
+const uint8_t kVerifiedBuildId[] = {0x30, 0x68, 0x54, 0xeb,
+                                    0xdf, 0x81, 0x49, 0x05};
+#else
+const uint8_t kVerifiedBuildId[] = {0};
+#endif
+
+constexpr std::size_t kMaxBuildIdLen = 64;
+
+struct EngineBuildId {
+    // The engine library is mapped in this process.
+    bool loaded = false;
+    // It carries a GNU build id (`len` bytes of `bytes`).
+    bool found = false;
+    std::size_t len = 0;
+    uint8_t bytes[kMaxBuildIdLen] = {};
+};
+
+bool EndsWith(const char* text, const char* suffix) {
+    const std::size_t text_len = std::strlen(text);
+    const std::size_t suffix_len = std::strlen(suffix);
+    return text_len >= suffix_len &&
+           std::strcmp(text + (text_len - suffix_len), suffix) == 0;
+}
+
+// Read the NT_GNU_BUILD_ID note of the loaded engine library out of its
+// mapped PT_NOTE segments. Every length is checked against the segment.
+int FindEngineBuildId(struct dl_phdr_info* info, std::size_t /*size*/,
+                      void* data) {
+    if (info->dlpi_name == nullptr ||
+        !EndsWith(info->dlpi_name, kEngineLibrarySuffix)) {
+        return 0;
+    }
+    auto* out = static_cast<EngineBuildId*>(data);
+    out->loaded = true;
+    for (int i = 0; i < info->dlpi_phnum; ++i) {
+        const ElfW(Phdr)& segment = info->dlpi_phdr[i];
+        if (segment.p_type != PT_NOTE) {
+            continue;
+        }
+        const auto* cursor =
+            reinterpret_cast<const uint8_t*>(info->dlpi_addr + segment.p_vaddr);
+        std::size_t left = static_cast<std::size_t>(segment.p_memsz);
+        while (left >= sizeof(ElfW(Nhdr))) {
+            ElfW(Nhdr) note;
+            std::memcpy(&note, cursor, sizeof(note));
+            const std::size_t name_size =
+                (static_cast<std::size_t>(note.n_namesz) + 3u) & ~std::size_t{3};
+            const std::size_t desc_size =
+                (static_cast<std::size_t>(note.n_descsz) + 3u) & ~std::size_t{3};
+            if (name_size > left - sizeof(note) ||
+                desc_size > left - sizeof(note) - name_size) {
+                break;
+            }
+            const uint8_t* name = cursor + sizeof(note);
+            const uint8_t* desc = name + name_size;
+            if (note.n_type == NT_GNU_BUILD_ID && note.n_namesz == 4 &&
+                std::memcmp(name, "GNU", 4) == 0 && note.n_descsz > 0 &&
+                note.n_descsz <= kMaxBuildIdLen) {
+                out->found = true;
+                out->len = note.n_descsz;
+                std::memcpy(out->bytes, desc, note.n_descsz);
+                return 1;
+            }
+            cursor = desc + desc_size;
+            left -= sizeof(note) + name_size + desc_size;
+        }
+    }
+    // The engine library, with no build id: stop looking.
+    return 1;
+}
+
+EngineBuildId LoadedEngineBuildId() {
+    EngineBuildId id;
+    dl_iterate_phdr(&FindEngineBuildId, &id);
+    return id;
+}
+
+// 0: not decided. 1: the loaded engine is the verified binary. 2: an engine
+// library is loaded and it is not the verified binary.
+std::atomic<int> g_engine_verified{0};
+
+// The "asked before the engine library was loaded" line was written.
+std::atomic<bool> g_engine_absent_logged{false};
+
+// Whether the engine library loaded in this process is the binary the
+// evidence was read from.
+//
+// A verdict is kept only once there is a loaded engine library to give it
+// about. Asked before `libjingle_peerconnection_so.so` is loaded (nothing in
+// the app does so today, but nothing forbids it either), the answer is "no"
+// for that call and the question stays open, so an early caller cannot turn
+// the setter off for the rest of the process. While it is open each call
+// walks the loaded-library list once (`dl_iterate_phdr`); callers ask once
+// per call start, and no set reaches here while the answer is "no".
+bool EngineIsVerified() {
+    int decided = g_engine_verified.load(std::memory_order_acquire);
+    if (decided == 0) {
+        const EngineBuildId id = LoadedEngineBuildId();
+        if (!id.loaded) {
+            if (!g_engine_absent_logged.exchange(true,
+                                                 std::memory_order_acq_rel)) {
+                __android_log_print(
+                    ANDROID_LOG_INFO, kDelayLogTag,
+                    "setter not available yet: "
+                    "libjingle_peerconnection_so.so is not loaded; asked "
+                    "again at the next call");
+            }
+            return false;
+        }
+        const bool ok = lakko::receiver_delay::PlatformSupported() &&
+                        id.found && id.len == sizeof(kVerifiedBuildId) &&
+                        std::memcmp(id.bytes, kVerifiedBuildId, id.len) == 0;
+        decided = ok ? 1 : 2;
+        // Two threads deciding at once reach the same verdict; the one that
+        // stores it second says nothing.
+        int undecided = 0;
+        if (!g_engine_verified.compare_exchange_strong(
+                undecided, decided, std::memory_order_acq_rel)) {
+            return undecided == 1;
+        }
+        if (ok) {
+            __android_log_print(
+                ANDROID_LOG_INFO, kDelayLogTag,
+                "setter available: the loaded libjingle_peerconnection_so.so "
+                "is the verified binary of 125.6422.07");
+        } else {
+            __android_log_print(
+                ANDROID_LOG_WARN, kDelayLogTag,
+                "setter NOT available: the loaded "
+                "libjingle_peerconnection_so.so is not the verified binary "
+                "of 125.6422.07 (build id %s); the playout delay stays "
+                "observe-only until the evidence is redone for this binary",
+                id.found ? "differs" : "unreadable");
+        }
+    }
+    return decided == 1;
+}
+
+void DelayLogSink(const char* line) {
+    if (line != nullptr) {
+        __android_log_print(ANDROID_LOG_INFO, kDelayLogTag, "%s", line);
+    }
+}
+
+}  // namespace
+
+extern "C" {
+
+// The build id of the loaded engine library as lowercase hex, or null when
+// the library is not loaded or carries none. For the log and the tests.
+JNIEXPORT jstring JNICALL
+Java_me_lakko_sframe_ReceiverPlayoutDelay_nativeEngineBuildId(
+    JNIEnv* env,
+    jobject /*thiz*/) {
+    const EngineBuildId id = LoadedEngineBuildId();
+    if (!id.found) {
+        return nullptr;
+    }
+    static const char kHex[] = "0123456789abcdef";
+    char text[2 * kMaxBuildIdLen + 1];
+    for (std::size_t i = 0; i < id.len; ++i) {
+        text[2 * i] = kHex[id.bytes[i] >> 4];
+        text[2 * i + 1] = kHex[id.bytes[i] & 0x0f];
+    }
+    text[2 * id.len] = '\0';
+    return env->NewStringUTF(text);
+}
+
+// Whether a set can be attempted in this process: the loaded engine is the
+// verified binary and the probe has not failed.
+JNIEXPORT jboolean JNICALL
+Java_me_lakko_sframe_ReceiverPlayoutDelay_nativeIsAvailable(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/) {
+    return (EngineIsVerified() && !lakko::receiver_delay::ProbeHasFailed())
+               ? JNI_TRUE
+               : JNI_FALSE;
+}
+
+// Set the minimum playout delay of the engine receiver at
+// `receiver_ptr` (what `org.webrtc.RtpReceiver.getNativeRtpReceiver()`
+// returns: a raw `webrtc::RtpReceiverInterface*` the Java object holds a
+// reference on) to `delay_ms`; 0 gives it back to the engine.
+// `media_type` is 0 for an audio receiver and 1 for a video one;
+// `decryptor_ptr` is the native pointer of the `LakkoFrameDecryptor`
+// attached to this receiver, or 0. Returns
+// `lakko::receiver_delay::Status` as an int.
+//
+// Blocks until the engine's worker thread has run the call: never call it
+// on the main thread (the app runs it on its one playout-delay thread). The
+// caller keeps the Java `RtpReceiver` (and the decryptor) undisposed for
+// the call.
+JNIEXPORT jint JNICALL
+Java_me_lakko_sframe_ReceiverPlayoutDelay_nativeSet(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/,
+    jlong receiver_ptr,
+    jint delay_ms,
+    jint media_type,
+    jlong decryptor_ptr) {
+    using lakko::receiver_delay::Status;
+    if (lakko::receiver_delay::ProbeHasFailed()) {
+        return static_cast<jint>(Status::kProbeFailed);
+    }
+    if (receiver_ptr == 0 || delay_ms < 0 || !EngineIsVerified() ||
+        (media_type != lakko::receiver_delay::kMediaTypeAudio &&
+         media_type != lakko::receiver_delay::kMediaTypeVideo)) {
+        return static_cast<jint>(Status::kNotAvailable);
+    }
+    webrtc::FrameDecryptorInterface* decryptor =
+        decryptor_ptr == 0
+            ? nullptr
+            : reinterpret_cast<lakko::sframe::LakkoFrameDecryptor*>(
+                  decryptor_ptr);
+    const Status status = lakko::receiver_delay::SetMinimumPlayoutDelay(
+        reinterpret_cast<void*>(receiver_ptr),
+        static_cast<uint32_t>(delay_ms), static_cast<int>(media_type),
+        decryptor, &lakko::sframe::LakkoFrameDecryptor::IsLive,
+        &DelayLogSink);
+    return static_cast<jint>(status);
 }
 
 }  // extern "C"

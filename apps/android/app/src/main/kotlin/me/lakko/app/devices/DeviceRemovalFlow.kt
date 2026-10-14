@@ -292,7 +292,7 @@ public class DeviceRemovalOwedStore(private val storage: MarkerStorage) {
             if (rows.isEmpty()) {
                 storage.remove(KEY_PREFIX + accountIdB64)
             } else {
-                storage.set(KEY_PREFIX + accountIdB64, json.encodeToString(LIST, rows))
+                me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.set(KEY_PREFIX + accountIdB64, json.encodeToString(LIST, rows)) }
             }
         } catch (_: Throwable) {
             // The debt then lives for this process only.

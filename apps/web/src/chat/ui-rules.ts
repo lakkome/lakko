@@ -65,6 +65,14 @@ export type UiRules = Pick<
   | "callBarVisible"
   | "callBarStatusKind"
   | "callBarElapsedMs"
+  // A group call's screen (`docs/ux/group-call-grid.md`): the grid's geometry
+  // and who is on the stage, so the three clients draw the same thing on the
+  // same width; and whether the outgoing tone plays at all, which every
+  // client used to answer "yes" for a call nobody was being rung in.
+  // `calls/group-call-layout.ts` is the adapter.
+  | "ringbackPlays"
+  | "callGrid"
+  | "callStage"
   // Chat folders (`docs/ux/chat-folders.md`, ADR-0058): which conversations
   // a folder holds and in what order, and the name rule and id minting the
   // editor needs. `chat/folders/folder-view.ts` is the adapter.

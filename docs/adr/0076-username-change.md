@@ -17,7 +17,8 @@
 - **UX:** `docs/ux/profile-names.md` (to be extended with the two screens).
 
 Renumbered from 0068 on 2026-10-13: the main branch had taken 0064 to 0071 for
-other decisions. Commit messages before that date name this ADR as 0068.
+other decisions. Commit messages before that date name this ADR as 0068, and so do the
+migration files of this work, whose bytes are checksummed and were left as written.
 
 ## Context
 
@@ -189,3 +190,45 @@ Open:
 - Channel member cards are not re-published by the rename itself on iOS and
   Android.
 - The rollback view on web has no text of its own.
+
+## Merged with main (2026-10-14)
+
+Main had built its own guest lifecycle while this branch was open (ADR-0032,
+`docs/ux/call-links.md` section 9): a guest joins a call with no phrase
+shown, lives 23 hours, and is asked `Create account` / `No, thanks` after the
+call. The two claims are now one flow, by the maintainer's decision:
+
+- **When and for how long is main's.** The question comes only after the
+  call; `No, thanks` deletes the account; a guest older than 23 hours is
+  removed; the half-claimed states are main's.
+- **The step is this ADR's.** One screen for the name and the first
+  password. No phrase is shown and no words are checked afterwards: the
+  person lands on the "Protect your account" step of ADR-0075, as after an
+  ordinary sign-up. The phrase moves unseen from the guest's row to the
+  account's row.
+- **The other entry points are removed** (Settings, Devices, the protect
+  card, the recovery-email form): a guest never reaches the app shell. Those
+  screens keep a plain line where a session does not know its username.
+- **The claim does not delete the device's directory KeyPackage** (main's
+  claim did): since ADR-0074 a deleted row is tombstoned for 30 days, which
+  would keep the kept account's own device out of every chat.
+
+Server rules added for it in `services/auth`:
+
+- `DELETE /account` needs no fresh-auth grant for an account with no login
+  handle and no passkey. Nobody knows a guest's password, so no fresh proof
+  can exist, and the unclaimed-account sweep would remove such an account
+  anyway.
+- `DELETE /auth/login-handle` needs the fresh-auth grant (header
+  `x-lakko-fresh-grant`) once the account is older than the unclaimed
+  lifetime (`LAKKO_AUTH_UNCLAIMED_ACCOUNT_TTL_SECS`, one day). Without this
+  a stolen session of a named account could release the name, after which
+  the account would be deletable on the session alone and taken by the
+  sweep, around the fresh-auth rule and around an open recall window. A
+  younger account (a sign-up or a guest claim being undone) releases freely.
+  Residual: for its first day a named account can be destroyed this way by
+  whoever holds its session.
+
+Open, found during the merge: a browser that signed in with a discoverable
+passkey and no typed name does not know the account's username until the
+own-username register reaches it; no route tells a session its own name.

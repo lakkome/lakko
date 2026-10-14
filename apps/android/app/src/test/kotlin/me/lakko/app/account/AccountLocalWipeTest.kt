@@ -73,7 +73,8 @@ import org.robolectric.RuntimeEnvironment
  * rows must still be there.
  *
  * Not reachable here: the stores behind `EncryptedSharedPreferences` (session
- * token, identity seeds, export key, recovery phrase, backup floor, push
+ * token, identity seeds, export key, recovery phrase, a guest account's
+ * recovery phrase under its own key, backup floor, push
  * routing secrets, journal ownership, reach, identity pins, invite-link
  * secrets, channel log + subscriber keys, call history) need the Android
  * Keystore, which Robolectric does not provide. Their steps are asserted to be
@@ -268,6 +269,31 @@ class AccountLocalWipeTest {
     }
 
     @Test
+    fun `the wipe removes the guest marker and the owed-phrase marker of that account only`() {
+        // A guest who answers `No, thanks` leaves nothing behind
+        // (docs/ux/call-links.md section 9): the marker goes with the account,
+        // and the guest's phrase row has a step of its own (it is kept under a
+        // key that is not the account's, so the account's step would miss it).
+        val guests = me.lakko.app.auth.SharedPrefsMarkerStorage(context, me.lakko.app.auth.GUEST_ACCOUNT_PREFS)
+        // The phrase a device still owes its person (`auth/RecoveryOwed.kt`).
+        val owed = me.lakko.app.auth.RecoveryOwedStore.onDevice(context)
+        for (acct in listOf(a, b)) {
+            me.lakko.app.auth.markGuestAccount(guests, acct, 1_760_000_000_000L)
+            owed.markPhraseOwed(acct, me.lakko.app.auth.OwedPhraseOrigin.FreshIdentity)
+        }
+        AccountLocalWipe.wipeAccountLocalData(context, a)
+        assertEquals(null, me.lakko.app.auth.guestAccountState(guests, a))
+        assertFalse(owed.phraseShowable(a))
+        assertEquals(
+            me.lakko.app.auth.GuestAccountState(markedAtMs = 1_760_000_000_000L, claimedUsername = null),
+            me.lakko.app.auth.guestAccountState(guests, b),
+        )
+        assertTrue(owed.phraseShowable(b))
+        val names = AccountLocalWipe.steps.map { it.name }
+        assertTrue("guest-phrase" in names)
+        assertTrue(names.indexOf("guest-phrase") > names.indexOf("recovery-phrase"))
+    }
+    @Test
     fun `the wipe of one account never touches another account's session record`() {
         SessionStore(context).save(PersistedSession(accountIdB64 = b, username = "bob"))
         AccountLocalWipe.wipeAccountLocalData(context, a)
@@ -299,6 +325,17 @@ class AccountLocalWipeTest {
     private fun seed(raw: ByteArray, acct: String, marker: String) {
         // Shared preferences, through each store's own write path.
         me.lakko.app.backup.AutoBackupStore.markDirty(context, acct, 1_000L)
+        // The conversation ids a restored backup named, and the flag of a
+        // backup restore still pending.
+        me.lakko.app.backup.BackupRestoreStore.addRestoredGroups(context, acct, listOf(group), emptyList())
+        me.lakko.app.backup.BackupRestoreStore.setRetryPending(context, acct, true)
+        // A guest account (auth/GuestAccount.kt) with a username already
+        // taken for it.
+        me.lakko.app.auth.SharedPrefsMarkerStorage(context, me.lakko.app.auth.GUEST_ACCOUNT_PREFS).let {
+            me.lakko.app.auth.markGuestAccount(it, acct, 1_760_000_000_000L)
+            me.lakko.app.auth.noteGuestUsernameClaimed(it, acct, "mira")
+            check(me.lakko.app.auth.guestAccountState(it, acct)?.claimedUsername == "mira")
+        }
         DeviceGroupJournalAccess.markFoundingUnconfirmed(context, acct)
         StateBundle.saveKnownGroupIds(context, acct, listOf(group))
         check(deviceLinkAnswerLimit(context, acct).tryConsume())
@@ -528,11 +565,12 @@ class AccountLocalWipeTest {
             "lakko.anticensorship", "lakko.release", "lakko.feed", "lakko-key-reset-owed",
             "lakko-reset-ledger", "lakko-verified-bindings", "lakko-reset-continuity",
             "lakko-lineage-mirror", "lakko-orphaned-channels",
+            "lakko-guest-account",
         )
 
         /** The files [seed] writes a row naming the account into. */
         val PREFS_SEEDED_PER_ACCOUNT = setOf(
-            "lakko.backup.auto", "me.lakko.devicegroup.founding", "lakko-pairing-known-groups", "lakko-device-link",
+            "lakko.backup.auto", "lakko.backup.restore", "me.lakko.devicegroup.founding", "lakko-pairing-known-groups", "lakko-device-link",
             "lakko-readmission-removed", "me.lakko.known-groups.v1", "lakko-committer-beacons", "lakko-pending-requests",
             "lakko-unapplied-requests", "lakko-last-observed-owner", "lakko-leave-requested", "lakko-group-names",
             "lakko-pins", "lakko-read-watermarks", "lakko-group-calls", "lakko-peer-profiles", "lakko-own-profile",
@@ -542,6 +580,7 @@ class AccountLocalWipeTest {
             "lakko-recovery-owed", "lakko-three-words-budget", "lakko-key-reset-owed",
             "lakko-reset-ledger", "lakko-verified-bindings", "lakko-reset-continuity",
             "lakko-lineage-mirror", "lakko-orphaned-channels",
+            "lakko-guest-account",
             CHANNEL_PUBLISHER_PREFS,
         )
 
@@ -575,7 +614,7 @@ class AccountLocalWipeTest {
          */
         val KEYSTORE_BACKED_STEPS = setOf(
             "push-routing-secrets", "session-token", "account-identity-seed", "device-identity-seed", "export-key",
-            "recovery-phrase", "backup-floor", "journal-ownership", "reach", "identity-pins",
+            "recovery-phrase", "guest-phrase", "backup-floor", "journal-ownership", "reach", "identity-pins",
             "channel-log-and-keys",
         )
     }

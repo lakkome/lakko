@@ -61,6 +61,7 @@ final class NetworkGuard: NSObject, XCTestObservation {
 
     private static let lock = NSLock()
     private static var installed = false
+    private static var storeGateReset: StoreGateTestReset?
     private static var current: XCTestCase?
     private static var caught: [String] = []
     private static var caughtInCurrent: [String] = []
@@ -69,6 +70,10 @@ final class NetworkGuard: NSObject, XCTestObservation {
         super.init()
         Self.install()
         XCTestObservationCenter.shared.addTestObserver(self)
+        // One bundle has one principal class. The store gate's reset before
+        // every test (`StoreGateTestReset`, `AccountStoreGateTests.swift`)
+        // is installed from here.
+        Self.storeGateReset = StoreGateTestReset()
     }
 
     /// Install the guard. Idempotent.

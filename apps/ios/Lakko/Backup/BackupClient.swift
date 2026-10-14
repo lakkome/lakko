@@ -21,11 +21,14 @@ import LakkoCore
 ///      ``AuthRepository`` + the accepted-contacts list from
 ///      ``ContactsRepository.state.accepted``.
 ///
-/// The v1 payload carries a whole-storage MLS snapshot from
-/// `Identity.snapshotStorage()` (Phase 2a3d3) — passed through
-/// `uploadNow` / `uploadFromCache` as `wholeStorageSnapshot`,
-/// empty only on the signup baseline before any MLS state
-/// exists.
+/// The payload (wire v6) carries the accepted contacts, the ids of the
+/// account's conversations and the ADR-0058 synced state. It carries NO MLS
+/// provider state: a snapshot belongs to the device that made it. Loaded on
+/// another device it would clone a leaf (ADR-0050); loaded on the same device
+/// after a reinstall it would roll the device back behind commits it already
+/// published (ADR-0040) and re-use ratchet positions (G-34). A restored
+/// device is admitted to its chats by their other members (ADR-0050 section
+/// 2.5a), never from the backup.
 public final class BackupClient {
 
     private let storage: StorageClient
@@ -56,13 +59,10 @@ public final class BackupClient {
         self.sessionToken = nil
     }
 
-    /// Bind / rebind the bearer token used for the `/backup` routes AND the
-    /// `/auth/backup/head` mint (ADR-0037). Mirror of the web
-    /// `BackupClient.setSessionToken`.
     /// Decode one hex group id, or `nil` when it is not one.
     ///
-    /// Lakko mints 32-byte ids; anything else names no group this device could
-    /// load, so carrying it would only make a restore try and fail.
+    /// Lakko mints 32-byte ids; anything else names no conversation, so
+    /// carrying it would only put a row in the list that nothing can match.
     static func groupIdBytes(fromHex hex: String) -> Data? {
         guard hex.count == 64, hex.count % 2 == 0 else { return nil }
         var out = Data(capacity: hex.count / 2)
@@ -76,6 +76,34 @@ public final class BackupClient {
         return out
     }
 
+    /// Compose the backup payload bytes (wire v6). Pure: no clock beyond
+    /// `createdAtMs`, no network, no store.
+    ///
+    /// There is no MLS snapshot argument, and none may be added: see the type
+    /// comment. A row of `knownGroupIdsHex` that is not a group id is dropped
+    /// rather than failing the backup, so one malformed local entry never
+    /// costs the whole envelope.
+    static func composePayload(
+        accountId: Data,
+        createdAtMs: UInt64,
+        ed25519Seed: Data,
+        contacts: [BackupContactRecord],
+        knownGroupIdsHex: [String],
+        syncedState: Data?
+    ) throws -> Data {
+        try buildBackupPayload(
+            accountId: accountId,
+            createdAtMs: createdAtMs,
+            ed25519Seed: ed25519Seed,
+            contacts: contacts,
+            knownGroupIds: knownGroupIdsHex.compactMap(Self.groupIdBytes(fromHex:)),
+            syncedState: syncedState
+        )
+    }
+
+    /// Bind / rebind the bearer token used for the `/backup` routes AND the
+    /// `/auth/backup/head` mint (ADR-0037). Mirror of the web
+    /// `BackupClient.setSessionToken`.
     public func setSessionToken(_ token: String?) {
         self.sessionToken = token
         storage.setSessionToken(token)
@@ -99,27 +127,21 @@ public final class BackupClient {
         ed25519Seed: Data,
         phraseBytes: Data,
         contacts: [BackupContactRecord],
-        // Phase 2a3d3: whole-storage MLS snapshot from
-        // `Identity.snapshotStorage()`. Pass `Data()` on signup
-        // baseline when there is no MLS state yet.
-        wholeStorageSnapshot: Data = Data(),
-        /// The MLS `group_id`s this device knows about, hex as the repository
-        /// holds them. The index the snapshot cannot supply: a restored
-        /// provider holds every group and offers no way to enumerate them.
+        /// The ids of the account's conversations, hex: the groups this device
+        /// holds plus the ones a restored backup named that it has not joined
+        /// (``RestoredKnownGroupsStore/uploadGroupIds(own:restored:)``), so a
+        /// restored device knows which conversations exist before any member
+        /// has admitted it.
         knownGroupIdsHex: [String] = [],
         /// ADR-0058 section 5.2 — `SyncedState.toBytes()`, or `nil`.
         syncedState: Data? = nil
     ) async throws {
-        let payloadBytes = try buildBackupPayload(
+        let payloadBytes = try Self.composePayload(
             accountId: accountId,
             createdAtMs: UInt64(Date().timeIntervalSince1970 * 1000),
             ed25519Seed: ed25519Seed,
             contacts: contacts,
-            wholeStorageSnapshot: wholeStorageSnapshot,
-            // A row that is not a group id is dropped rather than failing the
-            // backup: one malformed local entry must not cost the whole
-            // envelope.
-            knownGroupIds: knownGroupIdsHex.compactMap(Self.groupIdBytes(fromHex:)),
+            knownGroupIdsHex: knownGroupIdsHex,
             syncedState: syncedState
         )
         let envelope = try sealBackup(phrase: phraseBytes, payloadBytes: payloadBytes)
@@ -168,7 +190,6 @@ public final class BackupClient {
         accountIdB64: String,
         ed25519Seed: Data,
         contacts: [BackupContactRecord],
-        wholeStorageSnapshot: Data = Data(),
         knownGroupIdsHex: [String] = [],
         syncedState: Data? = nil
     ) async -> UploadResult {
@@ -195,7 +216,6 @@ public final class BackupClient {
                 ed25519Seed: ed25519Seed,
                 phraseBytes: phraseBytes,
                 contacts: contacts,
-                wholeStorageSnapshot: wholeStorageSnapshot,
                 knownGroupIdsHex: knownGroupIdsHex,
                 syncedState: syncedState
             )

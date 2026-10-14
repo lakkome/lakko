@@ -182,6 +182,7 @@ public class CallInviteAcceptor(
                     if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return Result.RateLimited
                     return Result.Failed(message = e.message ?: e.toString())
                 } catch (e: Exception) {
+                    me.lakko.app.rethrowIfCancelled(e)
                     return Result.Failed(message = e.message ?: e.toString())
                 }
             }
@@ -216,6 +217,7 @@ public class CallInviteAcceptor(
                     joinerAccountId = joinerAccountId,
                 )
             } catch (e: Exception) {
+                me.lakko.app.rethrowIfCancelled(e)
                 if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return Result.RateLimited
                 // ADR-0054 - the consume spends an `invite-consume` token.
                 if (me.lakko.app.anon.isAnonTokenQuotaExhausted(e)) return Result.AllowanceUsed

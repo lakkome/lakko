@@ -162,6 +162,19 @@ ended the call as a timeout while the callee's screen said `Connecting...`). A c
 answered but never connected ends as `Call failed` on both sides, never as
 `No answer`.
 
+**The outgoing tone belongs to a one-to-one call, and stops at the answer.** It
+plays only while a one-to-one call this device placed is waiting for the other
+person, and stops the moment they answer; the seconds of connecting after that
+are silent on both sides. **A group call rings nobody**, and neither does a call
+joined from a link: the person who starts one is simply in it, and a person who
+joins is joining, not calling. Their status line reads `Connecting...`, never
+`Calling...`. What remains for a group is the two short cues, one when the call
+connects or someone joins and one when someone leaves or the call ends. Before
+this every call that was not yet connected looped the tone, so a person alone in
+a call they had just started heard a phone ringing, and so did everyone who
+arrived by a link (found live 2026-10-02). One shared rule,
+`lakko-ui-rules::call_group::ringback_plays`, on all three clients.
+
 ## 4. The call screen
 
 One screen for both kinds, laid out for the eye and not for the debugger.
@@ -183,8 +196,8 @@ Both share:
 - **One small lock chip** beside the status line: a lock and the word `Encrypted`, shown
   only when the call's own encryption is armed, opening the encryption sheet (section 5).
 - **Controls**, bottom, one row of round buttons of equal size, 64 pt across, spaced
-  evenly, each with a small label under it: microphone, camera, speaker, more, end call.
-  End call is a wider red pill, visually separated from the rest. A control that is off
+  evenly, each with a small label under it; section 4.1 lists them. End call is the one
+  red control, visually separated from the rest. A control that is off
   is filled; a control that is on is outlined. Nothing but the end button is red.
 - The controls fade out after 5 seconds of a connected video call and come back on a
   tap; on a voice call they never hide.
@@ -200,8 +213,6 @@ wrong **kind** of control in the wrong **place**:
 - The call screen hid real actions behind an **ellipsis menu**. Switching to the other
   camera, or moving the sound to the speaker, is something a person does mid-sentence
   with one thumb; a menu makes it two taps and a reading task.
-- **Speaker was not on the screen at all**, although it is the control people reach for
-  most on a voice call.
 - The row sat glued to the bottom edge of a mostly empty screen, unanchored to anything.
 
 The rules that follow from that:
@@ -209,12 +220,23 @@ The rules that follow from that:
 **Never a switch, a checkbox or a list row inside a call.** Every call control is a
 round icon button that toggles on press.
 
-**The whole set is on the screen. There is no More menu in a 1x1 call.**
+**The whole set is on the screen. There is no More menu in any call.**
 
 | Call kind | The row, left to right |
 |---|---|
-| Voice | Speaker · Mute · Camera · End |
-| Video | Speaker · Mute · Camera · End |
+| One-to-one, voice or video | Microphone · Camera · Settings · End |
+| Group | Microphone · Camera · Participants · Settings · End |
+
+The row was rebuilt on 2026-10-02 after a live group call showed seven circles
+wrapped into two rows on a phone. Speaker left the row (it is a setting, not
+something done mid-sentence), the chat control left the product, Participants
+and Invite became one entry, and Settings arrived.
+
+**Settings is where the devices are chosen.** It opens a sheet of the app's own
+with up to three radio lists, each starting with `System default`: the
+microphone, the camera, and the speaker where the platform lets the app move a
+call's sound. A list with nothing to choose is absent. A choice applies at once
+and holds for the call. Never a system picker or a system route sheet.
 
 **The camera button is on a voice call too, and it turns the call into a video one.**
 People start a call with their voice and decide to show something a minute later; every
@@ -227,12 +249,21 @@ portrait.
 
 - **Flip camera does not belong in the row.** It lives on the self-view itself, as a
   small button in that rectangle's corner, where the thing it changes is visible.
-- A group call keeps its participants and chat entries. On a phone those live behind
-  a single overflow button, because six circles do not fit a 400 pt row at a size a
-  thumb can hit; on the web there is room, so the row shows them all — Speaker ·
-  Mute · Camera · Participants · Chat · End — at slightly smaller circles (56 pt, End
-  64 pt), shrinking further on a narrow window and never below the 44 pt floor. Mute,
-  camera, speaker and end stay in the row everywhere.
+- **A group call adds one entry, `Participants`.** On a call that can hand out
+  a link to itself it opens a menu: `Participants` (only once someone else is
+  in the call), `Copy invite link`, `Invite contacts` (`call-links.md` section
+  3). On a call placed inside a conversation, which has no link, it opens the
+  list directly, and is absent while the person is alone. Participants and
+  Invite were two buttons until 2026-10-02; alone in a call the first had
+  nothing to list.
+- **There is no chat in a call.** The chat control that used to be here sent
+  nothing anywhere, and a control that does nothing is worse than none; a
+  person who wants to write opens the conversation, which the collapsed call
+  (section 4.5) leaves usable.
+- **The group row is always one line.** On a narrow screen (under 600 pt) or a
+  short one (under 520 pt) the words under the circles go (each circle keeps
+  its spoken name), and the circles are sized from the width and the number of
+  controls, never below 38 pt.
 - **No switches for echo cancellation, noise suppression or gain control.** The
   engine keeps all three on; the settings sheet once offered three toggles that
   changed a stored flag nothing read, and a switch that does nothing is worse than
@@ -250,11 +281,68 @@ portrait.
   (translucent white fill about 12 percent, white icon); muted or stopped is solid white
   with a dark slashed icon. The old screen highlighted the off state in the accent
   colour, which read as "on".
-- One short muted label under each circle: `Speaker`, `Mute`, `Camera`, `End`. The label
-  names the action, never the state, and does not change size when the state does.
+- One short muted label under each circle: `Microphone`, `Camera`, `Participants`,
+  `Settings`, `End`. The label names the thing, never the state, and does not change
+  size when the state does.
 - Disabled is 40 percent opacity, never a hidden button. Touch targets stay at least
   44 pt. Spoken labels name the action and the resulting state (`Mute microphone`,
   `Unmute microphone`).
+
+### 4.1.2 End, for the person who started a group call
+
+Decided by the maintainer on 2026-10-02. It is the one place a call control
+opens a choice, and the reason is that the two things it could mean are not
+the same thing for the other people.
+
+**Who.** The person who started the call: in a chat group call the account
+whose device announced it, on any of that account's devices that is in the
+call; in a link call the account that made the link. Nobody else, whatever
+their role in the group. A one-to-one call has no such choice: ending it ends
+it for both.
+
+**When.** Only while at least one other person is in the call. Alone in the
+call (still waiting for the first person, or everyone else has left), `End`
+ends it as before, with no choice shown: both items would do the same thing.
+
+**What it looks like.** Pressing `End` opens a small menu above the control
+row, drawn by the app (not a system dialog), with two rows:
+
+| Row | What it does |
+|---|---|
+| `Leave call` | This person leaves. The call goes on for the others, exactly as `End` does for everyone else in the call. |
+| `End call for everyone` | The call ends for every person in it. Red text. |
+
+Pressing outside the menu, or `End` again, closes it and nothing happens; the
+call is never ended by the first press. There is no second confirmation: the
+menu is the confirmation. Both rows are at least 44 pt tall; with a keyboard,
+`Esc` closes it and the first row has focus.
+
+**For the others.** Their call closes at once, and one line says why for a
+few seconds wherever they are in the app: `{name} ended the call for
+everyone` (the name by the tile rule of section 4.4; when the device cannot
+name the person, `The call was ended for everyone`). The conversation gets
+the usual call row. A person who was not in the call sees the offer to join
+disappear.
+
+**Afterwards.** The call is over: it cannot be joined again, and a link call's
+link is spent as after any ended call. The starter can start a new one.
+
+**What makes it hold.** The end is a message inside the conversation's
+encryption (inside the call's own group for a link call), and each device
+acts on it only when it comes from the person who started that call; the
+same message from anyone else is treated as an ordinary end notice and takes
+nobody out of a call. The server is not asked and cannot do it. A device that
+does not receive the message (asleep, offline) stays in until it notices it
+is alone, which ends the call for it by the rule of section 4.3.
+
+**States.**
+
+| State | What the starter sees |
+|---|---|
+| Others in the call | `End` opens the menu |
+| Alone in the call | `End` ends the call, no menu |
+| `End call for everyone` pressed | The call screen closes as on any hang-up; the message is sent in the background |
+| The message could not be sent | The starter has still left; the others stay until they hang up or the call empties. No error is shown: there is nothing the person can do about it from outside the call |
 
 ### 4.2 Measured against the messengers people already use
 
@@ -367,6 +455,10 @@ were each picking someone else and one of them was picking wrong:
 - **The grid keeps roster order** and never reorders on its own. When the person
   in the large tile stops sending video, the next one sending video takes the
   slot and they drop into the grid where their roster position puts them.
+- **The layout of the tiles is `group-call-grid.md`**: a grid of equal tiles
+  that fills the screen without scrolling, or one large tile with the others in
+  a row above it. The paragraphs below about the large tile describe the rule
+  it replaced where the two disagree.
 - **The control bar fits the screen it is on.** Five circles at the sizes of
   section 4.1.1 do not fit a 402 pt phone, so when the room is short the
   circles shrink together, keeping their ratio and never going under the 44 pt
@@ -380,15 +472,46 @@ were each picking someone else and one of them was picking wrong:
   fades on a tap, but a tile is never legible only while it is faded.
 
 - **Every tile carries the person's name, in a link call too.** A tile
-  labelled with eight hex characters (`01a0a045`) named nobody. In a chat group
-  call the name comes from the profile the group already carries. In a link
-  call the joiners are strangers to each other and the guest has no contact
-  list, so each participant seals its own profile into the call's own group
-  and every member relays it once it has joined and again whenever someone new
-  is admitted (the newcomer can only read from that moment on). The server
-  forwards ciphertext; a name never crosses it in clear. A name learnt this way
-  is what the person calls themself and outranks the contact-list lookup; the
-  contact list stays the fallback, and `Peer` is the last resort.
+  always shows a name. One rule on every client and for both kinds of call, in
+  this order:
+  1. what the one resolver of [`profile-names.md`](profile-names.md) calls the
+     person behind the tile: the viewer's own name for a contact, then the
+     person's profile name, then their verified `@username`;
+  2. the display name the person announced inside the call (link calls), for
+     the moment before the device has filed their profile;
+  3. the username the person claims while this device has not verified it
+     yet, as plain text without `@`. The `@` form is shown only for a verified
+     username; a bare word claims nothing a typed display name could not.
+
+  There is no `Participant 2` and no other made-up name. Everyone has
+  something to announce: an account has a username, and a guest has the name
+  typed on the link page. A tile is without a name only for the moments
+  before that announcement reaches the device, and then it shows the call
+  screen's plain unnamed state, with no number.
+
+  A tile never shows a piece of an account id or of a key. A tile labelled
+  with eight hex characters (`01a0a045`) named nobody, and it is what a person
+  who had set no profile name was shown as in a link call until 2026-10-02:
+  the tile read only the profile name and fell back to the start of the
+  account id the server reports.
+
+  How the device learns who is behind a tile. In a chat group call the group
+  already carries everyone's profile. In a link call the joiners are strangers
+  to each other and a guest has no contact list, so each participant seals its
+  own profile into the call's own group and every member relays it once it
+  has joined and again whenever someone new is admitted (the newcomer can only
+  read from that moment on). The server forwards ciphertext; a name never
+  crosses it in clear. An announcement that arrives before the newcomer can
+  read it (it can outrun the admission) is kept and read right after, not
+  dropped.
+
+  The receiver files an announced profile under the person who sealed it,
+  exactly as it files a profile received in a chat, which is what checks a
+  claimed username and what lets the viewer's own name for a contact apply.
+  It does so only when the account the profile claims is the account the
+  server admitted that participant to the call as; otherwise the profile is
+  not kept and the tile shows the announced name as plain text. The tiles are
+  named again whenever the stored profiles change.
 - **The person joins with what the device has.** A video call asks for a
   camera and a microphone; a device without a camera, or a browser that
   blocks capture, used to fail the whole request and print the browser's own

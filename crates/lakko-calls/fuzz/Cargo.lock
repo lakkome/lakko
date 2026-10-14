@@ -836,6 +836,7 @@ dependencies = [
  "lakko-attest",
  "lakko-crypto",
  "lakko-proto",
+ "lakko-sync",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
@@ -853,6 +854,15 @@ dependencies = [
  "prost",
  "prost-build",
  "protox",
+]
+
+[[package]]
+name = "lakko-sync"
+version = "0.0.0"
+dependencies = [
+ "lakko-contacts",
+ "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

@@ -45,8 +45,10 @@ public fun SaveFreshPhraseScreen(
     phrase: String,
     onConfirm: () -> Unit,
     modifier: Modifier = Modifier,
-    /** The account's username, or `null` / blank for a guest account made
-     *  from a call link (it has no password, so the copy differs). */
+    /** The account's username, or `null` / blank for an account that has
+     *  none (the copy then does not name it). A guest account made from a
+     *  call link no longer comes here: its phrase is shown only if the person
+     *  keeps the account, through the sign-up phrase screen. */
     username: String? = null,
     publishOwed: PublishOwedReason? = null,
     onRetryPublish: suspend () -> Unit = {},

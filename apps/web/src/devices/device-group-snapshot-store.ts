@@ -57,6 +57,8 @@
  * DS itself assigned and already knows.
  */
 
+import { requireAccountStoresWritable } from "../auth/account-store-gate";
+
 const DB_NAME = "lakko-device-group-snapshots";
 const DB_VERSION = 1;
 const STORE = "snapshots";
@@ -120,6 +122,7 @@ export async function putDeviceGroupSnapshot(
 
   const db = await openDb();
   try {
+    requireAccountStoresWritable(accountIdB64);
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite");
       tx.oncomplete = (): void => resolve();

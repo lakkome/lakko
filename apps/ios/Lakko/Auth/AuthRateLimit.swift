@@ -238,6 +238,24 @@ enum AuthErrorCopy {
         return t("auth.signup.error.generic")
     }
 
+    /// `Create account` on a guest account (``GuestAccountClaim``).
+    ///
+    /// The step that sets the password is proved by the keys this device
+    /// holds; the person typed no phrase, so its failures collapse into the
+    /// form's generic sentence.
+    static func guestClaim(_ error: Error) -> String {
+        if error is GuestPhraseUnavailable { return t("guest.claim.error.phrase_missing") }
+        if let common = shared(error) { return common }
+        if let limited = error as? UsernameBindLimited {
+            return AuthRateLimit.handleBindLimitedCopy(retryAfterSecs: limited.retryAfterSecs)
+        }
+        if error is UsernameTaken || status(error) == 409 {
+            return t("auth.signup.error.username_taken")
+        }
+        if let rule = rule(error) { return rule }
+        return t("guest.claim.error.generic")
+    }
+
     /// The recovery forms that take the phrase and a new
     /// password. A wrong phrase and an unknown username are one sentence.
     static func recover(_ error: Error) -> String {

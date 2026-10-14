@@ -208,6 +208,8 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
                 phrase = ""
             } catch {
                 busy = false
+                // Overtaken by a sign-out or another sign-in: not a failure.
+                if error is StaleBindingError { return }
                 self.errorText = UiText { AuthErrorCopy.identityRestore(error) }
             }
         }
@@ -316,6 +318,8 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
             } catch {
                 busy = false
                 resetting = false
+                // Overtaken by a sign-out or another sign-in: not a failure.
+                if error is StaleBindingError { return }
                 if FreshAuthRefusal.isRequired(error) {
                     // The proof expired on the way: show the block with its
                     // helper. Nothing went wrong, so no error styling.

@@ -455,7 +455,9 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 // ADR-0074 key-rotation envelope and root endorsement.
                 .KeyRotation,
                 // ADR-0075 the email vault and the recovery-email address.
-                .EmailVaultNotOpened, .EmailVault, .RecoveryEmail:
+                .EmailVaultNotOpened, .EmailVault, .RecoveryEmail,
+                // The conversation-backup vault (main's ADR-0064).
+                .Vault:
                 return nil
             }
         }

@@ -79,6 +79,8 @@ struct RecoveryMarkers {
 
     /// Store (or replace) the owed publish.
     func markPublishOwed(_ record: KeyResetPublishRecord, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         do {
             defaults.set(try JSONEncoder().encode(record), forKey: Self.publishOwedKey(accountIdB64: accountIdB64))
         } catch {
@@ -95,6 +97,8 @@ struct RecoveryMarkers {
     }
 
     func markPhraseOwed(accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         defaults.set(true, forKey: Self.phraseOwedKey(accountIdB64: accountIdB64))
     }
 

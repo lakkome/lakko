@@ -66,6 +66,7 @@ pub mod sfu_signaling;
 pub mod synced_state;
 pub mod transport;
 pub mod ui_rules;
+pub mod vault;
 pub mod ws;
 
 uniffi::setup_scaffolding!();
@@ -688,6 +689,22 @@ pub enum FfiError {
     /// `control-character`, `whitespace`, `not-one-at-sign`, `empty-part`.
     #[error("{0}")]
     RecoveryEmail(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0064 conversation vault / ADR-0065 blob delete key — appended,
+    // for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// A vault operation was refused (`vault.rs`). The message is
+    /// `"<code>: <reason>"`: the frozen `code()` of the `lakko-vault` error
+    /// (a record bound such as `truncated`, `tooLarge` or `repeatedRef`; a
+    /// seal refusal such as `authentication` or `notABucket`; a proof
+    /// refusal such as `requestNotCanonical`; a reference refusal such as
+    /// `idLength`), or an argument of the wrong length (`blobIdLength`,
+    /// `keyLength`, `nonceLength`, `accountKeyLength`, `seedLength`). A
+    /// client branches on the code, never on the prose. Appended last so
+    /// every earlier variant keeps its ordinal.
+    #[error("{0}")]
+    Vault(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {
@@ -4188,6 +4205,9 @@ pub enum FfiCallEndReason {
     Declined,
     TimedOut,
     Error,
+    /// Group / link call only: the call's starter ended it for everyone.
+    /// Act on it only when the MLS-authenticated sender is that starter.
+    EndedForAll,
 }
 
 impl FfiCallEndReason {
@@ -4198,6 +4218,7 @@ impl FfiCallEndReason {
             Self::Declined => lakko_calls::EndReason::Declined,
             Self::TimedOut => lakko_calls::EndReason::TimedOut,
             Self::Error => lakko_calls::EndReason::Error,
+            Self::EndedForAll => lakko_calls::EndReason::EndedForAll,
         }
     }
 
@@ -4208,6 +4229,7 @@ impl FfiCallEndReason {
             lakko_calls::EndReason::Declined => Self::Declined,
             lakko_calls::EndReason::TimedOut => Self::TimedOut,
             lakko_calls::EndReason::Error => Self::Error,
+            lakko_calls::EndReason::EndedForAll => Self::EndedForAll,
         }
     }
 }
@@ -4497,6 +4519,7 @@ pub fn sframe_derive_participant_key(
 /// `(sender_leaf << 8) | stream_index` (ADR-0035) the receiver read from the
 /// frame's header — the decryptor never needs a separate media discriminator,
 /// it re-derives the exact sender-stream key straight from the KID.
+/// `frame_counter` is the 64-bit counter from the header (ADR-0069).
 #[uniffi::export]
 pub fn sframe_open_with_overlap(
     current_call_key_seed: Vec<u8>,
@@ -4504,7 +4527,7 @@ pub fn sframe_open_with_overlap(
     kid: u64,
     aad: Vec<u8>,
     ciphertext: Vec<u8>,
-    frame_counter: u32,
+    frame_counter: u64,
 ) -> Result<Vec<u8>, FfiError> {
     let take_seed = |bytes: Vec<u8>| -> Result<[u8; 32], FfiError> {
         if bytes.len() != 32 {

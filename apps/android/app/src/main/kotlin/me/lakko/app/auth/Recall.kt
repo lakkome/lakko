@@ -130,7 +130,13 @@ public class RecallRecordStore(private val storage: RecallBlobStorage) {
             return false
         }
         return try {
-            storage.write(hexOf(record.accountId), plain)
+            // The record outlives the STAGED wipe (it is written before that
+            // wipe starts, and the wipe keeps it), so a sealed account still
+            // takes this write. It is refused once the account's data was
+            // wiped: a late save after the full wipe puts no seed back.
+            me.lakko.app.account.AccountStoreGate.writeUnlessWiped(base64Encode(record.accountId)) {
+                storage.write(hexOf(record.accountId), plain)
+            } ?: return false
             // Read back: a record that cannot be opened again is no record.
             val again = storage.read(hexOf(record.accountId))
             val ok = again != null && again.contentEquals(plain)

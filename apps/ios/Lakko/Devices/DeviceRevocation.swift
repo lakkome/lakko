@@ -267,6 +267,8 @@ public struct DeviceRemovalStore {
     }
 
     private func save(_ records: [DeviceRemovalRecord], accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         if records.isEmpty {
             clear(accountIdB64: accountIdB64)
         } else if let data = try? JSONEncoder().encode(records) {

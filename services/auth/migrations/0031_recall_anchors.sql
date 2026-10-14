@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 --
--- ADR-0074 sprint T3 — the recall (taking the account back from an old device
+-- ADR-0066 sprint T3 — the recall (taking the account back from an old device
 -- after a reset): section 0.2 (recall anchors) and section 1.2 (the routes).
 --
 -- `recall_anchors` is what the account was BEFORE the first change of the

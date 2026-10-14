@@ -17,10 +17,17 @@
  * person to where they were and offers the "Protect your account" step,
  * which a guest never saw.
  *
- * Every decision is `username-claim.ts`. The host is whole-session; the
- * entry points open it through `username-claim-host.ts`.
+ * Every decision is `username-claim.ts`.
+ *
+ * The screen has ONE entry: `Create account` in the question a guest is
+ * asked after its call (`GuestAccountOffer`), which draws
+ * {@link UsernameClaimScreen} itself. A guest never lands in the app, so
+ * nothing inside the app opens it. A session whose browser does not know the
+ * account's username (a passkey sign-in with no name typed) is NOT offered
+ * it: that account has a name already and the claim would be refused; the
+ * screens that need the name say so in plain text.
  */
-import { createSignal, Match, Show, Switch, type JSX } from "solid-js";
+import { createSignal, Match, onCleanup, Show, Switch, type JSX } from "solid-js";
 
 import { useAuth } from "./AuthContext";
 import { handleBindLimitedMessage, isHandleBindLimited, isOffline } from "./auth-error-copy";
@@ -37,26 +44,11 @@ import {
   type ClaimFailure,
   type ClaimState,
 } from "./username-claim";
-import { closeUsernameClaim, usernameClaimOpen } from "./username-claim-host";
 import { t } from "../l10n";
 import { useProfiles } from "../profile/ProfileContext";
 import { mayLookUp, usernameReason } from "../profile/rules";
 import { createUsernameCheck } from "../profile/username-field";
-import { ModalLayer } from "../ui/ModalLayer";
 import { PasswordField } from "../ui/PasswordField";
-
-/** The whole-session host: the screen in the app's own layer. */
-export function UsernameClaimHost(): JSX.Element {
-  const auth = useAuth();
-  const shown = (): boolean => usernameClaimOpen() && auth.state().kind === "session";
-  return (
-    <ModalLayer open={shown()} title={t("username.claim.title")} onClose={closeUsernameClaim}>
-      <Show when={shown()}>
-        <UsernameClaimScreen onClose={closeUsernameClaim} />
-      </Show>
-    </ModalLayer>
-  );
-}
 
 function failureText(failure: ClaimFailure): string {
   switch (failure.kind) {
@@ -71,7 +63,12 @@ function failureText(failure: ClaimFailure): string {
   }
 }
 
-function UsernameClaimScreen(props: { readonly onClose: () => void }): JSX.Element {
+export function UsernameClaimScreen(props: {
+  readonly onClose: () => void;
+  /** This device cannot read the guest account's recovery phrase, so the
+   *  account cannot be kept (`GuestPhraseUnavailableError`). */
+  readonly onCannotKeep?: () => void;
+}): JSX.Element {
   const auth = useAuth();
   const profiles = useProfiles();
   const sessionUsername = (): string => {
@@ -103,10 +100,36 @@ function UsernameClaimScreen(props: { readonly onClose: () => void }): JSX.Eleme
     return s.step === "done" ? null : s.failure;
   };
 
+  // The screen can be unmounted by its own success (a guest stops being one
+  // the moment the password is set, and the guard moves on) or by the
+  // session ending: nothing is written to it after that.
+  let alive = true;
+  onCleanup(() => {
+    alive = false;
+  });
+
+  /** The two ways a guest account cannot be kept. `true` when `err` was one
+   *  of them and has been dealt with. */
+  function guestRefusal(err: unknown): boolean {
+    if (!(err instanceof Error)) return false;
+    // Past its lifetime: the account is deleted and the session is over.
+    if (err.name === "GuestAccountExpiredError") return true;
+    if (err.name === "GuestPhraseUnavailableError") {
+      if (alive) {
+        dispatch({ type: "failed", failure: { kind: "error" } });
+        setOwnError(t("guest.claim.error.phrase_missing"));
+        props.onCannotKeep?.();
+      }
+      return true;
+    }
+    return false;
+  }
+
   async function setFirstPassword(): Promise<void> {
     try {
       await auth.replacePassword(password(), { firstPassword: true });
     } catch (err) {
+      if (guestRefusal(err) || !alive) return;
       // The name is kept; only the password is retried.
       setOwnError(newPasswordErrorMessage(err));
       dispatch({ type: "failed", failure: { kind: "error" } });
@@ -148,6 +171,7 @@ function UsernameClaimScreen(props: { readonly onClose: () => void }): JSX.Eleme
       certificate = claimed.certificate;
       dispatch({ type: "name-saved", username: claimed.username });
     } catch (err) {
+      if (guestRefusal(err) || !alive) return;
       dispatch({
         type: "failed",
         failure: claimFailure({

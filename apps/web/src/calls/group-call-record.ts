@@ -96,6 +96,11 @@ export interface GroupCallRecord {
   readonly mediaAudio: boolean;
   readonly mediaVideo: boolean;
   readonly initiatorLeaf: number;
+  /** The person (base64 account key) whose device announced the call,
+   *  resolved from the MLS sender at receipt (C-68); `null` when it could
+   *  not be resolved. Only this person may end the call for everyone
+   *  (`docs/ux/calls.md` section 4.1.2). */
+  readonly initiatorPersonKey: string | null;
   /** `created_at_ms` exactly as the initiator stamped it (tie-break). */
   readonly createdAtMs: number;
   /** DS-bounded start time (liveness). */
@@ -119,6 +124,7 @@ export type GroupCallEvent =
       readonly kind: "start";
       readonly callIdHex: string;
       readonly initiatorLeaf: number;
+      readonly initiatorPersonKey: string | null;
       readonly createdAtMs: number;
       readonly mediaAudio: boolean;
       readonly mediaVideo: boolean;
@@ -171,6 +177,7 @@ export function reduceGroupCalls(
         mediaAudio: event.mediaAudio,
         mediaVideo: event.mediaVideo,
         initiatorLeaf: event.initiatorLeaf,
+        initiatorPersonKey: event.initiatorPersonKey,
         createdAtMs: event.createdAtMs,
         startedAtMs: boundStartedAt(event.createdAtMs, event.observedAtMs),
         members: new Map<string, GroupCallMember>(),
@@ -413,6 +420,10 @@ export function deserializeGroupCalls(raw: string | null): GroupCallRecords {
       mediaAudio: r["mediaAudio"] as boolean,
       mediaVideo: r["mediaVideo"] as boolean,
       initiatorLeaf: r["initiatorLeaf"] as number,
+      initiatorPersonKey:
+        typeof r["initiatorPersonKey"] === "string" && r["initiatorPersonKey"].length > 0
+          ? r["initiatorPersonKey"]
+          : null,
       createdAtMs: r["createdAtMs"] as number,
       startedAtMs: r["startedAtMs"] as number,
       members,

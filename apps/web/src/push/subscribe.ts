@@ -97,10 +97,20 @@ export interface SubscribeResult {
  * account, a fresh pseudonym is minted first so that account's wakes fail
  * the worker's gate.
  *
+ * The call is fire-and-forget from the sign-in paths and one of its awaits is
+ * the permission prompt, which has no time limit: the person can leave it
+ * open, sign out and sign in as somebody else. `isCurrent` is asked after
+ * every await that precedes a write; once it answers `false` nothing is
+ * rotated, registered or recorded. In particular the wake binding is never
+ * recorded for an account that has signed out - the worker would treat it as
+ * the signed-in one.
+ *
  * @param accountIdB64 base64 account id of the account signing in.
+ * @param isCurrent whether `accountIdB64` is still the signed-in account.
  */
 export async function subscribeToPush(
   accountIdB64: string,
+  isCurrent: () => boolean = () => true,
 ): Promise<SubscribeResult | null> {
   if (VAPID_PUBLIC_KEY_B64URL.length === 0) {
     // No build-time VAPID key — dev fallback.
@@ -120,6 +130,7 @@ export async function subscribeToPush(
   if (Notification.permission === "default") {
     const granted = await Notification.requestPermission();
     if (granted !== "granted") return null;
+    if (!isCurrent()) return null;
   }
 
   // The 1.16f2 register path doesn't directly expose the
@@ -132,6 +143,7 @@ export async function subscribeToPush(
   } catch {
     return null;
   }
+  if (!isCurrent()) return null;
 
   // Reuse an existing subscription where the browser already has
   // one — `getSubscription()` is the canonical idempotency
@@ -167,6 +179,9 @@ export async function subscribeToPush(
   } catch {
     existing = null;
   }
+  // Before the pseudonym is touched: rotating it for an account that has
+  // left would cut the wakes of the account that is signed in now.
+  if (!isCurrent()) return null;
   if (pseudonymMustRotate(existing, accountIdB64)) clearDevicePushId();
   const devicePseudonym = getOrCreateDevicePushId();
 
@@ -194,6 +209,11 @@ export async function subscribeToPush(
     console.warn("push token register failed", err);
     return null;
   }
+  // The register request spanned a sign-out. push-gw holds a row for a
+  // pseudonym nothing is bound to (the worker's gate drops its wakes, and the
+  // sign-out's own unregister or the next sign-in's rotation replaces it);
+  // what must not happen is this account becoming the worker's signed-in one.
+  if (!isCurrent()) return null;
   await recordWakeBinding(accountIdB64, devicePseudonym);
 
   return {

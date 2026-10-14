@@ -50,7 +50,8 @@ public class CallInviteComposer(
 
     /**
      * Result of [composeAndUpload]. The fields are independent — the UI hands
-     * [url] to the share sheet, and [blobId] is what a future revoke would name.
+     * [url] to the clipboard or into a conversation, and [blobId] is what a future
+     * revoke would name.
      */
     public data class Composed(
         /** Raw 6-byte server-assigned `blob_id`, or `null` for an inline link

@@ -445,6 +445,16 @@ pub(crate) async fn delete_account(
         if !consumed {
             return Err(ApiError::ActionRequired);
         }
+    } else if crate::unclaimed::is_unclaimed(&state.db, &auth.0)
+        .await
+        .map_err(ApiError::Db)?
+    {
+        // An account nobody named (a call-link guest, ADR-0032): nobody knows
+        // its password, so no fresh proof can exist, and there is nothing to
+        // protect that the unclaimed-account sweep would not remove anyway.
+        // A named account cannot reach this state on a bare session: an
+        // account older than the sweep's lifetime needs the fresh-auth grant
+        // to release its login handle (`login_handle::delete`).
     } else {
         // No passkey: the password, proven within the grant's lifetime.
         crate::session::require_fresh_grant(

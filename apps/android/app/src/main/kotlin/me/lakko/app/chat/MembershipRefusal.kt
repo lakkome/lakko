@@ -509,6 +509,9 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // (a wrong-length seed, account id or device id); not a
                 // membership refusal.
                 is FfiException.AccountStatement,
+                // ADR-0064 - a refused vault operation; not a membership
+                // refusal.
+                is FfiException.Vault,
                 -> null
 
                 // Everything that is NOT a membership refusal. Enumerated

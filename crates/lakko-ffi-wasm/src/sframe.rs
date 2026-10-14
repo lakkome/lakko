@@ -15,10 +15,22 @@
 //! - [`WasmParticipantKey`] (JS `ParticipantKey`) — `seal(aad,
 //!   plaintext) → SealedFrame`, `open(aad, ciphertext,
 //!   counter) → Uint8Array`, plus `senderLeaf()` and
-//!   `counter()` getters.
+//!   `counter()` getters. The frame counter is 64-bit and
+//!   crosses to JS as a `bigint` everywhere (ADR-0069); a
+//!   key starts at a random counter below `2^62`, and
+//!   nothing on this surface sets or resets a counter.
 //! - [`WasmSealedFrame`] (JS `SealedFrame`) — paired
 //!   `counter` + `ciphertext` so the platform transformer
 //!   embeds the counter in the SFrame wire header.
+//!
+//! Since ADR-0071 the web media path seals and opens the layout
+//! `clear_prefix || ciphertext_and_tag || sframe_header || trailer`
+//! (`sealMediaFrame` / `openMediaFrameWithOverlap` / `parseMediaFrame`,
+//! `MediaCodec`): the codec's own frame header stays in the clear so a
+//! receiver without the generic frame descriptor finds key frames. The
+//! header-first `sealFramed` / `openFramed` / `openFramedWithOverlap`
+//! remain for the golden vector the native stacks still pin; the web
+//! worker no longer calls them.
 //!
 //! The web call-side wires this through the browser's
 //! `RTCRtpScriptTransform` API (a separate sub-sprint
@@ -30,7 +42,7 @@
 //! to the UniFFI variant prose so a cross-platform log
 //! line reads the same.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use lakko_calls::link_invite::{
     elect_committer as core_elect_committer, CommitterCandidate as CoreCommitterCandidate,
@@ -76,6 +88,12 @@ impl WasmCallKey {
     ///
     /// `stream_index` crosses as a `u32`; a value `> 255` fails closed (it would
     /// overflow the KID's 8-bit stream field) rather than silently truncating.
+    ///
+    /// The key's frame counter starts at a uniformly random value in
+    /// `[0, 2^62)` (ADR-0069), so deriving a key again for the same
+    /// `(seed, sender_leaf, stream_index)` — a reload, a rejoin, a republished
+    /// track — is safe: two such keys reuse a nonce only if the counter ranges
+    /// they seal overlap, with probability at most `(L1 + L2) / 2^62`.
     ///
     /// # Errors
     ///
@@ -172,10 +190,12 @@ impl WasmParticipantKey {
         self.inner.lock().expect("sframe lock").sender_leaf()
     }
 
-    /// Current frame counter value. Diagnostics only.
+    /// Current 64-bit frame counter value (a `bigint` in JS): the counter of
+    /// the last frame sealed, or the key's random start (ADR-0069) when none
+    /// was. Diagnostics only.
     #[wasm_bindgen(js_name = "counter")]
     #[must_use]
-    pub fn counter(&self) -> u32 {
+    pub fn counter(&self) -> u64 {
         self.inner.lock().expect("sframe lock").counter()
     }
 
@@ -184,9 +204,9 @@ impl WasmParticipantKey {
     ///
     /// # Errors
     ///
-    /// `JsError` containing `"counter exhausted"` when the
-    /// 32-bit counter rolls over; the caller MUST trigger
-    /// a fresh MLS commit and re-derive the `CallKey`
+    /// `JsError` containing `CounterExhausted` when the
+    /// 64-bit counter stands at its last value (ADR-0069);
+    /// nothing is sealed and the caller derives a new key
     /// before continuing.
     #[wasm_bindgen(js_name = "seal")]
     pub fn seal(&self, aad: &[u8], plaintext: &[u8]) -> Result<WasmSealedFrame, JsError> {
@@ -202,8 +222,8 @@ impl WasmParticipantKey {
         })
     }
 
-    /// Open `ciphertext` using `counter` from the SFrame
-    /// header.
+    /// Open `ciphertext` using the 64-bit `counter` (a
+    /// `bigint` in JS) from the SFrame header.
     ///
     /// # Errors
     ///
@@ -211,7 +231,7 @@ impl WasmParticipantKey {
     /// key / wrong AAD / tampered ciphertext / wrong
     /// counter).
     #[wasm_bindgen(js_name = "open")]
-    pub fn open(&self, aad: &[u8], ciphertext: &[u8], counter: u32) -> Result<Vec<u8>, JsError> {
+    pub fn open(&self, aad: &[u8], ciphertext: &[u8], counter: u64) -> Result<Vec<u8>, JsError> {
         self.inner
             .lock()
             .expect("sframe lock")
@@ -229,8 +249,8 @@ impl WasmParticipantKey {
     ///
     /// # Errors
     ///
-    /// `JsError` containing `"counter exhausted"` when the 32-bit
-    /// counter rolls over (re-key required), else an AEAD error.
+    /// `JsError` containing `CounterExhausted` when the 64-bit
+    /// counter stands at its last value, else an AEAD error.
     #[wasm_bindgen(js_name = "sealFramed")]
     pub fn seal_framed(&self, plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
         self.inner
@@ -250,8 +270,8 @@ impl WasmParticipantKey {
     /// # Errors
     ///
     /// `JsError` on a malformed header, a KID that doesn't match
-    /// this key's leaf, a counter out of range, or AEAD auth
-    /// failure.
+    /// this key's leaf, or AEAD auth failure. Any 64-bit counter
+    /// the header carries is accepted (ADR-0069).
     #[wasm_bindgen(js_name = "openFramed")]
     pub fn open_framed(&self, wire: &[u8]) -> Result<Vec<u8>, JsError> {
         self.inner
@@ -259,6 +279,69 @@ impl WasmParticipantKey {
             .expect("sframe lock")
             .open_framed(wire)
             .map_err(|e| JsError::new(&format!("call crypto error: sframe open_framed: {e:?}")))
+    }
+
+    /// Seal an encoded media frame into the ADR-0071 layout,
+    /// `clear_prefix || ciphertext_and_tag || sframe_header || trailer`, with
+    /// the clear prefix the sender's rule gives `codec` for this frame: 10
+    /// bytes of a VP8 key frame, 3 of any other VP8 frame, none for Opus or an
+    /// unknown codec. This is the web worker's outgoing path. Key, nonce and
+    /// counter are those of ADR-0035 / ADR-0069; the header, the clear prefix
+    /// and the trailer are the AEAD additional data.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` containing `CounterExhausted` when the 64-bit counter stands
+    /// at its last value, else an AEAD error. Nothing is sealed on either.
+    #[wasm_bindgen(js_name = "sealMediaFrame")]
+    pub fn seal_media_frame(
+        &self,
+        frame: &[u8],
+        codec: WasmMediaCodec,
+    ) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .seal_media_frame_for_codec(frame, codec.into())
+            .map_err(|e| JsError::new(&format!("call crypto error: seal_media_frame: {e:?}")))
+    }
+
+    /// [`Self::seal_media_frame`] with the clear prefix length stated by the
+    /// caller. A length beyond the frame is cut to the frame.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` when `clear_prefix_len` exceeds 16, on counter exhaustion,
+    /// or on an AEAD error. Nothing is sealed.
+    #[wasm_bindgen(js_name = "sealMediaFrameWithPrefix")]
+    pub fn seal_media_frame_with_prefix(
+        &self,
+        frame: &[u8],
+        clear_prefix_len: u32,
+    ) -> Result<Vec<u8>, JsError> {
+        let clear = usize::try_from(clear_prefix_len).unwrap_or(usize::MAX);
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .seal_media_frame(frame, clear)
+            .map_err(|e| JsError::new(&format!("call crypto error: seal_media_frame: {e:?}")))
+    }
+
+    /// Open a frame in the ADR-0071 layout and return the encoded frame
+    /// `clear_prefix || plaintext`. This key must be the one derived for the
+    /// frame's KID. A frame in the header-first layout is refused.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` on a malformed frame, a KID that is not this key's, or an
+    /// AEAD authentication failure.
+    #[wasm_bindgen(js_name = "openMediaFrame")]
+    pub fn open_media_frame(&self, wire: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .open_media_frame(wire)
+            .map_err(|e| JsError::new(&format!("call crypto error: open_media_frame: {e:?}")))
     }
 }
 
@@ -339,7 +422,8 @@ impl WasmCallKeyRing {
     /// SFrame KID `(sender_leaf << 8) | stream_index` keeps every one of a
     /// participant's concurrent streams on a distinct key + nonce-salt space.
     /// `stream_index` crosses as a `u32`; a value `> 255` fails closed rather
-    /// than silently truncating.
+    /// than silently truncating. The key starts at a random counter in
+    /// `[0, 2^62)` (ADR-0069).
     ///
     /// # Errors
     ///
@@ -393,6 +477,30 @@ impl WasmCallKeyRing {
                 ))
             })
     }
+
+    /// Open a sealed media frame in the ADR-0071 layout with the overlap
+    /// fall-back (ADR-0029) and return the encoded frame
+    /// `clear_prefix || plaintext`. The KID is read from the frame's own
+    /// SFrame header, which sits before the trailer at the end of the frame;
+    /// the caller passes nothing but the bytes. The receive-side path for the
+    /// web worker.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` on a malformed frame, or on AEAD authentication failure under
+    /// both the current and the previous key.
+    #[wasm_bindgen(js_name = "openMediaFrameWithOverlap")]
+    pub fn open_media_frame_with_overlap(&self, wire: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .try_open_media_frame_with_overlap(wire)
+            .map_err(|e| {
+                JsError::new(&format!(
+                    "call crypto error: ring open_media_frame_with_overlap: {e:?}"
+                ))
+            })
+    }
 }
 
 /// Output of [`WasmParticipantKey::seal`] — paired
@@ -401,17 +509,17 @@ impl WasmCallKeyRing {
 /// ciphertext.
 #[wasm_bindgen(js_name = "SealedFrame")]
 pub struct WasmSealedFrame {
-    counter: u32,
+    counter: u64,
     ciphertext: Vec<u8>,
 }
 
 #[wasm_bindgen(js_class = "SealedFrame")]
 impl WasmSealedFrame {
-    /// Frame counter the seal consumed. Goes into the
-    /// SFrame header.
+    /// 64-bit frame counter the seal consumed (a `bigint`
+    /// in JS). Goes into the SFrame header.
     #[wasm_bindgen(getter, js_name = "counter")]
     #[must_use]
-    pub fn counter(&self) -> u32 {
+    pub fn counter(&self) -> u64 {
         self.counter
     }
 
@@ -429,13 +537,14 @@ impl WasmSealedFrame {
 
 /// Encode an SFrame wire frame: `header(kid=sender_leaf,
 /// ctr=counter) || ciphertext`. Mirror of the UniFFI
-/// helper at `crates/lakko-ffi-uniffi/src/sframe.rs`.
+/// helper at `crates/lakko-ffi-uniffi/src/sframe.rs`. `counter` is 64-bit
+/// (a `bigint` in JS).
 #[wasm_bindgen(js_name = "wrapSframeFrame")]
 #[must_use]
-pub fn wrap_sframe_frame_js(sender_leaf: u32, counter: u32, ciphertext: &[u8]) -> Vec<u8> {
+pub fn wrap_sframe_frame_js(sender_leaf: u32, counter: u64, ciphertext: &[u8]) -> Vec<u8> {
     let header = lakko_calls::SframeHeader {
         kid: u64::from(sender_leaf),
-        ctr: u64::from(counter),
+        ctr: counter,
     };
     let mut out = header.encode();
     out.extend_from_slice(ciphertext);
@@ -446,19 +555,18 @@ pub fn wrap_sframe_frame_js(sender_leaf: u32, counter: u32, ciphertext: &[u8]) -
 ///
 /// # Errors
 ///
-/// `JsError` on header decode failure or oversize
-/// `kid` / `ctr` (must fit in u32).
+/// `JsError` on header decode failure or an oversize
+/// `kid` (must fit in u32). Any 64-bit `ctr` is accepted
+/// (ADR-0069).
 #[wasm_bindgen(js_name = "unwrapSframeFrame")]
 pub fn unwrap_sframe_frame_js(wire: &[u8]) -> Result<WasmUnwrappedFrame, JsError> {
     let (header, consumed) = lakko_calls::SframeHeader::decode(wire)
         .map_err(|e| JsError::new(&format!("call crypto error: sframe header decode: {e:?}")))?;
     let sender_leaf = u32::try_from(header.kid)
         .map_err(|_| JsError::new("call crypto error: sframe kid does not fit in u32"))?;
-    let counter = u32::try_from(header.ctr)
-        .map_err(|_| JsError::new("call crypto error: sframe ctr does not fit in u32"))?;
     Ok(WasmUnwrappedFrame {
         sender_leaf,
-        counter,
+        counter: header.ctr,
         ciphertext: wire[consumed..].to_vec(),
     })
 }
@@ -467,7 +575,7 @@ pub fn unwrap_sframe_frame_js(wire: &[u8]) -> Result<WasmUnwrappedFrame, JsError
 #[wasm_bindgen(js_name = "UnwrappedFrame")]
 pub struct WasmUnwrappedFrame {
     sender_leaf: u32,
-    counter: u32,
+    counter: u64,
     ciphertext: Vec<u8>,
 }
 
@@ -480,10 +588,11 @@ impl WasmUnwrappedFrame {
         self.sender_leaf
     }
 
-    /// The per-sender frame counter, parsed from the SFrame header CTR.
+    /// The per-sender 64-bit frame counter (a `bigint` in JS), parsed from
+    /// the SFrame header CTR.
     #[wasm_bindgen(getter, js_name = "counter")]
     #[must_use]
-    pub fn counter(&self) -> u32 {
+    pub fn counter(&self) -> u64 {
         self.counter
     }
 
@@ -492,5 +601,329 @@ impl WasmUnwrappedFrame {
     #[must_use]
     pub fn ciphertext(&self) -> Vec<u8> {
         self.ciphertext.clone()
+    }
+}
+
+// ============================================================
+// Sealed media frame layout (ADR-0071)
+// ============================================================
+
+/// The codec of a frame, as far as the clear prefix of a sealed media frame
+/// depends on it (ADR-0071). Mirrors [`lakko_calls::MediaCodec`]; the values
+/// are frozen.
+#[wasm_bindgen(js_name = "MediaCodec")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WasmMediaCodec {
+    /// Any codec without a rule, and a codec the sender could not determine:
+    /// nothing is left in the clear.
+    Other = 0,
+    /// VP8 video: 10 clear bytes of a key frame, 3 of any other frame.
+    Vp8 = 1,
+    /// Opus audio: nothing is left in the clear.
+    Opus = 2,
+}
+
+impl From<WasmMediaCodec> for lakko_calls::MediaCodec {
+    fn from(codec: WasmMediaCodec) -> Self {
+        match codec {
+            WasmMediaCodec::Other => Self::Other,
+            WasmMediaCodec::Vp8 => Self::Vp8,
+            WasmMediaCodec::Opus => Self::Opus,
+        }
+    }
+}
+
+impl From<lakko_calls::MediaCodec> for WasmMediaCodec {
+    fn from(codec: lakko_calls::MediaCodec) -> Self {
+        match codec {
+            lakko_calls::MediaCodec::Other => Self::Other,
+            lakko_calls::MediaCodec::Vp8 => Self::Vp8,
+            lakko_calls::MediaCodec::Opus => Self::Opus,
+        }
+    }
+}
+
+/// Map a negotiated RTP codec MIME type (`"video/VP8"`, `"audio/opus"`, any
+/// case) to a `MediaCodec`. Anything else is `Other`.
+#[wasm_bindgen(js_name = "mediaCodecFromMime")]
+#[must_use]
+pub fn media_codec_from_mime(mime: &str) -> WasmMediaCodec {
+    lakko_calls::MediaCodec::from_mime(mime).into()
+}
+
+/// How many leading bytes of `frame` a sender leaves in the clear for
+/// `codec` (ADR-0071). Never more than the frame holds.
+#[wasm_bindgen(js_name = "mediaClearPrefixLen")]
+#[must_use]
+pub fn media_clear_prefix_len(codec: WasmMediaCodec, frame: &[u8]) -> u32 {
+    // At most 16 by the core's bound.
+    u32::try_from(lakko_calls::clear_prefix_len(codec.into(), frame)).unwrap_or(0)
+}
+
+/// Whether a VP8 frame is a key frame by its own frame tag (the low bit of
+/// the first byte is 0). `undefined` for an empty frame. Only the first byte
+/// is read, so a caller may pass a one-byte view.
+#[wasm_bindgen(js_name = "vp8IsKeyFrame")]
+#[must_use]
+pub fn vp8_is_key_frame(frame: &[u8]) -> Option<bool> {
+    lakko_calls::vp8_is_key_frame(frame)
+}
+
+/// Read the trailer and the SFrame header of a sealed media frame without a
+/// key: the KID, the counter and the clear prefix length. Nothing here is
+/// authenticated; it is for selecting a key and for diagnostics.
+///
+/// # Errors
+///
+/// `JsError` when the bytes are not a well-formed sealed media frame.
+#[wasm_bindgen(js_name = "parseMediaFrame")]
+pub fn parse_media_frame(wire: &[u8]) -> Result<WasmMediaFrameInfo, JsError> {
+    media_frame_info(wire)
+        .map_err(|e| JsError::new(&format!("call crypto error: media frame: {e}")))
+}
+
+fn media_frame_info(wire: &[u8]) -> Result<WasmMediaFrameInfo, lakko_calls::MediaFrameError> {
+    let parts = lakko_calls::MediaFrameParts::split(wire)?;
+    Ok(WasmMediaFrameInfo {
+        kid: parts.header.kid,
+        counter: parts.header.ctr,
+        // At most 16 by the split's bound.
+        clear_prefix_len: u32::try_from(parts.clear_prefix.len()).unwrap_or(0),
+    })
+}
+
+/// What [`parse_media_frame`] reads off a sealed media frame.
+#[wasm_bindgen(js_name = "MediaFrameInfo")]
+pub struct WasmMediaFrameInfo {
+    kid: u64,
+    counter: u64,
+    clear_prefix_len: u32,
+}
+
+#[wasm_bindgen(js_class = "MediaFrameInfo")]
+impl WasmMediaFrameInfo {
+    /// The whole SFrame KID `(sender_leaf << 8) | stream_index` (ADR-0035), a
+    /// `bigint` in JS.
+    #[wasm_bindgen(getter, js_name = "kid")]
+    #[must_use]
+    pub fn kid(&self) -> u64 {
+        self.kid
+    }
+
+    /// The 64-bit frame counter (a `bigint` in JS).
+    #[wasm_bindgen(getter, js_name = "counter")]
+    #[must_use]
+    pub fn counter(&self) -> u64 {
+        self.counter
+    }
+
+    /// How many bytes at the start of the frame are in the clear.
+    #[wasm_bindgen(getter, js_name = "clearPrefixLen")]
+    #[must_use]
+    pub fn clear_prefix_len(&self) -> u32 {
+        self.clear_prefix_len
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Host tests of the success paths only: a `JsError` cannot be built off
+    //! the wasm target, so the refusals are covered by the web vitest suites
+    //! (`apps/web/src/calls/sframe-*.test.ts`) and the core's own tests.
+
+    use super::*;
+
+    const GOLDEN_SEED: [u8; core::CALL_KEY_LEN] = [0x42; core::CALL_KEY_LEN];
+    const GOLDEN_LEAF: u32 = 3;
+    const GOLDEN_PLAINTEXT: &[u8] = b"lakko sframe golden vector v1";
+    const GOLDEN_WIRE_HEX: &str =
+        "910300fe2c2af65799594a4c693ff4c9e0d49b0565756ddd7299b0945fc8adb1c9c12fced57c6937f372e6b94bdae40a";
+
+    fn golden_wire() -> Vec<u8> {
+        (0..GOLDEN_WIRE_HEX.len() / 2)
+            .map(|i| u8::from_str_radix(&GOLDEN_WIRE_HEX[i * 2..i * 2 + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn ok<T>(result: Result<T, JsError>) -> T {
+        let Ok(value) = result else {
+            panic!("the call was refused");
+        };
+        value
+    }
+
+    /// (1) The canonical cross-stack golden wire (a frame at counter 1) opens
+    /// through this surface, by a participant key and by the ring.
+    #[test]
+    fn golden_wire_opens_to_the_plaintext() {
+        let pk = ok(ok(WasmCallKey::new(&GOLDEN_SEED)).participant_key(GOLDEN_LEAF, 0));
+        assert_eq!(ok(pk.open_framed(&golden_wire())), GOLDEN_PLAINTEXT);
+
+        let header = ok(unwrap_sframe_frame_js(&golden_wire()));
+        assert_eq!(header.sender_leaf(), 0x0300, "the header's whole KID");
+        assert_eq!(header.counter(), 1_u64);
+
+        let ring = ok(WasmCallKeyRing::new(&GOLDEN_SEED));
+        assert_eq!(
+            ok(ring.open_framed_with_overlap(0x0300, &golden_wire())),
+            GOLDEN_PLAINTEXT
+        );
+    }
+
+    /// (2) A frame this surface seals carries the composite KID and a 64-bit
+    /// counter one above the key's random start (ADR-0069), and opens under an
+    /// independently derived key. Nothing here sets a counter, so a fresh key
+    /// does not seal the golden bytes.
+    #[test]
+    fn sealed_frame_carries_the_kid_and_a_64_bit_counter() {
+        let call_key = ok(WasmCallKey::new(&GOLDEN_SEED));
+        let sender = ok(call_key.participant_key(GOLDEN_LEAF, 0));
+        let start: u64 = sender.counter();
+        assert!(start < 1 << 62, "a key starts below 2^62");
+
+        let wire = ok(sender.seal_framed(GOLDEN_PLAINTEXT));
+        let header = ok(unwrap_sframe_frame_js(&wire));
+        assert_eq!(header.sender_leaf(), 0x0300, "KID = (leaf 3 << 8) | 0");
+        assert_eq!(header.counter(), start + 1);
+        assert_eq!(sender.counter(), start + 1);
+
+        let receiver = ok(call_key.participant_key(GOLDEN_LEAF, 0));
+        assert_ne!(receiver.counter(), start, "starts are independent");
+        assert_eq!(ok(receiver.open_framed(&wire)), GOLDEN_PLAINTEXT);
+    }
+
+    /// The raw pair and the wire helpers carry a counter that needs all 8
+    /// bytes.
+    #[test]
+    fn raw_seal_open_and_wrap_carry_a_64_bit_counter() {
+        let call_key = ok(WasmCallKey::new(&GOLDEN_SEED));
+        let sender = ok(call_key.participant_key(1, 1));
+        let sealed = ok(sender.seal(b"aad", b"raw"));
+        let counter: u64 = sealed.counter();
+        let receiver = ok(call_key.participant_key(1, 1));
+        assert_eq!(
+            ok(receiver.open(b"aad", &sealed.ciphertext(), counter)),
+            b"raw"
+        );
+
+        let eight_byte_counter = 0x3FED_CBA9_8765_4321_u64;
+        let wire = wrap_sframe_frame_js(7, eight_byte_counter, b"body");
+        let header = ok(unwrap_sframe_frame_js(&wire));
+        assert_eq!(header.sender_leaf(), 7);
+        assert_eq!(header.counter(), eight_byte_counter);
+        assert_eq!(header.ciphertext(), b"body");
+    }
+
+    // ---- ADR-0071 sealed media frame ---------------------------------------
+
+    const GOLDEN_MEDIA_FRAME_HEX: &str =
+        "1002009d012a8002e0012dc56b47f2bfd3ebf051d8893d6d2b2b355f29f3980b60\
+         e19c2555c9ad3a6ca9e95f08b228768c0f59a6509103010a0301";
+
+    fn golden_media_frame() -> Vec<u8> {
+        (0..GOLDEN_MEDIA_FRAME_HEX.len() / 2)
+            .map(|i| u8::from_str_radix(&GOLDEN_MEDIA_FRAME_HEX[i * 2..i * 2 + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn vp8_key_frame() -> Vec<u8> {
+        let mut frame = vec![0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01];
+        frame.extend_from_slice(b"lakko media frame golden v1");
+        frame
+    }
+
+    /// The core's golden media frame (leaf 3, stream 1, counter 1) opens
+    /// through both wasm open paths.
+    #[test]
+    fn golden_media_frame_opens_to_the_frame() {
+        let wire = golden_media_frame();
+        let pk = ok(ok(WasmCallKey::new(&GOLDEN_SEED)).participant_key(GOLDEN_LEAF, 1));
+        assert_eq!(ok(pk.open_media_frame(&wire)), vp8_key_frame());
+        let ring = ok(WasmCallKeyRing::new(&GOLDEN_SEED));
+        assert_eq!(
+            ok(ring.open_media_frame_with_overlap(&wire)),
+            vp8_key_frame()
+        );
+        let info = media_frame_info(&wire).expect("well-formed");
+        assert_eq!(info.kid(), 0x0301);
+        assert_eq!(info.counter(), 1);
+        assert_eq!(info.clear_prefix_len(), 10);
+    }
+
+    /// Seal through the wasm surface: the VP8 header stays at the start, the
+    /// KID and a 64-bit counter sit in the header at the end, and the frame
+    /// opens through the ring.
+    #[test]
+    fn sealed_media_frame_keeps_the_codec_header_and_opens() {
+        let ring = ok(WasmCallKeyRing::new(&GOLDEN_SEED));
+        let sender = ok(ring.participant_key(GOLDEN_LEAF, 1));
+        let key_frame = vp8_key_frame();
+        let delta_frame = [&[0x11u8, 0x02, 0x00][..], b"delta"].concat();
+
+        let start = sender.counter();
+        let key_wire = ok(sender.seal_media_frame(&key_frame, WasmMediaCodec::Vp8));
+        let delta_wire = ok(sender.seal_media_frame(&delta_frame, WasmMediaCodec::Vp8));
+        assert_eq!(&key_wire[..10], &key_frame[..10]);
+        assert_eq!(&delta_wire[..3], &delta_frame[..3]);
+        assert_eq!(vp8_is_key_frame(&key_wire), Some(true));
+        assert_eq!(vp8_is_key_frame(&delta_wire), Some(false));
+
+        let key_info = media_frame_info(&key_wire).expect("well-formed");
+        assert_eq!(key_info.kid(), 0x0301);
+        assert_eq!(key_info.counter(), start + 1);
+        assert_eq!(key_info.clear_prefix_len(), 10);
+        let delta_info = media_frame_info(&delta_wire).expect("well-formed");
+        assert_eq!(delta_info.counter(), start + 2);
+        assert_eq!(delta_info.clear_prefix_len(), 3);
+
+        assert_eq!(ok(ring.open_media_frame_with_overlap(&key_wire)), key_frame);
+        assert_eq!(
+            ok(ring.open_media_frame_with_overlap(&delta_wire)),
+            delta_frame
+        );
+    }
+
+    /// Opus and an unknown codec leave nothing clear; an explicit prefix is
+    /// honoured and cut to the frame.
+    #[test]
+    fn media_frame_prefix_per_codec_and_explicit() {
+        let call_key = ok(WasmCallKey::new(&GOLDEN_SEED));
+        let audio = ok(call_key.participant_key(GOLDEN_LEAF, 0));
+        let receiver = ok(call_key.participant_key(GOLDEN_LEAF, 0));
+        for codec in [WasmMediaCodec::Opus, WasmMediaCodec::Other] {
+            let wire = ok(audio.seal_media_frame(b"\x78opus", codec));
+            assert_eq!(media_frame_info(&wire).expect("ok").clear_prefix_len(), 0);
+            assert_eq!(ok(receiver.open_media_frame(&wire)), b"\x78opus");
+        }
+        let wire = ok(audio.seal_media_frame_with_prefix(&[1, 2, 3], 10));
+        assert_eq!(media_frame_info(&wire).expect("ok").clear_prefix_len(), 3);
+        assert_eq!(ok(receiver.open_media_frame(&wire)), [1, 2, 3]);
+
+        assert_eq!(media_codec_from_mime("video/VP8"), WasmMediaCodec::Vp8);
+        assert_eq!(media_codec_from_mime("audio/opus"), WasmMediaCodec::Opus);
+        assert_eq!(media_codec_from_mime("video/H264"), WasmMediaCodec::Other);
+        assert_eq!(
+            media_clear_prefix_len(WasmMediaCodec::Vp8, &vp8_key_frame()),
+            10
+        );
+        assert_eq!(
+            media_clear_prefix_len(WasmMediaCodec::Vp8, &[0x11, 0, 0, 9]),
+            3
+        );
+        assert_eq!(
+            media_clear_prefix_len(WasmMediaCodec::Other, &vp8_key_frame()),
+            0
+        );
+        assert_eq!(vp8_is_key_frame(&[]), None);
+    }
+
+    /// The parser refuses a header-first frame and garbage without a key.
+    #[test]
+    fn media_frame_info_refuses_malformed_input() {
+        assert!(media_frame_info(&[]).is_err());
+        assert!(media_frame_info(&[0u8; 40]).is_err());
+        let mut truncated = golden_media_frame();
+        truncated.pop();
+        assert!(media_frame_info(&truncated).is_err());
     }
 }

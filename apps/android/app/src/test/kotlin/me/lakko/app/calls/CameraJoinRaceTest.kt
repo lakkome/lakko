@@ -53,10 +53,8 @@ class CameraJoinRaceTest {
             isLocal = false,
             micOn = true,
             camOn = camOn,
-            handRaised = false,
             quality = CallUiState.QualityTier.Good,
             speaking = false,
-            screenSharing = false,
         )
 
     private fun local(): CallUiState.Participant =
@@ -66,10 +64,8 @@ class CameraJoinRaceTest {
             isLocal = true,
             micOn = true,
             camOn = true,
-            handRaised = false,
             quality = CallUiState.QualityTier.Good,
             speaking = false,
-            screenSharing = false,
         )
 
     private fun camOnOf(state: CallUiState, id: String): Boolean =

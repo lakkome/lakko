@@ -102,6 +102,102 @@ final class SyncedStateSupportTests: XCTestCase {
         XCTAssertEqual(try held.lineageRoot(successorGroupId: successor)?.rootConversationId, root)
     }
 
+    // MARK: - A refused encoding is "none held" (version 1, ADR-0065)
+
+    /// A fresh account id for the real on-disk store, removed afterwards.
+    private func storeAccount() -> String {
+        let account = "synced-state-version-\(UUID().uuidString)"
+        addTeardownBlock { SyncedStateStore.delete(accountIdB64: account) }
+        return account
+    }
+
+    /// A version 1 blob: the version byte `0x01` followed by anything.
+    private var versionOneBlob: Data { Data([0x01, 0x00, 0x00, 0x00, 0x00]) }
+
+    /// This build's own bytes with the version byte set back to 1: what a
+    /// device that wrote the previous encoding holds.
+    private func downgraded(_ state: SyncedState) throws -> Data {
+        var bytes = try state.toBytes()
+        XCTAssertEqual(bytes.first, 0x02, "the encoding this build writes is version 2")
+        bytes[bytes.startIndex] = 0x01
+        return bytes
+    }
+
+    func testAVersionOneBlobIsRefusedByTheCore() throws {
+        XCTAssertThrowsError(try SyncedState.fromBytes(bytes: versionOneBlob))
+        let s = SyncedState()
+        _ = try s.applyPayload(payload: flagsPayload(hlc: 10, pinned: true))
+        XCTAssertThrowsError(try SyncedState.fromBytes(bytes: try downgraded(s)))
+    }
+
+    func testAStoredVersionOneBlobLoadsAsNoneHeldAndTheNextWriteReplacesIt() throws {
+        let held = SyncedState()
+        _ = try held.applyPayload(payload: flagsPayload(hlc: 10, pinned: true))
+        for blob in [versionOneBlob, try downgraded(held)] {
+            let account = storeAccount()
+            SyncedStateStore.store().putSnapshot(accountIdB64: account, blob: blob)
+            XCTAssertEqual(
+                SyncedStateStore.store().getSnapshot(accountIdB64: account), blob,
+                "the blob is on disk before the load")
+
+            // Loaded as nothing held, twice over (the second read is the one
+            // that must not log again or crash), and never offered to a backup.
+            let loaded = SyncedStateStore.load(accountIdB64: account)
+            XCTAssertEqual(try loaded.maxHlc(), 0)
+            XCTAssertNil(try loaded.flags(groupId: gid))
+            XCTAssertEqual(try SyncedStateStore.load(accountIdB64: account).maxHlc(), 0)
+            XCTAssertNil(SyncedStateStore.bytes(accountIdB64: account))
+            XCTAssertEqual(
+                SyncedStateStore.store().getSnapshot(accountIdB64: account), blob,
+                "a read leaves the entry for the next write to replace")
+
+            // The next write replaces the entry with this build's encoding.
+            _ = try loaded.applyPayload(payload: flagsPayload(hlc: 20, pinned: true))
+            SyncedStateStore.save(loaded, accountIdB64: account)
+            let replaced = try XCTUnwrap(SyncedStateStore.bytes(accountIdB64: account))
+            XCTAssertEqual(replaced.first, 0x02)
+            XCTAssertEqual(
+                try SyncedStateStore.load(accountIdB64: account).flags(groupId: gid)?.pinned, true)
+        }
+    }
+
+    func testABackupStateInVersionOneIsNoneHeldAndLeavesTheStoreAlone() throws {
+        let account = storeAccount()
+        let held = SyncedState()
+        _ = try held.applyPayload(payload: flagsPayload(hlc: 30, pinned: true))
+        SyncedStateStore.save(held, accountIdB64: account)
+        let before = try XCTUnwrap(SyncedStateStore.bytes(accountIdB64: account))
+
+        XCTAssertEqual(
+            SyncedStateStore.mergeIntoStored(bytes: versionOneBlob, accountIdB64: account),
+            .unreadable)
+        XCTAssertEqual(
+            SyncedStateStore.mergeIntoStored(bytes: try downgraded(held), accountIdB64: account),
+            .unreadable)
+        XCTAssertEqual(SyncedStateStore.bytes(accountIdB64: account), before)
+
+        // Nothing stored at all: still no crash, and still nothing stored.
+        let empty = storeAccount()
+        XCTAssertEqual(
+            SyncedStateStore.mergeIntoStored(bytes: versionOneBlob, accountIdB64: empty),
+            .unreadable)
+        XCTAssertNil(SyncedStateStore.store().getSnapshot(accountIdB64: empty))
+    }
+
+    func testAReadableBackupStateReplacesAStoredVersionOneBlob() throws {
+        let account = storeAccount()
+        SyncedStateStore.store().putSnapshot(accountIdB64: account, blob: versionOneBlob)
+        let backup = SyncedState()
+        _ = try backup.applyPayload(payload: flagsPayload(hlc: 40, pinned: true))
+
+        XCTAssertEqual(
+            SyncedStateStore.mergeIntoStored(bytes: try backup.toBytes(), accountIdB64: account),
+            .merged(changed: true))
+        XCTAssertEqual(SyncedStateStore.bytes(accountIdB64: account)?.first, 0x02)
+        XCTAssertEqual(
+            try SyncedStateStore.load(accountIdB64: account).flags(groupId: gid)?.pinned, true)
+    }
+
     // MARK: - Growth (section 5.1)
 
     private func leaf(_ index: UInt32, _ key: UInt8) -> DeviceLeaf {

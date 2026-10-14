@@ -7,7 +7,7 @@
  * hands the rest to the chat view, which adds them through its own add path.
  */
 import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
-import { useNavigate } from "@solidjs/router";
+import { useLocation, useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Decode, base64UrlEncodeNoPad } from "../auth/account-id";
@@ -28,6 +28,7 @@ import { t } from "../l10n";
 import { DEFAULT_GROUP_LABEL } from "../chat/group-title";
 import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
+import { screenAnchor } from "../ui/screen-anchor";
 
 export const GROUP_NAME_MAX = 64;
 
@@ -37,6 +38,7 @@ export default function NewGroup(): JSX.Element {
   const profiles = useProfiles();
   const groupNames = useGroupNames();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const client = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
@@ -82,6 +84,9 @@ export default function NewGroup(): JSX.Element {
     const [first, ...rest] = picks;
     if (first === undefined) return;
     setBusy(true);
+    // The group is created and recorded whether or not the person waits for
+    // it; only opening it is addressed to this screen (`ui/screen-anchor.ts`).
+    const here = screenAnchor(location);
     try {
       const result = await client.startGroupWith(
         secrets,
@@ -122,7 +127,9 @@ export default function NewGroup(): JSX.Element {
           })),
         });
       }
-      navigate(paths.groupChat(base64UrlEncodeNoPad(result.group.groupId)), { replace: true });
+      if (here()) {
+        navigate(paths.groupChat(base64UrlEncodeNoPad(result.group.groupId)), { replace: true });
+      }
     } catch (err) {
       setError(contactsErrorText(err, "chats.new_group.error"));
       setBusy(false);

@@ -211,6 +211,8 @@ struct ThreeWordsBudgetStore {
     }
 
     func save(_ budget: ThreeWords.Budget, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         guard let data = try? JSONEncoder().encode(budget) else { return }
         defaults.set(data, forKey: Self.key(accountIdB64: accountIdB64))
     }
@@ -232,6 +234,8 @@ struct ThreeWordsBudgetStore {
 
     /// Suspend the route and clear the budget. Nothing else is touched.
     func suspend(accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         defaults.set(true, forKey: Self.suspendedKey(accountIdB64: accountIdB64))
         clear(accountIdB64: accountIdB64)
     }

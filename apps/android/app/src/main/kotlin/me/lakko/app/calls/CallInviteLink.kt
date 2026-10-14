@@ -30,9 +30,8 @@ import me.lakko.app.l10n.UiText
  *
  * At the FIRST `Invite` of a call, never at `New call`. Minting costs a network
  * round trip, so paying it at the start would make
- * every call slower for the sake of the links most calls never need. That is
- * also why the busy state here says what it is doing instead of only spinning:
- * the wait is seconds, not milliseconds.
+ * every call slower for the sake of the links most calls never need. What the
+ * control is doing meanwhile, and where the link went, is `InCallInvite.kt`.
  *
  * Pure and Android-free, so every branch is unit-tested on the host JVM.
  */
@@ -89,76 +88,7 @@ public fun showsCallInvite(owner: Boolean, phase: LinkCallPhase): Boolean =
 public fun newCallId(random: SecureRandom = SecureRandom()): ByteArray =
     ByteArray(CALL_ID_LEN).also { random.nextBytes(it) }
 
-/**
- * Where the `Invite` control is, for the call on screen.
- *
- * One state per call: [LinkCallHost] resets it when a call starts, so a link
- * minted for one call is never offered as another call's.
- */
-public sealed interface CallInviteLinkState {
-    /** Nothing asked for yet. */
-    public data object Idle : CallInviteLinkState
-
-    /** Signing and uploading the capability. */
-    public data object Preparing : CallInviteLinkState
-
-    /** Minted. A second `Invite` re-offers this rather than minting again. */
-    public data class Ready(val url: String) : CallInviteLinkState
-
-    /** The mint failed. The call is unaffected; the control stays live. */
-    public data class Failed(val message: UiText) : CallInviteLinkState
-}
-
-/** The `Invite` control, ready to draw. */
-public data class CallInviteButton(
-    /** The word on the control. Names the action, never the state. */
-    val label: UiText,
-    /** A spinner instead of the icon. */
-    val busy: Boolean,
-    val enabled: Boolean,
-    /** What TalkBack reads. */
-    val spokenLabel: UiText,
-    /**
-     * One quiet line under the control, or `null`. Carries the wait while the
-     * link is being prepared and the reason when it failed.
-     */
-    val note: UiText?,
-)
-
-/** How the control reads in each state. */
-public fun callInviteButton(state: CallInviteLinkState): CallInviteButton = when (state) {
-    CallInviteLinkState.Idle -> CallInviteButton(
-        label = UiText("call.control.invite"),
-        busy = false,
-        enabled = true,
-        spokenLabel = UiText("call.control.invite_a11y"),
-        note = null,
-    )
-    CallInviteLinkState.Preparing -> CallInviteButton(
-        // Section 5: the wait "says what it is doing rather than only spinning".
-        label = UiText("common.preparing"),
-        busy = true,
-        enabled = false,
-        spokenLabel = UiText("common.preparing"),
-        note = UiText("call.invite.minting"),
-    )
-    is CallInviteLinkState.Ready -> CallInviteButton(
-        label = UiText("call.control.invite"),
-        busy = false,
-        enabled = true,
-        spokenLabel = UiText("call.invite.share_a11y"),
-        note = null,
-    )
-    is CallInviteLinkState.Failed -> CallInviteButton(
-        label = UiText("call.control.invite"),
-        busy = false,
-        enabled = true,
-        spokenLabel = UiText("call.invite.retry_a11y"),
-        note = state.message,
-    )
-}
-
-/** Why a mint did not produce a link. */
+/** Why `Invite` did not hand the link out. */
 public enum class CallInviteFailure {
     /** The session is gone: nothing can be signed for this account. */
     NO_SESSION,
@@ -166,8 +96,12 @@ public enum class CallInviteFailure {
     /** The device could not reach the server. */
     NETWORK,
 
-    /** Anything else. */
+    /** Anything else that stopped the link being prepared. */
     OTHER,
+
+    /** The link exists, but the invitation could not be sent to the picked
+     *  conversation. */
+    NOT_SENT,
 }
 
 /**
@@ -189,14 +123,14 @@ public fun classifyCallInviteFailure(cause: Throwable?): CallInviteFailure = whe
 }
 
 /**
- * What the user is told when a mint fails — section 5: one sentence on what
- * happened, one on what to do, and never a word about the call, which is
- * unaffected and does not end.
+ * What the user is told when `Invite` fails — section 5: one sentence on what
+ * happened, one on what to do. The call is unaffected and does not end.
  */
 public fun callInviteFailureMessage(failure: CallInviteFailure): UiText = when (failure) {
     CallInviteFailure.NO_SESSION -> UiText("call.invite.signed_out")
     CallInviteFailure.NETWORK -> UiText("common.error.offline")
     CallInviteFailure.OTHER -> UiText("call.invite.unavailable")
+    CallInviteFailure.NOT_SENT -> UiText("call.invite.send_failed")
 }
 
 /** [callInviteFailureMessage] for a thrown cause. */

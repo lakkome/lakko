@@ -26,11 +26,15 @@
 //! crate ever needs a key, a secret or a peer's assertion, it is in the wrong
 //! crate.
 
+pub mod av_align;
 pub mod call_bar;
+pub mod call_group;
 pub mod capture;
 pub mod conversation;
 pub mod folder;
 pub mod info;
+pub mod layer_display;
 pub mod lookup;
 pub mod ring;
+pub mod speaking;
 pub mod visibility;

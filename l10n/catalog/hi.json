@@ -255,7 +255,7 @@
       "status": "machine"
     },
     "backup.stale_restore.consequence": {
-      "text": "इसे रीस्टोर करने से आपका खाता पुरानी स्थिति में लौट जाएगा — पुराने मैसेज, और जिन डिवाइस को आपने हटाया था वे फिर से दिख सकते हैं।",
+      "text": "इसे पुनर्स्थापित करने से पुरानी संपर्क सूची और पुरानी सेटिंग्स वापस आ जाएँगी। उसके बाद किए गए बदलाव खो जाएँगे।",
       "status": "machine"
     },
     "backup.stale_restore.reason.anchor_unreadable": {
@@ -447,7 +447,7 @@
       "status": "machine"
     },
     "call.control.mute": {
-      "text": "म्यूट",
+      "text": "माइक्रोफ़ोन",
       "status": "machine"
     },
     "call.control.mute_a11y": {
@@ -462,12 +462,20 @@
       "text": "प्रतिभागी छिपाएँ",
       "status": "machine"
     },
+    "call.control.participants_menu_a11y": {
+      "text": "प्रतिभागी और आमंत्रण",
+      "status": "machine"
+    },
     "call.control.participants_show_a11y": {
       "text": "प्रतिभागी दिखाएँ",
       "status": "machine"
     },
     "call.control.raise_hand": {
       "text": "हाथ उठाएँ",
+      "status": "machine"
+    },
+    "call.control.settings": {
+      "text": "सेटिंग्स",
       "status": "machine"
     },
     "call.control.share_screen": {
@@ -550,6 +558,26 @@
       "text": "यह कॉल एन्क्रिप्टेड है",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "कॉल समाप्त करने के विकल्प",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "सभी के लिए कॉल समाप्त करें",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "कॉल छोड़ें",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "कॉल सभी के लिए समाप्त कर दी गई",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} ने सभी के लिए कॉल समाप्त कर दी",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "कॉल का एन्क्रिप्शन सेट अप नहीं हो सका, इसलिए कॉल शुरू नहीं हुई।",
       "status": "machine"
@@ -594,6 +622,18 @@
       "text": "{name} का कैमरा",
       "status": "machine"
     },
+    "call.grid.next_a11y": {
+      "text": "अगला पृष्ठ",
+      "status": "machine"
+    },
+    "call.grid.page_a11y": {
+      "text": "पृष्ठ {page} / {total}",
+      "status": "machine"
+    },
+    "call.grid.prev_a11y": {
+      "text": "पिछला पृष्ठ",
+      "status": "machine"
+    },
     "call.group_banner.join_video": {
       "text": "वीडियो",
       "status": "machine"
@@ -608,6 +648,10 @@
     },
     "call.guest.default_name": {
       "text": "मेहमान",
+      "status": "machine"
+    },
+    "call.guest.note": {
+      "text": "आप अतिथि के रूप में जुड़ते हैं। खाते की ज़रूरत नहीं है।",
       "status": "machine"
     },
     "call.guest.working.title": {
@@ -710,8 +754,28 @@
       "text": "कॉल लिंक",
       "status": "machine"
     },
+    "call.invite.menu_a11y": {
+      "text": "इस कॉल में आमंत्रित करें",
+      "status": "machine"
+    },
+    "call.invite.menu_contact": {
+      "text": "संपर्कों को आमंत्रित करें",
+      "status": "machine"
+    },
+    "call.invite.menu_copy": {
+      "text": "आमंत्रण लिंक कॉपी करें",
+      "status": "machine"
+    },
     "call.invite.minting": {
       "text": "इस कॉल का लिंक तैयार हो रहा है। इसमें कुछ सेकंड लगते हैं।",
+      "status": "machine"
+    },
+    "call.invite.picker_empty": {
+      "text": "अभी कोई संपर्क नहीं है। आमंत्रण लिंक कॉपी करें और किसी और तरीके से भेजें।",
+      "status": "machine"
+    },
+    "call.invite.picker_title": {
+      "text": "कॉल में आमंत्रित करें",
       "status": "machine"
     },
     "call.invite.ready": {
@@ -720,6 +784,18 @@
     },
     "call.invite.retry_a11y": {
       "text": "इनवाइट लिंक फिर से तैयार करने की कोशिश करें",
+      "status": "machine"
+    },
+    "call.invite.row_invited": {
+      "text": "आमंत्रित",
+      "status": "machine"
+    },
+    "call.invite.send_failed": {
+      "text": "आमंत्रण नहीं भेजा गया। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "call.invite.sent": {
+      "text": "{name} को आमंत्रण भेजा गया।",
       "status": "machine"
     },
     "call.invite.share_a11y": {
@@ -752,6 +828,14 @@
     },
     "call.label.group": {
       "text": "ग्रुप कॉल",
+      "status": "machine"
+    },
+    "call.layout.focus_a11y": {
+      "text": "बोलने वाले को बड़ा दिखाएँ",
+      "status": "machine"
+    },
+    "call.layout.grid_a11y": {
+      "text": "सभी को एक ही आकार में दिखाएँ",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -914,6 +998,10 @@
       "text": "प्रतिभागी {number}",
       "status": "machine"
     },
+    "call.participant.pin_a11y": {
+      "text": "{name} को पिन करें",
+      "status": "machine"
+    },
     "call.participant.pinned": {
       "text": "पिन है",
       "status": "machine"
@@ -928,6 +1016,10 @@
     },
     "call.participant.unnamed": {
       "text": "प्रतिभागी",
+      "status": "machine"
+    },
+    "call.participant.unpin_a11y": {
+      "text": "{name} को अनपिन करें",
       "status": "machine"
     },
     "call.participant.you": {
@@ -1068,6 +1160,14 @@
     },
     "call.settings.system_default": {
       "text": "सिस्टम डिफ़ॉल्ट",
+      "status": "machine"
+    },
+    "call.settings.title": {
+      "text": "कॉल सेटिंग्स",
+      "status": "machine"
+    },
+    "call.settings.unnamed_device": {
+      "text": "डिवाइस {n}",
       "status": "machine"
     },
     "call.settings.video": {
@@ -1832,6 +1932,10 @@
     },
     "chat.call.voice": {
       "text": "कॉल करें",
+      "status": "machine"
+    },
+    "chat.call_invite.title": {
+      "text": "कॉल का आमंत्रण",
       "status": "machine"
     },
     "chat.composer.attach": {
@@ -5702,6 +5806,58 @@
       "text": "किसी भी चरण की कोई समय-सीमा नहीं है। अगर कुछ न हो, तो आप अनुरोध फिर से भेज सकते हैं।",
       "status": "machine"
     },
+    "guest.claim.error.generic": {
+      "text": "खाता नहीं बनाया जा सका। फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "guest.claim.error.phrase_missing": {
+      "text": "यह अतिथि खाता इस डिवाइस पर नहीं रखा जा सकता। आप साइन-अप स्क्रीन से नया खाता बना सकते हैं।",
+      "status": "machine"
+    },
+    "guest.claim.username_taken_for_you": {
+      "text": "आपका उपयोगकर्ता नाम @{username} है।",
+      "status": "machine"
+    },
+    "guest.claim.working": {
+      "text": "आपका खाता बनाया जा रहा है...",
+      "status": "machine"
+    },
+    "guest.in_call.return": {
+      "text": "कॉल पर लौटें",
+      "status": "machine"
+    },
+    "guest.in_call.title": {
+      "text": "आप अतिथि के रूप में कॉल में हैं।",
+      "status": "machine"
+    },
+    "guest.offer.body": {
+      "text": "आप यहाँ अतिथि के रूप में हैं। अपना नाम बनाए रखने और लोगों को फिर से कॉल या संदेश करने के लिए खाता बनाएँ।",
+      "status": "machine"
+    },
+    "guest.offer.decline": {
+      "text": "नहीं, धन्यवाद",
+      "status": "machine"
+    },
+    "guest.offer.decline_note": {
+      "text": "अगर आप मना करते हैं, तो अतिथि खाता तुरंत हटा दिया जाता है।",
+      "status": "machine"
+    },
+    "guest.offer.delete_failed": {
+      "text": "अतिथि खाता अभी हटाया नहीं जा सका। फिर से कोशिश करें; यह एक दिन के भीतर अपने आप भी हट जाता है।",
+      "status": "machine"
+    },
+    "guest.offer.deleted": {
+      "text": "अतिथि खाता हटा दिया गया।",
+      "status": "machine"
+    },
+    "guest.offer.deleting": {
+      "text": "हटाया जा रहा है...",
+      "status": "machine"
+    },
+    "guest.offer.title": {
+      "text": "Lakko का उपयोग जारी रखें?",
+      "status": "machine"
+    },
     "invite.contact.accept_failed": {
       "text": "इनवाइट स्वीकार नहीं हो सका। फिर से कोशिश करें।",
       "status": "machine"
@@ -7072,6 +7228,10 @@
     },
     "restore_identity.lost.create": {
       "text": "अकाउंट की कुंजियाँ रीसेट करें",
+      "status": "machine"
+    },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "नई रिकवरी फ़्रेज़ इस डिवाइस पर सेव नहीं हो सकी। कुछ भी नहीं बदला गया।",
       "status": "machine"
     },
     "restore_identity.lost.sub": {

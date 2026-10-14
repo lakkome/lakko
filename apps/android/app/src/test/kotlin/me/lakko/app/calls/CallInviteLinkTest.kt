@@ -16,8 +16,7 @@ import org.junit.Test
  * The invite link of a live call — `docs/ux/call-links.md` sections 3, 4 and 5.
  *
  * The values the client fills in place of the four questions the deleted form
- * asked, the shape of the `Invite` control in each state, and who is offered it
- * at all.
+ * asked, who is offered a link at all, and what a failure says.
  */
 class CallInviteLinkTest {
 
@@ -66,52 +65,10 @@ class CallInviteLinkTest {
         }
     }
 
-    // ---- Section 5: what the control says -------------------------------------
-
-    @Test
-    fun `the first invite says what it is doing rather than only spinning`() {
-        val preparing = callInviteButton(CallInviteLinkState.Preparing)
-        assertTrue(preparing.busy)
-        assertFalse(preparing.enabled)
-        // Section 5: the mint includes a proof-of-work solve, so the wait is
-        // named. The words never say "proof of work" — see the copy rules.
-        assertTrue(preparing.label.en.isNotBlank())
-        assertNotEquals("Invite", preparing.label.en)
-        assertEquals("Preparing a link to this call. This takes a few seconds.", preparing.note?.en)
-    }
-
-    @Test
-    fun `a ready link re-offers rather than minting again`() {
-        val ready = callInviteButton(CallInviteLinkState.Ready("https://lakko.me/c/abc"))
-        assertTrue(ready.enabled)
-        assertFalse(ready.busy)
-        assertNull(ready.note)
-        // The label names the action, never the state.
-        assertEquals("Invite", ready.label.en)
-    }
-
-    @Test
-    fun `a failed mint stays pressable and says what to do`() {
-        val message = callInviteFailureMessage(CallInviteFailure.NETWORK)
-        val failed = callInviteButton(CallInviteLinkState.Failed(message))
-        assertTrue(failed.enabled)
-        assertEquals(message, failed.note)
-    }
-
-    @Test
-    fun `every invite state names its action and is spoken`() {
-        val states = listOf(
-            CallInviteLinkState.Idle,
-            CallInviteLinkState.Preparing,
-            CallInviteLinkState.Ready("https://lakko.me/c/abc"),
-            CallInviteLinkState.Failed(me.lakko.app.l10n.UiText("call.invite.unavailable")),
-        )
-        for (state in states) {
-            val button = callInviteButton(state)
-            assertTrue("$state", button.label.en.isNotBlank())
-            assertTrue("$state", button.spokenLabel.en.isNotBlank())
-        }
-    }
+    // ---- Section 5: what a failure says ---------------------------------------
+    //
+    // What `Invite` is doing in each state, and the line the call screen shows
+    // for it, is `InCallInviteTest`.
 
     @Test
     fun `a failure is one sentence on what happened and one on what to do`() {

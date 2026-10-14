@@ -280,6 +280,8 @@ public final class UnappliedRequestStore {
     private func saveRows(
         accountIdB64: String, groupIdB64: String, _ rows: [String: UnappliedRow]
     ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var raw: [String: [String: Any]] = [:]
         for (key, row) in rows {
             var entry: [String: Any] = ["join": NSNumber(value: row.viaJoinRequest)]

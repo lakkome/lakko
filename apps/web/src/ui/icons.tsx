@@ -50,6 +50,10 @@ const PATHS = {
   eyeOff: `<path d="M3 3l18 18M10.6 5.9A9.8 9.8 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-3.2 3.9M6.6 6.6C4 8.5 2.5 12 2.5 12s3.5 6.5 9.5 6.5c1.5 0 2.8-.4 4-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>`,
   lock: `<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/>`,
   pin: `<path d="M9 3.5h6l-1 6 3 3H7l3-3zM12 12.5V21"/>`,
+  // The two group-call layouts (docs/ux/group-call-grid.md section 3): equal
+  // tiles, and one large tile with a strip above it.
+  layoutGrid: `<rect x="3.5" y="4.5" width="7.5" height="6.5" rx="1.5"/><rect x="13" y="4.5" width="7.5" height="6.5" rx="1.5"/><rect x="3.5" y="13" width="7.5" height="6.5" rx="1.5"/><rect x="13" y="13" width="7.5" height="6.5" rx="1.5"/>`,
+  layoutFocus: `<rect x="3.5" y="4.5" width="4.5" height="3.5" rx="1"/><rect x="9.75" y="4.5" width="4.5" height="3.5" rx="1"/><rect x="16" y="4.5" width="4.5" height="3.5" rx="1"/><rect x="3.5" y="10" width="17" height="9.5" rx="1.5"/>`,
   archive: `<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/>`,
   link: `<path d="M10 14a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1"/><path d="M14 10a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1"/>`,
   copy: `<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>`,

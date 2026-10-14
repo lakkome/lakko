@@ -29,7 +29,6 @@ import { WaitNotice } from "../recover/FormNotices";
 import { createRetryCountdown } from "../recover/retry-countdown";
 import { currentLanguage, t } from "../../l10n";
 import { loadWasm } from "../../wasm";
-import { openUsernameClaim } from "../username-claim-host";
 import { rememberAddress } from "./address-register";
 import { CodeField, ResendButton } from "./CodeField";
 import {
@@ -250,9 +249,6 @@ export function RecoveryEmailForm(props: {
         <p class="form-info" role="status">
           {t("recovery_email.needs_username")}
         </p>
-        <button type="button" class="primary" onClick={openUsernameClaim}>
-          {t("username.claim.title")}
-        </button>
         <Show when={props.onCancel}>
           {(cancel) => (
             <button type="button" onClick={() => cancel()()}>

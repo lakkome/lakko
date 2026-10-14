@@ -79,6 +79,10 @@ public interface GroupCallSessionHandle {
     public fun setCameraEnabled(on: Boolean)
 
     public fun setMicrophoneEnabled(on: Boolean)
+
+    /** Use the camera chosen in the call's Settings sheet; `null` is the
+     *  default one. */
+    public fun selectCamera(cameraName: String?) {}
 }
 
 /** One read of a group for the host: membership, epoch, and the call seed at that epoch. */
@@ -134,6 +138,18 @@ public interface GroupCallPort {
      */
     public fun recordOtherFreshMembers(groupIdHex: String, callIdHex: String, nowMs: Long): Set<String>?
 
+    /**
+     * This ACCOUNT started the recorded call [callIdHex] (`docs/ux/calls.md`
+     * section 4.1.2): the starter the record carries is this device's own
+     * person key. `false` when the record is gone, names another call or
+     * carries no starter.
+     */
+    public fun startedByThisAccount(groupIdHex: String, callIdHex: String): Boolean
+
+    /** The name of the person behind [personKeyB64] by the call tile-name rule
+     *  (`CallTileName.kt`), or `null` when this device cannot name them. */
+    public fun personName(personKeyB64: String): String?
+
     public suspend fun readSettledGroup(groupIdHex: String, callId: ByteArray): SettledGroupRead
 
     /** The call-admission JWT. May throw. */
@@ -173,6 +189,12 @@ public sealed interface GroupCallStartOutcome {
     /** The call to join is no longer live. */
     public data object Ended : GroupCallStartOutcome
 
+    /**
+     * The person left the call while it was still connecting (they pressed
+     * End). Not a failure: there is nothing to tell them.
+     */
+    public data object Left : GroupCallStartOutcome
+
     /** [message] renders from the kind of failure (ADR-0061); the diagnostic is in the log. */
     public data class Failed(val message: UiText) : GroupCallStartOutcome
 }
@@ -185,6 +207,12 @@ public class GroupCallHost(
     private val onSlotChanged: (occupied: Boolean) -> Unit,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val warn: (String, Throwable?) -> Unit = ::logGroupCallWarning,
+    /**
+     * The call this device was in was ended for everyone by its starter
+     * (`docs/ux/calls.md` section 4.1.2). [starterName] is that person's name,
+     * or `null` when this device cannot name them. Called on the host scope.
+     */
+    private val notifyEndedForEveryone: (starterName: String?) -> Unit = {},
 ) {
     @Volatile
     private var port: GroupCallPort? = null
@@ -241,6 +269,16 @@ public class GroupCallHost(
     /** See [CallUiState.connectedSinceMs] — the running time the bar shows. */
     public val connectedSinceMs: StateFlow<Long?> get() = ui.connectedSinceMs
 
+    private val mutableStartedByThisAccount = MutableStateFlow(false)
+
+    /**
+     * This account started the call in the slot, so `End` offers to end it for
+     * everyone (`docs/ux/calls.md` section 4.1.2). Account-level: true on any
+     * device of the starter that is in the call. Read when the session comes
+     * up, from the record the `GroupCallStart` left, and cleared with the call.
+     */
+    public val startedByThisAccount: StateFlow<Boolean> = mutableStartedByThisAccount.asStateFlow()
+
     private class Active(
         val groupIdHex: String,
         val callId: ByteArray,
@@ -261,8 +299,16 @@ public class GroupCallHost(
         var sawRemote: Boolean = false,
         /** The alone-end timer (`docs/ux/calls.md` section 4.3); cancelled by [release]. */
         var aloneEnd: Job? = null,
+        /** The call's terminating `CallEnd` is already on the journal (its
+         *  starter ended it for everyone, here or on another device), so
+         *  leaving it publishes no second one. */
+        var endedForEveryone: Boolean = false,
         /** Set by [release]: no Join may be published for this call any more. */
         @Volatile var stopped: Boolean = false,
+        /** This device left the call as a hang-up (the person's End, or the
+         *  call ended for everyone) and not because its session failed. A
+         *  start still in flight then reports [GroupCallStartOutcome.Left]. */
+        var hungUp: Boolean = false,
     )
 
     private var active: Active? = null
@@ -350,6 +396,10 @@ public class GroupCallHost(
                 .distinctUntilChanged()
                 .collect { micOn -> if (micOn != null) handle?.setMicrophoneEnabled(micOn) }
         }
+        // The camera chosen in the Settings sheet (docs/ux/calls.md section 4.1).
+        scope.launch {
+            ui.devices.camera.collect { camera -> handle?.selectCamera(camera) }
+        }
         // Everyone else left: the call ends by itself after GROUP_CALL_ALONE_END_MS
         // as a hang-up, unless someone comes back inside the window
         // (`docs/ux/calls.md` section 4.3). The initiator still waiting for the
@@ -398,6 +448,72 @@ public class GroupCallHost(
         leaveWith(GroupLeaveReason.HUNG_UP)
     }
 
+    /**
+     * End the group call this device is in for every person in it
+     * (`docs/ux/calls.md` section 4.1.2). Only acts for the call's starter.
+     *
+     * The end is a `CallEnd` with the reason `EndedForAll`, published into the
+     * group like any call signal; every device in the call checks that it
+     * comes from the call's starter before it leaves. It is handed to the
+     * publish queue before this device leaves, so it is on its way while the
+     * session goes down, and the Leave this device owes follows it through the
+     * same queue. A failed publish is not reported: the starter has left
+     * either way, and the others stay until they hang up or the call empties.
+     */
+    public fun endForEveryone() {
+        val a = active ?: return
+        val p = port ?: return
+        if (!p.startedByThisAccount(a.groupIdHex, a.callIdHex)) {
+            // The record no longer names this account the starter (it was
+            // replaced by another call's): `End` goes back to leaving.
+            mutableStartedByThisAccount.value = false
+            return
+        }
+        if (a.endedForEveryone) return
+        a.endedForEveryone = true
+        scope.launch {
+            publishLock.withLock {
+                try {
+                    val published = p.publishSignal(
+                        a.groupIdHex,
+                        FfiCallSignalingBody.End(a.callId, FfiCallEndReason.ENDED_FOR_ALL),
+                    )
+                    if (!published) warn("group call: the end for everyone could not be published", null)
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (error: Throwable) {
+                    warn("group call: the end for everyone could not be published", error)
+                }
+            }
+        }
+        leaveWith(GroupLeaveReason.HUNG_UP)
+    }
+
+    /**
+     * The starter of the group call [callIdHex] in [groupIdHex] ended it for
+     * everyone: a `CallEnd{EndedForAll}` whose MLS sender is the starter this
+     * device recorded, as the receive path judged it
+     * ([groupCallEndedForEveryoneBy]). A device that is in that very call
+     * leaves and says who ended it; any other device has only lost the offer
+     * to join, which the closed record already took away.
+     *
+     * Safe from any thread: it only launches onto the host scope.
+     */
+    public fun onEndedForEveryone(groupIdHex: String, callIdHex: String, starterPersonKey: String) {
+        scope.launch {
+            val a = active ?: return@launch
+            if (a.groupIdHex != groupIdHex || a.callIdHex != callIdHex) return@launch
+            a.endedForEveryone = true
+            val name = try {
+                port?.personName(starterPersonKey)
+            } catch (error: Throwable) {
+                null
+            }
+            notifyEndedForEveryone(name)
+            leaveWith(GroupLeaveReason.HUNG_UP)
+        }
+    }
+
     /** The in-call screen's exit, after the ended state was shown. */
     public fun onOverlayExit() {
         if (handle != null) leaveWith(GroupLeaveReason.HUNG_UP)
@@ -440,6 +556,12 @@ public class GroupCallHost(
         }
         val callIdHex = callIdHexOf(callId)
         val gen = generation
+        // What this start built, for the outcome of a start that was left or
+        // failed under it (the fields are cleared by then).
+        var startedCall: Active? = null
+        var startedSession: GroupCallSessionHandle? = null
+        // This run holds [starting] until the session exists.
+        var holdsStarting = true
         // One call at a time, app-wide, from here on.
         starting = true
         setSlot(GroupCallSlot(groupIdHex, callIdHex, starting = true))
@@ -507,6 +629,7 @@ public class GroupCallHost(
                 keyedEpoch = read.epoch,
             )
             active = a
+            startedCall = a
             val h = p.createSession(
                 GroupCallSessionRequest(
                     groupIdHex = groupIdHex,
@@ -520,7 +643,15 @@ public class GroupCallHost(
                 ui,
             )
             handle = h
+            startedSession = h
+            // Whether `End` offers to end the call for everyone: the record
+            // names its starter from the `GroupCallStart` (this device's own,
+            // folded in as it was published, or the one it joined on).
+            mutableStartedByThisAccount.value = p.startedByThisAccount(groupIdHex, callIdHex)
+            // A camera chosen in the Settings sheet before the session existed.
+            ui.devices.camera.value?.let { h.selectCamera(it) }
             starting = false
+            holdsStarting = false
             setSlot(GroupCallSlot(groupIdHex, callIdHex, starting = false))
             mutableOverlay.value = true
             // A call is born expanded (see [collapsed]): cleared here, in the
@@ -528,36 +659,71 @@ public class GroupCallHost(
             // put-away can never suppress this one's screen.
             mutableCollapsed.value = false
             h.connect()
-            if (active !== a) return GroupCallStartOutcome.Failed(UiText(fallbackKey))
+            // Left, ended or failed while connecting: the session is already
+            // released. Which of the three decides what the person is told.
+            if (active !== a) return abandonedStartOutcome(a, h, groupIdHex, callId, fallbackKey)
             a.connected = true
             // A drain that arrived while connecting found no peer connection to
             // rekey; catch up now that the session can take a new key.
             settle(groupIdHex)
             return GroupCallStartOutcome.Connected
         } catch (cancel: CancellationException) {
-            release()
+            if (active == null || active === startedCall) release()
             throw cancel
         } catch (error: Throwable) {
-            val endedByServer = handle?.callEndedByServer == true
+            // Only this start's own call is left below: a start that was left
+            // while connecting can throw after the next call took the slot.
+            val ownCallActive = active != null && active === startedCall
+            // The person pressed End while the session was connecting and the
+            // connect threw under the teardown: not a failure to report.
+            if (startedCall?.hungUp == true) return GroupCallStartOutcome.Left
+            val endedByServer = startedSession?.callEndedByServer == true
             if (endedByServer) {
                 // The SFU says the call ended before this device arrived
                 // (`docs/ux/calls.md` section 4.3): close the chat's record
                 // for everyone rather than report a failure.
                 warn("group call: the SFU says the call ended before we joined", error)
-                if (active != null) leaveWith(GroupLeaveReason.ERROR)
+                if (ownCallActive) leaveWith(GroupLeaveReason.ERROR)
                 endRecordReportedBySfu(groupIdHex, callId)
                 return GroupCallStartOutcome.Ended
             }
             warn("group call: connect failed", error)
-            if (active != null) leaveWith(GroupLeaveReason.ERROR)
+            if (ownCallActive) leaveWith(GroupLeaveReason.ERROR)
             return GroupCallStartOutcome.Failed(callErrorText(error, fallbackKey))
         } finally {
-            starting = false
+            // A start that was left while connecting can finish after the next
+            // one began: it gave [starting] up when its session came up, and
+            // the slot and the call screen are the newer call's by now.
+            if (holdsStarting) starting = false
             if (active == null && handle == null) {
-                if (mutableSlot.value?.callIdHex == callIdHex) setSlot(null)
-                ui.setPhase(CallUiState.CallPhase.Ended(clock()))
+                val slotCallIdHex = mutableSlot.value?.callIdHex
+                if (slotCallIdHex == callIdHex) setSlot(null)
+                if (slotCallIdHex == null || slotCallIdHex == callIdHex) {
+                    ui.setPhase(CallUiState.CallPhase.Ended(clock()))
+                }
             }
         }
+    }
+
+    /**
+     * What a start came to when its call was taken out of the slot while the
+     * session was connecting. The person's own End says nothing; the SFU
+     * saying the call was over closes the chat's record, as when the connect
+     * throws for it; anything else is the failure it was before.
+     */
+    private fun abandonedStartOutcome(
+        a: Active,
+        h: GroupCallSessionHandle,
+        groupIdHex: String,
+        callId: ByteArray,
+        fallbackKey: String,
+    ): GroupCallStartOutcome = when {
+        a.hungUp -> GroupCallStartOutcome.Left
+        h.callEndedByServer -> {
+            endRecordReportedBySfu(groupIdHex, callId)
+            GroupCallStartOutcome.Ended
+        }
+        else -> GroupCallStartOutcome.Failed(UiText(fallbackKey))
     }
 
     private suspend fun settle(groupIdHex: String) {
@@ -680,6 +846,7 @@ public class GroupCallHost(
             return
         }
         val failed = handle?.failed == true
+        a.hungUp = reason == GroupLeaveReason.HUNG_UP && !failed
         // Read before the session is released: the call ended when the link
         // was last known alive, not when this device noticed.
         val lastInbound = handle?.lastInboundAtMs ?: 0L
@@ -696,7 +863,9 @@ public class GroupCallHost(
             initiator = a.initiator,
             recordOtherFreshMembers = otherFresh,
         )
-        if (p == null || (!plan.publishLeave && !plan.publishEnd)) return
+        // The starter's end for everyone IS the call's terminating End.
+        val publishEnd = plan.publishEnd && !a.endedForEveryone
+        if (p == null || (!plan.publishLeave && !publishEnd)) return
         val ffiReason = when (plan.leaveReason) {
             GroupLeaveReason.HUNG_UP -> FfiCallEndReason.HUNG_UP
             GroupLeaveReason.ERROR -> FfiCallEndReason.ERROR
@@ -707,7 +876,7 @@ public class GroupCallHost(
                 if (plan.publishLeave) {
                     p.publishSignal(a.groupIdHex, FfiCallSignalingBody.GroupLeave(a.callId, a.ownLeaf, ffiReason))
                 }
-                if (plan.publishEnd) {
+                if (publishEnd) {
                     p.publishSignal(a.groupIdHex, FfiCallSignalingBody.End(a.callId, ffiReason))
                 }
             }
@@ -725,6 +894,7 @@ public class GroupCallHost(
             it.aloneEnd = null
         }
         active = null
+        mutableStartedByThisAccount.value = false
         // Cleared BEFORE `hangUp`: the session's closed transition moves the UI
         // to Ended, and the phase observer must find no handle left.
         handle = null

@@ -124,6 +124,9 @@ public final class VerifiedBindingStore {
 
     private func save(_ all: [String: VerifiedBinding]) {
         guard let storageKey, let raw = try? JSONEncoder().encode(all) else { return }
+        guard let gate = AccountStoreGate.enterUnlessWiped(
+            ownerAccountIdB64 ?? AcceptedContactsStore.boundAccountIdB64 ?? "") else { return }
+        defer { gate.leave() }
         defaults.set(raw, forKey: storageKey)
     }
 

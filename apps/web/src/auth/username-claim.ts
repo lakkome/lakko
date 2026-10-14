@@ -23,19 +23,6 @@ export function usernameClaimOffered(username: string | null | undefined): boole
   return (username ?? "").trim().length === 0;
 }
 
-/**
- * What an entry point shows: `choose` for an account with no username;
- * `finish` for one whose name is saved and whose first password is still
- * owed (the screen then asks only for the password); `none` otherwise.
- */
-export function usernameClaimEntry(
-  username: string | null | undefined,
-  firstPasswordOwed: boolean,
-): "choose" | "finish" | "none" {
-  if (usernameClaimOffered(username)) return "choose";
-  return firstPasswordOwed ? "finish" : "none";
-}
-
 /** Why a step did not go through. */
 export type ClaimFailure =
   /** The name is taken (auth `409`, or discovery `409`). */

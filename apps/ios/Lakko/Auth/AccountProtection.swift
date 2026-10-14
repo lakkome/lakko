@@ -339,7 +339,7 @@ public struct AccountProtectionStore {
 
     /// Every key of `accountIdB64`, for the wipe.
     static func keys(accountIdB64: String) -> [String] {
-        ["phrase-saved", "status", "banner-dismissed", "notice-cursor", "own-actions", "first-password-owed",
+        ["phrase-saved", "status", "banner-dismissed", "notice-cursor", "own-actions",
          "rename-owed", "rename-at", "username-register-owed"]
             .map { key($0, accountIdB64: accountIdB64) }
     }
@@ -354,25 +354,9 @@ public struct AccountProtectionStore {
     }
 
     public func setPhraseSaved(_ saved: Bool, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         defaults.set(saved, forKey: Self.key("phrase-saved", accountIdB64: accountIdB64))
-    }
-
-    // MARK: A claimed username whose first password is still owed
-
-    /// A guest chose a username on this device and the account's first
-    /// password has not been set yet (the password it has is random and
-    /// known to nobody). Until it is, the password form opens without a
-    /// proof: there is nothing that could be proven.
-    public func firstPasswordOwed(accountIdB64: String) -> Bool {
-        defaults.bool(forKey: Self.key("first-password-owed", accountIdB64: accountIdB64))
-    }
-
-    public func setFirstPasswordOwed(_ owed: Bool, accountIdB64: String) {
-        if owed {
-            defaults.set(true, forKey: Self.key("first-password-owed", accountIdB64: accountIdB64))
-        } else {
-            defaults.removeObject(forKey: Self.key("first-password-owed", accountIdB64: accountIdB64))
-        }
     }
 
     // MARK: Changing the username (ADR-0076)
@@ -384,6 +368,8 @@ public struct AccountProtectionStore {
     }
 
     public func setRenameOwed(_ record: UsernameRename.Record?, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         let key = Self.key("rename-owed", accountIdB64: accountIdB64)
         if let record, let data = try? JSONEncoder().encode(record) {
             defaults.set(data, forKey: key)
@@ -398,6 +384,8 @@ public struct AccountProtectionStore {
     }
 
     public func setLastRenameAtMs(_ ms: Int64, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         defaults.set(ms, forKey: Self.key("rename-at", accountIdB64: accountIdB64))
     }
 
@@ -408,6 +396,8 @@ public struct AccountProtectionStore {
     }
 
     public func setUsernameRegisterOwed(_ name: String?, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         let key = Self.key("username-register-owed", accountIdB64: accountIdB64)
         if let name { defaults.set(name, forKey: key) } else { defaults.removeObject(forKey: key) }
     }
@@ -422,6 +412,8 @@ public struct AccountProtectionStore {
     }
 
     public func setStatus(_ status: RecoveryEmailStatus, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         guard let data = try? JSONEncoder().encode(status) else { return }
         defaults.set(data, forKey: Self.key("status", accountIdB64: accountIdB64))
         setPhraseSaved(status.phraseSaved, accountIdB64: accountIdB64)
@@ -434,6 +426,8 @@ public struct AccountProtectionStore {
     }
 
     public func setBannerDismissed(atMs: Int64, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         defaults.set(atMs, forKey: Self.key("banner-dismissed", accountIdB64: accountIdB64))
     }
 
@@ -447,6 +441,8 @@ public struct AccountProtectionStore {
     }
 
     public func setNoticeCursor(_ cursor: UInt64, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         defaults.set(
             Int64(clamping: cursor), forKey: Self.key("notice-cursor", accountIdB64: accountIdB64))
     }

@@ -11,11 +11,11 @@
 #      target/release/build/lakko-sframe-native-<hash>/out/.
 #   2. `c++` compiles sframe-bridge.cc + test_bridge.cc together,
 #      links the staticlib, and writes ./build/test_bridge.
-#   3. ./build/test_bridge runs four assertions:
-#        a. single-sender round-trip
-#        b. AAD-tampering fails
-#        c. multi-sender into one receiver (cache works)
-#        d. bad seed length rejected
+#   3. ./build/test_bridge runs the test functions listed in
+#      test_bridge.cc's `main` (round trip, the ADR-0071 golden
+#      frame, the clear prefix per codec, tampering, the refusal of
+#      the header-first layout, the SetCodec / Encrypt race, the
+#      mid-call rekey overlap, and the rest).
 #
 # The build runs offline once `target/release/` is populated; the
 # only network round-trip is the one cargo does on first run.

@@ -25,9 +25,10 @@
 
 use lakko_sfu_proto::{
     decode_payload_b64, decode_server_frame, encode_client_frame, encode_payload_b64, ClientFrame,
-    ErrorCode, RelayTarget, ServerFrame,
+    ErrorCode, RelayTarget, ServerFrame, VideoQuality, VideoWant,
 };
 
+use crate::ui_rules::TileVideoQuality;
 use crate::FfiError;
 
 impl From<lakko_sfu_proto::SfuProtoError> for FfiError {
@@ -162,6 +163,50 @@ pub enum SfuServerFrame {
         /// SDP offer string.
         sdp: String,
     },
+    /// What this subscriber is being sent of each publisher's video
+    /// (ADR-0070 step 6): the whole set, in the subscriber's order of
+    /// importance. A publisher's quality is the one asked for or a smaller
+    /// one, never a larger one.
+    VideoGiven {
+        /// One entry per publisher.
+        given: Vec<SfuVideoGiven>,
+    },
+    /// Which of this publisher's own camera senders somebody is being
+    /// sent, or is about to be sent. `false`: nobody is, the client may
+    /// stop encoding and uploading that sender; `true`: it must be
+    /// sending it. The light sender is always needed and is not here.
+    VideoNeeded {
+        /// The main (full size) camera sender.
+        main: bool,
+        /// The middle (half size) camera sender.
+        middle: bool,
+    },
+    /// How much this publisher's own camera senders may send (ADR-0068,
+    /// amendment of 2026-10-11): the ceiling the SFU sets for the main
+    /// and the middle sender, in kilobits per second, each at least 1
+    /// and at most 20000. The client sets each as that sender's maximum
+    /// bitrate. The light sender and audio are not limited and are not
+    /// here. A ceiling is given whether or not the sender is needed
+    /// (`VideoNeeded` switches senders on and off).
+    ///
+    /// Appended last: UniFFI lowers a variant as its ordinal.
+    PublishBudget {
+        /// The ceiling of the main (full size) camera sender, kbit/s.
+        main_kbps: u32,
+        /// The ceiling of the middle (half size) camera sender, kbit/s.
+        middle_kbps: u32,
+    },
+}
+
+/// One entry of [`SfuServerFrame::VideoGiven`]: the picture of one
+/// publisher this subscriber is being sent.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SfuVideoGiven {
+    /// The publisher's peer id, as the roster names it.
+    pub peer: String,
+    /// Which of that publisher's video tracks carries packets (the light
+    /// track is sent at every quality).
+    pub quality: TileVideoQuality,
 }
 
 impl From<ServerFrame> for SfuServerFrame {
@@ -198,6 +243,27 @@ impl From<ServerFrame> for SfuServerFrame {
             ServerFrame::Pong { nonce } => Self::Pong { nonce },
             ServerFrame::SdpAnswer { sdp } => Self::SdpAnswer { sdp },
             ServerFrame::SdpOffer { sdp } => Self::SdpOffer { sdp },
+            ServerFrame::VideoGiven { given } => Self::VideoGiven {
+                given: given
+                    .into_iter()
+                    .map(|entry| SfuVideoGiven {
+                        peer: entry.peer,
+                        quality: match entry.quality {
+                            VideoQuality::Main => TileVideoQuality::Main,
+                            VideoQuality::Middle => TileVideoQuality::Middle,
+                            VideoQuality::Light => TileVideoQuality::Light,
+                        },
+                    })
+                    .collect(),
+            },
+            ServerFrame::VideoNeeded { main, middle } => Self::VideoNeeded { main, middle },
+            ServerFrame::PublishBudget {
+                main_kbps,
+                middle_kbps,
+            } => Self::PublishBudget {
+                main_kbps,
+                middle_kbps,
+            },
         }
     }
 }
@@ -247,9 +313,71 @@ pub fn compose_sfu_signal_relay_to_call(payload: Vec<u8>) -> Result<String, FfiE
 }
 
 /// Compose a client → SFU SDP offer.
+///
+/// `light_mids` names the `mid`s of the offer's video m-lines that carry
+/// a light copy of the sender's camera (the same picture scaled down, on
+/// its own m-line beside the main one); the SFU forwards such a track as
+/// the sender's light companion. Empty for an offer without one. More
+/// than `lakko_sfu_proto::MAX_LIGHT_MIDS` entries, an empty entry or one
+/// longer than `lakko_sfu_proto::MAX_LIGHT_MID_BYTES` bytes is an error.
 #[uniffi::export]
-pub fn compose_sfu_sdp_offer(sdp: String) -> Result<String, FfiError> {
-    Ok(encode_client_frame(&ClientFrame::SdpOffer { sdp })?)
+pub fn compose_sfu_sdp_offer(sdp: String, light_mids: Vec<String>) -> Result<String, FfiError> {
+    compose_sfu_sdp_offer_with_middle(sdp, light_mids, Vec::new())
+}
+
+/// Compose a client → SFU SDP offer that also names its middle track
+/// (ADR-0070 step 5).
+///
+/// `middle_mids` names the `mid`s of the offer's video m-lines that carry
+/// the middle copy of the sender's camera (the same picture at half size,
+/// on its own m-line); the SFU forwards such a track only to a subscriber
+/// whose `video-wants` asks for it. The bounds are those of `light_mids`;
+/// outside them this is an error. With an empty `middle_mids` the frame is
+/// exactly [`compose_sfu_sdp_offer`]'s.
+#[uniffi::export]
+pub fn compose_sfu_sdp_offer_with_middle(
+    sdp: String,
+    light_mids: Vec<String>,
+    middle_mids: Vec<String>,
+) -> Result<String, FfiError> {
+    Ok(encode_client_frame(&ClientFrame::SdpOffer {
+        sdp,
+        light_mids,
+        middle_mids,
+    })?)
+}
+
+/// One entry of a `video-wants` frame: the picture of one publisher this
+/// subscriber shows.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SfuVideoWant {
+    /// The publisher's peer id, as the roster names it.
+    pub peer: String,
+    /// Which of that publisher's video tracks is shown
+    /// ([`crate::ui_rules::tile_video_quality`]).
+    pub quality: TileVideoQuality,
+}
+
+/// Compose a client → SFU `video-wants` frame (ADR-0070 step 5): which
+/// picture of each publisher this subscriber shows. Each frame replaces
+/// the whole set; a publisher left out is `Main`. An error when the list
+/// is outside the protocol's bounds (more than
+/// `lakko_sfu_proto::MAX_VIDEO_WANTS` entries, an empty peer id or one
+/// longer than `lakko_sfu_proto::MAX_VIDEO_WANT_PEER_BYTES` bytes).
+#[uniffi::export]
+pub fn compose_sfu_video_wants(wants: Vec<SfuVideoWant>) -> Result<String, FfiError> {
+    let wants = wants
+        .into_iter()
+        .map(|want| VideoWant {
+            peer: want.peer,
+            quality: match want.quality {
+                TileVideoQuality::Main => VideoQuality::Main,
+                TileVideoQuality::Middle => VideoQuality::Middle,
+                TileVideoQuality::Light => VideoQuality::Light,
+            },
+        })
+        .collect();
+    Ok(encode_client_frame(&ClientFrame::VideoWants { wants })?)
 }
 
 /// Compose a client → SFU SDP answer (responds to a SFU-initiated
@@ -341,8 +469,151 @@ mod tests {
 
     #[test]
     fn compose_sdp_offer_kebab() {
-        let json = compose_sfu_sdp_offer("v=0\r\n".into()).expect("compose");
+        let json = compose_sfu_sdp_offer("v=0\r\n".into(), Vec::new()).expect("compose");
         assert!(json.contains("\"kind\":\"sdp-offer\""), "got {json}");
+        assert!(!json.contains("light_mids"), "got {json}");
+    }
+
+    #[test]
+    fn compose_sdp_offer_carries_the_light_mids() {
+        let json = compose_sfu_sdp_offer("v=0\r\n".into(), vec!["2".into()]).expect("compose");
+        match lakko_sfu_proto::decode_client_frame(&json).expect("decode") {
+            ClientFrame::SdpOffer {
+                sdp,
+                light_mids,
+                middle_mids,
+            } => {
+                assert_eq!(sdp, "v=0\r\n");
+                assert_eq!(light_mids, vec!["2".to_owned()]);
+                assert!(middle_mids.is_empty());
+            },
+            _ => panic!("expected SdpOffer"),
+        }
+        assert!(!json.contains("middle_mids"), "got {json}");
+        // Outside the bound: not composed.
+        let many = vec!["1".to_owned(); lakko_sfu_proto::MAX_LIGHT_MIDS + 1];
+        assert!(compose_sfu_sdp_offer("v=0\r\n".into(), many).is_err());
+    }
+
+    #[test]
+    fn compose_sdp_offer_carries_the_middle_mids() {
+        let json =
+            compose_sfu_sdp_offer_with_middle("v=0\r\n".into(), vec!["2".into()], vec!["3".into()])
+                .expect("compose");
+        match lakko_sfu_proto::decode_client_frame(&json).expect("decode") {
+            ClientFrame::SdpOffer {
+                light_mids,
+                middle_mids,
+                ..
+            } => {
+                assert_eq!(light_mids, vec!["2".to_owned()]);
+                assert_eq!(middle_mids, vec!["3".to_owned()]);
+            },
+            _ => panic!("expected SdpOffer"),
+        }
+        let many = vec!["1".to_owned(); lakko_sfu_proto::MAX_LIGHT_MIDS + 1];
+        assert!(compose_sfu_sdp_offer_with_middle("v=0\r\n".into(), Vec::new(), many).is_err());
+    }
+
+    #[test]
+    fn compose_video_wants_round_trips_and_refuses_what_the_server_would() {
+        let want = |peer: &str, quality| SfuVideoWant {
+            peer: peer.to_owned(),
+            quality,
+        };
+        let json = compose_sfu_video_wants(vec![
+            want("p1", TileVideoQuality::Main),
+            want("p2", TileVideoQuality::Middle),
+            want("p3", TileVideoQuality::Light),
+        ])
+        .expect("compose");
+        assert_eq!(
+            json,
+            r#"{"kind":"video-wants","wants":[{"peer":"p1","quality":"main"},{"peer":"p2","quality":"middle"},{"peer":"p3","quality":"light"}]}"#
+        );
+        assert!(lakko_sfu_proto::decode_client_frame(&json).is_ok());
+        assert_eq!(
+            compose_sfu_video_wants(Vec::new()).expect("empty set"),
+            r#"{"kind":"video-wants","wants":[]}"#
+        );
+        assert!(compose_sfu_video_wants(vec![want("", TileVideoQuality::Main)]).is_err());
+        let many = vec![want("p", TileVideoQuality::Light); lakko_sfu_proto::MAX_VIDEO_WANTS + 1];
+        assert!(compose_sfu_video_wants(many).is_err());
+    }
+
+    #[test]
+    fn video_given_parses_into_typed_frame() {
+        let json = r#"{"kind":"video-given","given":[{"peer":"p1","quality":"main"},{"peer":"p2","quality":"middle"},{"peer":"p3","quality":"light"}]}"#;
+        match parse_sfu_server_frame(json.to_owned()).expect("parses") {
+            SfuServerFrame::VideoGiven { given } => assert_eq!(
+                given,
+                vec![
+                    SfuVideoGiven {
+                        peer: "p1".into(),
+                        quality: TileVideoQuality::Main,
+                    },
+                    SfuVideoGiven {
+                        peer: "p2".into(),
+                        quality: TileVideoQuality::Middle,
+                    },
+                    SfuVideoGiven {
+                        peer: "p3".into(),
+                        quality: TileVideoQuality::Light,
+                    },
+                ]
+            ),
+            _ => panic!("expected VideoGiven"),
+        }
+        // Out of bounds, as the wire crate refuses it.
+        assert!(parse_sfu_server_frame(
+            r#"{"kind":"video-given","given":[{"peer":"","quality":"main"}]}"#.to_owned()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn video_needed_parses_into_typed_frame() {
+        for (main, middle) in [(true, true), (false, true), (true, false), (false, false)] {
+            let json = format!(r#"{{"kind":"video-needed","main":{main},"middle":{middle}}}"#);
+            match parse_sfu_server_frame(json).expect("parses") {
+                SfuServerFrame::VideoNeeded { main: m, middle: d } => {
+                    assert_eq!((m, d), (main, middle));
+                },
+                _ => panic!("expected VideoNeeded"),
+            }
+        }
+        // Both flags are required, and they are booleans.
+        assert!(
+            parse_sfu_server_frame(r#"{"kind":"video-needed","main":true}"#.to_owned()).is_err()
+        );
+        assert!(parse_sfu_server_frame(
+            r#"{"kind":"video-needed","main":1,"middle":0}"#.to_owned()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn publish_budget_parses_into_typed_frame() {
+        for (main, middle) in [(2500_u32, 500_u32), (1, 1), (20_000, 150)] {
+            let json =
+                format!(r#"{{"kind":"publish-budget","main_kbps":{main},"middle_kbps":{middle}}}"#);
+            match parse_sfu_server_frame(json).expect("parses") {
+                SfuServerFrame::PublishBudget {
+                    main_kbps,
+                    middle_kbps,
+                } => assert_eq!((main_kbps, middle_kbps), (main, middle)),
+                _ => panic!("expected PublishBudget"),
+            }
+        }
+        // Both ceilings are required, non-zero and within the bound.
+        for bad in [
+            r#"{"kind":"publish-budget","main_kbps":2500}"#,
+            r#"{"kind":"publish-budget","main_kbps":0,"middle_kbps":500}"#,
+            r#"{"kind":"publish-budget","main_kbps":2500,"middle_kbps":20001}"#,
+            r#"{"kind":"publish-budget","main_kbps":"2500","middle_kbps":500}"#,
+        ] {
+            assert!(parse_sfu_server_frame(bad.to_owned()).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -23,3 +23,5 @@ lakko-contacts.workspace = true
 [dev-dependencies]
 # Only to pin that the folder bitfield constants equal the wire ones.
 lakko-sync.workspace = true
+# The layer-display rule is a state machine: arbitrary event sequences.
+proptest = "1"

@@ -61,9 +61,6 @@ public fun ProfileSettingsScreen(
     /** Persist + republish a changed profile. */
     onSaved: (OwnProfile) -> Unit,
     onBack: () -> Unit,
-    /** Opens "Choose a username"; offered only while the account has none
-     *  (`usernameClaimOffered`). */
-    onChooseUsername: (() -> Unit)? = null,
     /** ADR-0076 - opens "Change username"; shown beside the username. */
     onChangeUsername: (() -> Unit)? = null,
 ) {
@@ -135,22 +132,15 @@ public fun ProfileSettingsScreen(
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (onChooseUsername != null && me.lakko.app.auth.usernameClaimOffered(hasUsername = username != null)) {
-            // A guest account: the place that shows the username offers one.
-            androidx.compose.material3.OutlinedButton(onClick = onChooseUsername) {
-                Text(t("username.claim.title"))
-            }
-        } else {
-            Text(
-                // A username is always laid out LTR (docs/ux/localization.md section 6).
-                text = username?.let { "\u2066@$it\u2069" } ?: t("settings.profile.username.none"),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (username != null && onChangeUsername != null) {
-                androidx.compose.material3.TextButton(onClick = onChangeUsername) {
-                    Text(t("username.change.title"))
-                }
+        Text(
+            // A username is always laid out LTR (docs/ux/localization.md section 6).
+            text = username?.let { "\u2066@$it\u2069" } ?: t("settings.profile.username.none"),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (username != null && onChangeUsername != null) {
+            androidx.compose.material3.TextButton(onClick = onChangeUsername) {
+                Text(t("username.change.title"))
             }
         }
 

@@ -140,14 +140,14 @@ suites); **not walked live**, no passkey ceremony executed; the
   and push binding dropped; `LAKKO_DS_ATTEST_KEY`). Neither checks freshness
   (a retried upload may be days old; an applied generation cannot be applied
   again); the client bounds its own owed attestation at 30 days.
-- **Residuals** (G-45): a stolen session can reset - loud, not silent, since
+- **Residuals** (G-46): a stolen session can reset - loud, not silent, since
   every other device shows the signed-out screen within the access TTL; the
   password and TOTP survive; `DELETE /discovery/keypackage/device/{id}` is
   not under discovery's generation floor; the other discovery writes and
   storage's `PUT /backup` stay open to a superseded token for the access TTL.
   The old identity's conversation leaves survive until a contact who
   administers each group evicts them (phase 2, in code since 2026-10-04;
-  G-44 for an owned, a table-less or an admin-less-contact group).
+  G-45 for an owned, a table-less or an admin-less-contact group).
 
 ## Per-client wrappers
 

@@ -11,12 +11,13 @@
  * registration day. `BackupClient.uploadFromCache` was built for precisely
  * this and had no caller anywhere.
  *
- * **Why a dirty flag rather than a plain timer.** The payload carries the
- * whole MLS storage snapshot, which changes on every message because the
- * ratchet advances - so a timer would upload constantly while the thing worth
- * restoring stayed the same. What makes a backup materially better is a
- * membership or address-book change, so those mark it dirty and the timer only
- * decides *when* a dirty backup goes out.
+ * **Why a dirty flag rather than a plain timer.** What the payload carries -
+ * the address book, the list of conversations, the synced state - changes
+ * rarely, so a timer would upload the same thing over and over. What makes a
+ * backup materially better is a membership or address-book change, so those
+ * mark it dirty and the timer only decides *when* a dirty backup goes out.
+ * (The payload carries no MLS state: a provider snapshot belongs to the
+ * device that made it and is never backed up, 2026-10-02.)
  *
  * **Why the flag is persisted.** The throttle means the upload usually does
  * not happen at the moment of the change, and a tab can close in between. A
@@ -164,22 +165,24 @@ export function markBackupDirty(
 
 /** What a run needs. Supplied as accessors rather than values because a run
  *  happens on a timer, long after the caller wired it, and the session token
- *  and the snapshot both move. */
+ *  moves. */
 export interface AutoBackupDeps {
   readonly accountId: () => Uint8Array | null;
   readonly accountIdB64: () => string | null;
   readonly ed25519Seed: () => Uint8Array | null;
   readonly deviceKey: () => Promise<CryptoKey | null>;
   readonly sessionToken: () => string | null;
-  /** The whole MLS storage snapshot, or `null` when no identity is loaded. */
-  readonly snapshot: () => Uint8Array | null;
+  /** Whether a fetch of this account's backup is still owed
+   *  (`restore-owed.ts`). While it is, nothing is uploaded: the blob on the
+   *  server is the one the restore still has to read, and this device's
+   *  state before that restore is nearly empty. Absent means "never owed". */
+  readonly restoreOwed?: (accountIdB64: string) => boolean;
   /** Injected for tests. */
   readonly upload: (args: {
     accountId: Uint8Array;
     ed25519Seed: Uint8Array;
     deviceKey: CryptoKey;
     sessionToken: string;
-    snapshot: Uint8Array;
   }) => Promise<boolean>;
   readonly now?: () => number;
 }
@@ -195,9 +198,10 @@ export type AutoBackupOutcome =
  * Upload if one is due, and record the result.
  *
  * `not-ready` covers every reason the session cannot produce an envelope right
- * now - no identity, no device key, no token. It leaves the dirty flag alone,
- * so the backup simply goes out at the next tick once the session is whole;
- * clearing it there would silently drop the change that made it dirty.
+ * now - no identity, no device key, no token - and the one reason it must not:
+ * a restore of the account's backup is still owed. It leaves the dirty flag
+ * alone, so the backup simply goes out at the next tick once the session is
+ * whole; clearing it there would silently drop the change that made it dirty.
  */
 export async function runDueBackup(
   deps: AutoBackupDeps,
@@ -205,6 +209,9 @@ export async function runDueBackup(
   const nowMs = (deps.now ?? Date.now)();
   const accountIdB64 = deps.accountIdB64();
   if (accountIdB64 === null) return "not-ready";
+  // Before the verdict: an owed restore holds the upload back however due
+  // it is.
+  if (deps.restoreOwed?.(accountIdB64) === true) return "not-ready";
   const state = loadAutoBackupState(accountIdB64);
   const verdict = backupVerdict(state, nowMs);
   if (verdict !== "due") return verdict;
@@ -212,13 +219,11 @@ export async function runDueBackup(
   const accountId = deps.accountId();
   const ed25519Seed = deps.ed25519Seed();
   const sessionToken = deps.sessionToken();
-  const snapshot = deps.snapshot();
   if (
     accountId === null ||
     ed25519Seed === null ||
     sessionToken === null ||
-    sessionToken.length === 0 ||
-    snapshot === null
+    sessionToken.length === 0
   ) {
     return "not-ready";
   }
@@ -232,7 +237,6 @@ export async function runDueBackup(
       ed25519Seed,
       deviceKey,
       sessionToken,
-      snapshot,
     });
   } catch {
     ok = false;

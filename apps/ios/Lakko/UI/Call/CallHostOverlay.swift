@@ -135,7 +135,9 @@ struct CallHostOverlay: ViewModifier {
             ExternalCallBar(
                 state: ui,
                 label: label,
-                phase: barPhase,
+                // A group call rings nobody: while it starts, the bar reads
+                // `Connecting...`, never `Calling...` (section 3.4).
+                phase: CallBarPresentation.groupDisplayPhase(barPhase),
                 connectedAt: callBar.connectedAt,
                 onExpand: { callBar.expand() })
         case nil:
@@ -173,6 +175,10 @@ struct CallHostOverlay: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            // The collapsed / expanded flag, for a screen under the overlay
+            // that offers its own way back to the call (a guest's
+            // `Return to call`, ``GuestRoot``).
+            .environmentObject(callBar)
             .safeAreaInset(edge: .top, spacing: 0) {
                 // Both can be up at once — a link call whose outcome has not
                 // been dismissed leaves its notice while a NEW call of another
@@ -195,6 +201,12 @@ struct CallHostOverlay: ViewModifier {
                             onDismiss: { link.dismissOutcome() }
                         )
                     }
+                    // The starter of the call this device was in ended it for
+                    // everyone (section 4.1.2): one line saying so, for a few
+                    // seconds, wherever the person is in the app.
+                    if let ended = group.endedForEveryoneNotice ?? link.endedForEveryoneNotice {
+                        CallEndedForEveryoneBanner(text: ended.text)
+                    }
                     if callBarVisible(phase: barPhase, callScreenUp: presentedNow != nil) {
                         collapsedBar
                     }
@@ -204,6 +216,11 @@ struct CallHostOverlay: ViewModifier {
             // the phase is folded here rather than inside it.
             .onChange(of: barPhase) { _, phase in
                 if callBar.observe(phase: phase) { dismissEndedCollapsedCall() }
+                // A choice of microphone, camera or speaker holds for the
+                // call, not for the next one. Here rather than on the call
+                // screen, which is not there for a call that ended while put
+                // away.
+                if phase == .ended || phase == .idle { CallDevices.resetForNextCall() }
             }
             .fullScreenCover(
                 isPresented: Binding(
@@ -238,9 +255,13 @@ struct CallHostOverlay: ViewModifier {
                         host.clearFinishedCall()
                     }
                 case .group(let ui, let id)?:
+                    // `End` offers the choice of section 4.1.2 only to the
+                    // account that started the call.
                     CallScreen(
                         externalState: ui,
                         connectedAt: callBar.connectedAt,
+                        endedLine: group.endedForEveryoneNotice?.text,
+                        onEndForEveryone: group.startedCall ? { group.endForEveryone() } : nil,
                         onCollapse: { callBar.collapse() }
                     ) {
                         group.dismissPresentation()
@@ -251,11 +272,16 @@ struct CallHostOverlay: ViewModifier {
                     // only by the device that founded the call, which is the
                     // only one whose signature a joiner's committer election
                     // would follow. `LinkCallHost` holds the offer for exactly
-                    // that case, so passing it through is the whole gate.
+                    // that case, so passing it through is the whole gate. It
+                    // opens the app's own menu on the call screen: Copy link,
+                    // and Invite contacts.
                     CallScreen(
                         externalState: ui,
                         invite: link.invite,
                         connectedAt: callBar.connectedAt,
+                        endedLine: link.endedForEveryoneNotice?.text,
+                        // The link's owner, and nobody else.
+                        onEndForEveryone: link.startedCall ? { link.endForEveryone() } : nil,
                         onCollapse: { callBar.collapse() }
                     ) {
                         let slug = link.presentationSlug

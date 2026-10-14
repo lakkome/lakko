@@ -4,7 +4,6 @@
 package me.lakko.app.webauthn
 
 import android.content.Context
-import android.content.Intent
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -110,6 +109,9 @@ public class PasskeysViewModel(
                     }
                 }
             } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e) {
+                    mutableState.update { it.copy(loading = false) }
+                }
                 mutableState.update {
                     it.copy(
                         loading = false,
@@ -194,6 +196,9 @@ public class PasskeysViewModel(
                     it.copy(busy = false, message = Message.Error(explain(e)))
                 }
             } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(
                         busy = false,
@@ -301,6 +306,9 @@ public class PasskeysViewModel(
                     it.copy(busy = false, message = Message.Error(explain(e)))
                 }
             } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(
                         busy = false,
@@ -387,7 +395,9 @@ public class PasskeysViewModel(
                 // Forget device takes (every per-account store, push first).
                 onAccountDeleted()
             } catch (e: Throwable) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
+                me.lakko.app.rethrowIfCancelled(e) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 if (me.lakko.app.auth.isFreshAuthRequired(e)) {
                     // The proof ran out between the block and the call:
                     // nothing was deleted; the dialog shows the block.
@@ -429,11 +439,12 @@ public class PasskeysViewModel(
 
     /**
      * A3 (GDPR portability) — fetch what the server holds about the account,
-     * wrap it in a portable JSON document, and hand it to the OS share sheet.
-     * The E2EE content lives on-device and is exported via the encrypted
-     * Backup, not here.
+     * wrap it in a portable JSON document, and hand it to [save], which asks
+     * the person where to put the file (the system's save picker; never a
+     * share sheet). The E2EE content lives on-device and is exported via the
+     * encrypted Backup, not here.
      */
-    public fun exportData(context: Context) {
+    public fun exportData(save: (name: String, mime: String, bytes: ByteArray) -> Unit) {
         rebindSession()
         if (mutableState.value.busy) return
         mutableState.update { it.copy(busy = true, message = null) }
@@ -447,22 +458,17 @@ public class PasskeysViewModel(
                     note = UiText("settings.data.export_note").render(),
                 )
                 val jsonText = exportJson.encodeToString(doc)
-                val send = Intent(Intent.ACTION_SEND).apply {
-                    type = "application/json"
-                    putExtra(Intent.EXTRA_TITLE, "lakko-account-export.json")
-                    putExtra(Intent.EXTRA_TEXT, jsonText)
-                }
-                val chooser = Intent.createChooser(send, UiText("settings.data.export").render()).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(chooser)
-                // The share sheet is the confirmation; no status line.
+                save("lakko-account-export.json", "application/json", jsonText.toByteArray(Charsets.UTF_8))
+                // The save picker is the confirmation; no status line.
                 mutableState.update { it.copy(busy = false) }
             } catch (e: WebauthnHttpError) {
                 mutableState.update {
                     it.copy(busy = false, message = Message.Error(explain(e)))
                 }
             } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(
                         busy = false,
@@ -529,7 +535,7 @@ public sealed interface Message {
     public data class Error(val text: UiText) : Message
 }
 
-/** A3 — the portable JSON document handed to the share sheet. Wraps the
+/** A3 — the portable JSON document the person saves as a file. Wraps the
  *  server-held [AccountExport] with provenance + an E2EE-content note. */
 @Serializable
 private data class ExportDoc(

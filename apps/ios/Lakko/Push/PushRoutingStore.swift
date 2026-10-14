@@ -231,6 +231,8 @@ public final class PushRoutingStore {
         distributed: Bool,
         mintEpoch: UInt64
     ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard let combined = seal(Self.encodeRecord(
             secret: secret, distributed: distributed, mintEpoch: mintEpoch)) else { return }
         secretDefaults.set(combined, forKey: Self.secretKey(accountIdB64, groupIdHex))
@@ -344,6 +346,8 @@ public final class PushRoutingStore {
         groupIdHex: String,
         matching secret: Data
     ) -> Bool {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return false }
+        defer { gate.leave() }
         guard let record = getRecord(accountIdB64: accountIdB64, groupIdHex: groupIdHex),
               record.secret == secret else {
             return false

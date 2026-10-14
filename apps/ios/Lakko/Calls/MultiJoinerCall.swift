@@ -87,17 +87,22 @@ final class MultiJoinerCall {
         let audio: Bool
         /// Camera request.
         let video: Bool
-        /// Resolve a peer to a contact name (ADR-0021 peer_tag lookup).
-        var resolveDisplayName: ((_ peerId: String, _ pseudonym: String, _ peerTag: String) -> String)?
+        /// What the remote tiles are named through (``LinkCallTileNames``):
+        /// the people this device already knows, the one display resolver and
+        /// the profile store a member's sealed profile is filed in. The
+        /// default knows nobody and files nothing.
+        var naming = LinkCallTileNames.Ports()
         /// `services/auth` base URL for the JWT mint (default `CallJwtClient`
         /// default).
         var authBaseUrl: String?
         /// The name on the local tile (`docs/ux/calls.md` section 4.4).
         var localDisplayName: String = ""
-        /// The user's own ADR-0048 profile envelope, or `nil` when none is
-        /// set. Sealed into the call's MLS group and relayed, so every other
-        /// member — a guest with no contact list included — names this tile.
-        /// The SFU relays ciphertext only.
+        /// The user's own ADR-0048 profile envelope, or `nil` without an
+        /// account. Sealed into the call's MLS group and relayed, so every
+        /// other member — a guest with no contact list included — names this
+        /// tile. It carries the display name or, when there is none, the
+        /// username, so there is always something to name the tile by. The
+        /// SFU relays ciphertext only.
         var ownProfileEnvelope: (() -> Data?)?
     }
 
@@ -116,6 +121,10 @@ final class MultiJoinerCall {
         var onNoCommitter: (() -> Void)?
         /// Fired on a fatal setup error (incl. the owner-membership refusal).
         var onError: ((Error) -> Void)?
+        /// The link's owner ended the call for everyone
+        /// (`docs/ux/calls.md` section 4.1.2). `peerId` is the SFU peer that
+        /// relayed it, for the name on the notice. The host ends the call.
+        var onEndedForEveryone: ((_ peerId: String) -> Void)?
     }
 
     enum Role { case owner, joiner }
@@ -139,10 +148,12 @@ final class MultiJoinerCall {
     /// This client's MLS leaf once it has a group.
     private var localLeaf: UInt32?
     private var joined = false
-    /// Names members announced over the call group (SFU peer id -> name). A
-    /// name learnt this way outranks the contact-list resolver: it is what the
-    /// person calls themself, sealed under a key only members hold.
-    private var peerNames: [String: String] = [:]
+    /// Who is behind each remote tile and what it is called
+    /// (``CallTileName``): what each member announced over the call group, and
+    /// the person the profile store knows them as.
+    private let names: LinkCallTileNames
+    /// Broadcasts that arrived before this client had a group to read them.
+    private var earlyRelays = EarlyRelays<(from: String, bytes: Data)>()
 
     /// G-22 dedup: relay `from` SFU peer id → wrapped Welcome, so ONE
     /// SFU-admitted peer is admitted at most once per call — even if it re-mints
@@ -179,6 +190,9 @@ final class MultiJoinerCall {
     /// a track arrival only defers to it. `@MainActor`-confined like the
     /// rest of this class — no new concurrency.
     private var lastKnownCameraOn: [String: Bool] = [:]
+    /// Who is speaking, read on this device from the call's own audio
+    /// (`docs/ux/group-call-grid.md` section 7.3).
+    private let speaking: GroupSpeakingMonitor
 
     // MARK: - Init
 
@@ -199,6 +213,8 @@ final class MultiJoinerCall {
         self.role = role
         self.ownerKeyHex = ownerKeyHex
         self.localLeaf = initialLeaf
+        self.speaking = GroupSpeakingMonitor(ui: ui)
+        self.names = LinkCallTileNames(ports: opts.naming)
         self.presence = CallPresence(
             selfKeyHex: hexEncode(opts.identity.signaturePublicKey()),
             ownerKeyHex: ownerKeyHex,
@@ -228,8 +244,10 @@ final class MultiJoinerCall {
             onWelcome: { [weak self] selfPeerId, roster in
                 self?.onSfuWelcome(selfPeerId: selfPeerId, roster: roster)
             },
-            onPeerJoined: { [weak self] peerId, pseudonym, peerTag in
-                self?.onSfuPeerJoined(peerId: peerId, pseudonym: pseudonym, peerTag: peerTag)
+            // The SFU's account pseudonym is a piece of the account id: never
+            // a name, so it goes no further (``CallTileName``).
+            onPeerJoined: { [weak self] peerId, _, peerTag in
+                self?.onSfuPeerJoined(peerId: peerId, peerTag: peerTag)
             },
             onPeerLeft: { [weak self] peerId in self?.onSfuPeerLeft(peerId: peerId) },
             onRemoteVideoTrack: { [weak self] track, streamId in
@@ -278,9 +296,31 @@ final class MultiJoinerCall {
                 // track arrival for a muted peer defers to it (join-race guard).
                 self.lastKnownCameraOn[id] = cameraOn
                 self.ui.setParticipantCamera(id, cameraOn)
+            },
+            onRemoteLightVideoTrack: { [weak self] track, peerId in
+                // The light companion of that peer's camera (``LightStream``):
+                // kept beside the main track for the peer's tile to draw, and
+                // nothing else. No participant, no camera flag.
+                self?.ui.setRemoteLightVideoTrack(track, forParticipant: "peer-\(peerId)")
+            },
+            onRemoteMiddleVideoTrack: { [weak self] track, peerId in
+                // That peer's middle track (ADR-0070 step 5): the heavy
+                // picture a tile watches when the shared rule says `middle`.
+                self?.ui.setRemoteMiddleVideoTrack(track, forParticipant: "peer-\(peerId)")
+            },
+            onVideoGiven: { [weak self] given in
+                // What the SFU gives of each person (ADR-0070 step 6).
+                self?.ui.setRemoteVideoGiven(byPeerId: given)
             }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
+        self.speaking.source = { [weak self] in await self?.session.sampleAudioLevels() }
+        // What a tile shows of a person, for the SFU (``VideoWants``).
+        ui.tileVideoQualitySink = { [weak self] tile, peerId, quality in
+            self?.session.reportTileVideoQuality(tile: tile, peerId: peerId, quality: quality)
+        }
+        // A username verified or a contact renamed re-names the tiles on screen.
+        self.names.follow(ui: ui)
         // A joiner behind a symmetric NAT has no server-reflexive candidate and
         // reaches the room only through the relay. Fail-soft: no credential
         // leaves the call on STUN.
@@ -347,6 +387,8 @@ final class MultiJoinerCall {
         clearAdmissionTimer()
         clearRebroadcast()
         clearOwnerProbe()
+        // Nothing kept while probing can be read in a group founded only now.
+        _ = earlyRelays.drain()
         safetyNumber = MultiJoinerCall.safeSafetyNumber(seed)
         cbs.onJoined?()
         broadcastOwnProfile()
@@ -355,7 +397,7 @@ final class MultiJoinerCall {
             do {
                 try await self.session.publish(seed: seed, localLeaf: leaf)
             } catch {
-                self.cbs.onError?(error)
+                self.reportPublishFailure(error)
             }
         }
     }
@@ -444,6 +486,15 @@ final class MultiJoinerCall {
         return call
     }
 
+    /// A publish that threw. One that stopped because the call was left or
+    /// ended while it was awaited is not a failure: the end was already
+    /// reported through the session's state (`onEnded`), and "could not
+    /// start" is not what happened.
+    private func reportPublishFailure(_ error: Error) {
+        if case SfuCallSession.SfuCallError.endedWhileConnecting = error { return }
+        cbs.onError?(error)
+    }
+
     private func start() async throws {
         do {
             try await session.connect()
@@ -460,7 +511,25 @@ final class MultiJoinerCall {
         clearAdmissionTimer()
         clearRebroadcast()
         clearOwnerProbe()
+        speaking.stop()
         session.hangUp()
+    }
+
+    /// End the call for every person in it. Only the link's owner may: every
+    /// other member checks the sender against the owner key of the signed
+    /// capability and ignores it from anyone else. Sealed into the call's own
+    /// group, so the SFU relays ciphertext. Best-effort: the caller hangs up
+    /// whether or not this went out.
+    func endForEveryone() {
+        guard role == .owner, let group else { return }
+        do {
+            let payload = try composeCallSignaling(
+                body: .end(callId: opts.callId, reason: .endedForAll))
+            let sealed = try group.createApplicationMessage(identity: opts.identity, plaintext: payload)
+            session.sendSignalRelayToCall(payload: sealed)
+        } catch {
+            NSLog("multi-joiner: the end for everyone was not sent: %@", String(describing: error))
+        }
     }
 
     /// Mute / unmute the local mic.
@@ -530,11 +599,14 @@ final class MultiJoinerCall {
         case .connected:
             ui.setPhase(.connected)
             ui.setE2ee(CallUiState.E2eeState(active: true, shortFingerprint: safetyNumber))
+            speaking.start()
             if !firedLive {
                 firedLive = true
                 cbs.onLive?()
             }
         case .failed, .closed:
+            speaking.stop()
+            ui.clearRemoteVideoCopies()
             ui.setPhase(.ended(endedAt: Date()))
             cbs.onEnded?()
         case .idle:
@@ -548,7 +620,7 @@ final class MultiJoinerCall {
             .filter { $0.peerId != selfPeerId }
             .map { snapshot in
                 remoteParticipant(
-                    name: nameOf(peerId: snapshot.peerId, pseudonym: snapshot.accountPseudonym, peerTag: snapshot.peerTag),
+                    name: names.name(peerId: snapshot.peerId, peerTag: snapshot.peerTag),
                     peerId: snapshot.peerId
                 )
             }
@@ -565,10 +637,10 @@ final class MultiJoinerCall {
         if pendingKeyPackage != nil { startRebroadcast() }
     }
 
-    private func onSfuPeerJoined(peerId: String, pseudonym: String, peerTag: String) {
+    private func onSfuPeerJoined(peerId: String, peerTag: String) {
         presence.addPeer(peerId: peerId, peerTag: peerTag)
         ui.participantJoined(
-            remoteParticipant(name: nameOf(peerId: peerId, pseudonym: pseudonym, peerTag: peerTag), peerId: peerId)
+            remoteParticipant(name: names.name(peerId: peerId, peerTag: peerTag), peerId: peerId)
         )
         // A newly-present peer may be a freshly-elected committer (owner reclaim
         // / a successor); re-broadcast so it sees a still-pending join.
@@ -588,7 +660,7 @@ final class MultiJoinerCall {
         // Forget the departed peer's sticky camera state so a later rejoin
         // under the same id starts from a clean slate (join-race guard).
         lastKnownCameraOn.removeValue(forKey: id)
-        peerNames.removeValue(forKey: peerId)
+        names.peerLeft(peerId)
         ui.participantLeft(id)
         // The committer may have left → the next inbound KP is evaluated against
         // the fresh election (this client might now be it). No action here.
@@ -795,14 +867,27 @@ final class MultiJoinerCall {
         }
         cbs.onJoined?()
         broadcastOwnProfile()
+        replayEarlyRelays()
+        // A replayed commit moved the group past the Welcome's epoch; media
+        // must start under the key of the epoch the group is at now. On a
+        // derivation failure the Welcome's seed stands (never plaintext).
+        let publishSeed = (try? deriveSeed(joinedGroup)) ?? seed
         // Publish media ONLY now — after joining + deriving the seed (invariant #4).
         Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.session.publish(seed: seed, localLeaf: leaf)
+                try await self.session.publish(seed: publishSeed, localLeaf: leaf)
             } catch {
-                self.cbs.onError?(error)
+                self.reportPublishFailure(error)
             }
+        }
+    }
+
+    /// Process what arrived before the Welcome, oldest first. A payload this
+    /// epoch cannot open is dropped inside `onMaybeCommit`, as it always was.
+    private func replayEarlyRelays() {
+        for relay in earlyRelays.drain() {
+            onMaybeCommit(from: relay.from, relay.bytes)
         }
     }
 
@@ -810,7 +895,12 @@ final class MultiJoinerCall {
     /// advance → rekey) or a member's sealed application message (today: the
     /// ADR-0048 profile that names its tile).
     private func onMaybeCommit(from: String, _ bytes: Data) {
-        guard let group else { return }
+        guard let group else {
+            // Not readable yet: a member's profile can outrun the Welcome.
+            // Kept and replayed once the group exists (`replayEarlyRelays`).
+            earlyRelays.keep((from: from, bytes: bytes))
+            return
+        }
         let processed: ProcessedMessage
         do {
             // The call group has no ADR-0022 role table — plain apply (the
@@ -829,7 +919,15 @@ final class MultiJoinerCall {
                let sender = groupMembers().first(where: { $0.leafIndex == senderLeaf }) {
                 presence.bindPeerToMember(peerId: from, memberKeyHex: sender.signatureKeyHex)
             }
-            onMemberApplication(from: from, plaintext: data)
+            // The same leaf resolved to the PERSON, here at receipt (C-68),
+            // the way the chat receive loop resolves a profile's sender.
+            let senderKey = senderLeaf.flatMap { AuthorIdentity.resolve(group: group, leafIndex: $0) }
+            // Whether the MLS-authenticated sender is the link's owner: the
+            // key the SIGNED capability names, matched the way the join check
+            // does.
+            let fromOwner = EndForEveryone.sentByOwner(
+                senderLeaf: senderLeaf, members: groupMembers(), ownerKeyHex: ownerKeyHex)
+            onMemberApplication(from: from, sender: senderKey, fromOwner: fromOwner, plaintext: data)
         case .commit:
             rekeyToCurrentEpoch()
             // Someone was admitted: they decrypt only from this epoch on, so
@@ -840,15 +938,23 @@ final class MultiJoinerCall {
         }
     }
 
-    /// A member's sealed application message. Only a profile is understood;
-    /// anything else is ignored. The name binds to the relaying SFU peer — the
-    /// same binding the peer's media tracks already rest on.
-    private func onMemberApplication(from: String, plaintext: Data) {
-        guard let decoded = try? decodeProfileEnvelope(plaintext: plaintext) else { return }
-        let name = decoded.displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !name.isEmpty else { return }
-        peerNames[from] = name
-        ui.setParticipantName("\(peerPrefix)\(from)", name)
+    /// A member's sealed application message: the owner's end for everyone,
+    /// or a profile; anything else is ignored. What a profile announces binds
+    /// to the relaying SFU peer — the same binding the peer's media tracks
+    /// already rest on — and the tile is named again from it: a person who set
+    /// no profile name reads as their username (``LinkCallTileNames``).
+    private func onMemberApplication(
+        from: String, sender: MemberIdentity?, fromOwner: Bool, plaintext: Data
+    ) {
+        if EndForEveryone.isEndForEveryone(plaintext: plaintext, callId: opts.callId) {
+            // Acted on only from the link's owner; from anyone else it is
+            // ignored.
+            if fromOwner { cbs.onEndedForEveryone?(from) }
+            return
+        }
+        guard let profile = ChatClient.decodeProfileIfEnvelope(plaintext) else { return }
+        names.memberProfile(from: from, sender: sender, profile: profile)
+        names.relabel(ui)
     }
 
     private func forgetAdmission(peerId: String, memberKeyHex: String?) {
@@ -933,14 +1039,6 @@ final class MultiJoinerCall {
     }
 
     // MARK: - Store-participant helpers
-
-    private func nameOf(peerId: String, pseudonym: String, peerTag: String) -> String {
-        if let announced = peerNames[peerId] { return announced }
-        if let resolve = opts.resolveDisplayName {
-            return resolve(peerId, pseudonym, peerTag)
-        }
-        return pseudonym.isEmpty ? Localization.text("chat.peer.fallback_name") : String(pseudonym.prefix(8))
-    }
 
     private func localParticipant() -> CallUiState.Participant {
         CallUiState.Participant(

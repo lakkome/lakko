@@ -68,11 +68,38 @@ public final class LocalCameraCapture {
     /// max supported framerate.
     private var targetFps: Int
 
-    /// Tracks whether `start()` has actually started capture
-    /// so `stop()` knows whether to call libwebrtc's stop API
-    /// (calling stop without a prior start crashes in debug
-    /// builds of `WebRTC.framework`).
-    private var didStart: Bool = false
+    /// Whether the capturer is running and whether the owner has let this
+    /// capture go (``CameraCaptureGate``): `stop()` calls libwebrtc's stop
+    /// API only for a capturer that started (calling stop without a prior
+    /// start crashes in debug builds of `WebRTC.framework`), and a start
+    /// that completes after the owner's `stop()` is stopped again at once.
+    ///
+    /// `start`, `stop`, `flip` and `use` are not confined to one actor and
+    /// the owner's `stop()` runs in a task of its own, so the gate is read
+    /// and written under a lock.
+    private var gate = CameraCaptureGate()
+    private let gateLock = NSLock()
+
+    private func withGate<T>(_ body: (inout CameraCaptureGate) -> T) -> T {
+        gateLock.lock()
+        defer { gateLock.unlock() }
+        return body(&gate)
+    }
+
+    /// The camera the person chose for this call in the call's settings
+    /// (`docs/ux/calls.md` section 4.1), by its `uniqueID`, or `nil` for the
+    /// default (the front camera). Read when a capture is built, so a choice
+    /// made while the camera is off holds for when it starts. Cleared when
+    /// the call is over.
+    public static var preferredDeviceId: String?
+
+    /// The capture that is running now, if any, so a choice in the call's
+    /// settings can move it to another camera at once. One call at a time
+    /// across the app, so there is at most one.
+    public private(set) static weak var active: LocalCameraCapture?
+
+    /// The camera this capture is on, by its `uniqueID`.
+    public var deviceId: String? { device?.uniqueID }
 
     /// Construct with the source frames should be delivered
     /// into. The source's lifetime must outlive this
@@ -86,15 +113,46 @@ public final class LocalCameraCapture {
     public init?(source: RTCVideoSource) {
         self.capturer = RTCCameraVideoCapturer(delegate: source)
         let devices = RTCCameraVideoCapturer.captureDevices()
+        let chosen = Self.preferredDeviceId.flatMap { id in
+            devices.first { $0.uniqueID == id }
+        }
         let front = devices.first { $0.position == .front }
         let back = devices.first { $0.position == .back }
-        guard let device = front ?? back ?? devices.first else {
+        guard let device = chosen ?? front ?? back ?? devices.first else {
             return nil
         }
         self.device = device
         let picked = Self.pickFormat(for: device)
         self.format = picked.format
         self.targetFps = picked.fps
+    }
+
+    /// Move this capture to the camera `deviceId` names, or back to the
+    /// default (the front camera) for `nil`: on the same track and the same
+    /// sender, so the SFrame encryptor attached to it keeps its counter and
+    /// only the frames change. A camera that is not there, or the one already
+    /// in use, changes nothing.
+    public func use(deviceId: String?) async {
+        let devices = RTCCameraVideoCapturer.captureDevices()
+        let wanted = deviceId.flatMap { id in devices.first { $0.uniqueID == id } }
+            ?? devices.first { $0.position == .front }
+            ?? devices.first
+        guard let next = wanted, next.uniqueID != device?.uniqueID else { return }
+        let picked = Self.pickFormat(for: next)
+        guard let format = picked.format else { return }
+        let wasRunning = withGate { $0.running }
+        await halt()
+        self.device = next
+        self.format = format
+        self.targetFps = picked.fps
+        // The call may have ended while the capturer stopped: `start()`
+        // refuses a capture its owner has let go, so the camera stays off.
+        guard wasRunning else { return }
+        do {
+            try await start()
+        } catch {
+            NSLog("LocalCameraCapture: camera change restart failed: %@", String(describing: error))
+        }
     }
 
     /// The 720p-class format and frame rate to use for a device.
@@ -140,10 +198,12 @@ public final class LocalCameraCapture {
         guard let next = Self.otherFacingDevice(than: device) else { return }
         let picked = Self.pickFormat(for: next)
         guard let format = picked.format else { return }
-        await stop()
+        await halt()
         self.device = next
         self.format = format
         self.targetFps = picked.fps
+        // As in `use(deviceId:)`: a call that ended meanwhile is not started
+        // again.
         do {
             try await start()
         } catch {
@@ -187,6 +247,9 @@ public final class LocalCameraCapture {
     public func start() async throws {
         guard let device = device else { throw CaptureError.noDevice }
         guard let format = format else { throw CaptureError.noFormat }
+        // The owner already let this capture go (the call ended before the
+        // camera was asked to start): the camera is not turned on at all.
+        guard withGate({ $0.mayStart }) else { throw CaptureError.released }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             capturer.startCapture(
                 with: device,
@@ -200,7 +263,14 @@ public final class LocalCameraCapture {
                 }
             }
         }
-        didStart = true
+        // The owner's `stop()` may have run while the capturer was starting.
+        // It found nothing to stop then, so the camera is stopped here: a
+        // call that is over never keeps it.
+        guard withGate({ $0.started() }) else {
+            await stopCapturer()
+            throw CaptureError.released
+        }
+        Self.active = self
     }
 
     /// Stop the underlying capture. Idempotent — repeated
@@ -210,9 +280,25 @@ public final class LocalCameraCapture {
     /// but the explicit stop is preferred so the caller can
     /// `await` the async tear-down for deterministic test
     /// ordering.
+    ///
+    /// Final: a capture that was stopped by its owner never starts again,
+    /// including a `start()`, a `flip()` or a `use(deviceId:)` that was in
+    /// flight when this was called. A camera turned on again later is a new
+    /// `LocalCameraCapture`.
     public func stop() async {
-        guard didStart else { return }
-        didStart = false
+        guard withGate({ $0.release() }) else { return }
+        await stopCapturer()
+    }
+
+    /// Stop the capturer between two cameras (`flip`, `use`): the capture
+    /// stays its owner's and may start again.
+    private func halt() async {
+        guard withGate({ $0.halt() }) else { return }
+        await stopCapturer()
+    }
+
+    private func stopCapturer() async {
+        if Self.active === self { Self.active = nil }
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             capturer.stopCapture {
                 cont.resume()
@@ -225,8 +311,8 @@ public final class LocalCameraCapture {
         // tell libwebrtc to release the camera here.
         // stopCapture with no completion-handler is the
         // documented blocking shape; safe to call from deinit
-        // when didStart is true.
-        if didStart {
+        // when the capturer is running.
+        if gate.running {
             capturer.stopCapture()
         }
     }
@@ -246,14 +332,61 @@ public final class LocalCameraCapture {
         /// enum case only (via `.startFailed`) since the
         /// underlying error is platform-version-dependent.
         case startFailed(underlying: Error)
+        /// The owner stopped this capture (the call ended) before or while
+        /// the camera started. Not a failure of the camera: nothing is shown
+        /// for it.
+        case released
 
         public static func == (lhs: CaptureError, rhs: CaptureError) -> Bool {
             switch (lhs, rhs) {
             case (.noDevice, .noDevice): return true
             case (.noFormat, .noFormat): return true
             case (.startFailed, .startFailed): return true
+            case (.released, .released): return true
             default: return false
             }
         }
+    }
+}
+
+/// Whether a camera capturer is running, and whether its owner has let the
+/// capture go.
+///
+/// The capturer starts and stops through completion handlers, and the owner
+/// (a call session) stops it from a task of its own when the call ends. So a
+/// stop can arrive while a start is still in flight: there is nothing running
+/// to stop yet, and without this the start would then complete and leave the
+/// camera on for a call that is over. `release()` is remembered, and the
+/// start that completes after it is told to stop again.
+struct CameraCaptureGate: Equatable {
+    /// The capturer is delivering frames.
+    private(set) var running = false
+    /// The owner called `stop()`: this capture never starts again.
+    private(set) var released = false
+
+    /// Whether a start may be asked of the capturer at all.
+    var mayStart: Bool { !released }
+
+    /// The capturer reported that it started. `false` when the owner let the
+    /// capture go meanwhile: the caller stops the capturer again.
+    mutating func started() -> Bool {
+        if released { return false }
+        running = true
+        return true
+    }
+
+    /// The capturer is being stopped between two cameras. Returns whether
+    /// there is a running capturer to stop.
+    mutating func halt() -> Bool {
+        let wasRunning = running
+        running = false
+        return wasRunning
+    }
+
+    /// The owner stops the capture for good. Returns whether there is a
+    /// running capturer to stop now.
+    mutating func release() -> Bool {
+        released = true
+        return halt()
     }
 }

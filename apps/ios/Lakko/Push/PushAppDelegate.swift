@@ -45,9 +45,9 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
         // `docs/ux/calls.md` section 2.1 — start receiving VoIP pushes at
         // launch, not at sign-in: the token is device state, and the app has to
         // be able to take a call push before it knows whether one is coming.
-        // iOS re-delivers the current token to the registrar's delegate on
-        // every launch, so this is also how a token that could not be
-        // registered last time (no device pseudonym yet) gets another chance.
+        // iOS delivers the current token to the registrar's delegate on
+        // every launch; it is registered then for a restored session, and at
+        // sign-in otherwise (``VoipPushRegistrar/registerForSignIn(devicePseudonym:)``).
         VoipPushRegistrar.shared.start()
         return true
     }

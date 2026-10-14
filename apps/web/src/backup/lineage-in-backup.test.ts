@@ -47,7 +47,7 @@ function throughBackup(synced: Uint8Array): Uint8Array {
     1n,
     new Uint8Array(32).fill(9),
     [],
-    new Uint8Array(0),
+    // Payload v6: no MLS snapshot argument; the group ids take its place.
     new Uint8Array(0),
     synced,
   );

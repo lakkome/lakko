@@ -11,6 +11,7 @@
 #   C-N  -> docs/security/calls.md              (### C-N:)
 #   T-N  -> docs/security/transport.md          (### T-N:)
 #   G-N  -> docs/security/known-gaps.md         (### G-N:)
+#           docs/security/known-gaps-closed.md  (### G-N:, entries with nothing left open)
 #
 # docs/security/invariant-index.md aggregates them into one
 # reviewer-friendly cheat sheet. The "how to add a new
@@ -59,7 +60,7 @@ source_for_class() {
         I) echo "$ROOT/docs/security/mls-state-machine.md" ;;
         C) echo "$ROOT/docs/security/calls.md" ;;
         T) echo "$ROOT/docs/security/transport.md" ;;
-        G) echo "$ROOT/docs/security/known-gaps.md" ;;
+        G) echo "$ROOT/docs/security/known-gaps.md $ROOT/docs/security/known-gaps-closed.md" ;;
         *) echo "audit-index-check: unknown class $1" >&2; exit 2 ;;
     esac
 }
@@ -71,7 +72,9 @@ for class in I C T G; do
 
     # IDs that the source file claims via `### CLASS-N: ...`
     # headers.
-    src_ids=$(grep -oE "^### ${class}-[0-9]+:" "$src" \
+    # $src is deliberately unquoted: the G- class reads two files.
+    # shellcheck disable=SC2086
+    src_ids=$(grep -ohE "^### ${class}-[0-9]+:" $src \
         | sed -E "s/^### (${class}-[0-9]+):.*/\1/" \
         | sort -u)
 
@@ -112,7 +115,8 @@ done
 # gaps" row is NOT gated (see the header comment: status is an
 # adjudication, not a mechanical fact).
 
-g_nums=$(grep -oE "^### G-[0-9]+:" "$(source_for_class G)" \
+# shellcheck disable=SC2046
+g_nums=$(grep -ohE "^### G-[0-9]+:" $(source_for_class G) \
     | sed -E "s/^### G-([0-9]+):.*/\1/" \
     | sort -n -u)
 
@@ -149,7 +153,8 @@ if [ "$fail" -eq 0 ]; then
     i_n=$(grep -c "^### I-" "$(source_for_class I)")
     c_n=$(grep -c "^### C-" "$(source_for_class C)")
     t_n=$(grep -c "^### T-" "$(source_for_class T)")
-    g_n=$(grep -c "^### G-" "$(source_for_class G)")
+    # shellcheck disable=SC2046
+    g_n=$(cat $(source_for_class G) | grep -c "^### G-")
     echo "audit-index-check: clean (${i_n} I + ${c_n} C + ${t_n} T invariants + ${g_n} G gaps pinned in both source and index)"
 fi
 

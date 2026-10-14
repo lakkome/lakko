@@ -27,8 +27,9 @@
 //!   day). Must match every verifier. Malformed or zero: startup fails.
 //! - `LAKKO_ANON_TOKEN_QUOTA_<CONTEXT>` - tokens per account per epoch, one
 //!   variable per context (`DISCOVERY_LOOKUP`, `DISCOVERY_REGISTER`,
-//!   `INVITE_CONSUME`, `DS_KNOCK`, `PUSH_REGISTER`). `0` stops issuance for
-//!   that context. Malformed: startup fails.
+//!   `INVITE_CONSUME`, `DS_KNOCK`, `PUSH_REGISTER`, `CHANNEL_SUBSCRIBE`,
+//!   `DIRECTORY_SEARCH`, `VAULT_CLAIM`, `BLOB_UPLOAD`, `BLOB_READ`). `0`
+//!   stops issuance for that context. Malformed: startup fails.
 //!
 //! # Failure posture
 //!
@@ -69,14 +70,31 @@ use crate::AppState;
 /// are chosen, not measured, too (ADR-0059 open question 4): a person
 /// subscribes to a few channels a day and searches the directory a few
 /// times; a count inflated by one account moves by at most its quota.
+///
+/// `vault-claim`, `blob-upload`, `blob-read` and the raised `ds-knock` are
+/// chosen, not measured, as well:
+///
+/// - `vault-claim` (ADR-0064 section 1): a vault is claimed once per
+///   conversation or channel, so the quota bounds how many conversations an
+///   account can open a vault for in a day.
+/// - `blob-upload` and `blob-read` (ADR-0065 section 5): one token buys an
+///   hour's pass, a device takes a pass at most once an hour (24 a day), and
+///   an account has several devices; 96 covers four devices holding a pass
+///   around the clock.
+/// - `ds-knock`: ADR-0064 has a signed-in device knock once per conversation
+///   it is not in yet, so the earlier 20 a day left most of an account's
+///   conversations without a knock.
 const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::DiscoveryLookup, 100),
     (TokenContext::DiscoveryRegister, 10),
     (TokenContext::InviteConsume, 30),
-    (TokenContext::DsKnock, 20),
+    (TokenContext::DsKnock, 200),
     (TokenContext::PushRegister, 100),
     (TokenContext::ChannelSubscribe, 20),
     (TokenContext::DirectorySearch, 30),
+    (TokenContext::VaultClaim, 100),
+    (TokenContext::BlobUpload, 96),
+    (TokenContext::BlobRead, 96),
 ];
 
 /// How many contexts exist; the quota table has one row per context.
@@ -127,10 +145,24 @@ pub(crate) fn load_anon_tokens() -> anyhow::Result<Option<AnonTokenIssuer>> {
     let Some(server) = AnonTokenServerConfig::from_env()? else {
         return Ok(None);
     };
+    let quotas = quotas_from(|var| std::env::var(var).ok())?;
+    Ok(Some(AnonTokenIssuer { server, quotas }))
+}
+
+/// The quota table: the defaults, each replaced by its
+/// `LAKKO_ANON_TOKEN_QUOTA_<CONTEXT>` value when `lookup` returns one. An
+/// unset or blank variable keeps the default.
+///
+/// # Errors
+///
+/// A value that is not a non-negative integer.
+fn quotas_from(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<[(TokenContext, u32); CONTEXT_COUNT]> {
     let mut quotas = DEFAULT_QUOTAS;
     for (context, quota) in &mut quotas {
         let var = quota_var(*context);
-        if let Ok(raw) = std::env::var(&var) {
+        if let Some(raw) = lookup(&var) {
             let raw = raw.trim();
             if !raw.is_empty() {
                 *quota = raw
@@ -139,7 +171,7 @@ pub(crate) fn load_anon_tokens() -> anyhow::Result<Option<AnonTokenIssuer>> {
             }
         }
     }
-    Ok(Some(AnonTokenIssuer { server, quotas }))
+    Ok(quotas)
 }
 
 /// Log the startup state, loudly when dormant.

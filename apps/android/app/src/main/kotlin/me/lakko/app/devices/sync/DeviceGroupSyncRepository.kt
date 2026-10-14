@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import me.lakko.app.launchBound
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.auth.OwnUsernameState
 import me.lakko.app.auth.RecoveryAddressState
@@ -146,6 +147,17 @@ public class DeviceGroupSyncRepository(
     private val identity = AtomicReference<Identity?>(null)
     private val group = AtomicReference<DeviceGroup?>(null)
     private val activeAccountIdB64 = AtomicReference<String?>(null)
+
+    /**
+     * The binding of this runtime to [activeAccountIdB64]: it ends when the
+     * handles are dropped ([clear], a bootstrap for another account). The poll
+     * loop asks it before every row and before its persist, because [identity]
+     * and [group] are read live and would by then be the next account's.
+     */
+    private val sessionBinding = me.lakko.app.BindingEpoch()
+
+    /** The binding current now (a host test reads when it ends). */
+    internal fun captureSessionBinding(): me.lakko.app.Binding = sessionBinding.capture()
 
     /** ADR-0057 — the DeviceGroup journal's root signer (every device of the
      *  account holds it), derived at bootstrap from the account seed. */
@@ -286,8 +298,11 @@ public class DeviceGroupSyncRepository(
         // was restored above, so every row it re-fetches is one this state
         // has already consumed. The snapshot is a head start, not an
         // authority - the poll folds newer rows on top, so a sibling device's
-        // later write still wins. Bytes in an older format do not decode and
-        // are dropped: there is no migration (no production data).
+        // later write still wins. Bytes in an older format (encoding version
+        // 1, before the saved-message register) do not decode and are
+        // dropped: there is no migration (no production data). The state
+        // starts empty, and the persistence writer's first write replaces the
+        // refused file.
         if (seedState) {
             val restored = runCatching {
                 DeviceGroupSnapshotStore.getSnapshot(
@@ -301,7 +316,9 @@ public class DeviceGroupSyncRepository(
             }
             val prefs = applicationContext.getSharedPreferences(PENDING_PREFS, Context.MODE_PRIVATE)
             pendingFlag = PendingSyncFlag(prefs.getBoolean(accountIdB64, false)) { value ->
-                prefs.edit().putBoolean(accountIdB64, value).apply()
+                me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+                    prefs.edit().putBoolean(accountIdB64, value).apply()
+                }
                 mutablePending.value = value
             }.also { mutablePending.value = it.pending }
             republish()
@@ -333,14 +350,16 @@ public class DeviceGroupSyncRepository(
         }
         installJournalSigner(groupId)
         installReachPublisher()
+        val bound = sessionBinding.capture()
         pollJob = scope.launch {
             claimJournalBestEffort(groupId, refounded = true)
             val forkedAt = runPollLoop(
+                bound = bound,
                 accountIdB64 = accountIdB64,
                 groupId = groupId,
                 startCursor = startCursor,
             )
-            if (forkedAt != null) {
+            if (forkedAt != null && bound.isCurrent) {
                 repairFork(accountIdBytes, accountIdB64, forkedAt)
             }
         }
@@ -1081,7 +1100,7 @@ public class DeviceGroupSyncRepository(
         val ownLeaf = runCatching { g.ownLeafIndex() }.getOrNull() ?: return
         val send = runCatching { shouldSendSnapshot(ownLeaf, priorLeaves) }.getOrDefault(false)
         if (!send) return
-        scope.launch {
+        scope.launchBound(sessionBinding) {
             delay(SyncCatchUp.resendDelayMs(kotlin.random.Random.nextDouble()))
             try {
                 publishSnapshot()
@@ -1141,6 +1160,7 @@ public class DeviceGroupSyncRepository(
      * `null` (cancelled, or the handle is gone).
      */
     private suspend fun runPollLoop(
+        bound: me.lakko.app.Binding,
         accountIdB64: String,
         groupId: ByteArray,
         startCursor: Long = 0L,
@@ -1197,6 +1217,9 @@ public class DeviceGroupSyncRepository(
 
                 var mutated = false
                 for (message in result.messages) {
+                    // The account this loop polls for is gone: the handles
+                    // read below are nobody's, or the next account's.
+                    if (!bound.isCurrent) return null
                     cursor = message.id
                     val g = group.get() ?: return null
                     val id = identity.get() ?: return null
@@ -1295,6 +1318,7 @@ public class DeviceGroupSyncRepository(
                     // mutation.
                 }
 
+                if (!bound.isCurrent) return null
                 if (mutated) {
                     val id = identity.get()
                     if (id != null) {
@@ -1514,7 +1538,7 @@ public class DeviceGroupSyncRepository(
     private fun installReachPublisher() {
         val publisher: (ByteArray) -> Unit = { envelope ->
             val copy = envelope.copyOf()
-            scope.launch {
+            scope.launchBound(sessionBinding) {
                 try {
                     sendServiceEnvelope(copy)
                 } catch (cancellation: CancellationException) {
@@ -1615,6 +1639,9 @@ public class DeviceGroupSyncRepository(
     }
 
     private fun cancelPollAndDropHandles() {
+        // First: the poll loop and everything launched for this account stop
+        // before the handles below are replaced.
+        sessionBinding.advance()
         // Write a change still waiting out its debounce, then let the account
         // go: the state is kept for the next sign-in, never written after.
         syncStatePersistence.stopAndFlush()
@@ -1706,6 +1733,41 @@ public class DeviceGroupSyncRepository(
         private const val AWAIT_RUNTIME_STEP_MS: Long = 500
 
         /**
+         * The folded state's bytes for [accountIdB64] as a backup carries
+         * them (ADR-0058 section 5.2), for a caller that runs before - or
+         * without - the sync runtime: the live repository's when it is on
+         * this account, else what the state file holds. `null` when there is
+         * none, or it cannot be read.
+         */
+        public fun backupSyncedStateBytes(context: Context, accountIdB64: String): ByteArray? {
+            val live = active
+            if (live != null && live.activeAccountIdB64.get() == accountIdB64) {
+                return live.currentSyncedStateBytes()
+            }
+            return try {
+                // A file this build's core refuses (an older encoding
+                // version) is "none held": the backup carries no synced
+                // state rather than bytes no device could merge back.
+                heldSyncedStateBytes(
+                    stored = DeviceGroupSnapshotStore.getSnapshot(
+                        context = context,
+                        accountIdB64 = accountIdB64,
+                        dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
+                    ),
+                    core = CoreSyncedStateBytes,
+                ) { cause ->
+                    Log.w(
+                        LOG_TAG,
+                        "persisted synced state refused, the backup carries none (${cause.javaClass.simpleName})",
+                    )
+                }
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "synced state not readable for the backup (${cause.javaClass.simpleName})")
+                null
+            }
+        }
+
+        /**
          * A backup restore carried folded state (ADR-0058 section 5.2). The
          * restore runs before the sync runtime bootstraps, so the state goes
          * to the same file [bootstrap] seeds from, merged with anything this
@@ -1721,39 +1783,23 @@ public class DeviceGroupSyncRepository(
                 return
             }
             try {
-                val existing = DeviceGroupSnapshotStore.getSnapshot(
-                    context = context,
-                    accountIdB64 = accountIdB64,
-                    dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
-                )?.let { runCatching { SyncedState.fromBytes(it) }.getOrNull() }
-                val merged = if (existing == null) {
-                    // Validate before writing: undecodable bytes are dropped.
-                    SyncedState.fromBytes(bytes).toBytes()
-                } else {
-                    for (part in SyncedState.fromBytes(bytes).snapshotParts()) {
-                        existing.applyPayload(
-                            ParsedDeviceGroupPayload(
-                                hlc = 0u,
-                                senderLeaf = 0u,
-                                body = DeviceGroupBody.StateSnapshot(part),
-                            ),
-                        )
-                    }
-                    // ADR-0073 R.13a - and the lineage registers, which are
-                    // not part of `snapshotParts()`.
-                    for (envelope in SyncedState.fromBytes(bytes).lineageEnvelopes()) {
-                        existing.applyLineageEnvelope(envelope)
-                    }
-                    // ADR-0075 - and the recovery email register.
-                    SyncedState.fromBytes(bytes).recoveryEmailEnvelope()?.let {
-                        existing.applyRecoveryEmailEnvelope(it)
-                    }
-                    // ADR-0076 - and the own-username register.
-                    SyncedState.fromBytes(bytes).ownUsernameEnvelope()?.let {
-                        existing.applyOwnUsernameEnvelope(it)
-                    }
-                    existing.toBytes()
-                }
+                // Bytes the core refuses (an older encoding version) are
+                // "none held", in the backup and in the file alike: a
+                // refused backup seeds nothing, a refused file is replaced.
+                val merged = backupSeedBytes(
+                    stored = DeviceGroupSnapshotStore.getSnapshot(
+                        context = context,
+                        accountIdB64 = accountIdB64,
+                        dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
+                    ),
+                    backup = bytes,
+                    core = CoreSyncedStateBytes,
+                ) { which, cause ->
+                    Log.w(
+                        LOG_TAG,
+                        "backup seed: synced state refused (${which.name}, ${cause.javaClass.simpleName})",
+                    )
+                } ?: return
                 DeviceGroupSnapshotStore.putSnapshot(
                     context = context,
                     accountIdB64 = accountIdB64,
@@ -1765,6 +1811,37 @@ public class DeviceGroupSyncRepository(
             }
         }
     }
+}
+
+/** [SyncedStateBytes] over the native core. */
+internal object CoreSyncedStateBytes : SyncedStateBytes {
+    override fun canonical(bytes: ByteArray): ByteArray =
+        SyncedState.fromBytes(bytes).use { it.toBytes() }
+
+    override fun merged(existing: ByteArray, backup: ByteArray): ByteArray =
+        SyncedState.fromBytes(existing).use { state ->
+            SyncedState.fromBytes(backup).use { restored ->
+                for (part in restored.snapshotParts()) {
+                    state.applyPayload(
+                        ParsedDeviceGroupPayload(
+                            hlc = 0u,
+                            senderLeaf = 0u,
+                            body = DeviceGroupBody.StateSnapshot(part),
+                        ),
+                    )
+                }
+                // ADR-0073 R.13a - and the lineage registers, which are not
+                // part of `snapshotParts()`.
+                for (envelope in restored.lineageEnvelopes()) {
+                    state.applyLineageEnvelope(envelope)
+                }
+                // ADR-0075 - and the recovery email register.
+                restored.recoveryEmailEnvelope()?.let { state.applyRecoveryEmailEnvelope(it) }
+                // ADR-0076 - and the own-username register.
+                restored.ownUsernameEnvelope()?.let { state.applyOwnUsernameEnvelope(it) }
+            }
+            state.toBytes()
+        }
 }
 
 /**

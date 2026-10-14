@@ -42,12 +42,16 @@
  *
  * ## Scope / deferred
  *
- * MVP: one publish offer at connect; SFU-driven subscribe
- * renegotiation; SFrame on every track; trickle ICE both ways.
- * Deferred (each a follow-up, none a security gap):
- *   * Client-initiated mid-call renegotiation (add / drop a track
- *     after the first offer) — needs perfect-negotiation glare
- *     handling.
+ * One publish offer at connect; SFU-driven subscribe renegotiation;
+ * client-initiated renegotiation when the camera is turned on mid-call;
+ * SFrame on every track; trickle ICE both ways. The camera is published as
+ * three ordinary senders, a main one, a light one and a middle one (ADR-0070
+ * steps 1 and 5); every offer this client makes names the `mid`s of the last
+ * two to the SFU. The middle one sends only from three people in the call
+ * on. The session also tells the SFU which picture of each person this
+ * device shows (`video-wants.ts`), so the SFU forwards a heavy track only
+ * where it is shown.
+ * Deferred (a follow-up, not a security gap):
  *   * Per-remote connection-quality stats.
  *
  * Mapping a remote `ontrack` to its source participant IS resolved:
@@ -57,9 +61,12 @@
  * session surfaces is exactly that peer id. `sfu-call-ui.ts` keys the
  * roster tile off it (`peer-<streamId>`).
  *
- * Security invariant #4 (no non-E2EE fallback): if the browser lacks
- * `RTCRtpScriptTransform`, `connect()` throws BEFORE any media is
- * published — the call never opens unencrypted.
+ * Security invariant #4 (no non-E2EE fallback): if the browser can hand
+ * encoded frames to the SFrame worker by neither `RTCRtpScriptTransform`
+ * nor `createEncodedStreams()` (`./sframe-transport.ts`), `connect()`
+ * throws BEFORE any media is captured: the call never opens unencrypted.
+ * On the `createEncodedStreams()` path the peer connection is built for it
+ * and every sender and receiver has its streams taken (`coverSFrame`).
  */
 
 import {
@@ -78,15 +85,94 @@ import {
   type SfuWelcome,
 } from "./sfu-signaling-client";
 import { loadWasm } from "../wasm";
+import { describeLocalCamera } from "./local-preview";
 import {
   attachReceiverSFrame,
   attachSenderSFrame,
+  coverEncodedStreams,
+  syncSenderCodecs,
   rekeySFrame,
   isSFrameTransformSupported,
+  SFRAME_STREAM_CAMERA_LIGHT,
+  SFRAME_STREAM_CAMERA_MIDDLE,
+  type SFrameStreamIndex,
 } from "./sframe-transform";
-import { audioTrackConstraint, trackConstraint, type VideoPublishState } from "./call-session";
+import {
+  sframePeerConnectionConfig,
+  sframeTransport,
+  sframeTransportLine,
+} from "./sframe-transport";
+import {
+  audioTrackConstraint,
+  CAMERA_CAPTURE_SIZE,
+  trackConstraint,
+  type VideoPublishState,
+} from "./call-session";
 import { captureWithFallback, type CaptureFallback } from "./capture-fallback";
 import { SFU_KEEPALIVE_TICK_MS, sfuKeepaliveAction } from "./sfu-keepalive";
+import {
+  addCameraSenderMidCall,
+  addCopySender,
+  addGroupCallSender,
+  CAMERA_COPY_KINDS,
+  configureCopySender,
+  removeCopySender,
+  type CameraCopyKind,
+  type CopySender,
+} from "./camera-sender";
+import {
+  CAMERA_SENDER_KINDS,
+  describeVideoNeededChange,
+  neededWord,
+  SenderActivity,
+  senderActive,
+  sendersActive,
+  type CameraSenderKind,
+  type SenderActivityNote,
+  type VideoNeeded,
+} from "./sender-activity";
+import {
+  BUDGETED_SENDER_KINDS,
+  describePublishBudgetChange,
+  readEncodingCeiling,
+  SenderCeiling,
+  senderCeiling,
+  type BudgetedSenderKind,
+  type PublishBudget,
+} from "./publish-budget";
+import {
+  deltaOf,
+  describeDeltas,
+  describeOutboundSenders,
+  describeGivenChanges,
+  describeSender,
+  describeShownPeers,
+  readMedia,
+  readSender,
+  type MediaReading,
+  type SenderReading,
+} from "./media-counters";
+import { shownLayerLedger } from "./layer-display";
+import {
+  CallAvAlign,
+  avAlignEnabled,
+  browserHasJitterTarget,
+  inboundSamples,
+  receiverSample,
+  shownTrack,
+  type AvRole,
+  type AvVideoRole,
+  type InboundSample,
+} from "./av-align";
+import { splitStreamId } from "./light-stream";
+import { registerVideoFrameSource } from "./video-frame-watch";
+import { VideoGivenBook, videoGivenChanges, type VideoGivenEntry } from "./video-given";
+import {
+  VideoWantsBook,
+  VideoWantsSender,
+  type VideoQuality,
+  type VideoWantsFrame,
+} from "./video-wants";
 
 /** Lifecycle phases the SFU session can be in. */
 export type SfuCallState =
@@ -163,7 +249,11 @@ export interface SfuRemoteTrack {
   /**
    * The MSID stream id the SFU tagged the track with. The SFU pins
    * this to the source peer id (see the module doc), so the caller
-   * maps it straight to a participant (`peer-<streamId>`).
+   * maps it straight to a participant (`peer-<streamId>`). The light
+   * companion track of a publisher's camera arrives under the peer id plus
+   * `LIGHT_STREAM_SUFFIX` and its middle track under the peer id plus
+   * `MIDDLE_STREAM_SUFFIX`; the caller reads all three with `splitStreamId`
+   * (`light-stream.ts`) and never makes a participant of either.
    */
   readonly streamId: string;
   readonly track: MediaStreamTrack;
@@ -175,6 +265,20 @@ export interface SfuRemoteTrack {
 // share ONE type + one videoPublishState surface; re-exported here for existing
 // importers (`sfu-call-ui.ts`).
 export type { VideoPublishState };
+
+/**
+ * `connect()` was still running when the session ended: `closed` when this
+ * device hung it up (the person left), `failed` when it failed on its own
+ * (the reason was logged by `fail`, and `callEndedByServer()` says whether
+ * the SFU refused it as over). Whatever the connect had started is released;
+ * a caller that sees `closed` reports nothing.
+ */
+export class SfuCallOverError extends Error {
+  constructor(readonly state: "closed" | "failed") {
+    super(`the SFU call session ${state === "closed" ? "was closed" : "failed"} while connecting`);
+    this.name = "SfuCallOverError";
+  }
+}
 
 /** Callbacks the caller wires in. */
 export interface SfuCallCallbacks {
@@ -191,6 +295,14 @@ export interface SfuCallCallbacks {
   ): void;
   /** A participant left. */
   onPeerLeft?(peerId: string): void;
+  /**
+   * What the SFU gives this device of each person's video changed
+   * (ADR-0070 step 6, `video-given.ts`): the whole set as it stands, by SFU
+   * peer id. A person it does not name is given what is asked for. Empty
+   * until an SFU with downlink control on says something, and again once
+   * the call is torn down.
+   */
+  onVideoGiven?(given: ReadonlyMap<string, VideoQuality>): void;
   /** A remote media track arrived (already SFrame-decrypting). */
   onRemoteTrack?(remote: SfuRemoteTrack): void;
   /** The local capture stream is ready (fired once, at publish time). The
@@ -256,6 +368,31 @@ function seedsEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
+/** How often the media counters are logged (ADR-0067 step 1). */
+const MEDIA_COUNTERS_INTERVAL_MS = 2_000;
+
+/** The SFrame stream index each copy of the camera is sealed under. Stated,
+ *  never derived from the track kind: each is a further video sender of the
+ *  participant and must not share the camera's key, nor the other's. */
+function copyStreamIndex(kind: CameraCopyKind): SFrameStreamIndex {
+  return kind === "light" ? SFRAME_STREAM_CAMERA_LIGHT : SFRAME_STREAM_CAMERA_MIDDLE;
+}
+
+/** One copy of the camera, as the session keeps it. */
+interface CopySlot {
+  /** The copy's sender; `null` while there is no camera sender, and when a
+   *  browser would not take one. Never more than one per kind. */
+  sender: CopySender | null;
+  /** The SFrame transform id of {@link sender}. */
+  transformId: string | null;
+  /** A browser that will not take this copy is named once per call. */
+  refusalWarned: boolean;
+}
+
+function emptyCopySlot(): CopySlot {
+  return { sender: null, transformId: null, refusalWarned: false };
+}
+
 export class SfuCallSession {
   private state: SfuCallState = "idle";
   private pc: RTCPeerConnection | null = null;
@@ -271,6 +408,8 @@ export class SfuCallSession {
   /** Ids of every attached SFrame transform (senders + receivers), so a
    *  mid-call rekey can target them all (G-18, ADR-0029). */
   private readonly transformIds = new Set<string>();
+  /** Said once per call when a sender is found with no SFrame transform. */
+  private unsealedSenderWarned = false;
   /** Call-key seed of the CURRENT MLS epoch. Starts at `config.seed` (or
    *  `null` on the ADR-0032 deferred-publish path, set later by
    *  {@link publish}) and advances on `rekey` so a late-arriving receiver
@@ -297,6 +436,72 @@ export class SfuCallSession {
   private videoPublishState: VideoPublishState = "off";
 
   /**
+   * The camera's copies (ADR-0070 steps 1 and 5): each a clone of the camera
+   * track on a transceiver of its own, sealed under its own SFrame stream
+   * index. The light one is a quarter of the size and always sent; the middle
+   * one is half the size and sent only while {@link middleWanted}. A copy a
+   * browser would not take is absent and the call goes on without it.
+   */
+  private readonly copies: Record<CameraCopyKind, CopySlot> = {
+    light: emptyCopySlot(),
+    middle: emptyCopySlot(),
+  };
+  /**
+   * The SFU's last `video-needed` frame (`sender-activity.ts`): which of this
+   * device's camera senders somebody is being sent. `null` before the first
+   * frame, which means every sender is needed.
+   */
+  private videoNeeded: VideoNeeded | null = null;
+  /**
+   * Keeps each camera sender's one encoding active or not, as
+   * {@link sendersActiveNow} says. One per sender, so the `setParameters`
+   * calls on a sender never overlap (a browser refuses one made while
+   * another is pending) and the last decision wins.
+   */
+  private readonly senderActivity: Record<CameraSenderKind, SenderActivity> = {
+    main: new SenderActivity("main"),
+    middle: new SenderActivity("middle"),
+    light: new SenderActivity("light"),
+  };
+  /**
+   * The SFU's last `publish-budget` frame (`publish-budget.ts`): how much
+   * this device's main and middle camera senders may send. `null` before
+   * the first frame, which means each sender keeps the ceiling it was
+   * created with.
+   */
+  private publishBudget: PublishBudget | null = null;
+  /**
+   * Keeps the main and the middle camera sender's one encoding under the
+   * ceiling the SFU last gave. Its writes share each sender's one queue of
+   * parameter writes with {@link senderActivity} and the sender's set-up
+   * (`sender-parameters.ts`), so they never overlap.
+   */
+  private readonly senderCeilings: Record<BudgetedSenderKind, SenderCeiling> = {
+    main: new SenderCeiling("main"),
+    middle: new SenderCeiling("middle"),
+  };
+
+  /** The shared rules, once loaded (`connect()`). */
+  private wasm: Awaited<ReturnType<typeof loadWasm>> | null = null;
+
+  /**
+   * What this device shows of each person (`video-wants.ts`): the people of
+   * the call as the SFU names them, and the picture every mounted tile
+   * reports. Sent to the SFU as a whole whenever it changes.
+   */
+  private readonly wantsBook = new VideoWantsBook();
+  private readonly wantsSender: VideoWantsSender;
+  /**
+   * What the SFU says it gives of each person (`video-given.ts`). Read by the
+   * tiles and the media counters; never fed back into {@link wantsBook}, so
+   * the SFU keeps being asked for what the tiles really want.
+   */
+  private readonly givenBook = new VideoGivenBook();
+  /** The publish offer is out: the SFU has media state for this peer, and
+   *  takes a `video-wants` frame only from then on. */
+  private publishOfferSent = false;
+
+  /**
    * The local camera on/off state, broadcast to peers over the opaque SFU
    * `signal-relay` (camera-off-cleanup). Initialised from the initial media
    * request; updated by every path that flips the local camera
@@ -315,6 +520,30 @@ export class SfuCallSession {
    * leaving the timer counting on a socket nobody answers.
    */
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  /** ADR-0067 step 1: the media counters poll and its last reading (the
+   *  base of the next interval's line and of the total at the end). */
+  private mediaCountersTimer: ReturnType<typeof setInterval> | null = null;
+  private mediaCountersLast: MediaReading | null = null;
+  /** The media timer runs at the alignment rule's reading interval
+   *  (`av-align.ts`); the counters are logged every this many ticks, which
+   *  is every {@link MEDIA_COUNTERS_INTERVAL_MS}. */
+  private mediaCountersEvery = 1;
+  private mediaTick = 0;
+  /** A tick is still reading: the next one is skipped, not stacked. */
+  private mediaSampling = false;
+  /** Each remote person's sound and picture kept together (ADR-0070, note
+   *  of 2026-10-12; `av-align.ts`). `null` outside a call. */
+  private avAlign: CallAvAlign<RTCRtpReceiver> | null = null;
+  private senderCountersLast: SenderReading | null = null;
+  /** The ids of the remote tracks that are light companions and middle
+   *  tracks (`light-stream.ts`), so the media counters can say which receiver
+   *  is which. */
+  /** The audio receiver of each remote peer, by peer id (`audioReceiverFor`). */
+  private readonly audioReceivers = new Map<string, RTCRtpReceiver>();
+  private readonly copyTrackIds: Record<CameraCopyKind, Set<string>> = {
+    light: new Set<string>(),
+    middle: new Set<string>(),
+  };
   private lastInboundMs = 0;
   private lastPingMs = 0;
   private pingNonce = 0;
@@ -328,6 +557,227 @@ export class SfuCallSession {
     this.publishLeaf = config.localLeaf ?? 0;
     this.localCameraOn = config.media.video;
     this.nowMs = config.nowMs ?? Date.now;
+    this.wantsSender = new VideoWantsSender(this.wantsBook, (frame) => this.sendVideoWants(frame), {
+      now: () => this.nowMs(),
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    });
+  }
+
+  /**
+   * A tile says which picture of `peerId` it shows (`video-wants.ts`), or
+   * `null` when it stops showing one. `tile` is any object that stays the
+   * same for the tile's lifetime. The session asks the SFU for the highest
+   * quality any tile of a person wants, `light` for a person no tile shows,
+   * and tells it whenever that changes.
+   */
+  reportTileVideoQuality(tile: object, peerId: string, quality: VideoQuality | null): void {
+    if (this.wantsBook.setTile(tile, peerId, quality)) this.wantsSender.changed();
+  }
+
+  /**
+   * The receiver that decodes `peerId`'s audio, or `undefined` before their
+   * audio track arrived and after it ended. The call screen reads the
+   * person's sound level from it (`audio-level.ts`), on this device, for the
+   * speaking ring and the large tile; nothing about it is sent anywhere.
+   */
+  audioReceiverFor(peerId: string): RTCRtpReceiver | undefined {
+    const receiver = this.audioReceivers.get(peerId);
+    if (receiver === undefined) return undefined;
+    // A track that ended (the peer left or stopped sending) has no level.
+    if (receiver.track?.readyState === "ended") {
+      this.audioReceivers.delete(peerId);
+      return undefined;
+    }
+    return receiver;
+  }
+
+  /** The picture of `peerId` this device asks the SFU for now. */
+  videoQualityOf(peerId: string): VideoQuality {
+    return this.wantsBook.qualityOf(peerId);
+  }
+
+  /** What the SFU gives of `peerId` now; `undefined` when it has not said
+   *  (downlink control off, or a person its last frame did not name). */
+  videoGivenOf(peerId: string): VideoQuality | undefined {
+    return this.givenBook.givenOf(peerId);
+  }
+
+  /**
+   * A `video-given` frame: the SFU's whole set replaces the last one. The
+   * tiles are told, and one line says whose shown picture it changed. What
+   * this device asks for is left as it is.
+   */
+  private onVideoGivenFrame(entries: readonly VideoGivenEntry[]): void {
+    const before = this.givenBook.snapshot();
+    this.givenBook.replace(entries);
+    const line = describeGivenChanges(
+      "call video given",
+      videoGivenChanges(
+        this.wantsBook.wants(),
+        (peerId) => before.get(peerId),
+        (peerId) => this.givenBook.givenOf(peerId),
+      ),
+    );
+    if (line !== null) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    this.callbacks.onVideoGiven?.(this.givenBook.snapshot());
+  }
+
+  /** Put one `video-wants` frame on the wire; `false` when it cannot go yet
+   *  (the sender then tries again at its next call). */
+  private sendVideoWants(frame: VideoWantsFrame): boolean {
+    const signaling = this.signaling;
+    if (signaling === null || !this.publishOfferSent) return false;
+    try {
+      signaling.sendVideoWants(frame.peers, frame.qualities);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Whether the middle sender sends now: the shared rule
+   * (`middle_sender_wanted`) over the people in the call, this device's own
+   * person included. `false` while the rule cannot be asked.
+   */
+  private middleWanted(): boolean {
+    try {
+      return this.wasm?.middleSenderWanted(this.wantsBook.people()) ?? false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The "camera is on" condition of the sender-activity decision: this
+   * device has a live camera track.
+   *
+   * Deliberately NOT `track.enabled`. The person turning the camera off is
+   * `track.enabled = false` on the camera and its clones, exactly as before
+   * this rule existed: the senders go on sending (black frames, at very
+   * little bitrate) and a viewer who joins meanwhile still gets its key
+   * frame. The SFU's own bookkeeping for a silent sender (no key frame
+   * request used up, no retransmission asked, no burst at its return) covers
+   * only a sender it told `false`; a sender this client silenced by itself
+   * would be an unannounced stop on the SFU's side. So the person's camera
+   * toggle and the SFU's word compose without touching each other: the
+   * toggle changes the tracks, the SFU's word changes the encodings, and a
+   * camera turned on while the SFU's last word was `false` finds that
+   * encoding still inactive and the light one active.
+   */
+  private cameraIsOn(): boolean {
+    const track = this.localStream?.getVideoTracks()[0];
+    return track !== undefined && track.readyState === "live";
+  }
+
+  /** This device's main camera sender, if it has one. */
+  private mainCameraSender(): RTCRtpSender | undefined {
+    const pc = this.pc;
+    return pc === null ? undefined : this.mainSenderOf(pc, "video");
+  }
+
+  /**
+   * Which camera senders encode and send now (`sender-activity.ts`): the
+   * camera is on, the sender exists, the people count allows the middle one,
+   * and the SFU's last word for the sender is not `false`.
+   */
+  private sendersActiveNow(): Record<CameraSenderKind, boolean> {
+    const main = this.mainCameraSender();
+    return sendersActive(
+      { cameraOn: this.cameraIsOn(), middleWanted: this.middleWanted(), needed: this.videoNeeded },
+      (kind) => (kind === "main" ? main !== undefined : this.copies[kind].sender !== null),
+    );
+  }
+
+  /**
+   * Make every camera sender's encoding active or not, as
+   * {@link sendersActiveNow} says now. `setParameters` only: the media lines,
+   * the SSRCs and the SFrame transforms stay and nothing is renegotiated.
+   *
+   * Called after everything that can change the answer or reset what the
+   * browser holds: a `video-needed` frame, a change of the roster, the
+   * camera turned off or on, a sender added, a track replaced (device
+   * switch, re-publish after an ended track), a renegotiation, and every
+   * counters tick (which is also when a refused switch-on is asked again).
+   * A no-op for a sender whose encoding already says so.
+   */
+  private syncSenderActivity(): void {
+    const main = this.mainCameraSender();
+    this.senderActivity.main.bind(main ?? null);
+    this.senderActivity.middle.bind(this.copies.middle.sender?.sender ?? null);
+    this.senderActivity.light.bind(this.copies.light.sender?.sender ?? null);
+    const active = this.sendersActiveNow();
+    for (const kind of CAMERA_SENDER_KINDS) {
+      const activity = this.senderActivity[kind];
+      if (activity.bound) activity.want(active[kind]);
+    }
+    // Every moment that can reset what a sender's encoding holds is also a
+    // moment its bitrate ceiling may have been lost.
+    this.syncSenderCeilings(main ?? null);
+  }
+
+  /**
+   * Put the main and the middle camera sender's encoding under the ceiling
+   * the SFU last gave (`publish-budget.ts`). `setParameters` only. A no-op
+   * before the first `publish-budget` frame and for a sender whose encoding
+   * already holds the ceiling; a write the browser refused is asked again
+   * here, at the latest at the next counters tick. A sender that was added
+   * again gets the ceiling in force, not the one it was created with.
+   */
+  private syncSenderCeilings(main: RTCRtpSender | null): void {
+    this.senderCeilings.main.bind(main);
+    this.senderCeilings.middle.bind(this.copies.middle.sender?.sender ?? null);
+    for (const kind of BUDGETED_SENDER_KINDS) {
+      const ceiling = this.senderCeilings[kind];
+      if (ceiling.bound) ceiling.want(senderCeiling(kind, this.publishBudget));
+    }
+  }
+
+  /**
+   * A `publish-budget` frame: the SFU's whole word replaces the last one,
+   * the senders follow at once, and one line says so when it changed.
+   */
+  private onPublishBudgetFrame(budget: PublishBudget): void {
+    const line = describePublishBudgetChange(this.publishBudget, budget);
+    this.publishBudget = budget;
+    if (line !== null) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    this.syncSenderCeilings(this.mainCameraSender() ?? null);
+  }
+
+  /** The bitrate ceiling one camera sender's encoding holds now, bits a
+   *  second, for the `send video` line; `null` for none. */
+  private senderCeilingNow(kind: CameraSenderKind): number | null {
+    const sender = kind === "main" ? this.mainCameraSender() : this.copies[kind].sender?.sender;
+    return sender === undefined ? null : readEncodingCeiling(sender);
+  }
+
+  /**
+   * A `video-needed` frame: the SFU's whole word replaces the last one, the
+   * senders follow at once, and one line says so when it changed which of
+   * them is active.
+   */
+  private onVideoNeededFrame(needed: VideoNeeded): void {
+    const before = this.sendersActiveNow();
+    this.videoNeeded = needed;
+    const line = describeVideoNeededChange(needed, before, this.sendersActiveNow());
+    if (line !== null) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    this.syncSenderActivity();
+  }
+
+  /** What the `send video` line says of one sender: the SFU's last word and
+   *  whether its encoding is asked to be active. */
+  private senderActivityNote(kind: CameraSenderKind): SenderActivityNote {
+    return { needed: neededWord(kind, this.videoNeeded), active: this.sendersActiveNow()[kind] };
   }
 
   /**
@@ -362,8 +812,13 @@ export class SfuCallSession {
    * the publish offer has been sent; remote tracks arrive
    * asynchronously through `onRemoteTrack`.
    *
-   * Throws (before any media capture) if the browser lacks
-   * `RTCRtpScriptTransform` — invariant #4, no non-E2EE fallback.
+   * Throws (before any media capture) if the browser can hand encoded
+   * frames to the SFrame worker by neither interface
+   * (`./sframe-transport.ts`) - invariant #4, no non-E2EE fallback.
+   *
+   * Rejects with {@link SfuCallOverError} when the session was hung up or
+   * failed while this was running. Everything it had started by then is
+   * released: no captured track, peer connection or timer is left.
    */
   async connect(): Promise<void> {
     if (this.state !== "idle") {
@@ -371,10 +826,14 @@ export class SfuCallSession {
     }
     if (!isSFrameTransformSupported()) {
       throw new Error(
-        "RTCRtpScriptTransform is unavailable — refusing to join the SFU " +
-          "call without SFrame media encryption (security invariant #4)",
+        "Neither RTCRtpScriptTransform nor createEncodedStreams is available: " +
+          "refusing to join the SFU call without SFrame media encryption " +
+          "(security invariant #4)",
       );
     }
+    // Which of the two interfaces carries this call's frames to the worker.
+    // eslint-disable-next-line no-console
+    console.info(sframeTransportLine());
     this.setState("connecting");
 
     // 1. Open signaling first so the PC's trickled ICE + the publish
@@ -389,6 +848,9 @@ export class SfuCallSession {
         onSignalRelay: (f): void => this.onSignalRelayFrame(f),
         onSdpAnswer: (f): void => void this.onSdpAnswer(f),
         onSdpOffer: (f): void => this.onSdpOffer(f),
+        onVideoGiven: (given): void => this.onVideoGivenFrame(given),
+        onVideoNeeded: (needed): void => this.onVideoNeededFrame(needed),
+        onPublishBudget: (budget): void => this.onPublishBudgetFrame(budget),
         onPong: (): void => {
           this.lastInboundMs = this.nowMs();
         },
@@ -408,12 +870,28 @@ export class SfuCallSession {
         onSocketError: (): void => this.onSignalingClosed(),
       },
     );
+    const signaling = this.signaling;
     try {
-      await this.signaling.connect();
+      await signaling.connect();
     } catch (err) {
+      // Closed by this device while the socket was opening (`hangUp()`, or a
+      // failure that already named itself): `fail` is then a no-op and the
+      // caller reads the state to tell an abandoned start from a failed one.
       this.fail("signaling connect failed", err);
       throw err;
     }
+    // Hung up, or failed, in the same turn the socket opened.
+    this.throwIfOver();
+
+    // The shared rules (the signaling client has loaded the module already).
+    try {
+      this.wasm = await loadWasm();
+    } catch {
+      this.wasm = null;
+    }
+    // Nothing is started for a session that ended meanwhile: a keepalive
+    // timer armed here would never be cleared.
+    this.throwIfOver();
 
     // The socket is open and the Welcome has arrived: start the keepalive.
     this.lastInboundMs = this.lastPingMs = this.nowMs();
@@ -424,11 +902,68 @@ export class SfuCallSession {
     //    holds a Welcome + a derived seed, then call `publish()`).
     if (this.config.deferPublish === true) return;
     try {
-      await this.openPeerConnectionAndPublish();
+      await this.orOver(this.openPeerConnectionAndPublish());
     } catch (err) {
+      // Ended while the publish was in flight (a closed peer connection may
+      // reject what was pending on it): released already. Said as what it
+      // is, an ended session, not as a failed publish.
+      this.throwIfOver();
       this.fail("publish failed", err);
       throw err;
     }
+    // Ended while the publish was in flight, and the publish stood down.
+    this.throwIfOver();
+  }
+
+  /** The session was hung up or failed: nothing more may be started for it. */
+  private isOver(): boolean {
+    return this.state === "closed" || this.state === "failed";
+  }
+
+  /** `connect()` does not resolve for a session that ended while it ran. */
+  private throwIfOver(): void {
+    if (this.state === "closed" || this.state === "failed") {
+      throw new SfuCallOverError(this.state);
+    }
+  }
+
+  /** A publish (capture, peer connection, offer) is in flight, so a second
+   *  one must not open the devices again. */
+  private publishing = false;
+
+  /** Told when the session ends, by {@link setState}. */
+  private readonly overListeners = new Set<() => void>();
+
+  /**
+   * `work`, unless the session ends first: then this rejects with
+   * {@link SfuCallOverError} at once and `work` is left to finish by itself.
+   *
+   * A publish parks on things this session cannot hurry: a permission prompt
+   * the person never answers, and `createOffer` / `setLocalDescription` on a
+   * peer connection that was closed meanwhile, which a browser is allowed to
+   * leave pending for good. Whoever awaits `connect()` must still be told
+   * the session ended, or the host's start latch is never released. `work`
+   * checks the session after each of its awaits and releases what it holds,
+   * so abandoning it here leaves nothing behind; its own late rejection is
+   * taken here and goes nowhere.
+   */
+  private orOver<T>(work: Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const onOver = (): void => {
+        reject(new SfuCallOverError(this.state === "failed" ? "failed" : "closed"));
+      };
+      this.overListeners.add(onOver);
+      work.then(
+        (value) => {
+          this.overListeners.delete(onOver);
+          resolve(value);
+        },
+        (err: unknown) => {
+          this.overListeners.delete(onOver);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        },
+      );
+    });
   }
 
   /**
@@ -442,7 +977,9 @@ export class SfuCallSession {
    * @throws if no seed is available (never publishes unencrypted).
    */
   async publish(seed?: Uint8Array, localLeaf?: number): Promise<void> {
-    if (this.pc !== null) return;
+    if (this.pc !== null || this.publishing) return;
+    // A session that was hung up, or failed, opens no device.
+    if (this.isOver()) return;
     if (seed !== undefined) this.activeSeed = seed;
     if (localLeaf !== undefined) this.publishLeaf = localLeaf;
     if (this.activeSeed === null) {
@@ -452,8 +989,12 @@ export class SfuCallSession {
       );
     }
     try {
-      await this.openPeerConnectionAndPublish();
+      await this.orOver(this.openPeerConnectionAndPublish());
     } catch (err) {
+      // Ended while the publish was in flight: what it did is released
+      // already (or is released by the publish itself, the moment the await
+      // it is parked on returns) and there is nothing to report.
+      if (this.isOver()) return;
       this.fail("publish failed", err);
       throw err;
     }
@@ -491,7 +1032,13 @@ export class SfuCallSession {
         track.enabled = on;
       }
     }
+    // The copies follow the camera.
+    this.setCopiesEnabled(on);
     this.setLocalCameraOn(on);
+    // The toggle is the tracks' `enabled`, as before; the encodings stay as
+    // the people count and the SFU's last word have them (asked again here
+    // in case this browser reset one).
+    this.syncSenderActivity();
   }
 
   /** Current mid-call camera-on lifecycle state (piece B). */
@@ -563,9 +1110,11 @@ export class SfuCallSession {
     }
     // A live video sender already exists (a call started as video, or a prior
     // publishVideo): just re-enable — no capture, no renegotiation.
-    const existing = pc.getSenders().find((s) => s.track?.kind === "video");
+    const existing = this.mainSenderOf(pc, "video");
     if (existing?.track != null && existing.track.readyState === "live") {
       existing.track.enabled = true;
+      this.setCopiesEnabled(true);
+      this.syncSenderActivity();
       this.setVideoPublishState("live");
       // Camera is live again — tell peers (camera-off-cleanup).
       this.setLocalCameraOn(true);
@@ -600,12 +1149,56 @@ export class SfuCallSession {
         this.setVideoPublishState("off");
         return;
       }
+      // The sender of a camera track that ended by itself (device unplugged,
+      // permission withdrawn) takes the new track in place: one sender, one
+      // SFrame transform and one frame counter per stream, and no
+      // renegotiation.
+      const ended = this.mainSenderOf(pc2, "video", "ended");
+      if (ended?.track != null) {
+        const old = ended.track;
+        await ended.replaceTrack(track);
+        if (this.pc !== pc2 || this.localStream !== localStream) {
+          // Torn down while the track was being replaced: the stream the
+          // teardown stopped no longer holds this track, so stop it here.
+          track.stop();
+          this.setVideoPublishState("off");
+          return;
+        }
+        localStream.removeTrack(old);
+        localStream.addTrack(track);
+        // The copies' clones ended with the camera they were cloned from:
+        // each takes a clone of the new track, in place as well.
+        await this.followCamera(pc2, track, seed);
+        if (this.pc !== pc2) {
+          // Torn down while the copies were being set up. The teardown
+          // stopped the stream's tracks, this one among them.
+          track.stop();
+          this.setVideoPublishState("off");
+          return;
+        }
+        this.setVideoPublishState("live");
+        this.setLocalCameraOn(true);
+        this.callbacks.onLocalStream?.(localStream);
+        return;
+      }
       localStream.addTrack(track);
-      const sender = pc2.addTrack(track, localStream);
+      // The main sender: `addTrack`, which mid-call may reuse a video
+      // transceiver the SFU already negotiated; the layers are asked for
+      // separately.
+      const sender = addCameraSenderMidCall(pc2, track, localStream);
       this.transformIds.add(
         attachSenderSFrame(sender, { seed, localLeaf: this.publishLeaf }),
       );
-      // addTrack fired onnegotiationneeded -> the SDP renegotiation runs in the
+      // The copies, added and sealed in the same turn as the main one, so
+      // the renegotiation `addTrack` asked for finds all of them.
+      await this.followCamera(pc2, track, seed);
+      if (this.pc !== pc2) {
+        // Torn down while the copies were being set up.
+        track.stop();
+        this.setVideoPublishState("off");
+        return;
+      }
+      // Adding the sender fired onnegotiationneeded -> the SDP renegotiation runs in the
       // background. The self-preview is live now (the local track is live), so
       // report `live`; a background renegotiation failure only affects what
       // REMOTE peers see, not the local preview.
@@ -650,13 +1243,15 @@ export class SfuCallSession {
   ): Promise<void> {
     if (this.pc === null || this.localStream === null) return;
     if (deviceId.length === 0) return;
-    const sender = this.pc.getSenders().find((s) => s.track?.kind === kind);
+    const pc = this.pc;
+    const localStream = this.localStream;
+    const sender = this.mainSenderOf(pc, kind);
     if (sender === undefined) return;
 
     const constraints: MediaStreamConstraints =
       kind === "audio"
         ? { audio: { deviceId: { exact: deviceId } } }
-        : { video: { deviceId: { exact: deviceId } } };
+        : { video: { ...CAMERA_CAPTURE_SIZE, deviceId: { exact: deviceId } } };
 
     let captured: MediaStream;
     try {
@@ -666,10 +1261,17 @@ export class SfuCallSession {
       console.warn(`getUserMedia (SFU ${kind} device switch) failed`, err);
       return;
     }
+    // The call was torn down (or its stream replaced) while the capture and
+    // its permission prompt were open: release the new device at once. The
+    // teardown nulled `this.localStream`, so nothing below may touch it.
+    if (this.pc !== pc || this.localStream !== localStream) {
+      for (const t of captured.getTracks()) t.stop();
+      return;
+    }
     const oldTracks =
       kind === "audio"
-        ? this.localStream.getAudioTracks()
-        : this.localStream.getVideoTracks();
+        ? localStream.getAudioTracks()
+        : localStream.getVideoTracks();
     const newTrack =
       kind === "audio"
         ? captured.getAudioTracks()[0]
@@ -691,12 +1293,451 @@ export class SfuCallSession {
       newTrack.stop();
       return;
     }
+    if (this.pc !== pc || this.localStream !== localStream) {
+      // Torn down while the track was being replaced: the old tracks were
+      // stopped by the teardown, and the new one is not in any stream it knew.
+      newTrack.stop();
+      return;
+    }
 
     for (const t of oldTracks) {
-      this.localStream.removeTrack(t);
+      localStream.removeTrack(t);
       t.stop();
     }
-    this.localStream.addTrack(newTrack);
+    localStream.addTrack(newTrack);
+    // The copies follow the camera to the new device. Their old clones are
+    // stopped there; the old camera track was stopped just above. A copy the
+    // browser would not take is not tried again here.
+    if (kind === "video" && this.pc === pc && this.activeSeed !== null) {
+      await this.followCamera(pc, newTrack, this.activeSeed, false);
+    }
+    // A replaced track keeps the sender and its parameters; asked again all
+    // the same, in case this browser reset the encoding.
+    if (kind === "video") this.syncSenderActivity();
+  }
+
+  /** The copies' clones are enabled and disabled with the camera. */
+  private setCopiesEnabled(on: boolean): void {
+    for (const kind of CAMERA_COPY_KINDS) {
+      const copy = this.copies[kind].sender;
+      if (copy !== null) copy.track.enabled = on;
+    }
+  }
+
+  /**
+   * This device's microphone sender or main camera sender: the sender of
+   * `kind` that is not one of the camera's copies. With `readyState`, only
+   * one whose track is in that state.
+   */
+  private mainSenderOf(
+    pc: RTCPeerConnection,
+    kind: "audio" | "video",
+    readyState?: MediaStreamTrackState,
+  ): RTCRtpSender | undefined {
+    const copySenders = CAMERA_COPY_KINDS.map((k) => this.copies[k].sender?.sender);
+    return pc
+      .getSenders()
+      .find(
+        (s) =>
+          !copySenders.includes(s) &&
+          s.track?.kind === kind &&
+          (readyState === undefined || s.track.readyState === readyState),
+      );
+  }
+
+  /**
+   * Make every copy of the camera carry a copy of `cameraTrack` (ADR-0070
+   * steps 1 and 5).
+   *
+   * A copy that is not there yet is added (unless `addMissing` is `false`):
+   * a clone of the camera on a transceiver of its own, with its size and its
+   * bitrate ceiling, sealed under its own SFrame stream index before any
+   * offer can be built (security invariant #4). Every missing copy is added
+   * and sealed in this same turn, before anything is awaited. A copy already
+   * there has its clone replaced in place: same sender, same transform, same
+   * frame counter, and no renegotiation. There is never a second one of a
+   * kind.
+   *
+   * Never fails the call. A browser that takes no such sender, takes none
+   * with the right size, or cannot seal it leaves the call without that copy,
+   * said once.
+   */
+  private async followCamera(
+    pc: RTCPeerConnection,
+    cameraTrack: MediaStreamTrack,
+    seed: Uint8Array,
+    addMissing = true,
+  ): Promise<void> {
+    await Promise.all(
+      CAMERA_COPY_KINDS.map((kind) => this.followCameraWith(kind, pc, cameraTrack, seed, addMissing)),
+    );
+    // The roster may have crossed three people, or the SFU's word may have
+    // changed, while a copy was set up; and a new or re-tracked sender is
+    // given its flag again.
+    this.syncSenderActivity();
+  }
+
+  /** {@link followCamera} for one copy. Runs up to the copy being added and
+   *  sealed without awaiting anything. */
+  private async followCameraWith(
+    kind: CameraCopyKind,
+    pc: RTCPeerConnection,
+    cameraTrack: MediaStreamTrack,
+    seed: Uint8Array,
+    addMissing: boolean,
+  ): Promise<void> {
+    const slot = this.copies[kind];
+    const existing = slot.sender;
+    if (existing !== null) {
+      let clone: MediaStreamTrack;
+      try {
+        clone = cameraTrack.clone();
+      } catch (err) {
+        this.dropCopySender(kind, pc, "the camera track cannot be cloned", err);
+        return;
+      }
+      clone.enabled = cameraTrack.enabled;
+      const old = existing.track;
+      try {
+        await existing.sender.replaceTrack(clone);
+      } catch (err) {
+        clone.stop();
+        this.dropCopySender(kind, pc, `the ${kind} sender would not take the new camera`, err);
+        return;
+      }
+      old.stop();
+      if (slot.sender !== existing) {
+        // Torn down (or removed) while the track was being replaced.
+        clone.stop();
+        return;
+      }
+      existing.track = clone;
+      return;
+    }
+    if (!addMissing) return;
+
+    // The middle sender is created sending or not as the roster and the SFU
+    // say now; the light one is created sending.
+    const active =
+      kind === "middle"
+        ? senderActive("middle", {
+            cameraOn: cameraTrack.readyState === "live",
+            exists: true,
+            middleWanted: this.middleWanted(),
+            needed: this.videoNeeded,
+          })
+        : undefined;
+    const added = addCopySender(
+      pc,
+      cameraTrack,
+      kind,
+      (what, err) => this.warnNoCopySender(kind, what, err),
+      active,
+    );
+    if (added === null) return;
+    const copy = added.copy;
+    copy.track.enabled = cameraTrack.enabled;
+    slot.sender = copy;
+    try {
+      slot.transformId = attachSenderSFrame(copy.sender, {
+        seed,
+        localLeaf: this.publishLeaf,
+        streamIndex: copyStreamIndex(kind),
+      });
+      this.transformIds.add(slot.transformId);
+    } catch (err) {
+      // An unsealed sender is never left in place (invariant #4).
+      this.dropCopySender(kind, pc, "its SFrame transform could not be attached", err);
+      return;
+    }
+    if (!added.configured) {
+      // The browser refused the size and the ceiling with the transceiver;
+      // ask again on the sender. Without them this would be another
+      // full-size camera, so a refusal here removes the sender.
+      const ok = await configureCopySender(copy.sender, kind, active);
+      if (slot.sender !== copy) return;
+      if (!ok) {
+        this.dropCopySender(kind, pc, "its size and bitrate ceiling were refused", undefined);
+      }
+    }
+  }
+
+  /** Remove a copy's sender and say why, once per call. */
+  private dropCopySender(kind: CameraCopyKind, pc: RTCPeerConnection, what: string, err: unknown): void {
+    this.warnNoCopySender(kind, what, err);
+    const slot = this.copies[kind];
+    const copy = slot.sender;
+    if (copy === null) return;
+    slot.sender = null;
+    if (slot.transformId !== null) this.transformIds.delete(slot.transformId);
+    slot.transformId = null;
+    removeCopySender(pc, copy);
+  }
+
+  private warnNoCopySender(kind: CameraCopyKind, what: string, err: unknown): void {
+    const slot = this.copies[kind];
+    if (slot.refusalWarned) return;
+    slot.refusalWarned = true;
+    // eslint-disable-next-line no-console
+    console.warn(`SfuCallSession: publishing the camera without a ${kind} sender: ${what}`, err ?? "");
+  }
+
+  /**
+   * The `mid`s of the offer's m-lines that carry the `kind` copy of the
+   * camera: one while there is such a sender with a `mid` (it has one once a
+   * local description that includes it is set), none otherwise. Sent with
+   * every offer this client makes, so the SFU forwards that m-line as the
+   * camera's light companion, or as its middle track.
+   */
+  private copyMids(kind: CameraCopyKind): string[] {
+    const mid = this.copies[kind].sender?.transceiver.mid;
+    return typeof mid === "string" && mid.length > 0 ? [mid] : [];
+  }
+
+  /**
+   * The stats ids of the `outbound-rtp` entries of the `kind` copy's sender,
+   * read from the sender's own report, so the media counters can name each
+   * camera sender. Empty without that sender or when the browser does not
+   * answer.
+   */
+  private async copyOutboundIds(kind: CameraCopyKind): Promise<Set<string>> {
+    const ids = new Set<string>();
+    const copy = this.copies[kind].sender;
+    if (copy === null) return ids;
+    try {
+      const report = await copy.sender.getStats();
+      for (const e of report.values() as Iterable<Record<string, unknown>>) {
+        const id = e["id"];
+        if (e["type"] === "outbound-rtp" && typeof id === "string") ids.add(id);
+      }
+    } catch {
+      // The lines then name that sender `main`.
+    }
+    return ids;
+  }
+
+  /**
+   * ADR-0067 step 1: log what the receivers report, once per interval and as
+   * a total when the call ends, so a change to how calls survive packet loss
+   * can be measured. Diagnostics only: counts and durations.
+   */
+  private startMediaCounters(pc: RTCPeerConnection): void {
+    this.stopMediaCounters();
+    // The tiles of this call start from nothing.
+    shownLayerLedger.reset();
+    this.localCameraSaid = false;
+    // One timer and one statistics report per tick serve both the alignment
+    // rule and the counters. The rule is read every tick (its own interval,
+    // one second: at the counters' two seconds its steps and its counts of
+    // readings would take twice as long to close a skew); the counters are
+    // logged every second tick, as before.
+    const avAlign = new CallAvAlign<RTCRtpReceiver>({
+      enabled: avAlignEnabled(),
+      prototypeSettable: browserHasJitterTarget(),
+      // eslint-disable-next-line no-console
+      info: (line) => console.info(line),
+      // eslint-disable-next-line no-console
+      warn: (message, err) => console.warn(message, err ?? ""),
+    });
+    this.avAlign = avAlign;
+    const intervalMs = Math.min(avAlign.readingMs(), MEDIA_COUNTERS_INTERVAL_MS);
+    this.mediaCountersEvery = Math.max(1, Math.round(MEDIA_COUNTERS_INTERVAL_MS / intervalMs));
+    this.mediaTick = 0;
+    this.mediaSampling = false;
+    this.mediaCountersTimer = setInterval(() => {
+      void this.onMediaTick(pc);
+    }, intervalMs);
+  }
+
+  /** One tick of the media timer: read the statistics once, give the
+   *  alignment rule its interval, and on every counters tick log. */
+  private async onMediaTick(pc: RTCPeerConnection): Promise<void> {
+    if (this.pc !== pc || this.mediaSampling) return;
+    this.mediaSampling = true;
+    try {
+      this.mediaTick += 1;
+      await this.sampleMediaCounters(pc, this.mediaTick % this.mediaCountersEvery === 0);
+    } finally {
+      this.mediaSampling = false;
+    }
+  }
+
+  /**
+   * Give the alignment rule one interval from a statistics report this tick
+   * already read. Only the `inbound-rtp` entries are looked at. Where the
+   * browser's entries do not name their track, each registered receiver is
+   * asked for its own report instead.
+   */
+  private async readAvAlign(
+    pc: RTCPeerConnection,
+    entries: readonly Record<string, unknown>[],
+  ): Promise<void> {
+    const avAlign = this.avAlign;
+    if (avAlign === null) return;
+    // A track that ended (the person left or stopped sending) has no
+    // receiver to align any more.
+    for (const tracked of avAlign.receivers()) {
+      if (tracked.receiver.track?.readyState === "ended") {
+        avAlign.removeReceiver(tracked.peerId, tracked.role, tracked.receiver);
+      }
+    }
+    const samples = inboundSamples(entries);
+    let byTrack: ReadonlyMap<string, InboundSample> = samples.byTrack;
+    if (samples.unidentified > 0) {
+      const filled = new Map(samples.byTrack);
+      for (const tracked of avAlign.receivers()) {
+        if (filled.has(tracked.trackId)) continue;
+        try {
+          const report = await tracked.receiver.getStats();
+          const sample = receiverSample(report.values() as Iterable<Record<string, unknown>>);
+          if (sample !== null) filled.set(tracked.trackId, sample);
+        } catch {
+          // That receiver has no reading this interval; the rule changes
+          // nothing for it.
+        }
+      }
+      byTrack = filled;
+    }
+    if (this.pc !== pc || this.avAlign !== avAlign) return;
+    avAlign.read(Math.round(performance.now()), byTrack, (peerId) => this.shownTrackOf(peerId));
+  }
+
+  /** The one track a tile draws of `peerId` now (`av-align.ts`), from what
+   *  the tiles asked for, what the SFU gives and what the tile last said it
+   *  showed. */
+  private shownTrackOf(peerId: string): AvVideoRole | null {
+    const avAlign = this.avAlign;
+    if (avAlign === null) return null;
+    return shownTrack({
+      hasTile: this.wantsBook.hasTile(peerId),
+      wanted: this.wantsBook.qualityOf(peerId),
+      given: this.givenBook.givenOf(peerId) ?? null,
+      hasMiddle: avAlign.has(peerId, "middle"),
+      hasLight: avAlign.has(peerId, "light"),
+      lightOnTop: shownLayerLedger.shownNowOf(peerId) === "light",
+    });
+  }
+
+  /** Whether the `call local camera` line was written for this call. */
+  private localCameraSaid = false;
+
+  /**
+   * Say once, at the first counters interval at which there is a camera, the
+   * state of the camera track and of each copy of it that is sent
+   * (`local-preview.ts`): whether the track the own preview plays still
+   * gives frames once it has clones.
+   */
+  private sayLocalCameraOnce(): void {
+    if (this.localCameraSaid) return;
+    const main = this.localStream?.getVideoTracks()[0];
+    if (main === undefined) return;
+    this.localCameraSaid = true;
+    // eslint-disable-next-line no-console
+    console.info(
+      describeLocalCamera(main, [
+        ["light", this.copies.light.sender?.track],
+        ["middle", this.copies.middle.sender?.track],
+      ]),
+    );
+  }
+
+  private async sampleMediaCounters(pc: RTCPeerConnection, logCounters = true): Promise<void> {
+    if (this.pc !== pc) return;
+    let reading: MediaReading;
+    let sender: SenderReading | null;
+    try {
+      // The senders' own reports are only needed to name them in the log.
+      const lightOutbound = logCounters ? await this.copyOutboundIds("light") : new Set<string>();
+      const middleOutbound = logCounters ? await this.copyOutboundIds("middle") : new Set<string>();
+      const report = await pc.getStats();
+      const entries = [...(report.values() as Iterable<Record<string, unknown>>)];
+      await this.readAvAlign(pc, entries);
+      if (!logCounters) return;
+      reading = readMedia(
+        entries,
+        this.copyTrackIds.light,
+        lightOutbound,
+        this.copyTrackIds.middle,
+        middleOutbound,
+      );
+      sender = readSender(entries, lightOutbound, middleOutbound);
+    } catch {
+      return;
+    }
+    if (this.pc !== pc) return;
+    this.sayLocalCameraOnce();
+    // A sender the browser refused to start is asked again, and a flag a
+    // renegotiation reset is put back.
+    this.syncSenderActivity();
+    for (const line of describeDeltas("call media interval", deltaOf(this.mediaCountersLast, reading))) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    for (const line of describeOutboundSenders(
+      "call media interval",
+      reading.outboundVideoSenders,
+      (kind) => this.senderActivityNote(kind),
+      CAMERA_SENDER_KINDS.filter((kind) => this.senderActivity[kind].bound),
+      (kind) => this.senderCeilingNow(kind),
+    )) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    if (sender !== null) {
+      // eslint-disable-next-line no-console
+      console.info(describeSender("call media interval", this.senderCountersLast, sender));
+      this.senderCountersLast = sender;
+    }
+    // What each remote tile showed over the interval, and the frames it
+    // observed on its two elements (`layer-display.ts`).
+    const tileFrames = shownLayerLedger.takeFrames();
+    for (const line of describeShownPeers(
+      "call media interval",
+      shownLayerLedger.takeInterval(),
+      (peerId) => this.wantsBook.qualityOf(peerId),
+      (peerId) => this.givenBook.givenOf(peerId) ?? null,
+      (peerId) => tileFrames.get(peerId),
+    )) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    // Each remote person's sound against their pictures, as the alignment
+    // rule last read them (`av-align.ts`).
+    for (const line of this.avAlign?.lines("call media interval") ?? []) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    this.mediaCountersLast = reading;
+  }
+
+  /** Stop the poll and log the whole call's totals from what was read. */
+  private stopMediaCounters(): void {
+    if (this.mediaCountersTimer !== null) {
+      clearInterval(this.mediaCountersTimer);
+      this.mediaCountersTimer = null;
+    }
+    // Every person's rule is freed with the call.
+    this.avAlign?.dispose();
+    this.avAlign = null;
+    const last = this.mediaCountersLast;
+    this.mediaCountersLast = null;
+    this.senderCountersLast = null;
+    if (last === null) return;
+    // Counted from zero: the counters are cumulative from the stream's start.
+    for (const line of describeDeltas("call media total", deltaOf(null, last))) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    for (const line of describeShownPeers(
+      "call media total",
+      shownLayerLedger.totals(),
+      (peerId) => this.wantsBook.qualityOf(peerId),
+      (peerId) => this.givenBook.givenOf(peerId) ?? null,
+    )) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    shownLayerLedger.reset();
   }
 
   /** User-initiated tear-down. Idempotent. Moves to `closed` unless the
@@ -712,6 +1753,7 @@ export class SfuCallSession {
    *  lifecycle state — the state transition is the caller's
    *  (`hangUp` → closed, `fail` → failed). Idempotent. */
   private releaseResources(): void {
+    this.stopMediaCounters();
     if (this.keepaliveTimer !== null) {
       clearInterval(this.keepaliveTimer);
       this.keepaliveTimer = null;
@@ -720,6 +1762,7 @@ export class SfuCallSession {
       this.signaling.close();
       this.signaling = null;
     }
+    this.audioReceivers.clear();
     if (this.pc !== null) {
       try {
         this.pc.close();
@@ -734,8 +1777,39 @@ export class SfuCallSession {
       }
       this.localStream = null;
     }
+    // The copies' clones are not in the local stream (the self-preview shows
+    // one picture), so they are stopped here.
+    for (const kind of CAMERA_COPY_KINDS) {
+      const slot = this.copies[kind];
+      if (slot.sender !== null) {
+        try {
+          slot.sender.track.stop();
+        } catch {
+          // best-effort
+        }
+      }
+      // In place: a copy still being set up compares against this very slot.
+      slot.sender = null;
+      slot.transformId = null;
+      slot.refusalWarned = false;
+      this.copyTrackIds[kind].clear();
+    }
+    this.videoNeeded = null;
+    for (const kind of CAMERA_SENDER_KINDS) this.senderActivity[kind].reset();
+    this.publishBudget = null;
+    for (const kind of BUDGETED_SENDER_KINDS) this.senderCeilings[kind].reset();
+    // Nothing more is asked of the SFU, and the tiles of a later call start
+    // from nothing.
+    this.wantsSender.reset();
+    this.wantsBook.clear();
+    if (this.givenBook.size() > 0) {
+      this.givenBook.clear();
+      this.callbacks.onVideoGiven?.(this.givenBook.snapshot());
+    }
+    this.publishOfferSent = false;
     this.offerQueue = [];
     this.transformIds.clear();
+    this.unsealedSenderWarned = false;
     // Reset perfect-negotiation + video-publish state so a reused instance
     // (or a late callback after teardown) starts clean.
     this.makingOffer = false;
@@ -786,6 +1860,18 @@ export class SfuCallSession {
       );
     }
     const seed = this.activeSeed;
+    this.publishing = true;
+    try {
+      await this.openAndPublishWith(seed);
+    } finally {
+      this.publishing = false;
+    }
+  }
+
+  /** {@link openPeerConnectionAndPublish}, with the seed in hand. After every
+   *  await it asks whether the session is still the one that started the
+   *  step, and starts nothing for one that is not. */
+  private async openAndPublishWith(seed: Uint8Array): Promise<void> {
     // Capture what the device has (section 4.4): the camera and microphone
     // when both work, the microphone alone when the camera fails, nothing
     // when neither can be had — the person joins in every case. Honour the
@@ -793,12 +1879,29 @@ export class SfuCallSession {
     // OS default).
     const captured = await captureWithFallback(
       this.config.media,
-      (audio, video) =>
-        navigator.mediaDevices.getUserMedia({
+      (audio, video) => {
+        // The fallback's second attempt (microphone alone) is not made for a
+        // session that ended while the first one was failing.
+        if (this.isOver()) {
+          return Promise.reject(new Error("the call ended before capture"));
+        }
+        return navigator.mediaDevices.getUserMedia({
           audio: audioTrackConstraint(audio, this.config.media.audioDeviceId),
           video: trackConstraint(video, this.config.media.videoDeviceId),
-        }),
+        });
+      },
     );
+    // The person pressed End, the session failed, or the SFU answered
+    // `call-ended` while the capture (and its permission prompt) was open.
+    // `releaseResources()` ran then, with no stream to stop, so the devices
+    // are released here: nothing is kept and nothing is built for a session
+    // that is over. The same when another publish got there first.
+    if (this.isOver() || this.pc !== null || this.localStream !== null) {
+      if (captured.stream !== null) {
+        for (const track of captured.stream.getTracks()) track.stop();
+      }
+      return;
+    }
     // An empty stream when nothing was captured, so a camera turned on later
     // (`publishVideo`) has a stream to join.
     const stream = captured.stream ?? new MediaStream();
@@ -812,12 +1915,27 @@ export class SfuCallSession {
       this.callbacks.onCaptureFallback?.(captured.fallback);
     }
 
-    const pc = new RTCPeerConnection({
-      iceServers: await this.resolveIceServers(),
-      bundlePolicy: "max-bundle",
-      rtcpMuxPolicy: "require",
-    });
+    // Built through `sframePeerConnectionConfig`: on a browser that reaches
+    // the SFrame worker by `createEncodedStreams()` the connection has to be
+    // constructed for it (`./sframe-transport.ts`); elsewhere the
+    // configuration is unchanged.
+    const iceServers = await this.resolveIceServers();
+    // Ended while the relay credential was being fetched. The teardown
+    // stopped the stream it knew of; stopped again here in case this is not
+    // that stream any more. No peer connection, no timer.
+    if (this.isOver() || this.localStream !== stream || this.pc !== null) {
+      for (const track of stream.getTracks()) track.stop();
+      return;
+    }
+    const pc = new RTCPeerConnection(
+      sframePeerConnectionConfig({
+        iceServers,
+        bundlePolicy: "max-bundle",
+        rtcpMuxPolicy: "require",
+      }),
+    );
     this.pc = pc;
+    this.startMediaCounters(pc);
 
     // Renegotiate on any future local track change (piece B: mid-call
     // `publishVideo` adds a camera track after the initial offer). Gated by
@@ -831,7 +1949,7 @@ export class SfuCallSession {
     // SFU. Attach the transform AFTER addTrack and BEFORE the offer is
     // built (the same sequencing the native shim follows).
     for (const track of stream.getTracks()) {
-      const sender = pc.addTrack(track, stream);
+      const sender = addGroupCallSender(pc, track, stream);
       this.transformIds.add(
         attachSenderSFrame(sender, {
           seed,
@@ -839,6 +1957,11 @@ export class SfuCallSession {
         }),
       );
     }
+    // The camera's copies (ADR-0070 steps 1 and 5), sealed like every sender
+    // before the offer is built.
+    const camera = stream.getVideoTracks()[0];
+    if (camera !== undefined) await this.followCamera(pc, camera, seed);
+    if (this.pc !== pc) return;
     if (stream.getTracks().length === 0) {
       // Nothing to send, but the offer still needs a media line to carry the
       // ICE/DTLS transport the SFU's own offers will reuse for what this
@@ -868,6 +1991,28 @@ export class SfuCallSession {
       this.transformIds.add(
         attachReceiverSFrame(ev.receiver, { seed: this.activeSeed ?? seed }),
       );
+      // Where the browser has no per-frame callback, the tile reads this
+      // receiver's statistics instead (`video-frame-watch.ts`).
+      if (ev.track.kind === "video") registerVideoFrameSource(ev.track, ev.receiver);
+      // The receiver of a light companion or of a middle track is named as
+      // such in the media counters.
+      const role = splitStreamId(remoteStream.id).role;
+      if (role !== "main") {
+        const trackId = ev.track.id;
+        const ids = this.copyTrackIds[role];
+        ids.add(trackId);
+        ev.track.addEventListener("ended", () => {
+          ids.delete(trackId);
+        });
+      }
+      // A peer's own audio: kept before the track is announced, so whoever
+      // hears of the track can already ask for its receiver.
+      if (role === "main" && ev.track.kind === "audio") {
+        this.audioReceivers.set(remoteStream.id, ev.receiver);
+      }
+      // The alignment rule is told which receiver this is: the person's
+      // sound, or one of their three pictures (`av-align.ts`).
+      this.registerAvReceiver(splitStreamId(remoteStream.id).peerId, role, ev.track, ev.receiver);
       this.callbacks.onRemoteTrack?.({
         streamId: remoteStream.id,
         track: ev.track,
@@ -879,6 +2024,8 @@ export class SfuCallSession {
       const s = pc.iceConnectionState;
       if (s === "connected" || s === "completed") {
         if (this.state === "connecting") this.setState("connected");
+        // Say again what this device shows, now that media flows.
+        this.wantsSender.resend();
       } else if (s === "failed") {
         this.fail("ICE connection failed");
       }
@@ -889,11 +2036,19 @@ export class SfuCallSession {
     // frames in the sealed VP8 this browser sends (`frame-descriptor.ts`).
     this.armFrameDescriptor(pc);
     const offer = await pc.createOffer();
+    // Torn down while the offer was being made: nothing is sent.
+    if (this.pc !== pc) return;
     await pc.setLocalDescription(offer);
+    if (this.pc !== pc) return;
     if (offer.sdp === undefined) {
       throw new Error("createOffer produced no SDP body");
     }
-    this.signaling?.sendSdpOffer(offer.sdp);
+    // The copies' transceivers have their `mid`s now.
+    this.signaling?.sendSdpOffer(offer.sdp, this.copyMids("light"), this.copyMids("middle"));
+    // The SFU has media state for this peer from this offer on: tell it what
+    // this device shows of everyone.
+    this.publishOfferSent = true;
+    this.wantsSender.resend();
 
     // Announce the initial camera state to any peers already in the call
     // (camera-off-cleanup) — so a peer that joined camera-off is shown off
@@ -909,6 +2064,10 @@ export class SfuCallSession {
   private onWelcome(frame: SfuWelcome): void {
     this.lastInboundMs = this.nowMs();
     this.selfPeerId = frame.peer_id;
+    this.wantsBook.setPeers(
+      frame.roster.map((p) => p.peer_id).filter((id) => id !== frame.peer_id),
+    );
+    this.onRosterChanged(false);
     this.callbacks.onWelcome?.(frame.peer_id, frame.roster);
   }
 
@@ -951,7 +2110,22 @@ export class SfuCallSession {
     }
   }
 
+  /**
+   * The people of the call changed: the middle sender starts or stops with
+   * the count, and the SFU is told what this device shows of the people now
+   * in it (again, whatever it is, after a join).
+   */
+  private onRosterChanged(joined: boolean): void {
+    this.syncSenderActivity();
+    if (joined) this.wantsSender.resend();
+    else this.wantsSender.changed();
+  }
+
   private onPeerJoined(frame: SfuPeerJoined): void {
+    if (frame.peer_id !== this.selfPeerId) {
+      this.wantsBook.addPeer(frame.peer_id);
+      this.onRosterChanged(true);
+    }
     this.callbacks.onPeerJoined?.(
       frame.peer_id,
       frame.account_pseudonym,
@@ -965,7 +2139,41 @@ export class SfuCallSession {
     this.announceCameraState();
   }
 
+  /**
+   * A remote track arrived: its receiver is one of `peerId`'s for the
+   * alignment rule until the track ends (found at the next reading, as
+   * `audioReceiverFor` finds it). Audio counts only on the person's
+   * own stream; a companion stream carries a picture.
+   */
+  private registerAvReceiver(
+    peerId: string,
+    streamRole: AvVideoRole,
+    track: MediaStreamTrack,
+    receiver: RTCRtpReceiver,
+  ): void {
+    const avAlign = this.avAlign;
+    if (avAlign === null) return;
+    let role: AvRole;
+    if (track.kind === "audio") {
+      if (streamRole !== "main") return;
+      role = "audio";
+    } else if (track.kind === "video") {
+      role = streamRole;
+    } else {
+      return;
+    }
+    avAlign.setReceiver(peerId, role, receiver, track.id);
+  }
+
   private onPeerLeft(frame: SfuPeerLeft): void {
+    this.wantsBook.removePeer(frame.peer_id);
+    this.avAlign?.removePeer(frame.peer_id);
+    // What the SFU gave of them goes with them: someone who later joins
+    // under the same id starts with nothing said.
+    if (this.givenBook.removePeer(frame.peer_id)) {
+      this.callbacks.onVideoGiven?.(this.givenBook.snapshot());
+    }
+    this.onRosterChanged(false);
     this.callbacks.onPeerLeft?.(frame.peer_id);
   }
 
@@ -994,6 +2202,9 @@ export class SfuCallSession {
         // A malformed relay payload is dropped, not fatal.
         return;
       }
+      // Hung up while the module resolved: a relay is not delivered to a
+      // call that is over.
+      if (this.isOver()) return;
       // Classify: consume a MediaState signal (camera-off-cleanup); everything
       // else passes through to onSignalRelay unchanged.
       if (mediaCb !== undefined) {
@@ -1018,6 +2229,31 @@ export class SfuCallSession {
     })();
   }
 
+  /**
+   * Insertable-streams browsers only (`./sframe-transport.ts`); nothing
+   * elsewhere. There a sender or receiver whose encoded streams were never
+   * taken passes no media, so after every negotiation step every receiver
+   * without a transform is given one at the current seed, and a sender left
+   * without one (the microphone, the camera, its light or middle copy) is
+   * said out loud. Nothing here can let a frame through unsealed: an
+   * uncovered endpoint is silent, not plain.
+   */
+  private coverSFrame(pc: RTCPeerConnection): void {
+    if (sframeTransport() !== "encoded-streams") return;
+    const seed = this.activeSeed;
+    if (seed === null || this.pc !== pc) return;
+    const cover = coverEncodedStreams(pc, seed);
+    for (const id of cover.attachedReceiverIds) this.transformIds.add(id);
+    if (cover.unsealedSenders.length > 0 && !this.unsealedSenderWarned) {
+      this.unsealedSenderWarned = true;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `SfuCallSession: ${cover.unsealedSenders.length} sender(s) have no SFrame transform; ` +
+          "their media does not flow",
+      );
+    }
+  }
+
   /** SFU's answer to our publish offer (initial or a mid-call renegotiation). */
   private async onSdpAnswer(frame: SfuSdpAnswer): Promise<void> {
     const pc = this.pc;
@@ -1026,6 +2262,12 @@ export class SfuCallSession {
       this.isSettingRemoteAnswerPending = true;
       await pc.setRemoteDescription({ type: "answer", sdp: frame.sdp });
       this.isSettingRemoteAnswerPending = false;
+      // The senders' codecs are negotiated now: the SFrame worker needs them
+      // to leave the right codec header in the clear (ADR-0071).
+      syncSenderCodecs();
+      this.coverSFrame(pc);
+      // A flag this negotiation reset on a sender is put back.
+      this.syncSenderActivity();
       // The initial publish (or a mid-call renegotiation) is now answered —
       // arm `onnegotiationneeded` for future local track changes (piece B).
       this.negotiationReady = true;
@@ -1075,7 +2317,9 @@ export class SfuCallSession {
       this.armFrameDescriptor(pc);
       await pc.setLocalDescription(); // implicit createOffer
       const sdp = pc.localDescription?.sdp;
-      if (sdp !== undefined) signaling.sendSdpOffer(sdp);
+      if (sdp !== undefined) {
+        signaling.sendSdpOffer(sdp, this.copyMids("light"), this.copyMids("middle"));
+      }
     } catch {
       // A failed renegotiation leaves the call up as-is; the publishVideo
       // caller already surfaced the local self-preview.
@@ -1142,6 +2386,13 @@ export class SfuCallSession {
           // sealed payload -- a blank tile for a peer who is sending fine.
           this.armFrameDescriptor(pc);
           await pc.setLocalDescription();
+          // Harmless when nothing changed for the senders: the worker keeps
+          // the newest table (ADR-0071).
+          syncSenderCodecs();
+          // The offer may have created transceivers: every receiver has its
+          // streams taken (insertable-streams browsers only).
+          this.coverSFrame(pc);
+          this.syncSenderActivity();
           const answerSdp = pc.localDescription?.sdp;
           if (answerSdp === undefined) {
             throw new Error("setLocalDescription produced no answer SDP");
@@ -1181,6 +2432,12 @@ export class SfuCallSession {
   private setState(state: SfuCallState): void {
     this.state = state;
     this.callbacks.onStateChange?.(state);
+    if (state === "closed" || state === "failed") {
+      // Whatever was awaiting a step of this session is told it is over.
+      const listeners = [...this.overListeners];
+      this.overListeners.clear();
+      for (const listener of listeners) listener();
+    }
   }
 
   private fail(reason: string, err?: unknown): void {

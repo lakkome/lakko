@@ -47,10 +47,31 @@ internal fun decideIntroIntake(
     IntroIntake.Drop
 }
 
+/**
+ * One background intake for the account that was bound when the envelope was
+ * handed over: [keep] and then [then], each only while [stillBound].
+ */
+internal suspend fun runIntakeFor(
+    stillBound: () -> Boolean,
+    keep: suspend () -> Unit,
+    then: () -> Unit,
+) {
+    if (!stillBound()) return
+    keep()
+    if (stillBound()) then()
+}
+
 /** The production intake: decode with the core, keep in [reach]. */
 public object IntroductionIntake {
     /** Keep an offer or a bundle [senderKey] sent. Never throws. */
-    public suspend fun keep(reach: ReachManager, senderKey: ByteArray, kind: ScopedEnvelopeKind, bytes: ByteArray) {
+    public suspend fun keep(
+        reach: ReachManager,
+        senderKey: ByteArray,
+        kind: ScopedEnvelopeKind,
+        bytes: ByteArray,
+        /** The account the envelope was received for; `null` = whoever is bound. */
+        boundAs: ReachManager.BoundAccount? = null,
+    ) {
         when (
             val decided = decideIntroIntake(
                 kind = kind,
@@ -59,8 +80,9 @@ public object IntroductionIntake {
                 decodeBundleStamp = { uniffi.lakko_ffi_uniffi.decodeIntroductionsBundle(it).updatedAtMs },
             )
         ) {
-            is IntroIntake.Offer -> reach.keepIntroductionOffer(senderKey, decided.record)
-            is IntroIntake.Bundle -> reach.keepIntroductionsBundle(senderKey, decided.wire, decided.updatedAtMs)
+            is IntroIntake.Offer -> reach.keepIntroductionOffer(senderKey, decided.record, boundAs)
+            is IntroIntake.Bundle ->
+                reach.keepIntroductionsBundle(senderKey, decided.wire, decided.updatedAtMs, boundAs)
             IntroIntake.Drop -> Log.i(LOG_TAG, "${kind.name.lowercase()} envelope dropped")
         }
     }
@@ -70,7 +92,16 @@ public object IntroductionIntake {
         kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
     )
 
-    /** [keep] in the background, then [then] (the relay re-run). */
+    /**
+     * [keep] in the background, then [then] (the relay re-run).
+     *
+     * The envelope is one of a contact of the account bound NOW (the caller
+     * is that account's receive loop). The account is remembered here, on the
+     * caller's thread, and not read when the launched work gets to run: by
+     * then it can be signed out and another signed in, and a contact's
+     * introductions kept for that one would hand it another person's
+     * contacts.
+     */
     public fun keepInBackground(
         reach: ReachManager,
         senderKey: ByteArray,
@@ -78,10 +109,14 @@ public object IntroductionIntake {
         bytes: ByteArray,
         then: () -> Unit,
     ) {
+        val boundAs = reach.boundAccount() ?: return
         scope.launch {
             try {
-                keep(reach, senderKey, kind, bytes)
-                then()
+                runIntakeFor(
+                    stillBound = { reach.isBound(boundAs) },
+                    keep = { keep(reach, senderKey, kind, bytes, boundAs) },
+                    then = then,
+                )
             } catch (cancel: kotlinx.coroutines.CancellationException) {
                 throw cancel
             } catch (cause: Throwable) {

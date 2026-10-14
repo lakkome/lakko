@@ -30,22 +30,46 @@
  *     throws leaves the cursor where it was (`held`), so the rows are fetched
  *     again rather than skipped — the cursor may lag what was handled, never
  *     lead it (the same direction C-67 pins for group journals).
+ *
+ * ## One poller, many sessions
+ *
+ * The poller is built once by a provider that outlives a sign-out, and the
+ * cursor is a small number: account A and account B can both be at cursor 7.
+ * The cursor check above therefore cannot tell "nobody consumed these rows"
+ * from "these rows are another account's". So a poll also captures a SCOPE at
+ * its start - an opaque value the owner replaces whenever the signed-in
+ * mailbox changes - and:
+ *
+ *   * a batch whose scope is no longer the current one is dropped whole
+ *     (`scope-changed`): not dispatched, no cursor written;
+ *   * the cursor is read and written THROUGH the captured scope, never through
+ *     whatever is current when the write runs, so a dispatch that finished for
+ *     A advances A's cursor even if B signed in meanwhile, and never B's.
  */
 
 /** What one poll did with the batch it fetched. */
-export type MailboxPollOutcome = "dispatched" | "cursor-moved" | "held";
+export type MailboxPollOutcome = "dispatched" | "cursor-moved" | "scope-changed" | "held";
 
-export interface MailboxPollerDeps<E> {
-  readonly readCursor: () => number;
-  readonly writeCursor: (cursor: number) => void;
+/**
+ * `S` is the scope: whatever identifies the mailbox a poll was started for
+ * (the signed-in account's inbox). Every callback receives the scope captured
+ * when its poll started. A poller with one mailbox for its whole life leaves
+ * `scope` out.
+ */
+export interface MailboxPollerDeps<E, S = undefined> {
+  /** The mailbox that is current now. Compared by identity. */
+  readonly scope?: () => S;
+  readonly readCursor: (scope: S) => number;
+  readonly writeCursor: (cursor: number, scope: S) => void;
   /** Fetch + decode everything after `after`. Throws on failure. */
   readonly fetch: (
     after: number,
     waitSecs: number,
     signal: AbortSignal | undefined,
+    scope: S,
   ) => Promise<{ readonly events: readonly E[]; readonly cursor: number }>;
   /** Handle a batch. Runs serialized. A throw holds the cursor. */
-  readonly dispatch: (events: readonly E[]) => Promise<void>;
+  readonly dispatch: (events: readonly E[], scope: S) => Promise<void>;
 }
 
 export interface MailboxPoller {
@@ -55,7 +79,11 @@ export interface MailboxPoller {
   poll(waitSecs: number, signal?: AbortSignal): Promise<MailboxPollOutcome>;
 }
 
-export function createMailboxPoller<E>(deps: MailboxPollerDeps<E>): MailboxPoller {
+export function createMailboxPoller<E, S = undefined>(
+  deps: MailboxPollerDeps<E, S>,
+): MailboxPoller {
+  const currentScope = (): S => (deps.scope === undefined ? (undefined as S) : deps.scope());
+
   // A promise chain as the dispatch lock: each dispatch runs after the
   // previous one settled, whatever its outcome.
   let tail: Promise<unknown> = Promise.resolve();
@@ -68,13 +96,17 @@ export function createMailboxPoller<E>(deps: MailboxPollerDeps<E>): MailboxPolle
 
   return {
     async poll(waitSecs, signal) {
-      const after = deps.readCursor();
-      const batch = await deps.fetch(after, waitSecs, signal);
+      const scope = currentScope();
+      const after = deps.readCursor(scope);
+      const batch = await deps.fetch(after, waitSecs, signal, scope);
       return serialized(async (): Promise<MailboxPollOutcome> => {
-        if (deps.readCursor() !== after) return "cursor-moved";
+        // Another mailbox is current (signed out, or another account signed
+        // in): these rows are not its rows, whatever its cursor says.
+        if (currentScope() !== scope) return "scope-changed";
+        if (deps.readCursor(scope) !== after) return "cursor-moved";
         if (batch.events.length > 0) {
           try {
-            await deps.dispatch(batch.events);
+            await deps.dispatch(batch.events, scope);
           } catch (err) {
             // Held: the rows will be fetched again. Re-thrown so the caller's
             // error path (and its backoff) sees it.
@@ -83,7 +115,9 @@ export function createMailboxPoller<E>(deps: MailboxPollerDeps<E>): MailboxPolle
         }
         // `batch.cursor` never precedes `after` (the fetch returns rows strictly
         // after it), but guard anyway: a cursor must never move backward.
-        if (batch.cursor > after) deps.writeCursor(batch.cursor);
+        // Through the captured scope: the dispatch above completed for THIS
+        // mailbox, so it is this mailbox's cursor that moves.
+        if (batch.cursor > after) deps.writeCursor(batch.cursor, scope);
         return "dispatched";
       });
     },

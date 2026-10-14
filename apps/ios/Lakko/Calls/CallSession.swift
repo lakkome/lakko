@@ -353,6 +353,12 @@ public final class CallSession: ObservableObject {
     }
 
     private func completeDial(iceServers: [RTCIceServer], audio: Bool, video: Bool) {
+        // The call may have ended while the relay credential was fetched (the
+        // person hung up, or the establish timer fired). The teardown ran
+        // with no peer connection to close, so building one now would start
+        // the microphone and the camera for a call that is over, ship its
+        // offer after its End, and leave nothing that would ever stop them.
+        guard state == .outgoing else { return }
         let rtc = WebRTCPeerConnection(iceServers: iceServers)
         guard rtc.isReady else {
             NSLog("CallSession.dial: RTCPeerConnection allocation failed")
@@ -360,6 +366,10 @@ public final class CallSession: ObservableObject {
             return
         }
         installDelegate(on: rtc)
+        // A voice call starts on the earpiece, as it always has; a call with
+        // video plays on the loudspeaker unless a headset or a Bluetooth
+        // device is connected.
+        CallAudioSession.configureCallOutput(loudspeakerByDefault: video)
         CallAudioSession.describe("dial: before local audio track")
         rtc.addLocalAudioTrack(enabled: audio)
 
@@ -442,8 +452,12 @@ public final class CallSession: ObservableObject {
                     // sender keeps the SDP m=video line
                     // intact, which is fine for the receiver
                     // (they will see a black frame).
-                    self?.localCameraCapture = nil
-                    self?.localVideoTrack = nil
+                    //
+                    // Only while this capture is still the call's: after
+                    // the call ended there is nothing of it left to clear.
+                    guard let self, self.localCameraCapture === capture else { return }
+                    self.localCameraCapture = nil
+                    self.localVideoTrack = nil
                 }
             }
         }
@@ -490,6 +504,10 @@ public final class CallSession: ObservableObject {
     ) async {
         do {
             let offerSdp = try await rtc.createOffer(audio: audio, video: video)
+            // Ended while the offer was built: an offer sent now would
+            // follow the call's End and ring the other person for a call
+            // that is over.
+            guard self.rtc === rtc else { return }
             let bytes = try composeCallSignaling(
                 body: .offer(
                     callId: callId,
@@ -500,6 +518,9 @@ public final class CallSession: ObservableObject {
             )
             onOutboundSignaling(bytes)
         } catch {
+            // A build that failed because the call ended meanwhile is not an
+            // error of the call.
+            guard self.rtc === rtc else { return }
             NSLog("dial offer-build failed: %@", String(describing: error))
             endLocal(reason: .error)
         }
@@ -595,6 +616,7 @@ public final class CallSession: ObservableObject {
         if rtc.currentLocalVideoTrack() != nil {
             rtc.setCameraEnabled(true)
             cameraEnabled = true
+            CallAudioSession.callGainedVideo()
             setVideoPublishState(.live)
             if rtc.setVideoSendingEnabled(true) {
                 await driveRenegotiationOffer(rtc: rtc, video: true)
@@ -625,6 +647,10 @@ public final class CallSession: ObservableObject {
         do {
             try await capture.start()
         } catch {
+            // The call ended while the camera was starting: its teardown
+            // already reset the state, and a camera that did not start for a
+            // call that is over is not a failure to show.
+            guard self.rtc === rtc else { return }
             addingVideo = false
             setVideoPublishState(.failed)
             throw error
@@ -657,12 +683,14 @@ public final class CallSession: ObservableObject {
         }
         guard sealed else {
             liveRtc.removeLocalVideoTrack()
-            await capture.stop()
             self.localCameraCapture = nil
             self.localVideoTrack = nil
             self.cameraEnabled = false
             addingVideo = false
-            setVideoPublishState(.failed)
+            await capture.stop()
+            // The call may have ended while the camera stopped; the teardown
+            // already put the state back to `.off`.
+            if self.rtc === liveRtc { setVideoPublishState(.failed) }
             throw CallSessionError.sframeUnavailable
         }
         self.localCameraCapture = capture
@@ -672,6 +700,9 @@ public final class CallSession: ObservableObject {
         // `localVideoTrack` (mapped in `CallUiState.driveFrom`).
         self.cameraEnabled = true
         addingVideo = false
+        // The call is a video call now: its sound moves to the loudspeaker
+        // unless a headset or a Bluetooth device is connected.
+        CallAudioSession.callGainedVideo()
         // B2a — camera is live; the spinner clears (the UI only shows it
         // while `.starting`).
         setVideoPublishState(.live)
@@ -729,6 +760,12 @@ public final class CallSession: ObservableObject {
         offerSdp: String,
         withVideo: Bool
     ) {
+        // The call may have ended while the relay credential was fetched: the
+        // caller hung up, the ring timed out, or it was declined. Without
+        // this an ended call came back as `connecting`, with the microphone
+        // (and the camera) on. It also makes a second accept of the same
+        // ring a no-op: the first one has already left `ringing`.
+        guard state == .ringing else { return }
         let rtc = WebRTCPeerConnection(iceServers: iceServers)
         guard rtc.isReady else {
             NSLog("acceptCall: RTCPeerConnection allocation failed")
@@ -736,6 +773,7 @@ public final class CallSession: ObservableObject {
             return
         }
         installDelegate(on: rtc)
+        CallAudioSession.configureCallOutput(loudspeakerByDefault: withVideo)
         CallAudioSession.describe("accept: before local audio track")
         // Mic on by default for the answerer; if the call
         // UI later supports "accept muted" we will pass the
@@ -769,9 +807,17 @@ public final class CallSession: ObservableObject {
     ) async {
         do {
             let answerSdp = try await rtc.createAnswer(remoteOfferSdp: offerSdp)
+            // Ended while the answer was built: nothing is sent for a call
+            // that is over, and the state the teardown reset stays reset.
+            guard self.rtc === rtc else { return }
+            // The senders' codecs are negotiated now: their SFrame encryptors
+            // need them to leave the right codec header in the clear
+            // (ADR-0071). Until told, a video encryptor keeps nothing clear.
+            rtc.syncSenderCodecs()
             // `createAnswer` set the remote offer: candidates held while the
             // call rang can go in now.
             await applyBufferedRemoteCandidates(to: rtc)
+            guard self.rtc === rtc else { return }
             let bytes = try composeCallSignaling(
                 body: .answer(
                     callId: callId,
@@ -787,6 +833,7 @@ public final class CallSession: ObservableObject {
             // the RTCPeerConnection's real connectionState
             // transition. The delegate hook below drives it.
         } catch {
+            guard self.rtc === rtc else { return }
             NSLog("acceptCall answer-build failed: %@", String(describing: error))
             endLocal(reason: .error)
         }
@@ -851,16 +898,27 @@ public final class CallSession: ObservableObject {
                 Task { [weak self] in
                     do {
                         try await rtc.applyRemoteAnswer(sdp)
-                        await self?.applyBufferedRemoteCandidates(to: rtc)
+                        // Ended while the answer was applied: the buffer
+                        // and the negotiation state the teardown reset stay
+                        // reset.
+                        guard let self, self.rtc === rtc else { return }
+                        // Negotiated: tell the encryptors their codecs
+                        // (ADR-0071).
+                        rtc.syncSenderCodecs()
+                        await self.applyBufferedRemoteCandidates(to: rtc)
+                        guard self.rtc === rtc else { return }
                         // Arm the mid-call renegotiation drive now the
                         // initial exchange is applied on our side (B2b).
-                        self?.negotiationReady = true
+                        self.negotiationReady = true
                     } catch {
+                        // An apply that failed because the call ended
+                        // meanwhile is not an error of the call.
+                        guard let self, self.rtc === rtc else { return }
                         NSLog(
                             "applyRemoteAnswer failed: %@",
                             String(describing: error)
                         )
-                        self?.endLocal(reason: .error)
+                        self.endLocal(reason: .error)
                     }
                 }
             } else {
@@ -871,13 +929,17 @@ public final class CallSession: ObservableObject {
                     self?.isSettingRemoteAnswerPending = true
                     do {
                         try await rtc.applyRemoteAnswer(sdp)
+                        // A renegotiation (mid-call camera on) may have
+                        // added a sender or changed a codec (ADR-0071).
+                        rtc.syncSenderCodecs()
                     } catch {
                         NSLog(
                             "reneg applyRemoteAnswer failed: %@",
                             String(describing: error)
                         )
                     }
-                    self?.isSettingRemoteAnswerPending = false
+                    // The teardown already cleared it for a call that ended.
+                    if self?.rtc === rtc { self?.isSettingRemoteAnswerPending = false }
                 }
             }
         case .iceCandidate(let cid, let candidate, let sdpMid, let sdpMLineIndex):
@@ -977,6 +1039,8 @@ public final class CallSession: ObservableObject {
         makingOffer = true
         do {
             let offerSdp = try await rtc.createRenegotiationOffer()
+            // Ended while the offer was built: nothing follows the End.
+            guard self.rtc === rtc else { return }
             let bytes = try composeCallSignaling(
                 body: .offer(
                     callId: callId,
@@ -992,7 +1056,7 @@ public final class CallSession: ObservableObject {
                 String(describing: error)
             )
         }
-        makingOffer = false
+        if self.rtc === rtc { makingOffer = false }
     }
 
     /// Apply a mid-call renegotiation offer from the peer (piece
@@ -1019,6 +1083,10 @@ public final class CallSession: ObservableObject {
                 try await rtc.rollbackLocalDescription()
             }
             let answerSdp = try await rtc.createAnswer(remoteOfferSdp: sdp)
+            // Ended while the answer was built: nothing follows the End.
+            guard self.rtc === rtc else { return }
+            // The renegotiation is applied on this side (ADR-0071).
+            rtc.syncSenderCodecs()
             let bytes = try composeCallSignaling(
                 body: .answer(callId: callId, sdp: answerSdp)
             )
@@ -1093,6 +1161,10 @@ public final class CallSession: ObservableObject {
             while !Task.isCancelled {
                 guard let self, let rtc = self.rtc else { return }
                 if let snap = await rtc.sampleConnectionStats() {
+                    // The call may have ended while the report was read: a
+                    // late sample must not put statistics back on a call
+                    // whose teardown just cleared them.
+                    guard !Task.isCancelled, self.rtc === rtc else { return }
                     // iter2 — derive bitrate from the byte delta against
                     // a monotonic clock (robust to poll-loop jitter; the
                     // 2 s sleep is only a nominal cadence).
@@ -1176,6 +1248,9 @@ public final class CallSession: ObservableObject {
             guard let self, let track, self.probedRemoteVideoTrack === track else { return }
             NSLog("CallSession: remote video first frame rendered")
             self.remoteVideoFlowing = true
+            // The other person is on screen: the call plays on the
+            // loudspeaker unless a headset or a Bluetooth device is connected.
+            CallAudioSession.callGainedVideo()
         }
         track.add(probe)
         remoteVideoProbe = probe
@@ -1461,6 +1536,10 @@ public final class CallSession: ObservableObject {
         case .declined: return .declined
         case .timedOut: return .timedOut
         case .error: return .error
+        // A group / link reason (`docs/ux/calls.md` section 4.1.2). A 1x1
+        // call has no such choice: ending it ends it for both, so here it is
+        // a plain hang-up.
+        case .endedForAll: return .hungUp
         }
     }
 

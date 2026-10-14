@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.account
+
+import android.content.Context
+import me.lakko.app.chat.KnownGroupsStore
+import me.lakko.app.push.PushRouteStore
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+
+/**
+ * The stores themselves refuse a write for an account whose session has
+ * ended, whoever calls them: after a forget-device nothing of the account is
+ * written back, and after a sign-out what is on disk stays as it was.
+ */
+@RunWith(RobolectricTestRunner::class)
+class SealedAccountStoresTest {
+
+    private lateinit var context: Context
+    private val account = "DAwMDAwMDAwMDAwMDAwMDA=="
+    private val group = "ab".repeat(32)
+    private val pushGid = "cd".repeat(32)
+
+    @Before
+    fun setUp() {
+        context = RuntimeEnvironment.getApplication()
+        AccountStoreGate.resetForTest()
+    }
+
+    @After
+    fun tearDown() = AccountStoreGate.resetForTest()
+
+    @Test
+    fun `nothing is written back after the forget-device wipe`() {
+        val known = KnownGroupsStore(context)
+        val routes = PushRouteStore(context)
+        known.add(account, group)
+        routes.put(account, pushGid, group)
+
+        // The wipe, as `AuthRepository.forgetDevice` runs it.
+        AccountStoreGate.seal(account) {
+            known.clear(account)
+            routes.clearForAccount(account)
+        }
+        // A writer of the forgotten session that gets to its write only now.
+        known.add(account, group)
+        routes.put(account, pushGid, group)
+
+        assertTrue(known.load(account).isEmpty())
+        assertNull(routes.lookup(account, pushGid))
+    }
+
+    @Test
+    fun `a sign-out deletes nothing and stops later writes`() {
+        val known = KnownGroupsStore(context)
+        known.add(account, group)
+
+        AccountStoreGate.seal(account)
+        known.add(account, "ef".repeat(32))
+        known.remove(account, group)
+
+        assertEquals(setOf(group), known.load(account))
+    }
+
+    @Test
+    fun `the account's next landing writes its stores again`() {
+        val known = KnownGroupsStore(context)
+        AccountStoreGate.seal(account)
+        AccountStoreGate.open(account)
+        known.add(account, group)
+        assertEquals(setOf(group), known.load(account))
+    }
+
+    @Test
+    fun `a forgotten account's own profile is not written back`() {
+        val raw = me.lakko.app.auth.base64Decode(account)
+        val profile = me.lakko.app.profile.OwnProfile(displayName = "Me", username = null, updatedAtMs = 1L)
+        me.lakko.app.profile.OwnProfileStore.save(context, raw, profile)
+
+        AccountStoreGate.seal(account) { me.lakko.app.profile.OwnProfileStore.delete(context, raw) }
+        me.lakko.app.profile.OwnProfileStore.save(context, raw, profile)
+
+        assertNull(me.lakko.app.profile.OwnProfileStore.load(context, raw))
+    }
+
+    @Test
+    fun `a refused snapshot write never lets the step it records reach the wire`() {
+        // The MLS snapshot store throws for a sealed account (it does not
+        // skip): every writer persists BEFORE it publishes, and the throw is
+        // what stops the publish.
+        try {
+            me.lakko.app.chat.IdentitySnapshotStore.putSnapshot(context, account, byteArrayOf(1))
+        } catch (_: Throwable) {
+            // No Keystore on the host; the open-account write is not the point.
+        }
+        AccountStoreGate.seal(account)
+        try {
+            me.lakko.app.chat.IdentitySnapshotStore.putSnapshot(context, account, byteArrayOf(1))
+            org.junit.Assert.fail("a refused ratchet persist was reported as made")
+        } catch (_: me.lakko.app.StaleBindingException) {
+            // expected
+        }
+
+        val chat = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatRepository.kt").readText()
+        // The best-effort persist passes the refusal on instead of swallowing
+        // it (a proposal publishes right after it).
+        val bestEffort = chat.substringAfter("    private fun persistSnapshotBestEffort() {").substringBefore("\n    }\n")
+        assertTrue(
+            bestEffort.indexOf("catch (ended: me.lakko.app.StaleBindingException)") in
+                0 until bestEffort.indexOf("catch (_: Throwable)"),
+        )
+        // The send path: seal the message, persist, and only then hand out
+        // what a publish needs.
+        val client = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatClient.kt").readText()
+        val prepare = client.substringAfter("    public suspend fun prepareSend(").substringBefore("\n    }\n")
+        val sealed = prepare.indexOf("group.createApplicationMessage(identity, plaintext)")
+        val persisted = prepare.indexOf("persistRatchet()")
+        val handedOut = prepare.indexOf("return PreparedSend(")
+        assertTrue(sealed in 0 until persisted && persisted < handedOut)
+        // The commit paths: outbox entry, then snapshot, and a failure of
+        // either is rethrown after the abort handler.
+        val outbox = java.io.File("src/main/kotlin/me/lakko/app/chat/CommitOutbox.kt").readText()
+        val crashSafe = outbox.substringAfter("internal fun prepareCrashSafeCommit(").substringBefore("\n}\n")
+        assertTrue(crashSafe.indexOf("persistEntryOrThrow()") < crashSafe.indexOf("persistSnapshotOrThrow()"))
+        assertTrue("throw persistFailure" in crashSafe)
+    }
+}

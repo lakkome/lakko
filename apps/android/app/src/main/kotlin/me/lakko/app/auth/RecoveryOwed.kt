@@ -32,7 +32,7 @@ public class RecoveryOwedStore(private val storage: MarkerStorage) {
     /** Record that a phrase is owed, and where it came from, so a restart
      *  shows it with the right words around it. */
     public fun markPhraseOwed(accountIdB64: String, origin: OwedPhraseOrigin): Unit =
-        put(PHRASE_PREFIX + accountIdB64, origin.tag)
+        put(accountIdB64, PHRASE_PREFIX + accountIdB64, origin.tag)
 
     /**
      * Where the owed phrase of [accountIdB64] came from, or `null` when none
@@ -53,7 +53,7 @@ public class RecoveryOwedStore(private val storage: MarkerStorage) {
 
     public fun isPublishOwed(accountIdB64: String): Boolean = has(PUBLISH_PREFIX + accountIdB64)
 
-    public fun markPublishOwed(accountIdB64: String): Unit = put(PUBLISH_PREFIX + accountIdB64, "1")
+    public fun markPublishOwed(accountIdB64: String): Unit = put(accountIdB64, PUBLISH_PREFIX + accountIdB64, "1")
 
     public fun clearPublishOwed(accountIdB64: String): Unit = drop(PUBLISH_PREFIX + accountIdB64)
 
@@ -77,9 +77,11 @@ public class RecoveryOwedStore(private val storage: MarkerStorage) {
         false
     }
 
-    private fun put(key: String, value: String) {
+    private fun put(accountIdB64: String, key: String, value: String) {
         try {
-            storage.set(key, value)
+            // Refused for a signed-out or wiped account: no late write puts
+            // a debt back ([me.lakko.app.account.AccountStoreGate]).
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.set(key, value) }
         } catch (_: Throwable) {
             // The debt then lives for this process only.
         }

@@ -276,16 +276,18 @@ public object DeviceReadmission {
         before: List<String>?,
         after: List<String>?,
     ) {
-        val gone = departed(before, after)
-        if (gone.isEmpty()) return
-        try {
-            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            val key = "$accountIdB64|$groupIdHex"
-            val cur = prefs.getStringSet(key, emptySet()).orEmpty().toMutableSet()
-            cur += gone
-            prefs.edit().putStringSet(key, cur).apply()
-        } catch (cause: Throwable) {
-            android.util.Log.w("DeviceReadmission", "removed-device memory not written", cause)
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val gone = departed(before, after)
+            if (gone.isEmpty()) return
+            try {
+                val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                val key = "$accountIdB64|$groupIdHex"
+                val cur = prefs.getStringSet(key, emptySet()).orEmpty().toMutableSet()
+                cur += gone
+                prefs.edit().putStringSet(key, cur).apply()
+            } catch (cause: Throwable) {
+                android.util.Log.w("DeviceReadmission", "removed-device memory not written", cause)
+            }
         }
     }
 

@@ -19,7 +19,8 @@
  * `{ groupIdHex -> PersistedGroup }` internally, so no new store is needed),
  * its pending-request observations, its
  * unapplied-request records, its durable leave record, its armed re-sends,
- * and its row in the in-memory group registry.
+ * its id in the account backup's list of conversations, and its row in the
+ * in-memory group registry.
  *
  * **What it does NOT remove, which is why the confirmation body is exact
  * rather than sweeping:** the inactive MLS group stays in the provider
@@ -38,6 +39,7 @@
  */
 
 import { getDeviceKey } from "../auth/key-store";
+import { dropRestoredKnownGroup } from "../backup/restored-known-groups";
 import { clearLeaveRequested } from "./membership-ended";
 import { clearArmedRetries, clearOwnRequestsForGroup, retryScopeKey } from "./membership-retry";
 import { deleteGroupFromMessageLog } from "./message-log-store";
@@ -84,6 +86,11 @@ export async function deleteChat(input: DeleteChatInput): Promise<void> {
   // behind for a deleted chat is the kind of residue that later reads as
   // a bug.
   clearArmedRetries(retryScopeKey(accountIdB64, groupIdB64));
+  // A chat the person deleted is not one the account's backup should go on
+  // listing. Once the registry row below is gone the id is no longer among
+  // the groups this device holds; this drops it from the restored set too
+  // (`backup/restored-known-groups.ts`), where a restore may have put it.
+  dropRestoredKnownGroup(accountIdB64, groupIdB64);
   // Drop the row from the registry LAST, so a failure above leaves the
   // chat reachable rather than orphaning a transcript behind a row the
   // user can no longer open.

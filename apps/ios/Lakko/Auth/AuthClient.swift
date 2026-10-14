@@ -1397,8 +1397,18 @@ public final class AuthClient {
 
     /// `DELETE /auth/login-handle` - remove the signed-in account's handle.
     /// Returns whether one was removed.
+    ///
+    /// Free for an account younger than the unclaimed lifetime (a day); an
+    /// older one needs the fresh-auth grant in `x-lakko-fresh-grant`, sent
+    /// when `freshGrant` is given.
     @discardableResult
     public func removeLoginHandle(sessionToken: String) async throws -> Bool {
+        try await removeLoginHandle(sessionToken: sessionToken, freshGrant: nil)
+    }
+
+    /// ``removeLoginHandle(sessionToken:)`` with the fresh-auth grant.
+    @discardableResult
+    public func removeLoginHandle(sessionToken: String, freshGrant: String?) async throws -> Bool {
         guard !sessionToken.isEmpty else {
             throw AuthClientError.argument("sessionToken must be non-empty")
         }
@@ -1406,6 +1416,9 @@ public final class AuthClient {
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
         request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
+        if let freshGrant {
+            request.setValue(freshGrant, forHTTPHeaderField: WebauthnClient.freshGrantHeader)
+        }
         let resp: LoginHandleRemoveResponse = try await execute(
             endpoint: "/auth/login-handle", request: request)
         return resp.removed

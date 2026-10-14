@@ -20,7 +20,7 @@ The codec is deliberately **plaintext-only** — it performs no encryption of it
 - `SignalingBody::is_group_control() -> bool` — `true` for exactly `GroupStart` / `GroupJoin` / `GroupLeave`. This is the **canonical client-side dispatcher gate** that routes a body to the 1×1 (`CallSession`) vs. group (`GroupCallSession`) state machine (C-11). The routing/drop logic itself lives in those consumers, not here — this module only supplies the discriminator and the id.
 - `compose_signaling_payload(&SignalingBody) -> Result<Vec<u8>>` — encodes to plaintext proto bytes. Practically infallible: every field is fixed-shape, so the prost encode error is unreachable in normal use (returned as `Error::Crypto` if it ever fired).
 - `parse_signaling_payload(&[u8]) -> Result<SignalingBody>` — the inverse. Decodes, enforces the 16-byte `call_id` length, and folds unknown `EndReason` codes forward.
-- `EndReason` — pinned numeric discriminator (`HungUp=0`, `Busy=1`, `Declined=2`, `TimedOut=3`, `Error=4`). For `GroupLeave` only `HungUp` / `TimedOut` / `Error` are meaningful; `Busy` / `Declined` are 1×1-only.
+- `EndReason` — pinned numeric discriminator (`HungUp=0`, `Busy=1`, `Declined=2`, `TimedOut=3`, `Error=4`, `EndedForAll=5`). For `GroupLeave` only `HungUp` / `TimedOut` / `Error` are meaningful; `Busy` / `Declined` are 1×1-only. `EndedForAll` is carried only by `End` of a group or link call: the call's starter ended it for everyone (`docs/ux/calls.md` section 4.1.2). The body states an intent and nothing about authority: a receiver leaves the call only when the MLS-authenticated sender is that call's starter, and reads it as a plain end otherwise. That check is the client's; this module only carries the value.
 - `MediaFlags { audio, video }` — a 2-bit wire bitmap (bit 0 = audio, bit 1 = video) with `into_bits` / `from_bits` round-tripping.
 
 ## Wire layout
@@ -32,7 +32,7 @@ Proto-encoded `CallSignalingPayload { body: oneof }`; this module never hand-rol
 
 ## Invariants upheld
 
-- **C-13 — unknown `EndReason` folds to `HungUp`.** `EndReason::from_proto` maps any discriminator outside `1..=4` to `HungUp` (the `_ =>` arm), so a future schema adding reason codes 5..N lands gracefully on an older receiver instead of erroring the call down. Pinned by `unknown_end_reason_folds_to_hung_up`.
+- **C-13 — unknown `EndReason` folds to `HungUp`.** `EndReason::from_proto` maps any discriminator outside `1..=5` to `HungUp` (the `_ =>` arm), so a future schema adding reason codes 6..N lands gracefully on an older receiver instead of erroring the call down. Pinned by `unknown_end_reason_folds_to_hung_up`.
 - **C-14 — `call_id` length strictly enforced at parse time.** The inner `take_call_id` closure returns `Error::Crypto("call_id length: expected 16, got N")` on any non-16-byte id — never an index panic. Pinned by `wrong_call_id_length_rejected`.
 - **C-11 (supporting) — group-control discriminator.** `is_group_control()` is the gate the 1×1 dispatcher relies on to drop `GroupStart/Join/Leave` rather than cross-feeding them into the 1×1 state machine. Pinned here by `is_group_control_false_for_one_on_one_bodies`; the actual silent-drop is verified in the consumer modules.
 - **C-12 (supporting) — `call_id` matching.** The `call_id()` accessor is what `GroupCallSession` uses to drop wrong-`call_id` bodies; the drop itself is enforced and tested there, not in this codec.

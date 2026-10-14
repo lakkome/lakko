@@ -55,6 +55,8 @@
  * `lakko-mnemonic` emits).
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
+
 const DB_NAME = "lakko.backup.phrase";
 const DB_VERSION = 1;
 const STORE = "phrases";
@@ -120,6 +122,7 @@ export async function putPhrase(
 
   const db = await openDb();
   try {
+    if (!accountStoresWritable(accountIdB64)) return;
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite");
       tx.oncomplete = (): void => resolve();

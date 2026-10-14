@@ -8,12 +8,17 @@ import {
   chatCallAffordance,
   decideGroupCallEpochChange,
   groupCallAloneAction,
+  groupCallStartAbandoned,
+  groupCallStartCheck,
+  runGroupCallStart,
   planGroupCallLeave,
   selectGroupCallBanner,
   type ChatCallAffordanceInput,
   type GroupCallBannerInput,
   type GroupCallEpochInput,
   type GroupCallLeaveInput,
+  type GroupCallStartRun,
+  type GroupCallStartSteps,
 } from "./group-call-host";
 
 function leave(over: Partial<GroupCallLeaveInput>): GroupCallLeaveInput {
@@ -251,5 +256,379 @@ describe("groupCallAloneAction", () => {
   it("does nothing while others are present and nothing is armed", () => {
     expect(groupCallAloneAction(2, true, false)).toBe("none");
     expect(groupCallAloneAction(1, false, false)).toBe("none");
+  });
+});
+
+describe("groupCallStartAbandoned", () => {
+  it("a session this device hung up and took out of the slot was left, not failed", () => {
+    // End pressed while the SFU session was connecting: no failure is shown.
+    expect(groupCallStartAbandoned({ sessionState: "closed", stillInSlot: false })).toBe(true);
+  });
+
+  it("a session that failed is a failure, in or out of the slot", () => {
+    // The ended-phase effect may already have released a failed session.
+    expect(groupCallStartAbandoned({ sessionState: "failed", stillInSlot: false })).toBe(false);
+    expect(groupCallStartAbandoned({ sessionState: "failed", stillInSlot: true })).toBe(false);
+  });
+
+  it("a start that stopped before or while its session was up is a failure", () => {
+    expect(groupCallStartAbandoned({ sessionState: null, stillInSlot: false })).toBe(false);
+    expect(groupCallStartAbandoned({ sessionState: "idle", stillInSlot: true })).toBe(false);
+    expect(groupCallStartAbandoned({ sessionState: "connecting", stillInSlot: true })).toBe(false);
+    expect(groupCallStartAbandoned({ sessionState: "connected", stillInSlot: true })).toBe(false);
+  });
+
+  it("a closed session still in the slot is not called abandoned", () => {
+    // Nothing took it out of the slot, so nobody chose to leave it.
+    expect(groupCallStartAbandoned({ sessionState: "closed", stillInSlot: true })).toBe(false);
+  });
+});
+
+describe("groupCallStartCheck", () => {
+  const at = { current: true, announced: false, handedOver: false, callStillLive: null };
+
+  it("the current attempt goes on", () => {
+    expect(groupCallStartCheck(at)).toEqual({ kind: "continue" });
+    expect(groupCallStartCheck({ ...at, callStillLive: true })).toEqual({ kind: "continue" });
+    expect(groupCallStartCheck({ ...at, announced: true })).toEqual({ kind: "continue" });
+  });
+
+  it("an attempt the person left before announcing stops and owes nothing", () => {
+    expect(groupCallStartCheck({ ...at, current: false })).toEqual({
+      kind: "stop",
+      outcome: "left",
+      takeBackAnnouncement: false,
+      releaseSlot: false,
+    });
+  });
+
+  it("an attempt left after its Start was published takes the announcement back", () => {
+    expect(groupCallStartCheck({ ...at, current: false, announced: true })).toEqual({
+      kind: "stop",
+      outcome: "left",
+      takeBackAnnouncement: true,
+      releaseSlot: false,
+    });
+  });
+
+  it("a call already handed to the slot is leaving's to tell the group about", () => {
+    const check = groupCallStartCheck({ ...at, current: false, announced: true, handedOver: true });
+    expect(check).toMatchObject({ outcome: "left", takeBackAnnouncement: false });
+  });
+
+  it("an attempt that is no longer current never frees the slot, live record or not", () => {
+    for (const callStillLive of [null, true, false]) {
+      const check = groupCallStartCheck({ ...at, current: false, callStillLive });
+      expect(check).toMatchObject({ kind: "stop", outcome: "left", releaseSlot: false });
+    }
+  });
+
+  it("a joiner whose call ended in the meantime stops as ended and frees its own slot", () => {
+    expect(groupCallStartCheck({ ...at, callStillLive: false })).toEqual({
+      kind: "stop",
+      outcome: "ended",
+      takeBackAnnouncement: false,
+      releaseSlot: true,
+    });
+  });
+});
+
+/** A promise settled from the test, standing in for one await of a start. */
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+  reject(err: unknown): void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** Let every continuation queued so far run. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+}
+
+/**
+ * The host's side of a start, modelled the way `CallHostContext.tsx` holds
+ * it: one slot, one current attempt, and a log of what reached the outside
+ * world (a session built, devices opened, bodies published).
+ */
+function host(): {
+  attempt: object | null;
+  slot: string | null;
+  readonly log: string[];
+  leave(): void;
+  start(
+    name: string,
+    initiator: boolean,
+  ): {
+    readonly run: Promise<GroupCallStartRun<string>>;
+    readonly sync: ReturnType<typeof deferred<void>>;
+    readonly mint: ReturnType<typeof deferred<boolean>>;
+    readonly announce: ReturnType<typeof deferred<boolean>>;
+    readonly connect: ReturnType<typeof deferred<void>>;
+    live: boolean;
+  };
+} {
+  const h = {
+    attempt: null as object | null,
+    slot: null as string | null,
+    log: [] as string[],
+    leave(): void {
+      h.attempt = null;
+      h.slot = null;
+    },
+    start(name: string, initiator: boolean) {
+      const attempt = {};
+      h.attempt = attempt;
+      h.slot = name;
+      const ctl = {
+        sync: deferred<void>(),
+        mint: deferred<boolean>(),
+        announce: deferred<boolean>(),
+        connect: deferred<void>(),
+        live: true,
+        run: undefined as unknown as Promise<GroupCallStartRun<string>>,
+      };
+      const steps: GroupCallStartSteps<string, string> = {
+        initiator,
+        isCurrent: () => h.attempt === attempt,
+        sync: () => ctl.sync.promise,
+        callStillLive: () => ctl.live,
+        prepare: async () =>
+          (await ctl.mint.promise)
+            ? { ok: true, material: name }
+            : { ok: false, reason: "refused" },
+        announce: (m) => {
+          h.log.push(`start:${m}`);
+          return ctl.announce.promise;
+        },
+        takeBackAnnouncement: (m, why) => h.log.push(`take-back:${m}:${why}`),
+        open: (m) => h.log.push(`session:${m}`),
+        connect: () => {
+          h.log.push(`devices:${name}`);
+          return ctl.connect.promise;
+        },
+      };
+      // As the host's `finally`: only the attempt the slot belongs to frees it.
+      ctl.run = runGroupCallStart(steps).then((run) => {
+        if (h.attempt === attempt) {
+          h.attempt = null;
+          if (run.kind !== "connected") h.slot = null;
+        }
+        return run;
+      });
+      return ctl;
+    },
+  };
+  return h;
+}
+
+describe("runGroupCallStart", () => {
+  it("control: nobody leaves, the initiator announces, builds the session and connects", async () => {
+    const h = host();
+    const a = h.start("a", true);
+    a.mint.resolve(true);
+    await settle();
+    expect(h.log).toEqual(["start:a"]);
+    a.announce.resolve(true);
+    await settle();
+    expect(h.log).toEqual(["start:a", "session:a", "devices:a"]);
+    a.connect.resolve();
+    expect(await a.run).toEqual({ kind: "connected" });
+    expect(h.slot).toBe("a");
+    expect(h.log).toEqual(["start:a", "session:a", "devices:a"]);
+  });
+
+  it("control: a joiner syncs, never announces, and connects", async () => {
+    const h = host();
+    const a = h.start("a", false);
+    a.sync.resolve();
+    a.mint.resolve(true);
+    await settle();
+    a.connect.resolve();
+    expect(await a.run).toEqual({ kind: "connected" });
+    expect(h.log).toEqual(["session:a", "devices:a"]);
+  });
+
+  it("left during the group sync: no session, no device, nothing published", async () => {
+    const h = host();
+    const a = h.start("a", false);
+    h.leave();
+    // The slot is free at once, not when the abandoned start returns.
+    expect(h.slot).toBeNull();
+    a.sync.resolve();
+    a.mint.resolve(true);
+    expect(await a.run).toEqual({ kind: "left" });
+    expect(h.log).toEqual([]);
+    expect(h.slot).toBeNull();
+  });
+
+  it("left during the mint: no session, no device, nothing published", async () => {
+    for (const initiator of [true, false]) {
+      const h = host();
+      const a = h.start("a", initiator);
+      a.sync.resolve();
+      await settle();
+      h.leave();
+      expect(h.slot).toBeNull();
+      a.mint.resolve(true);
+      a.announce.resolve(true);
+      expect(await a.run).toEqual({ kind: "left" });
+      expect(h.log).toEqual([]);
+    }
+  });
+
+  it("left while the Start was being published: no session, and the announcement is taken back once", async () => {
+    const h = host();
+    const a = h.start("a", true);
+    a.mint.resolve(true);
+    await settle();
+    h.leave();
+    a.announce.resolve(true);
+    expect(await a.run).toEqual({ kind: "left" });
+    expect(h.log).toEqual(["start:a", "take-back:a:left"]);
+    a.connect.resolve();
+    await settle();
+    expect(h.log).toEqual(["start:a", "take-back:a:left"]);
+    expect(h.slot).toBeNull();
+  });
+
+  it("left while a Start that never reached the journal was in flight: nothing to take back", async () => {
+    const h = host();
+    const a = h.start("a", true);
+    a.mint.resolve(true);
+    await settle();
+    h.leave();
+    a.announce.resolve(false);
+    expect(await a.run).toEqual({ kind: "left" });
+    expect(h.log).toEqual(["start:a"]);
+  });
+
+  it("left while connecting: leaving owns the call, the start takes nothing back", async () => {
+    const h = host();
+    const a = h.start("a", true);
+    a.mint.resolve(true);
+    a.announce.resolve(true);
+    await settle();
+    h.leave();
+    // The host hangs the session up, so its connect rejects...
+    a.connect.reject(new Error("closed"));
+    expect(await a.run).toEqual({ kind: "left" });
+    expect(h.log).toEqual(["start:a", "session:a", "devices:a"]);
+  });
+
+  it("left while connecting, and the connect resolves anyway: still left", async () => {
+    const h = host();
+    const a = h.start("a", true);
+    a.mint.resolve(true);
+    a.announce.resolve(true);
+    await settle();
+    h.leave();
+    a.connect.resolve();
+    expect(await a.run).toEqual({ kind: "left" });
+  });
+
+  it("a second start survives the first one's late success", async () => {
+    const h = host();
+    const a = h.start("a", true);
+    h.leave();
+    const b = h.start("b", true);
+    expect(h.slot).toBe("b");
+    // The first start's mint and publish come back late, and succeed.
+    a.mint.resolve(true);
+    a.announce.resolve(true);
+    expect(await a.run).toEqual({ kind: "left" });
+    expect(h.slot).toBe("b");
+    expect(h.attempt).not.toBeNull();
+    expect(h.log).toEqual([]);
+    b.mint.resolve(true);
+    b.announce.resolve(true);
+    await settle();
+    b.connect.resolve();
+    expect(await b.run).toEqual({ kind: "connected" });
+    expect(h.slot).toBe("b");
+    expect(h.log).toEqual(["start:b", "session:b", "devices:b"]);
+  });
+
+  it("a second start survives the first one's late failure", async () => {
+    const h = host();
+    const a = h.start("a", true);
+    h.leave();
+    const b = h.start("b", true);
+    a.mint.reject(new Error("mint refused"));
+    // No error is reported for a call the person already left.
+    expect(await a.run).toEqual({ kind: "left" });
+    expect(h.slot).toBe("b");
+    expect(h.attempt).not.toBeNull();
+    b.mint.resolve(true);
+    b.announce.resolve(true);
+    await settle();
+    b.connect.resolve();
+    expect(await b.run).toEqual({ kind: "connected" });
+    expect(h.log).toEqual(["start:b", "session:b", "devices:b"]);
+  });
+
+  it("a second start survives the first one's Start landing late: taken back, slot untouched", async () => {
+    const h = host();
+    const a = h.start("a", true);
+    a.mint.resolve(true);
+    await settle();
+    h.leave();
+    const b = h.start("b", true);
+    a.announce.resolve(true);
+    expect(await a.run).toEqual({ kind: "left" });
+    expect(h.log).toEqual(["start:a", "take-back:a:left"]);
+    expect(h.slot).toBe("b");
+    b.mint.resolve(true);
+    b.announce.resolve(true);
+    await settle();
+    b.connect.resolve();
+    expect(await b.run).toEqual({ kind: "connected" });
+    expect(h.log.filter((l) => l.startsWith("take-back"))).toEqual(["take-back:a:left"]);
+  });
+
+  it("a joiner whose call ended during the sync or the mint is told ended, with no session", async () => {
+    for (const during of ["sync", "mint"] as const) {
+      const h = host();
+      const a = h.start("a", false);
+      if (during === "sync") a.live = false;
+      a.sync.resolve();
+      await settle();
+      a.live = false;
+      a.mint.resolve(true);
+      expect(await a.run).toEqual({ kind: "ended" });
+      expect(h.log).toEqual([]);
+      expect(h.slot).toBeNull();
+    }
+  });
+
+  it("the current attempt reports its own failures, as before", async () => {
+    const h = host();
+    const refused = h.start("a", true);
+    refused.mint.resolve(false);
+    expect(await refused.run).toEqual({ kind: "refused", reason: "refused" });
+    expect(h.slot).toBeNull();
+
+    const unannounced = h.start("b", true);
+    unannounced.mint.resolve(true);
+    unannounced.announce.resolve(false);
+    expect(await unannounced.run).toMatchObject({ kind: "failed", handedOver: false });
+    expect(h.log).toEqual(["start:b"]);
+
+    const broken = h.start("c", true);
+    const err = new Error("ice failed");
+    broken.mint.resolve(true);
+    broken.announce.resolve(true);
+    await settle();
+    broken.connect.reject(err);
+    // Handed over: the host leaves the call, which is what publishes the End.
+    expect(await broken.run).toEqual({ kind: "failed", error: err, handedOver: true });
+    expect(h.log.filter((l) => l.startsWith("take-back"))).toEqual([]);
   });
 });

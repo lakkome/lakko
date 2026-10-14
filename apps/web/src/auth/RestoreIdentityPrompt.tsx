@@ -29,6 +29,7 @@
  * The lost-everything fallback (`mintFreshIdentity`) sits behind a warning
  * at the bottom; it is the one path that publishes a new identity.
  */
+import { isAbandoned } from "./binding-epoch";
 import {
   createResource,
   createSignal,
@@ -162,6 +163,8 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       const outcome = await auth.restoreKeysWithPasskey();
       if (outcome !== "restored") setMethod(null);
     } catch (err) {
+      // The prompt's account is no longer the one bound here: nothing to say.
+      if (isAbandoned(err)) return;
       if (!(err instanceof KeyedError && err.key === "auth.passkey.error.cancelled")) {
         setError(
           err instanceof KeyedError ? passkeyErrorMessage(err) : identityRestoreErrorMessage(err),
@@ -181,6 +184,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       setPhrase("");
       // No navigation: the state flips to `session` and the guard re-renders.
     } catch (err) {
+      if (isAbandoned(err)) return;
       setError(identityRestoreErrorMessage(err));
     } finally {
       setBusy(false);
@@ -211,6 +215,9 @@ export default function RestoreIdentityPrompt(): JSX.Element {
         loginHandle,
         known: { accountIdBytes, accountIdB64: acct.accountIdB64 },
       });
+      // No device key yet: the join holds its device seed, the history
+      // bundle and the pairing state bundle in memory until
+      // `completeFromPairing` has bootstrapped the key and calls this.
       persistAnonymousJoin = (key) => anon.persistTo(key);
       return {
         qrPayload: anon.qrPayload,
@@ -219,7 +226,10 @@ export default function RestoreIdentityPrompt(): JSX.Element {
           const outcome = await anon.accept(welcome, { welcomeCursor });
           return outcome.recovery;
         },
-        dispose: () => anon.dispose(),
+        dispose: () => {
+          anon.dispose();
+          persistAnonymousJoin = null;
+        },
       };
     }
     persistAnonymousJoin = null;
@@ -300,6 +310,8 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                     prepare={prepareDeviceFlow}
                     requestHandle={() => pairingHandle}
                     onRestored={async (outcome) => {
+                      // The panel disposes the flow only after this resolves,
+                      // so the anonymous join is still alive for its persist.
                       await auth.completeFromPairing(
                         outcome.phraseEntropy,
                         outcome.session ?? undefined,
@@ -432,6 +444,11 @@ function LostEverythingPanel(props: { busy: boolean; usernameKnown: boolean }): 
       if (grant === null) return;
       await auth.mintFreshIdentity();
     } catch (err) {
+      // Signed out, or another account landed, while the keys were being
+      // reset: no error. If the server reset already happened, the new keys
+      // and their phrase are stored for this account's next sign-in on this
+      // browser.
+      if (isAbandoned(err)) return;
       switch (gate.failed(err, grant).kind) {
         case "required":
         case "rate-limited":

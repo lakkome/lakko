@@ -186,8 +186,10 @@ public class SharedPrefsVerifiedBindingStore(context: Context) : VerifiedBinding
             val all = load(ownerAccountIdB64)
             if (all.containsKey(accountIdB64)) return false
             try {
-                prefs().edit().putString(KEY_PREFIX + ownerAccountIdB64, encodeVerifiedBindings(all + (accountIdB64 to binding))).apply()
-                true
+                // Refused for a signed-out or wiped owner: nothing is recorded.
+                me.lakko.app.account.AccountStoreGate.write(ownerAccountIdB64) {
+                    prefs().edit().putString(KEY_PREFIX + ownerAccountIdB64, encodeVerifiedBindings(all + (accountIdB64 to binding))).apply()
+                } != null
             } catch (_: Throwable) {
                 false
             }
@@ -198,7 +200,7 @@ public class SharedPrefsVerifiedBindingStore(context: Context) : VerifiedBinding
             val all = load(ownerAccountIdB64)
             if (!all.containsKey(accountIdB64)) return
             try {
-                prefs().edit().putString(KEY_PREFIX + ownerAccountIdB64, encodeVerifiedBindings(all - accountIdB64)).apply()
+                me.lakko.app.account.AccountStoreGate.write(ownerAccountIdB64) { prefs().edit().putString(KEY_PREFIX + ownerAccountIdB64, encodeVerifiedBindings(all - accountIdB64)).apply() }
             } catch (_: Throwable) {
                 // best-effort
             }

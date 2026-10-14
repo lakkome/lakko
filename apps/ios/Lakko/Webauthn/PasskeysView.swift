@@ -28,6 +28,8 @@ public struct PasskeysView: View {
     @State private var confirmingDelete = false
     /// The passkey "Stop restoring keys" is being confirmed for.
     @State private var stoppingKeysFor: CredentialSummary?
+    /// The data export the system's save picker is up for.
+    @State private var exportingData: ExportedFile?
     @ObservedObject private var l10n = Localization.shared
 
     public init(viewModel: @autoclosure @escaping () -> PasskeysViewModel) {
@@ -152,8 +154,12 @@ public struct PasskeysView: View {
                 .controlSize(.large)
                 .disabled(viewModel.isBusy)
                 if let url = viewModel.exportFileUrl {
-                    ShareLink(item: url) {
-                        Label(l10n.t("settings.data.share"), systemImage: "square.and.arrow.up")
+                    // The export is a file leaving the app: it goes through
+                    // the system's save picker, never the share sheet.
+                    Button {
+                        exportingData = ExportedFile(url: url)
+                    } label: {
+                        Label(l10n.t("settings.data.share"), systemImage: "square.and.arrow.down")
                     }
                 }
 
@@ -169,6 +175,7 @@ public struct PasskeysView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.large)
                 .disabled(viewModel.isBusy)
+                .fileExport($exportingData)
                 Text(l10n.t("settings.account.delete.sub"))
                 .font(.footnote)
                 .foregroundStyle(.secondary)

@@ -46,6 +46,10 @@ public struct ChatScreen: View {
     /// builds its own. Read only inside the picker sheet.
     @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
 
+    /// `docs/ux/call-links.md` section 3 — where the `Join` of a call
+    /// invitation goes: the app's own `/c/` link handling.
+    @EnvironmentObject private var inviteIntake: InviteIntake
+
     // 1.19c3 — picker state. Swift's `PhotosPicker` returns
     // `PhotosPickerItem`s asynchronously (we resolve them to
     // `Data` + MIME inside the `.onChange`); the file
@@ -767,6 +771,10 @@ public struct ChatScreen: View {
                                 // original when this device holds it.
                                 onForward: { viewModel.beginForward(entry.message) },
                                 onForwardTap: jumpToForwardOrigin,
+                                // `docs/ux/call-links.md` section 3 — `Join` on
+                                // a call invitation opens the call through the
+                                // same intake a tapped link goes through.
+                                onJoinCallInvite: { inviteIntake.handle($0) },
                                 // ADR-0052 decision 3 / section 4.1 — `Pin`
                                 // or `Unpin` after Forward; the sheet decides
                                 // who it is for.
@@ -1768,8 +1776,8 @@ struct MessageRow: View {
     /// row whose send failed.
     var onRetrySend: (Int64) -> Void = { _ in }
     /// 1.19c3 — bubble taps on attachment chips call into the
-    /// screen's preview / share helpers. `onPreview` opens the
-    /// inline image sheet; the `ShareLink` is wired inline.
+    /// screen's preview helper. `onPreview` opens the inline
+    /// image sheet; Save is wired inline on the chip.
     let onPreview: (AttachmentRef) -> Void
     /// ADR-0023 — context-menu actions. Edit / Delete only on own
     /// outgoing messages (gated below); React on any message.
@@ -1791,6 +1799,9 @@ struct MessageRow: View {
     /// ADR-0052 decision 2 / section 5.1 — the "Forwarded from" line was
     /// tapped. The screen decides whether it leads anywhere.
     var onForwardTap: (ForwardRef) -> Void = { _ in }
+    /// `docs/ux/call-links.md` section 3 — `Join` on a call invitation was
+    /// pressed; the argument is the call's link.
+    var onJoinCallInvite: (URL) -> Void = { _ in }
     /// ADR-0052 decision 3 / section 4.1 — which word the card shows for this
     /// message (`Pin`, `Unpin`, or no row). Decided by the view model, which
     /// holds the two pin stores and this device's standing; the row is a pure
@@ -2219,7 +2230,16 @@ struct MessageRow: View {
                             onQuoteTap(reply.target)
                         }
                     }
-                    if !message.text.isEmpty {
+                    if let invite = CallInviteLink.callInviteOf(
+                        message.text, ownOrigin: CallInviteUrl.defaultOrigin) {
+                        // `docs/ux/call-links.md` section 3 — a message whose
+                        // whole text is one call link of this deployment is an
+                        // invitation with a `Join` button, never a line of
+                        // characters to copy.
+                        CallInvitationCard(outgoing: isOutgoing) {
+                            onJoinCallInvite(invite.url)
+                        }
+                    } else if !message.text.isEmpty {
                         // No `.textSelection(.enabled)`. It installs UIKit's own
                         // long press for a selection loupe over the same pixels
                         // and the same duration as the gesture that opens the
@@ -2510,9 +2530,9 @@ private struct EditMessageSheet: View {
     }
 }
 
-/// Single attachment chip rendered inside a bubble. Hosts the
-/// "Save" share affordance (resolves the bytes to a temp file +
-/// hands to `ShareLink`) and the "Open" tap that funnels to the
+/// Single attachment chip rendered inside a bubble. Hosts "Save"
+/// (resolves the bytes to a temp file and hands it to the system's
+/// save picker) and the "Open" tap that funnels to the
 /// screen-level inline preview sheet (only on image MIMEs).
 private struct AttachmentChip: View {
     let ref: AttachmentRef
@@ -2522,6 +2542,8 @@ private struct AttachmentChip: View {
     @State private var resolvedBytes: Data?
     @State private var resolving: Bool = false
     @State private var resolveError: String?
+    /// The decrypted copy the system's save picker is up for.
+    @State private var exporting: ExportedFile?
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
@@ -2543,14 +2565,14 @@ private struct AttachmentChip: View {
                     .font(.caption)
                     .buttonStyle(.borderless)
             }
-            // "Save" — resolve on first tap (download +
-            // decrypt + write to a temp file URL), then hand
-            // off to `ShareLink`. The two-step is needed
-            // because `ShareLink` wants a transferable up
-            // front and Data → file is what the iOS share
-            // sheet expects for "Save to Files".
+            // "Save" — download + decrypt, write a temp copy, and
+            // hand that to the system's save picker: the one place a
+            // file can leave the app, and the narrowest one (it asks
+            // where to put the file and offers nothing else). Not the
+            // share sheet.
             saveControl
         }
+        .fileExport($exporting)
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(chipBackground)
@@ -2559,12 +2581,7 @@ private struct AttachmentChip: View {
 
     @ViewBuilder
     private var saveControl: some View {
-        if let bytes = resolvedBytes,
-           let url = writeTempCopy(bytes: bytes, ref: ref) {
-            ShareLink(item: url) {
-                Text(l10n.t("common.save")).font(.caption)
-            }
-        } else if resolving {
+        if resolving {
             ProgressView().controlSize(.small)
         } else {
             Button(l10n.t("common.save")) {
@@ -2572,8 +2589,16 @@ private struct AttachmentChip: View {
                     resolving = true
                     resolveError = nil
                     do {
-                        resolvedBytes = try await AttachmentBridge
-                            .downloadAndDecrypt(ref: ref)
+                        let bytes: Data
+                        if let resolvedBytes {
+                            bytes = resolvedBytes
+                        } else {
+                            bytes = try await AttachmentBridge.downloadAndDecrypt(ref: ref)
+                            resolvedBytes = bytes
+                        }
+                        if let url = writeTempCopy(bytes: bytes, ref: ref) {
+                            exporting = ExportedFile(url: url)
+                        }
                     } catch {
                         NSLog("attachment save failed: %@", String(describing: error))
                         resolveError = Localization.text("chat.attachment.error.download")
@@ -2603,8 +2628,7 @@ private struct AttachmentChip: View {
     }
 
     /// Write `bytes` to a temp file with the ref's name (or a
-    /// blob-id-derived fallback) so `ShareLink(item: URL)`
-    /// surfaces a "Save to Files" / share-sheet flow with a
+    /// blob-id-derived fallback) so the save picker offers a
     /// meaningful filename.
     private func writeTempCopy(bytes: Data, ref: AttachmentRef) -> URL? {
         // `ref.name` is sender-controlled: sanitize it, and write into a fresh
@@ -2909,15 +2933,8 @@ struct MembersSheet: View {
                             Text(link)
                                 .font(.system(.footnote, design: .monospaced))
                                 .textSelection(.enabled)
-                            if let url = URL(string: link) {
-                                ShareLink(item: url) {
-                                    Label(l10n.t("chat.invite_link.share"), systemImage: "square.and.arrow.up")
-                                }
-                            } else {
-                                ShareLink(item: link) {
-                                    Label(l10n.t("chat.invite_link.share"), systemImage: "square.and.arrow.up")
-                                }
-                            }
+                            // Copy is the whole of it: a link is never handed
+                            // to the system's share sheet.
                             Button(l10n.t("chat.invite_link.copy")) { UIPasteboard.general.string = link }
                             Button(l10n.t("chat.invite_link.revoke"), role: .destructive) {
                                 viewModel.onRevokeInviteLink()

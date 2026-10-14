@@ -36,7 +36,12 @@ where it appears.
 - **Never pretend** (`calls.md` section 1): no quality dot that was not measured,
   no speaking ring that was not heard.
 
-## 2. What exists today
+## 2. What existed before 2026-10-02
+
+The list below is the state this spec was written against. The web client was
+rebuilt to sections 3 to 6 on 2026-10-02 after a live call showed the old
+screen for what it was; what each client draws today is in
+[`PRODUCT-READINESS.md`](../PRODUCT-READINESS.md).
 
 Read from `apps/web/src/routes/Call.tsx` + `calls/call-screen-model.ts`,
 `apps/ios/Lakko/UI/Call/CallScreen.swift`,
@@ -88,7 +93,12 @@ A group call has two layouts, and the person can switch between them:
 | Someone starts sharing a screen | Focus, the screen on the stage (section 6.2) |
 | The person pins a tile | Focus, the pinned tile on the stage |
 | The person chose a layout by hand | That layout, for the rest of this call |
-| Focus, but nothing on the stage has a picture and nothing is pinned | Drawn as Grid (`calls.md` 4.4: the large tile shows a picture, or there is no large tile) |
+| Alone in the call | Grid: one tile, there is nobody for a strip |
+
+A Focus the person chose stays Focus whether or not anyone is sending a
+picture: the stage then holds the speaker's initials. Drawing a grid after the
+person pressed the button for the other layout would read as a button that does
+nothing.
 
 A call with one other person is not a group layout at all: it is the 1x1 portrait
 or video fill of `calls.md` section 4, unchanged. The group screen starts at three
@@ -96,12 +106,11 @@ people **including this device**. A group call that drops to two keeps the group
 screen (the kind of a call does not change mid-call, `call-screen-model.ts`
 `groupCall`), laid out as Grid with two tiles.
 
-**Switching.** **Per platform:** on a phone the switch is an item in the group
-overflow menu (`calls.md` 4.1 already puts participants and chat there): `Grid`
-/ `Focus`, with a check on the current one. On the web and on a tablet it is a
-small icon button at the top right, beside the quality dot, labelled
-`Change layout`. A manual choice is remembered for the call only; the next call
-starts from the defaults.
+**Switching.** One small icon button at the top right of the call screen, the
+twin of the collapse chevron at the top left, on every client and every width.
+It shows the layout a press leads to. While someone is pinned it unpins and
+returns to the grid. A manual choice is remembered for the call only; the next
+call starts from the defaults. The button is absent while the person is alone.
 
 ## 4. Grid layout
 
@@ -119,6 +128,15 @@ like whatever width it has.
 | Wide | ≥ 1024 pt | Laptop / desktop browser, iPad landscape full screen |
 
 ### 4.2 Columns and rows by count
+
+**The rule, which is what the clients run:** of every column count the minimum
+tile width allows, take the one that makes the tiles largest, with the tile
+shape held between 3:4 and 16:9 (section 4.3); beyond the page cap, page.
+`lakko-ui-rules::call_group::call_grid(count, width, height)` computes it in
+integer arithmetic for all three clients, so the same call on the same width is
+the same grid. The table below is what that rule gives on typical screens, not
+a second definition; where the two differ the rule wins (three people on a
+phone in portrait are three wide tiles one above another, not one over two).
 
 The grid fills the **call area**: the space below the status line and above the
 control bar (`calls.md` 4.4 already reserves both). "Page cap" is the most tiles
@@ -186,10 +204,10 @@ already had.
   dot per page, the current one filled. More than 5 pages and the dots become a
   count, `3 / 9`. It is also a control: on the web each dot is a button; on the
   natives tapping left or right of the current dot moves one page.
-- **Per platform — changing pages**: a horizontal swipe on iOS and Android, with
-  the page following the finger. On the web: arrow buttons appear at the left and
-  right edges of the grid on hover or focus, and `Page Up` / `Page Down` work while
-  the call has focus.
+- **Changing pages**: a horizontal swipe on a touch screen, on every client. With
+  a mouse, arrow buttons appear at the left and right edges of the grid while
+  the pointer is over it; they are not drawn on a touch screen, where they
+  would sit on someone's face.
 - Leaving a page and coming back finds it as it was, except where section 5 moved
   a speaker onto page 1. A page never goes empty under the person: if the last
   person on the last page leaves while it is showing, the view slides back one
@@ -236,11 +254,12 @@ move the same person at the same moment.
 - **A swap is a cross-fade in place** (200 ms; reduced motion: instant), not a
   slide across the screen. The eye sees one face become another in the same
   frame, not the grid rearranging.
-- **The stage in Focus** follows the active speaker with the same onset and a
-  **3-second hold**: it does not leave a speaker until someone else has been the
-  active speaker for 3 seconds. The stage only ever holds someone sending a
-  picture, as `calls.md` 4.4 requires; a speaker without a camera is promoted into
-  the strip instead.
+- **The stage in Focus** follows the floor. A person takes the floor after the
+  1.5-second onset and keeps it for as long as they keep speaking, so two
+  people talking over each other do not flip the stage; when they stop, the
+  stage stays on them until someone else takes the floor. A speaker without a
+  camera takes the stage too, as initials: the person chose Focus to see who is
+  talking.
 - **Pinned or sharing overrides all of this** and does not move until unpinned
   or stopped.
 
@@ -263,12 +282,16 @@ move the same person at the same moment.
 
 ### 6.1 Focus
 
-| Form factor | Stage | Strip |
-|---|---|---|
-| Compact | Full width, top, ≤ 60 % of the call area height | One row under it, horizontal scroll, tiles 110 × 110 pt |
-| Compact-wide | Left, full height | One column on the right, vertical scroll, tiles 16:9, 120 pt wide |
-| Regular | Top, full width | One row under it, tiles 16:9, 160 pt wide |
-| Wide | Left | One column on the right, 220 px wide, tiles 16:9 |
+**The strip is a row above the stage, on every width** (the maintainer's
+decision, 2026-10-02: the speaker or the pinned person in the middle, everyone
+else on top). Its tiles are 104 × 78 pt on Compact and 160 × 90 pt elsewhere;
+the stage takes the largest tile of an allowed shape that fits under it.
+
+**Who is on the stage** is one shared rule,
+`lakko-ui-rules::call_group::call_stage`: the pinned person; else the person
+holding the floor; else whoever held it most recently; else the first person
+sending a picture; else the first other person. This device's own tile takes
+the stage only when nobody else is in the call.
 
 The strip scrolls — it is the one place scrolling is allowed, because its tiles
 are secondary and the stage never moves when it scrolls. Tiles scrolled out of the
@@ -276,20 +299,49 @@ strip are off screen for section 7.4.
 
 ### 6.2 Pin and unpin
 
-- **Per platform — opening a tile's menu**: long press on iOS and Android; on the
-  web a small `⋯` button that appears at the tile's top right on hover or focus,
-  and right-click. **A plain tap on a tile does not pin.** On touch a tap shows the
-  controls, the gesture people already use for that; the pin-on-tap of today
-  (section 2) goes.
-- The menu holds `Pin` (or `Unpin`). Pinning switches to Focus with that tile on
-  the stage and shows a pin glyph on it. Double-tap (touch) or double-click (web)
-  on a tile is a shortcut for the same.
+The maintainer's decisions, 2026-10-11, after a live five-person call in which
+nobody could find how to pin.
+
+**One rule on every client: pinning and unpinning happen only through the
+pin button.** A tile is never itself the pin control, in the grid, in the
+strip or on the stage: a press anywhere on a tile pinned people by accident.
+
+**Three states.** *Nobody pinned*: the stage follows the speaker (6.1).
+*Pinned*: the stage holds that person whoever speaks. *The pinned person
+leaves*: the pin is cleared and the stage goes back to the speaker; the
+layout stays as it is.
+
+**The control.**
+
+- **The button.** Every other person's tile has a round pin button in its top
+  right corner, in the style of the other tile overlays: on grid tiles, on
+  strip tiles and on the stage tile. On the pinned tile it is **always**
+  shown, filled, and a press on it unpins.
+- **Web, with a pointer.** The button is shown while the pointer or the
+  keyboard focus is on the tile. It is at least 32 px; on a strip tile it may
+  be smaller, never under 24 px. A keyboard reaches it with Tab.
+- **Touch (iOS, Android, and the web on a touch screen).** There is no hover,
+  so a tap on any tile, grid or strip, shows that tile's controls for about
+  3 seconds: the pin button in the same corner, 44 pt. That tap does nothing
+  else; in particular it never pins. A tap anywhere else, or the time running
+  out, hides them. Tapping the button pins. On iOS and Android the staged
+  pinned tile carries a persistent `Pinned` chip with the same glyph, and a
+  tap on the chip unpins. Nothing needs a long press.
+
+**What a pin does.**
+
+- Pinning from the grid switches to Focus with that person on the stage.
+  Unpinning leaves the layout as it is: Focus stays, and the stage returns to
+  the speaker. The layout button still leads back to the grid, and from Focus
+  it unpins too.
 - **One pin at a time.** Pinning someone else moves the pin.
-- **Unpin**: the same menu, or the `Unpin` chip at the top left of the stage.
-  After unpinning, the layout goes back to what it was before the pin.
-- A pin is local. Nobody else learns that you pinned them.
-- If the pinned person leaves, the pin is cleared and the layout returns to what
-  it was.
+- A pin is local to the viewer. Nobody else learns that they were pinned.
+- Pinning asks the call server for the larger picture of that person
+  (section 7.6: the pinned person or the stage counts as the large tile).
+- This device's own tile has no pin button: it is never on the stage while
+  anyone else is present (5.3).
+- The button is named from the catalog, `Pin Anna` / `Unpin Anna`, and
+  reports its pressed state. A swipe that turns the page is not a tap.
 
 ### 6.3 Screen share (receiving)
 
@@ -359,6 +411,25 @@ the only thing it can measure. So its spoken and tooltip text is
 - **Timing**: on after 200 ms of speech, off after 800 ms of silence (chosen, not
   measured). This smoothing is separate from the 1.5-second promotion onset of
   5.2: the ring may flicker on for a cough, a tile never moves for one.
+- **What counts as speech**: a level well above that person's own noise floor
+  (three times it, within fixed bounds), not above one number for everyone. A
+  quiet microphone in a quiet room and a loud one in a noisy room both light the
+  ring for a voice and neither lights it for the room. Every level is on one
+  scale whatever it was read from: the root mean square of the decoded samples
+  over about a tenth of a second. The floor falls towards a quieter reading by
+  at most half per 100 ms and climbs towards steady sound by a tenth a second,
+  both per unit of time, so how often a client reads a level changes nothing.
+- **One rule for the three clients.** The ring, the floor of 5.2 and the noise
+  floor above are `lakko-ui-rules::speaking` (`SpeakingTracker`), on both FFI
+  surfaces, with every number in this section and the 1.5-second onset as its
+  constants. It replaced three hand-written copies (TypeScript, Swift, Kotlin)
+  that had drifted: the fall of the noise floor was per reading on web and
+  per unit of time on iOS and Android. Its decisions are integer arithmetic on
+  whole milliseconds and on levels converted once to whole units, so no
+  platform's floating point can make two clients disagree. What stays on each
+  client is reading the level, the loop that reads it and the call log. This
+  device's own person has a ring and never holds the floor; a muted person has
+  neither.
 - **Latency is expected**: the level is computed from audio that has already been
   received, decrypted and decoded, so the ring trails the voice by a few hundred
   milliseconds. That is acceptable and must not be "fixed" by using a level the
@@ -396,6 +467,106 @@ Two more cases fall into *video paused* rather than camera off:
 - This device's own connection is **Poor**: it may pause every tile except the
   stage and the active speaker. The notice line then says
   `Some videos are paused to keep the call smooth.`
+
+### 7.5 A picture that stands still, and its lighter copy
+
+A person whose camera is on sends two copies of their picture: the full one and
+a much lighter one (a quarter of the size). Every viewer receives both. When the
+connection drops packets for a moment, the full picture cannot be repaired in
+that moment and would stand still for about a second, then play the late second
+fast. The lighter copy is repaired several times faster.
+
+So the rule, the same on web, iOS and Android:
+
+> **A person's picture never stands still while a lighter copy of it is
+> arriving.**
+
+- A tile shows the full picture by default, and always when the person sends no
+  lighter copy.
+- When the full picture has shown no new frame for **150 ms** and the lighter
+  copy showed one within the last **250 ms**, the tile shows the lighter copy.
+- The tile returns to the full picture once it has played without a gap longer
+  than 150 ms for **1 second**. A gap inside that second starts the second
+  again. The wait also keeps the fast catch-up playback off the screen.
+- When a tile first appears and the full picture has shown nothing for
+  **1.5 seconds** while the lighter copy plays, the tile shows the lighter copy
+  rather than staying empty.
+- When both stand still, the tile keeps what it shows. If that lasts 3 seconds
+  the tile becomes *video paused* (section 7.4).
+- After the app or the page was in the background, a tile starts again on the
+  full picture.
+
+**No visible indicator.** The switch is a hard cut in the same box with the same
+crop: no fade, no badge, no label, no change to the name strip or the connection
+dot. The person sees a picture that gets softer for a moment and then sharp
+again, and nothing announces it. Screen readers are told nothing either: the
+person on the tile has not changed. The lighter copy is never a separate tile,
+never counted as a participant and never chosen for the stage on its own.
+
+All four numbers are chosen, not measured. They and the rule itself are written
+once (`crates/lakko-ui-rules`, `layer_display`) and every client asks that one
+rule, so the three clients switch at the same moments. A tile reports each frame
+it presents and looks at the clock every 50 ms so that a picture that stopped is
+noticed without a frame arriving. Each client also counts, per person, how often
+and for how long the lighter copy was shown and how long a picture stood still
+on screen; the counts go to the call's diagnostic log only.
+
+### 7.6 Which picture a tile shows, by people and by size
+
+A person whose camera is on sends up to three copies of their picture: the
+**full** one (720p), a **middle** one (half the size, 360p) and the **light**
+one of 7.5 (a quarter, 180p). The middle copy is sent only from three people
+in the call on. A viewer's device asks the call server for the one copy that
+suits each tile, and the server stops sending the others, so a call of many
+people does not carry a full picture per person to every device.
+
+The rule, the same on web, iOS and Android:
+
+| The call and the tile | Picture shown |
+|---|---|
+| Two people in the call (one other person), at any size | Full |
+| Three or more people; the pinned person or the stage of the focus layout, drawn at least 960 pixels wide | Full |
+| Three or more people; a tile drawn narrower than 240 pixels (a filmstrip thumbnail, a crowded grid on a phone) | Light |
+| Three or more people; any other tile, a pinned or stage tile narrower than 960 pixels included | Middle |
+
+- **Pixels are the device's own**, not points: a tile 200 points wide on a
+  3x phone is 600 pixels and shows the middle picture, the same tile on a 1x
+  laptop is 200 pixels and shows the light one. That is the size a picture
+  is actually stretched over.
+- **People** counts everyone in the call, this device's own person included.
+- A tile on another page of the grid, which nobody sees, is outside this
+  rule: the rule is asked about a tile that is drawn. Open for the
+  maintainer: such a tile asking for the light picture alone (the call
+  server supports it).
+- The light copy keeps arriving beside whichever picture a tile shows, and
+  the rule of 7.5 is unchanged: when the picture a tile shows stands still,
+  the tile shows the light copy until the picture plays again.
+
+**What a person sees when a tile changes size** (a pin, the layout switch, a
+window resize, a rotation, a third person joining): the tile keeps the
+picture it has until the first frame of the new one arrives, then cuts to it
+in the same box with the same crop. Until then, if the old picture has
+already stopped, the light copy fills in under 7.5. The new picture starts
+at a full frame the sender is asked for, which normally takes a fraction of
+a second. No spinner, no badge, no label and nothing for a screen reader:
+the person on the tile has not changed, only how sharp they are.
+
+**Not a pause.** A tile showing the middle or the light picture is in the
+*Video* state of 7.1, not *Video paused* (7.4): the person is seen moving.
+
+The two thresholds (960 and 240 pixels) and the count (three people) are
+chosen, not measured. They and the rule are written once
+(`crates/lakko-ui-rules`, `call_group::tile_video_quality` and
+`middle_sender_wanted`) and every client asks that one rule, so the three
+clients ask for the same picture for the same tile. A client re-asks when a
+tile's width crosses a threshold or the people count crosses three, sending
+the whole set of its tiles at once, and should let a resize settle (a few
+hundred milliseconds, the client's own choice) before it does, so dragging
+a window edge does not ask for a full frame on every step.
+
+Built so far: the rule, and the call server's side of it. No client asks
+yet: until one does, every tile is sent the full and the light picture, as
+before.
 
 ## 8. Call-level connection states
 
@@ -452,7 +623,7 @@ camera off with a bad signal, which is the confusion 7.4 exists to prevent.
   unresolved people are told apart by tone colour. They are **not numbered**:
   `Participant 3` becomes wrong the moment someone before them leaves.
 - **Long names**: truncated in the strip; the full name is in the spoken label and
-  the tile menu's title.
+  the pin button's name.
 - **Text size**: at the largest accessibility text sizes the strip grows to two
   lines at most and the minimum tile width of 4.2 drops a column. The strip never
   covers more than a third of the tile.
@@ -463,9 +634,9 @@ camera off with a bad signal, which is the confusion 7.4 exists to prevent.
 
 | Need | Why |
 |---|---|
-| A **local speaking level** per remote participant, computed on the receiving device from decoded (post-decryption) audio, at ≥ 10 samples a second | Sections 5 and 7.3. Candidates: the inbound audio `audioLevel` in `getStats`, or an audio analyser on the decoded track; either is local |
+| A **local speaking level** per remote participant, computed on the receiving device from decoded (post-decryption) audio, at ≥ 10 samples a second | Sections 5 and 7.3. Web: an audio analyser on the played stream, then the growth of `totalAudioEnergy` over `totalSamplesDuration` in the receiver's statistics; both are of decoded audio and on one scale, and a path with no reading, or stuck at exactly zero, falls through to the other. Not the level on a receiver's synchronization sources (where the header extension below is negotiated it is the sender's byte, readable and writable by the call server) and not the statistics' `audioLevel` (an engine-defined peak, not on that scale); both are only printed in the call log |
 | The **same level for this device's own microphone** | 5.3: your own ring, and `You're muted` |
-| **No audio-level RTP header extension** (RFC 6464) negotiated in either direction, and a check that keeps it out | It carries the speaking level in clear to the call server, which would hand the server exactly what section 1 says it never learns |
+| **No audio-level RTP header extension** (RFC 6464) negotiated in either direction, and a check that keeps it out | It carries the speaking level in clear to the call server, which would hand the server exactly what section 1 says it never learns. **Enforced by the call server since 2026-10-12**: until then it accepted the extension from every publisher, offered it to every subscriber and relayed the value (found in its own log of an offered track, `[audio] 1:ssrc-audio-level`). It now leaves the extension out of every answer and offer, so no client sends it, and carries no such value between peers (`services/sfu/README.md`, "Header extensions"; `docs/security/calls.md` C-39). No client asks for it; a client reading a receiver's synchronization sources finds no level there. Host-tested, not yet seen against a browser or a native client |
 | A **per-participant receive quality** from inbound stats (loss, jitter, freeze counts per person) | 7.2. Until it exists the remote connection glyph is absent — and the constant `good` of today is removed |
 | A **server-announced "peer reconnecting"** with the grace period | 8.2 |
 | A **session resume** for this device, and a clean re-admission path | 8.1. Today a lost connection ends the call (`calls.md` 4.3) |
@@ -473,6 +644,7 @@ camera off with a bad signal, which is the confusion 7.4 exists to prevent.
 | A way for the receiver to tell **"not sent to me"** from **"camera off"** | 7.4. Camera off is already signalled by the person themself (the call media-state signal); "not sent" has to come from the server or from this device's own pause request |
 | **Join order** as a stable roster property | 4.4, 5.1 |
 | **Which track is a screen** and whose it is | 6.3. The per-stream index already separates a screen from a camera in the media key (ADR-0035); the roster must expose it |
+| **One shared speaking rule**, `lakko-ui-rules::speaking` (built 2026-10-12, core and both FFI surfaces) | Section 7.3 and the floor of 5.2. Input: one level per person per reading (or none), the mute state, the roster order, this device's own person, the clock; output: whose ring is on, who holds the floor, when each person last held it, and the threshold in force per person for the call log |
 | **One shared layout-and-slot rule**, in `lakko-ui-rules` beside the existing call rules | Section 5 is exactly the kind of rule that drifts when written three times. Input: the roster with speaking, camera, share, pin and join order, the call-area size, the clock; output: layout, page cap, cells and the slot assignment with the hysteresis state |
 
 ## 11. Changes to `calls.md`
@@ -484,7 +656,7 @@ camera off with a bad signal, which is the confusion 7.4 exists to prevent.
 | 4.4: `Peer` is the last-resort name | `Participant`, with a person glyph instead of initials | `Participant` is what the clients already render, and `Peer` is a protocol word the design system's copy rules keep off the screen |
 | 4.3: no `Reconnecting...` on a group call | Reconnecting and Rejoining exist, once the transport can resume (section 8) | Section 8 is a target; `calls.md` 4.3 stays true until the transport changes |
 | 9: screen sharing out of scope | Receiving a share is designed here; sending stays out | The grid had to decide where a share goes; deciding it later means moving tiles again |
-| (Built behaviour, not text) a tap on a tile pins it | A tap shows the controls; pinning is in the tile's menu or a double-tap | On touch, a tap on a video surface already means "show me the controls" everywhere else |
+| (Built behaviour, not text) a tap on a tile pins it | Only the pin button on the tile pins and unpins (section 6.2); a tap on a tile, on touch, only shows the tile's controls, the pin button among them | A press anywhere on a tile that silently pinned it was not found by anyone looking for how to pin, and pinned people by accident |
 
 `calls.md` section 4.4 will point to this document for the grid; that edit is
 not made in this change.
@@ -497,7 +669,8 @@ not made in this change.
   `pinned`, `sharing screen`. For example: `Anna, speaking, camera off, poor
   connection`. Your own tile starts with `You,`.
 - The tile's actions (Pin / Unpin) are exposed as accessibility actions (iOS
-  custom actions, Android `customActions`, web menu button), so no gesture is the
+  custom actions, Android `customActions`) and, on the web, are the pin button
+  of section 6.2, a real button in the keyboard order, so no gesture is the
   only way in.
 - **Speaker changes are not announced**: in a busy call that is a constant
   stream. The label updates, so moving to a tile reads the current state. Joins,
@@ -507,8 +680,8 @@ not made in this change.
   connection and pause each have a glyph; *left* has a word.
 - **Reduced motion** (all three platforms' system setting): no slides, no pulse,
   cross-fades only (4.4, 5.2, 7.3).
-- **Touch targets**: tiles are targets in their own right; the web `⋯` button and
-  page-dot buttons are at least 44 × 44 even when drawn smaller. Page dots on the
+- **Touch targets**: on a touch screen the pin button and the page-dot
+  buttons are at least 44 × 44 even when drawn smaller. Page dots on the
   natives are one 44 pt high hit area split left / right.
 - **Focus order** (keyboard, switch control): status line, layout switch, tiles
   in reading order of the current page, page indicator, control bar.
@@ -524,7 +697,7 @@ Platform idiom, and only this:
 
 | | iOS | Android | Web |
 |---|---|---|---|
-| Tile menu | Long press (context menu) | Long press (dropdown) | `⋯` on hover / focus, right-click |
+| Pin control (6.2) | Tap the tile (grid or strip), then its pin button; `Pinned` chip unpins | Tap the tile (grid or strip), then its pin button; `Pinned` chip unpins | Pin button on hover / focus; on a touch screen, tap the tile, then its pin button |
 | Change page | Swipe | Swipe | Edge arrows, `Page Up` / `Page Down`, dot buttons |
 | Layout switch | Overflow menu (Compact) / top-right button (Regular) | Same | Top-right button |
 | Pin feedback | Light haptic | Light haptic | None |

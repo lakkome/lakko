@@ -199,7 +199,7 @@ public class ThreeWordsBudgetStore(private val storage: MarkerStorage) {
 
     public fun save(accountIdB64: String, budget: ThreeWordsBudget) {
         try {
-            storage.set(key(accountIdB64), json.encodeToString(ThreeWordsBudget.serializer(), budget))
+            me.lakko.app.account.AccountStoreGate.writeUnlessWiped(accountIdB64) { storage.set(key(accountIdB64), json.encodeToString(ThreeWordsBudget.serializer(), budget)) }
         } catch (_: Throwable) {
             // Storage refused: the form's in-memory copy still holds.
         }
@@ -229,7 +229,7 @@ public class ThreeWordsBudgetStore(private val storage: MarkerStorage) {
      *  phrase, the identity seed and everything else stay as they are. */
     public fun suspend(accountIdB64: String) {
         try {
-            storage.set(suspendedKey(accountIdB64), "1")
+            me.lakko.app.account.AccountStoreGate.writeUnlessWiped(accountIdB64) { storage.set(suspendedKey(accountIdB64), "1") }
         } catch (_: Throwable) {
             // The suspension then lasts for this form only.
         }

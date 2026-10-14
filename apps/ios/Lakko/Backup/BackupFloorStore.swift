@@ -60,6 +60,8 @@ public enum BackupFloorStore {
     /// - Throws: ``BackupFloorStoreError`` on a wrong-length hash or a
     ///   non-success `OSStatus` from `SecItemAdd`.
     public static func putFloor(accountIdB64: String, floor: BackupFloor) throws {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard floor.envelopeHash.count == envelopeHashLength else {
             throw BackupFloorStoreError.argument(
                 "envelope hash must be \(envelopeHashLength) bytes "

@@ -9,7 +9,7 @@ import Foundation
 /// life - an empty baseline at signup and one more at recover - so everything
 /// a person did afterwards (contacts accepted, groups joined, renames) never
 /// reached the server blob, and a restore on a new device landed them back at
-/// registration day. ``BackupClient/uploadFromCache(accountId:accountIdB64:ed25519Seed:contacts:wholeStorageSnapshot:)``
+/// registration day. ``BackupClient/uploadFromCache(accountId:accountIdB64:ed25519Seed:contacts:knownGroupIdsHex:syncedState:)``
 /// was built for precisely this and had no caller anywhere.
 ///
 /// Mirror of the web `backup/auto-backup.ts`. The rules live here, pure and

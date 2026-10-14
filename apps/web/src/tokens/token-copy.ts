@@ -26,7 +26,9 @@ export const ACTION_ALLOWANCE_USED = (): string => t("tokens.action_allowance_us
  * lookup and the allowance copy for an invite link, a group link or a
  * channel name (chosen by the refused token's context); `networkCopy` on a
  * disabled or unavailable token; `null` when `err` is not a token failure,
- * and for push registration, which is silent.
+ * and for push registration, which is silent. The storage contexts
+ * (`vault-claim`, `blob-upload`, `blob-read`) have no copy of their own and
+ * take the allowance copy.
  */
 export function anonTokenMessage(err: unknown, networkCopy: string): string | null {
   const quota = anonTokenQuotaExhausted(err);

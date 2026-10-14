@@ -1,7 +1,62 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::rtp_::Pt;
 use crate::sdp::FormatParam;
+
+// LAKKO FORK: the fmtp of an audio `red` payload type (RFC 2198), e.g.
+// `a=fmtp:63 111/111`: the payload type of every encoding a RED packet may
+// carry, primary last. Only the shape libwebrtc sends RED for is represented:
+// 2 to 32 entries, all the same payload type. Any other list does not parse
+// and the `red` entry is then not negotiated.
+/// Format parameters of an audio `red` payload type (RFC 2198).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedParams {
+    /// The payload type of the encodings carried (Opus).
+    pub pt: Pt,
+    /// How many entries the fmtp lists (`111/111` is 2).
+    pub count: u8,
+}
+
+impl RedParams {
+    /// Fewest entries in the fmtp list.
+    pub const MIN_COUNT: u8 = 2;
+    /// Most entries in the fmtp list.
+    pub const MAX_COUNT: u8 = 32;
+
+    /// Parse the fmtp value, e.g. `111/111`.
+    pub fn parse(value: &str) -> Option<Self> {
+        let mut pt: Option<u8> = None;
+        let mut count: u8 = 0;
+        for part in value.trim().split('/') {
+            let v: u8 = part.parse().ok()?;
+            if v >= 128 || pt.is_some_and(|p| p != v) || count == Self::MAX_COUNT {
+                return None;
+            }
+            pt = Some(v);
+            count += 1;
+        }
+        if count < Self::MIN_COUNT {
+            return None;
+        }
+        Some(RedParams {
+            pt: pt?.into(),
+            count,
+        })
+    }
+}
+
+impl fmt::Display for RedParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for i in 0..self.count {
+            if i > 0 {
+                write!(f, "/")?;
+            }
+            write!(f, "{}", self.pt)?;
+        }
+        Ok(())
+    }
+}
 
 /// Codec specific format parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -86,6 +141,10 @@ pub struct FormatParams {
     /// When > 0, DONL fields are included in H.265 RTP packets to support
     /// out-of-order NAL unit decoding.
     pub sprop_max_don_diff: Option<u16>,
+
+    // LAKKO FORK: see `RedParams`.
+    /// Audio RED (RFC 2198) redundancy list.
+    pub red: Option<RedParams>,
 }
 
 impl FormatParams {
@@ -105,6 +164,11 @@ impl FormatParams {
             .collect();
 
         let mut p = FormatParams::default();
+
+        // LAKKO FORK: a `red` fmtp is a bare list (`111/111`), not key=value.
+        if !line.contains('=') {
+            p.red = RedParams::parse(line);
+        }
 
         for param in FormatParam::parse_pairs(key_vals) {
             p.set_param(&param);
@@ -128,6 +192,8 @@ impl FormatParams {
             Tier(v) => self.tier = Some(*v),
             H265ProfileTierLevel(v) => self.h265_profile_tier_level = Some(*v),
             SpropMaxDonDiff(v) => self.sprop_max_don_diff = Some(*v),
+            // LAKKO FORK: see `RedParams`.
+            Red(v) => self.red = Some(*v),
             Apt(_) => {}
             Unknown => {}
         }
@@ -173,6 +239,10 @@ impl FormatParams {
         }
         if let Some(v) = self.sprop_max_don_diff {
             r.push(SpropMaxDonDiff(v));
+        }
+        // LAKKO FORK: see `RedParams`.
+        if let Some(v) = self.red {
+            r.push(Red(v));
         }
 
         r

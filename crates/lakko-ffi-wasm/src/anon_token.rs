@@ -192,7 +192,10 @@ pub fn anon_token_header_name() -> String {
     TOKEN_HEADER.to_string()
 }
 
-/// Every context name, in wire order.
+/// Every context name, in wire order: `discovery-lookup`,
+/// `discovery-register`, `invite-consume`, `ds-knock`, `push-register`,
+/// `channel-subscribe`, `directory-search`, `vault-claim`, `blob-upload`,
+/// `blob-read`.
 #[wasm_bindgen(js_name = anonTokenContexts)]
 #[must_use]
 pub fn anon_token_contexts() -> Vec<String> {
@@ -325,7 +328,26 @@ mod tests {
             "invalid-window: epoch window must be at least one second"
         );
         assert_eq!(anon_token_header_name(), "x-lakko-anon-token");
-        assert_eq!(anon_token_contexts().len(), 7);
+        assert_eq!(
+            anon_token_contexts(),
+            [
+                "discovery-lookup",
+                "discovery-register",
+                "invite-consume",
+                "ds-knock",
+                "push-register",
+                "channel-subscribe",
+                "directory-search",
+                "vault-claim",
+                "blob-upload",
+                "blob-read",
+            ]
+        );
+        // Every listed name is one a request can be built for.
+        for name in anon_token_contexts() {
+            let req = AnonTokenRequest::new_inner(&name, 1, 1).unwrap();
+            assert_eq!(req.context(), name);
+        }
         assert_eq!(anon_token_max_batch(), 32);
         assert!(anon_token_is_live(9, 10));
         assert!(!anon_token_is_live(8, 10));

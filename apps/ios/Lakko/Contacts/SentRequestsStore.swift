@@ -46,6 +46,8 @@ public struct KeychainSentRequestsStore: SentRequestsStoring {
             clear(accountIdB64: accountIdB64)
             return
         }
+        let gate = try AccountStoreGate.enterUnlessWipedOrEnd(accountIdB64)
+        defer { gate.leave() }
         try KeychainJSONItem.write(
             SentRequests.encode(sent), service: Self.serviceTag, account: accountIdB64)
     }

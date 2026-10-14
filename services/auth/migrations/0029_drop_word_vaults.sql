@@ -2,7 +2,7 @@
 -- SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 -- The three-word check moved to the device (2026-10-02, superseding
--- ADR-0072 decision 5 as first written).
+-- ADR-0064 decision 5 as first written).
 --
 -- A device that holds an account's keys also holds the recovery phrase under
 -- its device key. It asks for three words at random positions and compares

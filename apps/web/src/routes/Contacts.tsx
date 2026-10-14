@@ -87,9 +87,13 @@ import { createUsernameCheck } from "../profile/username-field";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
 import { t } from "../l10n";
-import { DIRECT_CHAT_STAND_IN } from "../chat/group-title";
+import { conversationWithContact } from "../contacts/contact-conversation";
+import { conversationKindOf } from "../chat/conversation-kind";
+import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
+import { foundOneToOneWith } from "../contacts/found-one-to-one";
 import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
+import { screenAnchor } from "../ui/screen-anchor";
 
 export default function Contacts(): JSX.Element {
   const auth = useAuth();
@@ -252,22 +256,19 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   ): Promise<string> {
     // ADR-0060 — accepting a request writes the 1:1 Welcome with the
     // requester's `reply` grant; a contact we message later is reached with
-    // the grants we keep for them. ADR-0062 — a contact's conversation is a
-    // one-to-one for good.
-    const result = await props.client.startGroupWith(
-      requireIdentity(),
+    // the grants we keep for them.
+    const founded = await foundOneToOneWith({
+      client: props.client,
+      identity: requireIdentity(),
+      chats,
+      profiles,
+      contact,
       peerAccountId,
       peerPubkey,
-      "chat",
-      { replyGrantB64 },
-    );
-    // ADR-0048 — a 1x1 chat is labelled by the resolver (the peer's name);
-    // this label is only the fallback.
-    const active = chats.add({ label: DIRECT_CHAT_STAND_IN, group: result.group });
-    // ADR-0048 §2 — founding a group is joining it.
-    profiles.groupJoined(active.groupIdB64);
-    setAccepted(upsertAccepted({ ...contact, groupIdB64: active.groupIdB64 }));
-    return paths.chat(base64UrlEncodeNoPad(active.group.groupId));
+      replyGrantB64,
+    });
+    setAccepted(founded.accepted);
+    return paths.chat(base64UrlEncodeNoPad(founded.conversation.group.groupId));
   }
 
   async function onAccept(req: IncomingContactRequest): Promise<void> {
@@ -399,33 +400,17 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       return key !== null && (c.previousSignaturePubkeysB64 ?? []).includes(key);
     });
 
-  /** The registry row of the 1x1 chat with this contact, if this device
-   *  holds one: the id linked at accept when the registry still holds it,
-   *  else the two-member roster scan. A linked id whose chat is gone (deleted
-   *  here, or never present on this device) is NOT an address: seen live
-   *  2026-09-26 as a contact whose Message opened "Conversation not found". */
-  const groupWith = (c: AcceptedContact): ActiveGroup | undefined => {
-    if (c.groupIdB64 !== undefined) {
-      const linked = chats.get(c.groupIdB64);
-      if (linked !== undefined) return linked;
-    }
-    const own = chats.identity();
-    const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
-    for (const g of chats.groups()) {
-      let keys: string[] = [];
-      try {
-        keys = (g.group.members() as Array<{ signaturePublicKey: Uint8Array }>).map((m) =>
-          base64Encode(m.signaturePublicKey),
-        );
-      } catch {
-        continue;
-      }
-      if (keys.length === 2 && keys.includes(c.signaturePubkeyB64) && keys.includes(ownB64 ?? "")) {
-        return g;
-      }
-    }
-    return undefined;
-  };
+  /** The registry row of the one-to-one with this contact, if this device
+   *  holds one. The rule is `contacts/contact-conversation.ts`, shared with
+   *  the call screen's `Invite contacts`. */
+  const groupWith = (c: AcceptedContact): ActiveGroup | undefined =>
+    conversationWithContact({
+      contact: c,
+      conversations: chats.groups(),
+      ownKeyB64: ownPersonKeyB64(chats.identity()),
+      peopleOf: (g) => personKeysOf(g.group),
+      isOneToOne: (g) => conversationKindOf(g.group) === "chat",
+    });
 
   /** The 1x1 chat with this contact, if this device holds one - `null`
    *  otherwise, so Message starts a chat instead of opening a dead link. */
@@ -481,7 +466,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       return;
     }
     setDetailError(null);
-    setDetailBusy(true);
+    const stillOn = beginDetailAction();
     try {
       // ADR-0073 R.5 — every group of the conversation, the head last.
       const view = lineageView.resolve(g.groupIdB64);
@@ -499,18 +484,51 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       // Nothing held for a conversation that is gone is ever sent.
       const conversationHex = view?.conversationHex ?? syncGroupIdHex(g.group.groupId);
       if (heldSends.take(conversationHex).length > 0) void persistHeldSends(s.account.accountId);
-      clearSelection();
+      // `clearSelection` navigates and deselects; only for a person still on
+      // THIS contact.
+      if (stillOn()) clearSelection();
     } catch (err) {
-      setDetailError(contactsErrorText(err, "chat.error.delete_chat", chatLabelOf(c)));
+      if (stillOn()) setDetailError(contactsErrorText(err, "chat.error.delete_chat", chatLabelOf(c)));
     } finally {
-      setDetailBusy(false);
+      if (stillOn()) setDetailBusy(false);
     }
   }
 
   // ---- detail actions --------------------------------------------
   const [detailBusy, setDetailBusy] = createSignal(false);
   const [detailError, setDetailError] = createLiveText();
-  createEffect(on(selectedKey, () => setDetailError(null), { defer: true }));
+  /**
+   * The busy flag and the error line are ONE pair for the whole pane, and the
+   * pane shows whichever contact is selected: picking another contact from
+   * the list changes neither the component nor the URL. So an action belongs
+   * to the contact it was started on. `beginDetailAction` marks the pane
+   * busy and returns "is that contact still the one shown, and has no later
+   * action replaced this one"; an action that is no longer current reports
+   * nothing - its late failure is not shown under another person's name, and
+   * it never deselects the person now open. What it did (the chat deleted or
+   * created) stands either way.
+   */
+  let detailAction = 0;
+  function beginDetailAction(): () => boolean {
+    const mine = ++detailAction;
+    const forKey = selectedKey();
+    const here = screenAnchor(location);
+    setDetailBusy(true);
+    return () => mine === detailAction && selectedKey() === forKey && here();
+  }
+  createEffect(
+    on(
+      selectedKey,
+      () => {
+        // Another contact: the pane starts clean, whatever is still running
+        // for the previous one.
+        detailAction += 1;
+        setDetailBusy(false);
+        setDetailError(null);
+      },
+      { defer: true },
+    ),
+  );
 
   /** Message: open the chat, or create it first when this device has none
    *  and the contact's account id is known. */
@@ -521,25 +539,29 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       return;
     }
     if (c.accountIdHex === undefined) return;
-    setDetailBusy(true);
     setDetailError(null);
+    // The chat is created and recorded whether or not the person waits; only
+    // opening it is addressed to this screen and this contact.
+    const stillOn = beginDetailAction();
     try {
       const href = await foundChatWith(
         c,
         hexToBytes(c.accountIdHex),
         base64Decode(c.signaturePubkeyB64),
       );
-      navigate(href);
+      if (stillOn()) navigate(href);
     } catch (err) {
-      setDetailError(
-        contactsErrorText(
-          err,
-          "contacts.error.start_chat",
-          memberNameOf(profiles.resolve(c.signaturePubkeyB64)),
-        ),
-      );
+      if (stillOn()) {
+        setDetailError(
+          contactsErrorText(
+            err,
+            "contacts.error.start_chat",
+            memberNameOf(profiles.resolve(c.signaturePubkeyB64)),
+          ),
+        );
+      }
     } finally {
-      setDetailBusy(false);
+      if (stillOn()) setDetailBusy(false);
     }
   }
 

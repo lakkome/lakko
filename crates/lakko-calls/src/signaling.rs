@@ -36,6 +36,13 @@ pub type CallId = [u8; 16];
 /// versions. For [`SignalingBody::GroupLeave`] only `HungUp`,
 /// `TimedOut`, and `Error` are meaningful — `Busy` /
 /// `Declined` are 1×1-only and reserved.
+///
+/// `EndedForAll` is carried only by [`SignalingBody::End`] and only for a
+/// group or link call: the person who started the call ended it for
+/// everyone in it. The body states an intent and nothing about authority;
+/// a receiver acts on it only when the MLS-authenticated sender is the
+/// call's starter (`docs/ux/calls.md`), and treats it as a plain end
+/// otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndReason {
     /// Either side tore down (regular hangup).
@@ -48,6 +55,8 @@ pub enum EndReason {
     TimedOut = 3,
     /// Unrecoverable error mid-call.
     Error = 4,
+    /// The call's starter ended it for everyone in it.
+    EndedForAll = 5,
 }
 
 impl EndReason {
@@ -57,6 +66,7 @@ impl EndReason {
             2 => Self::Declined,
             3 => Self::TimedOut,
             4 => Self::Error,
+            5 => Self::EndedForAll,
             _ => Self::HungUp,
         }
     }
@@ -438,6 +448,7 @@ mod tests {
             EndReason::Declined,
             EndReason::TimedOut,
             EndReason::Error,
+            EndReason::EndedForAll,
         ] {
             let body = SignalingBody::End {
                 call_id: fixture_call_id(),

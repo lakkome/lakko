@@ -177,6 +177,11 @@ public struct KeychainRecallRecordStore: RecallRecordStoring {
 
     public func put(_ record: RecallRecord) throws {
         guard record.isWellFormed else { throw RecallRecordStoreError.malformed }
+        // Kept through the staged wipe; refused only after a full one.
+        guard let gate = AccountStoreGate.enterUnlessFullyWiped(record.accountIdB64) else {
+            throw AccountStoreGate.Sealed()
+        }
+        defer { gate.leave() }
         let data = try JSONEncoder().encode(record)
         clear(accountIdB64: record.accountIdB64)
         let query: [CFString: Any] = [

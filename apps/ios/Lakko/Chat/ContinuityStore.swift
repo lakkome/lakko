@@ -123,6 +123,9 @@ public final class ContinuityStore {
     private func save(_ row: Row) {
         // With no account bound nothing is kept: the facts are per call then.
         guard let storageKey, let raw = Self.encode(row) else { return }
+        guard let gate = AccountStoreGate.enterUnlessWiped(
+            ownerAccountIdB64 ?? AcceptedContactsStore.boundAccountIdB64 ?? "") else { return }
+        defer { gate.leave() }
         defaults.set(raw, forKey: storageKey)
     }
 

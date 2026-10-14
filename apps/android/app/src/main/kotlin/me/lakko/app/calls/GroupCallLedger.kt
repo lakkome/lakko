@@ -96,6 +96,15 @@ internal data class GroupCallRecord(
      */
     val joinedMembers: Map<String, GroupCallMember>,
     val lastActivityMs: Long,
+    /**
+     * The person (base64 account key) whose device announced the call,
+     * resolved from the MLS sender of the `GroupCallStart` at receipt (C-68);
+     * for a call this device started, its own person key. `null` when it could
+     * not be resolved, and for a record stored before it was recorded. Only
+     * this person may end the call for everyone (`docs/ux/calls.md` section
+     * 4.1.2), and an unknown starter can never do so.
+     */
+    val initiatorPersonKey: String? = null,
 )
 
 /** One joined device of a [GroupCallRecord]. */
@@ -117,6 +126,9 @@ internal sealed interface GroupCallSignal {
         val createdAtMs: Long,
         val audio: Boolean,
         val video: Boolean,
+        /** The sender's person key resolved at receipt; `null` until attached
+         *  with [withSender]. Never the leaf the body names. */
+        val initiatorPersonKey: String? = null,
     ) : GroupCallSignal
 
     /**
@@ -146,11 +158,16 @@ internal sealed interface GroupCallSignal {
     data class End(override val callIdHex: String) : GroupCallSignal
 }
 
-/** [this] with the sender identity attached to a Join / Leave; Start and End carry none. */
+/**
+ * [this] with the sender identity attached: the device and the person on a
+ * Join / Leave, the person on a Start (the device key when the person did not
+ * resolve, so the same device is still recognised). End carries none.
+ */
 internal fun GroupCallSignal.withSender(memberKey: String?, personKey: String?): GroupCallSignal = when (this) {
     is GroupCallSignal.Join -> copy(memberKey = memberKey, personKey = personKey)
     is GroupCallSignal.Leave -> copy(memberKey = memberKey, personKey = personKey)
-    is GroupCallSignal.Start, is GroupCallSignal.End -> this
+    is GroupCallSignal.Start -> copy(initiatorPersonKey = (personKey ?: memberKey)?.takeIf { it.isNotEmpty() })
+    is GroupCallSignal.End -> this
 }
 
 /** Where a decoded call-signaling body goes. */
@@ -358,6 +375,7 @@ internal fun reduceGroupCall(
             startedAtMs = minOf(signal.createdAtMs, observedAtMs),
             joinedMembers = emptyMap(),
             lastActivityMs = observedAtMs,
+            initiatorPersonKey = signal.initiatorPersonKey,
         )
         when {
             current == null -> candidate

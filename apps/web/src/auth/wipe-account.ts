@@ -36,6 +36,12 @@
  * - the app-shell cache of the service worker: code, no account data.
  */
 import { base64Decode, base64UrlEncodeNoPad } from "./account-id";
+import {
+  WIPED_MARKER_TTL_MS,
+  finishAccountWipe,
+  pruneWipedMarker,
+  sealAccountStoresForWipe,
+} from "./account-store-gate";
 import { deleteDeviceKey } from "./key-store";
 import { deleteSessionToken } from "./session-token-store";
 import { deleteExportKey } from "./export-key-store";
@@ -43,6 +49,7 @@ import { deleteDeviceIdentitySeed } from "./device-identity-store";
 import { deleteAccountIdentitySeed } from "./account-identity-seed-store";
 import { deleteKeyRotationState } from "./key-rotation-store";
 import { clearRotatedNotice, clearRotation } from "../devices/key-rotation";
+import { clearGuestAccount, guestPhraseKey } from "./guest-account";
 import { clearSignupPhraseOwed } from "./phrase-gate";
 import { clearProtectionFacts } from "./protect/account-protection";
 import { clearNoticeStores } from "./protect/notices";
@@ -115,6 +122,8 @@ import { clearRemovals } from "../devices/removal";
 import { deleteRecallRecord } from "./recall-record";
 import { deleteFloor } from "../backup/floor-store";
 import { clearAutoBackupState } from "../backup/auto-backup";
+import { clearRestoredKnownGroups } from "../backup/restored-known-groups";
+import { clearBackupRestoreOwed } from "../backup/restore-owed";
 import { clearGroupRoutingForAccount } from "../push/group-routing-store";
 import { clearSupersededMirrorForAccount } from "../push/superseded-mirror";
 import { deleteAnonTokensForAccount } from "../tokens/anon-token-store";
@@ -154,6 +163,14 @@ function urlKeyOf(accountIdB64: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Every form `accountIdB64`'s rows are filed under: the standard base64
+ *  the auth state carries and the base64url two stores use. What the store
+ *  gate (`account-store-gate.ts`) seals and opens. */
+export function accountStoreIds(accountIdB64: string): string[] {
+  const urlKey = urlKeyOf(accountIdB64);
+  return urlKey === null || urlKey === accountIdB64 ? [accountIdB64] : [accountIdB64, urlKey];
 }
 
 function removeLocal(key: string): void {
@@ -225,6 +242,9 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     },
     { name: "session-token", run: () => deleteSessionToken(accountIdB64) },
     { name: "backup-phrase", run: () => deletePhrase(accountIdB64) },
+    // A guest account's phrase is kept under a key of its own
+    // (`guest-account.ts`), so it has a step of its own.
+    { name: "guest-phrase", run: () => deletePhrase(guestPhraseKey(accountIdB64)) },
     { name: "backup-floor", run: () => deleteFloor(accountIdB64) },
     { name: "export-key", run: () => deleteExportKey(accountIdB64) },
     { name: "device-identity-seed", run: () => deleteDeviceIdentitySeed(accountIdB64) },
@@ -286,6 +306,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       name: "predecessor-mailbox-adopted",
       run: () => removeLocal(predecessorAdoptionStorageKey(accountIdB64)),
     },
+    { name: "guest-account", run: () => clearGuestAccount(storage, accountIdB64) },
     { name: "pending-requests", run: () => clearObservationsForAccount(accountIdB64) },
     { name: "unapplied-requests", run: () => clearUnappliedForAccount(accountIdB64) },
     { name: "own-requests", run: () => clearOwnRequestsForAccount(accountIdB64) },
@@ -336,6 +357,10 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "ds-root-handover", run: () => clearOwedHandovers(accountIdB64) },
     { name: "ds-root-held", run: () => clearRootHeldAll(accountIdB64) },
     { name: "auto-backup", run: () => clearAutoBackupState(accountIdB64) },
+    // The conversations a restored backup named that this device has not
+    // joined yet, and the "backup not consulted yet" flag (2026-10-02).
+    { name: "restored-known-groups", run: () => clearRestoredKnownGroups(accountIdB64) },
+    { name: "backup-restore-owed", run: () => clearBackupRestoreOwed(accountIdB64) },
     { name: "knock-cursors", run: () => clearKnockCursorsForAccount(accountIdB64) },
     { name: "known-group-ids", run: () => clearKnownGroupIds(accountIdB64) },
     { name: "channel-rotation", run: () => clearRotationStatesForAccount(accountIdB64) },
@@ -372,7 +397,7 @@ export function stagedWipeSteps(accountIdB64: string): WipeStep[] {
  * throws; the report names the steps that failed (each is logged too).
  */
 export function wipeAccountLocalData(accountIdB64: string): Promise<WipeReport> {
-  return runWipe(accountWipeSteps(accountIdB64));
+  return runWipe(accountIdB64, accountWipeSteps(accountIdB64));
 }
 
 /**
@@ -382,11 +407,33 @@ export function wipeAccountLocalData(accountIdB64: string): Promise<WipeReport> 
  * account seed it is made from is among what this deletes). Never throws.
  */
 export function wipeAccountStaged(accountIdB64: string): Promise<WipeReport> {
-  return runWipe(stagedWipeSteps(accountIdB64));
+  return runWipe(accountIdB64, stagedWipeSteps(accountIdB64));
 }
 
-async function runWipe(steps: readonly WipeStep[]): Promise<WipeReport> {
+async function runWipe(accountIdB64: string, steps: readonly WipeStep[]): Promise<WipeReport> {
   const failed: string[] = [];
+  // Seal FIRST: from here no store accepts a write of this account's data,
+  // in this tab or another, so a write still suspended on an `await` cannot
+  // put a row back behind a delete below. A write whose transaction already
+  // exists is ordered ahead of the delete by IndexedDB itself. (The staged
+  // wipe's caller wrote the recall record before this ran.)
+  const ids = accountStoreIds(accountIdB64);
+  sealAccountStoresForWipe(ids);
+  try {
+    await runWipeSteps(steps, failed);
+  } finally {
+    finishAccountWipe(ids);
+    // The cross-tab marker names the account; it goes once every open tab
+    // has heard of the wipe. A page that closes first leaves it to the next
+    // page start (`installAccountStorageGate`).
+    if (typeof setTimeout === "function") {
+      setTimeout(() => pruneWipedMarker(), WIPED_MARKER_TTL_MS + 1_000);
+    }
+  }
+  return { failed };
+}
+
+async function runWipeSteps(steps: readonly WipeStep[], failed: string[]): Promise<void> {
   for (const step of steps) {
     try {
       await step.run();
@@ -398,5 +445,4 @@ async function runWipe(steps: readonly WipeStep[]): Promise<WipeReport> {
       );
     }
   }
-  return { failed };
 }

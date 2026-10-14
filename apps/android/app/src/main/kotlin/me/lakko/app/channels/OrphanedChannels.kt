@@ -38,7 +38,7 @@ public class OrphanedChannelsStore(private val prefs: SharedPreferences) {
         }
 
     public fun save(accountIdB64: String, channelIds: Set<String>) {
-        prefs.edit().putStringSet(key(accountIdB64), channelIds).apply()
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) { prefs.edit().putStringSet(key(accountIdB64), channelIds).apply() }
     }
 
     /** Add [channelIds] to the account's set. */

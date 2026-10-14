@@ -78,6 +78,8 @@ public enum ContinuityMirror {
         accountIdB64: String?, row: Row, defaults: UserDefaults? = SharedStorage.sharedDefaults()
     ) {
         guard let defaults, let accountIdB64 else { return }
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         if read(accountIdB64: accountIdB64, defaults: defaults) == row,
            defaults.object(forKey: key(accountIdB64)) != nil { return }
         guard let raw = try? JSONEncoder().encode(row) else { return }

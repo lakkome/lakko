@@ -88,7 +88,9 @@ public class RestoreIdentityPromptViewModel(
             } catch (_: me.lakko.app.auth.AuthNetworkError) {
                 mutableState.update { it.copy(busy = false, error = UiText("common.error.offline")) }
             } catch (err: Throwable) {
-                if (err is kotlinx.coroutines.CancellationException) throw err
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update { it.copy(busy = false, error = UiText("auth.passkey.error.generic")) }
             }
         }
@@ -156,6 +158,9 @@ public class RestoreIdentityPromptViewModel(
                     it.copy(busy = false, error = err.text ?: UiText("restore_identity.error.generic"))
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(
                         busy = false,
@@ -209,7 +214,9 @@ public class RestoreIdentityPromptViewModel(
                 // Repository flipped to SaveFreshPhrase — the warning is over.
                 mutableState.update { it.copy(busy = false, error = null) }
             } catch (err: Throwable) {
-                if (err is kotlinx.coroutines.CancellationException) throw err
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 val failure = resetFailureOf(err)
                 if (failure == ResetFailure.ProofRequired) onProofRequired()
                 mutableState.update { afterResetFailure(it, failure) }

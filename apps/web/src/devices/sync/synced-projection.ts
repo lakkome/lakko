@@ -176,3 +176,70 @@ export function buildFolderChangeSet(
 export function mergeRestoredFold(local: WasmSyncedState, backup: WasmSyncedState): boolean {
   return local.mergeFrom(backup);
 }
+
+// ---------- reading a persisted fold ---------------------------------------
+
+/** The part of the wasm core that reads a persisted fold. */
+export type SyncedStateWasm = Pick<Wasm, "SyncedState">;
+
+/**
+ * Open a persisted fold (`SyncedState.toBytes()`), or `null` when this build
+ * refuses the bytes.
+ *
+ * The core reads exactly one encoding version and refuses every other (the
+ * saved-messages register of ADR-0065 made it version 2; a version 1 blob is
+ * refused, with no migration). A refused blob is "no synced state held": the
+ * caller carries on with an empty fold, the journal and the other devices'
+ * growth re-send refill it, and the stored row is replaced by the next write.
+ * It is never a reason to fail a sign-in or a restore. `what` names the blob
+ * in the one log line a refusal writes.
+ */
+export function openPersistedFold(
+  wasm: SyncedStateWasm,
+  bytes: Uint8Array,
+  what: string,
+): WasmSyncedState | null {
+  try {
+    return wasm.SyncedState.fromBytes(bytes);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `${what} synced state unreadable; treated as none held:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  }
+}
+
+/**
+ * The bytes a restore writes to this device's row (ADR-0058 section 5.2):
+ * the stored fold with the backup's fold merged into it.
+ *
+ * - `null` when the backup's blob is refused: the backup holds no synced
+ *   state this build can read, so nothing is written and the stored row is
+ *   left as it is.
+ * - the backup's bytes when nothing is stored, or when the stored row is
+ *   refused (it holds nothing to keep).
+ * - otherwise the merge, the newer register from each side.
+ */
+export function mergeRestoredFoldBytes(
+  wasm: SyncedStateWasm,
+  localBytes: Uint8Array | null,
+  backupBytes: Uint8Array,
+): Uint8Array | null {
+  const backupFold = openPersistedFold(wasm, backupBytes, "backup");
+  if (backupFold === null) return null;
+  try {
+    if (localBytes === null) return backupBytes;
+    const localFold = openPersistedFold(wasm, localBytes, "stored");
+    if (localFold === null) return backupBytes;
+    try {
+      mergeRestoredFold(localFold, backupFold);
+      return localFold.toBytes();
+    } finally {
+      localFold.free();
+    }
+  } finally {
+    backupFold.free();
+  }
+}

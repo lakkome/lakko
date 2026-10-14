@@ -128,6 +128,8 @@ struct SubscribersPanel: View {
             )
             error = nil
         } catch {
+            // The panel was left mid-load: not a failure of the list.
+            if Cancellation.endedByCancellation(error) { return }
             NSLog("Channels: subscriber list failed: %@", String(describing: error))
             self.error = .key("channels.subscribers.error.load")
         }

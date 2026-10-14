@@ -31,7 +31,6 @@ import { A, useNavigate } from "@solidjs/router";
 import { useCallHost } from "../calls/CallHostContext";
 import { quietCallKindLabel, quietCallOfferFor } from "../calls/quiet-call-offer";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
-import { restoredKind } from "../auth/restore-marker";
 import { personKeysOf } from "./person-key";
 import { PeopleSearch } from "../search/PeopleSearch";
 import { rowHasUnread, type ConversationRow } from "./conversation-list";
@@ -45,7 +44,7 @@ import { useChats, type ActiveGroup } from "./ChatContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import type { ChatListSummary } from "./background-log";
-import { pendingKnownGroups } from "../devices/state-bundle";
+import { showsSynchronizing } from "./synchronizing";
 import { paths } from "../routes/paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
@@ -328,17 +327,13 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     navigate(paths.channelSubscribe(channelIdHex), { state: { handle } });
   };
 
-  /** ADR-0050 — a device that landed through a recovery route (three words,
-   *  the phrase, another device, a passkey) holds the identity and is admitted
-   *  to the account's chats by its other devices or its contacts. Until the
-   *  first chat arrives there is exactly one thing to say. */
-  const synchronizing = (): boolean => {
-    const joined = chats.groups().map((g) => g.groupIdB64);
-    // Groups the pairing bundle named that this device has not joined yet
-    // (ADR-0050 section 2.9); the stored list clears itself once all are in.
-    if (pendingKnownGroups(joined) > 0) return true;
-    return restoredKind() !== null && joined.length === 0;
-  };
+  /** ADR-0050 section 2.9 — a device added through another device was
+   *  handed, in the pairing bundle, the groups that device holds, and is
+   *  being admitted to them. While any is still missing there is exactly one
+   *  thing to say (`synchronizing.ts`). A device restored from the phrase
+   *  with no other device alive shows no such label. */
+  const synchronizing = (): boolean =>
+    showsSynchronizing(chats.groups().map((g) => g.groupIdB64));
 
   async function toggleFlag(g: ActiveGroup, field: Flag): Promise<void> {
     // Inside a folder, Pin acts on the folder's own pins (UX 2.3); the
@@ -413,9 +408,10 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       <div class="lk-pane-head">
         <h1>{copy().title()}</h1>
         {/* ADR-0050 / docs/ux/second-device.md section 2: one label while a
-            device that landed through a recovery route is still being admitted
-            to the account's chats. Chats appear as they arrive; the label goes
-            when the first one does. Never a counter, never a per-chat row. */}
+            device added through another device is still being admitted to the
+            groups the pairing bundle named. Chats appear as they arrive; the
+            label goes when the last of them has. Never a counter, never a
+            per-chat row. */}
         <Show when={synchronizing()}>
           <span class="lk-pane-status" role="status">
             {t("chats.synchronizing")}

@@ -22,8 +22,10 @@ import uniffi.lakko_ffi_uniffi.callSafetyNumber
  *     E2EE pill flips active on `CONNECTED`, since the SFrame seed is
  *     armed at connect),
  *   * `welcome` / `peer-joined` / `peer-left` -> the roster,
- *   * a remote video track -> the sole-remote tile (per-tile N-way video
- *     is a follow-up; audio plays out automatically).
+ *   * a remote video track -> its peer's tile, or that peer's middle /
+ *     light map (`LightStream.kt`); audio plays out automatically,
+ *   * `video-given` -> what each tile may show, and the tiles' reports ->
+ *     the session's `video-wants`.
  *
  * The caller owns deriving the inputs (the JWT via [CallJwtClient], the
  * seed via `Group.exportSecret("lakko/call/v1", callId, 32)`, the leaf
@@ -41,13 +43,17 @@ class SfuCallUi(
     scope: CoroutineScope,
     private val ui: CallUiState,
     localDisplayName: String = "",
+    /** The name on a remote tile (`CallTileName.kt`), empty while the peer is
+     *  unnamed. The default knows nobody; it never shows the SFU pseudonym,
+     *  which is a piece of the account id. */
     resolveDisplayName: (peerId: String, accountPseudonym: String, peerTag: String) -> String =
-        { _, pseudonym, _ ->
-            pseudonym.take(8)
-        },
+        { _, _, _ -> "" },
 ) {
     /** The underlying session (for direct control if needed). */
     val session: SfuCallSession
+
+    /** Reads who is speaking while the call is connected. */
+    private val speaking: SpeakingMonitor
 
     private val _videoPublishState =
         MutableStateFlow(SfuCallSession.VideoPublishState.OFF)
@@ -85,11 +91,28 @@ class SfuCallUi(
         // synchronisation is needed and per-call lifetime handles teardown.
         val lastKnownCameraOn = mutableMapOf<String, Boolean>()
 
+        // Who is speaking (`docs/ux/group-call-grid.md` section 7.3), read on
+        // this device from the session's own connection. The session is
+        // assigned last, so the reader goes through a holder.
+        var sessionRef: SfuCallSession? = null
+        val monitor = SpeakingMonitor(
+            scope = scope,
+            ui = ui,
+            sample = { sessionRef?.sampleAudioLevels() },
+        )
+        speaking = monitor
+
         val callbacks = SfuCallSession.Callbacks(
             onStateChange = { state ->
                 when (state) {
-                    SfuCallSession.State.CONNECTING ->
+                    SfuCallSession.State.CONNECTING -> {
                         ui.setPhase(CallUiState.CallPhase.Connecting)
+                        // The tiles of this call say which picture of a
+                        // person they show (`VideoWants.kt`).
+                        bindTileVideoQuality(ui) { tile, peerId, quality ->
+                            sessionRef?.reportTileVideoQuality(tile, peerId, quality)
+                        }
+                    }
                     SfuCallSession.State.CONNECTED -> {
                         ui.setPhase(CallUiState.CallPhase.Connected)
                         // SFrame is armed at connect, so media is E2E
@@ -102,10 +125,15 @@ class SfuCallUi(
                                 shortFingerprint = safetyNumber,
                             )
                         )
+                        monitor.start()
                     }
                     SfuCallSession.State.FAILED,
-                    SfuCallSession.State.CLOSED ->
+                    SfuCallSession.State.CLOSED -> {
+                        monitor.stop()
+                        // The call's tracks are gone with its connection.
+                        ui.clearRemoteCopyVideoTracks()
                         ui.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
+                    }
                     SfuCallSession.State.IDLE -> Unit
                 }
             },
@@ -134,33 +162,31 @@ class SfuCallUi(
                 // Drop the peer's video track first so its tile stops
                 // rendering a frozen last frame, then remove the roster entry.
                 ui.setRemoteVideoTrack(null, id)
+                // participantLeft also drops the peer's light companion.
                 ui.participantLeft(id)
                 lastKnownCameraOn.remove(id)
             },
             onRemoteVideoTrack = { track, streamId ->
-                // N-way remote video — key the track on the source peer's
-                // roster id (`peer-<streamId>`; the MSID stream id == the
-                // source peer id per the SFU contract) so each tile renders
-                // its own peer, then set that participant's camera flag so the
-                // tile's video surface (gated on `camOn`) renders — the same
-                // shape as the web `setParticipantCamera`.
+                // N-way remote video. The MSID stream id is the source peer
+                // id for a peer's main track, that id plus `~mid` for its
+                // middle track and plus `~light` for its light companion
+                // (`LightStream.kt`).
+                //
+                // The main track is keyed on the peer's roster id
+                // (`peer-<peerId>`) so each tile renders its own peer, and
+                // sets that participant's camera flag so the tile's video
+                // surface (gated on `camOn`) renders.
                 //
                 // Join-race guard: a newcomer subscribing to an already
                 // camera-muted peer still receives that peer's present-but-
                 // disabled video track, so this path fires even for a muted
                 // peer and would wrongly flip `camOn` back on. onRemoteMediaState
                 // is authoritative and records the true state in
-                // [lastKnownCameraOn]; here we DEFER to it — a track arrival for
-                // a peer we already know is muted keeps it off, an unknown peer
-                // defaults on, a null track is off. Steady-state mute/unmute is
-                // unaffected (it drives onRemoteMediaState directly).
-                streamId?.let { id ->
-                    val participantId = participantId(id)
-                    ui.setRemoteVideoTrack(track, participantId)
-                    val on =
-                        if (track != null) lastKnownCameraOn[participantId] ?: true else false
-                    ui.setParticipantCamera(participantId, on)
-                }
+                // [lastKnownCameraOn]; the main track DEFERS to it.
+                //
+                // A middle track or a companion goes to its own map and
+                // nothing else: no participant, no tile, no camera flag.
+                applyRemoteVideoTrack(ui, track, streamId, lastKnownCameraOn)
             },
             onLocalVideoTrack = { track ->
                 // Local camera (video call, or a mid-call publishVideo) ->
@@ -202,6 +228,10 @@ class SfuCallUi(
                 lastKnownCameraOn[id] = cameraOn
                 ui.setParticipantCamera(id, cameraOn)
             },
+            onCameraFacing = { front -> ui.setCameraFrontFacing(front) },
+            // What the SFU says it gives of each person (`VideoGiven.kt`):
+            // a tile shows the lower of that and what it asked for.
+            onVideoGiven = { given -> applyVideoGiven(ui, given) },
             onServerError = { _, _ -> },
         )
         session = SfuCallSession(
@@ -210,6 +240,7 @@ class SfuCallUi(
             scope = scope,
             callbacks = callbacks,
         )
+        sessionRef = session
     }
 
     /** Open the SFU connection + publish (delegates to the session). */
@@ -220,6 +251,7 @@ class SfuCallUi(
     /** Tear down (the session drives the UI to `Ended` via its state
      *  callback). Idempotent. */
     fun hangUp() {
+        speaking.stop()
         session.hangUp()
     }
 
@@ -248,6 +280,12 @@ class SfuCallUi(
         ui.setCamera(on)
     }
 
+    /** Use the camera the person chose in the call's Settings sheet, or the
+     *  default one for `null` ([SfuCallSession.selectCamera]). */
+    fun selectCamera(cameraName: String?) {
+        session.selectCamera(cameraName)
+    }
+
     /**
      * ADR-0032 piece B — turn the camera ON mid-call (a group call that
      * started audio-only). Acquires the camera, SFrame-seals the new sender,
@@ -263,7 +301,7 @@ class SfuCallUi(
         /** The roster id of a remote peer (`peer-<peerId>`); the MSID stream
          *  id == the source peer id per the SFU contract. Internal so the
          *  host's name resolver can address the same tile. */
-        internal fun participantId(peerId: String): String = "peer-$peerId"
+        internal fun participantId(peerId: String): String = remoteParticipantId(peerId)
 
         fun localParticipant(
             name: String,
@@ -276,10 +314,8 @@ class SfuCallUi(
                 isLocal = true,
                 micOn = audio,
                 camOn = video,
-                handRaised = false,
                 quality = CallUiState.QualityTier.Good,
                 speaking = false,
-                screenSharing = false,
             )
 
         fun remoteParticipant(
@@ -292,10 +328,8 @@ class SfuCallUi(
                 isLocal = false,
                 micOn = true,
                 camOn = false,
-                handRaised = false,
                 quality = CallUiState.QualityTier.Good,
                 speaking = false,
-                screenSharing = false,
             )
     }
 }

@@ -24,6 +24,7 @@
  * the account wipe. Without a device key or without IndexedDB every read is
  * empty and every write a no-op: the re-send then carries no intro.
  */
+import { accountStoresWritable } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 
 const DB_NAME = "lakko-sent-request-intros";
@@ -164,6 +165,8 @@ async function write(accountIdB64: string, key: CryptoKey, intros: SentIntros): 
     const blob = new Uint8Array(IV_LEN + ct.length);
     blob.set(iv, 0);
     blob.set(ct, IV_LEN);
+    // A wiped account takes no late write (`auth/account-store-gate.ts`).
+    if (!accountStoresWritable(accountIdB64)) return;
     const tx = db.transaction(STORE, "readwrite");
     const row: PersistedRow = { accountId: accountIdB64, ciphertext: blob };
     tx.objectStore(STORE).put(row);

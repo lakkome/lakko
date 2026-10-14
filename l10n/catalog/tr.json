@@ -255,7 +255,7 @@
       "status": "machine"
     },
     "backup.stale_restore.consequence": {
-      "text": "Bunu geri yüklemek hesabınızı daha eski bir duruma döndürür: mesajlar eskir ve kaldırdığınız cihazlar yeniden görünebilir.",
+      "text": "Geri yüklemek daha eski bir kişi listesini ve daha eski ayarları geri getirir. Sonradan yaptığınız değişiklikler kaybolur.",
       "status": "machine"
     },
     "backup.stale_restore.reason.anchor_unreadable": {
@@ -447,7 +447,7 @@
       "status": "machine"
     },
     "call.control.mute": {
-      "text": "Sessiz",
+      "text": "Mikrofon",
       "status": "machine"
     },
     "call.control.mute_a11y": {
@@ -462,12 +462,20 @@
       "text": "Katılımcıları gizle",
       "status": "machine"
     },
+    "call.control.participants_menu_a11y": {
+      "text": "Katılımcılar ve davetler",
+      "status": "machine"
+    },
     "call.control.participants_show_a11y": {
       "text": "Katılımcıları göster",
       "status": "machine"
     },
     "call.control.raise_hand": {
       "text": "El kaldır",
+      "status": "machine"
+    },
+    "call.control.settings": {
+      "text": "Ayarlar",
       "status": "machine"
     },
     "call.control.share_screen": {
@@ -550,6 +558,26 @@
       "text": "Bu arama şifreli",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "Aramayı bitirme seçenekleri",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "Aramayı herkes için bitir",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "Aramadan ayrıl",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "Arama herkes için sonlandırıldı",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} aramayı herkes için bitirdi",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "Arama şifrelemesi kurulamadı, bu yüzden arama başlamadı.",
       "status": "machine"
@@ -594,6 +622,18 @@
       "text": "Kamera: {name}",
       "status": "machine"
     },
+    "call.grid.next_a11y": {
+      "text": "Sonraki sayfa",
+      "status": "machine"
+    },
+    "call.grid.page_a11y": {
+      "text": "Sayfa {page} / {total}",
+      "status": "machine"
+    },
+    "call.grid.prev_a11y": {
+      "text": "Önceki sayfa",
+      "status": "machine"
+    },
     "call.group_banner.join_video": {
       "text": "Görüntülü",
       "status": "machine"
@@ -608,6 +648,10 @@
     },
     "call.guest.default_name": {
       "text": "Misafir",
+      "status": "machine"
+    },
+    "call.guest.note": {
+      "text": "Misafir olarak katılıyorsunuz. Hesap gerekmez.",
       "status": "machine"
     },
     "call.guest.working.title": {
@@ -710,8 +754,28 @@
       "text": "Arama bağlantısı",
       "status": "machine"
     },
+    "call.invite.menu_a11y": {
+      "text": "Bu aramaya davet et",
+      "status": "machine"
+    },
+    "call.invite.menu_contact": {
+      "text": "Kişileri davet et",
+      "status": "machine"
+    },
+    "call.invite.menu_copy": {
+      "text": "Davet bağlantısını kopyala",
+      "status": "machine"
+    },
     "call.invite.minting": {
       "text": "Bu arama için bir bağlantı hazırlanıyor. Birkaç saniye sürer.",
+      "status": "machine"
+    },
+    "call.invite.picker_empty": {
+      "text": "Henüz kişi yok. Davet bağlantısını kopyalayıp başka bir yolla gönderin.",
+      "status": "machine"
+    },
+    "call.invite.picker_title": {
+      "text": "Aramaya davet et",
       "status": "machine"
     },
     "call.invite.ready": {
@@ -720,6 +784,18 @@
     },
     "call.invite.retry_a11y": {
       "text": "Davet bağlantısını yeniden hazırlamayı dene",
+      "status": "machine"
+    },
+    "call.invite.row_invited": {
+      "text": "Davet edildi",
+      "status": "machine"
+    },
+    "call.invite.send_failed": {
+      "text": "Davet gönderilemedi. Yeniden deneyin.",
+      "status": "machine"
+    },
+    "call.invite.sent": {
+      "text": "Davet gönderildi: {name}.",
       "status": "machine"
     },
     "call.invite.share_a11y": {
@@ -752,6 +828,14 @@
     },
     "call.label.group": {
       "text": "Grup araması",
+      "status": "machine"
+    },
+    "call.layout.focus_a11y": {
+      "text": "Konuşanı büyük göster",
+      "status": "machine"
+    },
+    "call.layout.grid_a11y": {
+      "text": "Herkesi aynı boyutta göster",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -914,6 +998,10 @@
       "text": "Katılımcı {number}",
       "status": "machine"
     },
+    "call.participant.pin_a11y": {
+      "text": "{name} adlı kişiyi sabitle",
+      "status": "machine"
+    },
     "call.participant.pinned": {
       "text": "Sabitlendi",
       "status": "machine"
@@ -928,6 +1016,10 @@
     },
     "call.participant.unnamed": {
       "text": "Katılımcı",
+      "status": "machine"
+    },
+    "call.participant.unpin_a11y": {
+      "text": "{name} adlı kişinin sabitlemesini kaldır",
       "status": "machine"
     },
     "call.participant.you": {
@@ -1068,6 +1160,14 @@
     },
     "call.settings.system_default": {
       "text": "Sistem varsayılanı",
+      "status": "machine"
+    },
+    "call.settings.title": {
+      "text": "Arama ayarları",
+      "status": "machine"
+    },
+    "call.settings.unnamed_device": {
+      "text": "Cihaz {n}",
       "status": "machine"
     },
     "call.settings.video": {
@@ -1832,6 +1932,10 @@
     },
     "chat.call.voice": {
       "text": "Ara",
+      "status": "machine"
+    },
+    "chat.call_invite.title": {
+      "text": "Arama daveti",
       "status": "machine"
     },
     "chat.composer.attach": {
@@ -5702,6 +5806,58 @@
       "text": "İki adımın da süre sınırı yok. Bir şey olmazsa isteği yeniden gönderebilirsiniz.",
       "status": "machine"
     },
+    "guest.claim.error.generic": {
+      "text": "Hesap oluşturulamadı. Yeniden deneyin.",
+      "status": "machine"
+    },
+    "guest.claim.error.phrase_missing": {
+      "text": "Bu misafir hesabı bu cihazda korunamıyor. Kayıt ekranından yeni bir hesap oluşturabilirsiniz.",
+      "status": "machine"
+    },
+    "guest.claim.username_taken_for_you": {
+      "text": "Kullanıcı adınız: @{username}.",
+      "status": "machine"
+    },
+    "guest.claim.working": {
+      "text": "Hesabınız oluşturuluyor...",
+      "status": "machine"
+    },
+    "guest.in_call.return": {
+      "text": "Aramaya dön",
+      "status": "machine"
+    },
+    "guest.in_call.title": {
+      "text": "Misafir olarak bir aramadasınız.",
+      "status": "machine"
+    },
+    "guest.offer.body": {
+      "text": "Burada misafir olarak bulunuyorsunuz. Adınızı korumak ve insanları yeniden aramak veya onlara yazmak için bir hesap oluşturun.",
+      "status": "machine"
+    },
+    "guest.offer.decline": {
+      "text": "Hayır, teşekkürler",
+      "status": "machine"
+    },
+    "guest.offer.decline_note": {
+      "text": "Kabul etmezseniz misafir hesabı hemen silinir.",
+      "status": "machine"
+    },
+    "guest.offer.delete_failed": {
+      "text": "Misafir hesabı şu anda silinemedi. Yeniden deneyin; hesap bir gün içinde kendiliğinden de silinir.",
+      "status": "machine"
+    },
+    "guest.offer.deleted": {
+      "text": "Misafir hesabı silindi.",
+      "status": "machine"
+    },
+    "guest.offer.deleting": {
+      "text": "Siliniyor...",
+      "status": "machine"
+    },
+    "guest.offer.title": {
+      "text": "Lakko'yu kullanmaya devam edilsin mi?",
+      "status": "machine"
+    },
     "invite.contact.accept_failed": {
       "text": "Davet kabul edilemedi. Tekrar deneyin.",
       "status": "machine"
@@ -7072,6 +7228,10 @@
     },
     "restore_identity.lost.create": {
       "text": "Hesap anahtarlarını sıfırla",
+      "status": "machine"
+    },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "Yeni kurtarma ifadesi bu cihaza kaydedilemedi. Hiçbir şey değiştirilmedi.",
       "status": "machine"
     },
     "restore_identity.lost.sub": {

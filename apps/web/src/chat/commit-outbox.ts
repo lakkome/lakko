@@ -53,6 +53,7 @@
  * follow-up (ADR-0040 Open questions).
  */
 
+import { requireAccountStoresWritable } from "../auth/account-store-gate";
 import { OUTBOX_STORE, awaitTx, openMlsDb } from "./mls-store";
 import { boundContactsAccount } from "../contacts/local-store";
 
@@ -169,6 +170,7 @@ export type NewCommitEntry = Omit<
 export async function putEntryDurable(entry: PendingCommitEntry): Promise<void> {
   const db = await openMlsDb();
   try {
+    requireAccountStoresWritable(entry.accountId);
     const tx = db.transaction(OUTBOX_STORE, "readwrite");
     tx.objectStore(OUTBOX_STORE).put(entry);
     await awaitTx(tx, undefined);

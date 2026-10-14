@@ -62,6 +62,8 @@ public final class ContactsInboxStore {
     /// Persist one account's inbox. Best-effort: an encode failure (not
     /// reachable for the all-`Codable` model) leaves the prior row in place.
     public func save(_ inbox: PersistedContactsInbox, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard let data = try? JSONEncoder().encode(inbox) else { return }
         defaults.set(data, forKey: Self.storageKey(accountIdB64: accountIdB64))
     }

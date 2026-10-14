@@ -38,6 +38,8 @@ public final class GroupCallStore {
 
     /// Replace the account's stored records.
     func save(accountIdB64: String, records: [String: OngoingGroupCall]) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard !records.isEmpty else {
             clear(accountIdB64: accountIdB64)
             return

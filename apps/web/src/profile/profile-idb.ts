@@ -27,6 +27,7 @@
  * would lose to the profile name in exactly one place.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import {
   ACCOUNT_ID_HEX_RE,
   type ProfileBackend,
@@ -248,6 +249,7 @@ export class IdbProfileBackend implements ProfileBackend {
     const ciphertext = await encryptBlob(deviceKey, new TextEncoder().encode(json));
     const db = await openDb();
     try {
+      if (!accountStoresWritable(accountId)) return;
       const tx = db.transaction(STORE, "readwrite");
       tx.objectStore(STORE).put({ accountId, ciphertext } satisfies PersistedRow);
       await awaitTx(tx);

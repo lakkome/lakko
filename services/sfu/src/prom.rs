@@ -59,21 +59,31 @@ pub mod names {
     /// fire when this exceeds the configured refresh cadence
     /// by a wide margin.
     pub const JWKS_CACHE_AGE_SECS: &str = "lakko_sfu_jwks_cache_age_seconds";
-    /// Cumulative count of RTP frames successfully forwarded
+    /// Cumulative count of RTP packets successfully forwarded
     /// to a downstream peer (one increment per destination
-    /// peer per frame — a publisher frame fanned out to N
+    /// peer per packet — a publisher packet fanned out to N
     /// subscribers bumps this by N). Lets a dashboard see
     /// aggregate fanout volume; a flat line while
     /// `peers_active > 1` means media isn't flowing.
+    ///
+    /// The name says "frames" because the SFU forwarded whole
+    /// frames until ADR-0066; it is kept so dashboards and
+    /// alert rules do not break. The unit is a packet.
     pub const MEDIA_FRAMES_FORWARDED_TOTAL: &str = "lakko_sfu_media_frames_forwarded_total";
     /// Cumulative count of fanout attempts that did NOT reach
-    /// the wire, labelled `reason` (`no_writer` —
-    /// renegotiation not yet open / peer torn down;
+    /// the wire, one per packet per destination, labelled
+    /// `reason` (`no_writer` — renegotiation not yet open,
+    /// transport not connected, or peer torn down;
     /// `no_codec_match` — destination codec set excludes the
-    /// PT; `write_failed` — str0m refused the write;
-    /// `wrong_layer` — a simulcast frame for a layer this
-    /// subscriber is not receiving, dropped by design). A spike
-    /// in `no_writer` is the signal that subscribers are
+    /// packet's codec; `write_failed` — str0m refused the
+    /// write; `wrong_layer` — a simulcast packet for a layer
+    /// this subscriber is not receiving, dropped by design;
+    /// `stale` — a packet older than a simulcast switch point,
+    /// whose downstream sequence number is already taken;
+    /// `not_wanted` — a packet of a main or middle track the
+    /// subscriber does not show, ADR-0070 step 5, dropped by
+    /// design). A
+    /// spike in `no_writer` is the signal that subscribers are
     /// starved (renegotiation stuck), which is the
     /// fanout-fairness alarm; `wrong_layer` is expected traffic
     /// for a simulcast publisher, not an alarm.
@@ -83,6 +93,79 @@ pub mod names {
     /// `down` rate signals subscribers are frequently bandwidth-constrained; a
     /// churny up/down ratio near 1 hints the hysteresis window is too tight.
     pub const SIMULCAST_LAYER_SWITCHES_TOTAL: &str = "lakko_sfu_simulcast_layer_switches_total";
+    /// Cumulative count of video FEC packets (ULPFEC inside RED) received
+    /// from publishers. Only moves with `LAKKO_SFU_VIDEO_FEC` on and a
+    /// publisher that sends FEC. See `crate::fec_receive`.
+    pub const VIDEO_FEC_PACKETS_TOTAL: &str = "lakko_sfu_video_fec_packets_total";
+    /// Cumulative count of video media packets that were lost on a
+    /// publisher's leg and that the SFU rebuilt from the publisher's FEC and
+    /// forwarded. Against `VIDEO_FEC_PACKETS_TOTAL` it says what the FEC
+    /// bought.
+    pub const VIDEO_FEC_RECOVERED_TOTAL: &str = "lakko_sfu_video_fec_recovered_total";
+    /// Cumulative count of video FEC packets the SFU computed for a
+    /// subscriber's leg and sent, one per subscriber per publisher FEC
+    /// packet whose protected packets all went to that subscriber. See
+    /// `crate::fec_send`.
+    pub const VIDEO_FEC_SENT_TOTAL: &str = "lakko_sfu_video_fec_sent_total";
+    /// Cumulative count of REMB requests the SFU made toward publishers
+    /// under `LAKKO_SFU_BITRATE_CONTROL=server` (ADR-0068), one per
+    /// publisher per REMB round. Flat with publishers sending video means
+    /// no publisher is being told a bitrate. See `crate::uplink_estimate`.
+    pub const BITRATE_REMB_SENT_TOTAL: &str = "lakko_sfu_bitrate_remb_sent_total";
+    /// Cumulative count of `publish-budget` frames sent to publishers
+    /// (ADR-0068, amendment of 2026-10-11), labelled `why` (`first`,
+    /// `lower`, `senders`, `higher`; see `crate::publish_budget::Why`).
+    /// Only under `LAKKO_SFU_BITRATE_CONTROL=server` with
+    /// `LAKKO_SFU_PUBLISH_BUDGET` on. A `lower` count that climbs steadily
+    /// for one call is a publisher whose uplink keeps being cut.
+    pub const PUBLISH_BUDGET_SENT_TOTAL: &str = "lakko_sfu_publish_budget_sent_total";
+    /// Cumulative count of uplink fallback state changes, one per publisher
+    /// video track per change, labelled `direction` (`fallback`: the
+    /// publisher's uplink is in trouble and its subscribers were moved to
+    /// its light simulcast layer; `full`: they were moved back). Only a
+    /// publisher that sends simulcast can move it. A publisher that falls
+    /// back every few tens of seconds has an uplink that drops in bursts.
+    /// See `crate::uplink_fallback`.
+    pub const UPLINK_FALLBACK_SWITCHES_TOTAL: &str = "lakko_sfu_uplink_fallback_switches_total";
+    /// Cumulative count of RTP packets forwarded on light companion
+    /// tracks: the second downstream track a subscriber gets for a
+    /// simulcast video track, carrying its light layer all the time
+    /// (`crate::media::TrackRole`). Each is also counted in
+    /// `MEDIA_FRAMES_FORWARDED_TOTAL`; the difference of the two is what
+    /// went out on main tracks. Only moves with a publisher that sends
+    /// simulcast.
+    pub const LIGHT_COMPANION_PACKETS_FORWARDED_TOTAL: &str =
+        "lakko_sfu_media_light_companion_packets_forwarded_total";
+    /// Cumulative count of second copies of light companion packets sent
+    /// to subscribers (ADR-0070 step 3; `LAKKO_SFU_LIGHT_DUPLICATE`). Each
+    /// goes out as a retransmission nobody asked for, some tens of
+    /// milliseconds after the packet itself. Against
+    /// `LIGHT_COMPANION_PACKETS_FORWARDED_TOTAL` it should be close to one
+    /// for one; far below means subscribers negotiated no RTX.
+    pub const LIGHT_DUPLICATES_SENT_TOTAL: &str = "lakko_sfu_media_light_duplicates_sent_total";
+    /// Cumulative count of times the minimum playout delay of a
+    /// (subscriber, publisher) pair was raised after a burst of loss on
+    /// the publisher's uplink or the subscriber's downlink (ADR-0070 step
+    /// 4; `LAKKO_SFU_PLAYOUT_DELAY`). A pair is raised at most once per
+    /// three minutes while bursts keep coming. See `crate::playout_delay`.
+    pub const PLAYOUT_DELAY_RAISES_TOTAL: &str = "lakko_sfu_playout_delay_raises_total";
+    /// Cumulative count of changes of what a subscriber is given of a
+    /// publisher's video under downlink control (ADR-0070 step 6;
+    /// `LAKKO_SFU_DOWNLINK_CONTROL`), one per (subscriber, publisher) per
+    /// change, labelled `direction`: `down` when a larger track was given
+    /// up (the subscriber's downlink is short, or it asked for less), `up`
+    /// when one was given back. See `crate::downlink_allocation`.
+    pub const DOWNLINK_GIVEN_CHANGES_TOTAL: &str = "lakko_sfu_downlink_given_changes_total";
+    /// Cumulative count of probes of subscribers' downlinks that ended
+    /// (ADR-0070 step 6), labelled `outcome`: `carried` (the path carried
+    /// the rate of the next larger set, which is then given), or why not
+    /// (`trouble`, `loss`, `short`, `no-feedback`, `disturbed`). See
+    /// `crate::downlink_probe`.
+    pub const DOWNLINK_PROBES_TOTAL: &str = "lakko_sfu_downlink_probes_total";
+    /// Cumulative bytes of padding sent for those probes: copies of
+    /// packets already sent, on retransmission streams.
+    pub const DOWNLINK_PROBE_PADDING_BYTES_TOTAL: &str =
+        "lakko_sfu_downlink_probe_padding_bytes_total";
 }
 
 /// Failures while installing the recorder. The exporter
@@ -167,6 +250,61 @@ impl MetricsExporter {
             names::SIMULCAST_LAYER_SWITCHES_TOTAL,
             "Simulcast layer switches the bandwidth policy made, labelled by \
              `direction` (up = recovery / down = congestion)"
+        );
+        // The three video FEC counters are described and, like the labelled
+        // ones, not pre-initialised: with the feature off they never appear.
+        metrics::describe_counter!(
+            names::VIDEO_FEC_PACKETS_TOTAL,
+            "Video FEC packets received from publishers"
+        );
+        metrics::describe_counter!(
+            names::VIDEO_FEC_RECOVERED_TOTAL,
+            "Video media packets rebuilt from a publisher's FEC and forwarded"
+        );
+        metrics::describe_counter!(
+            names::VIDEO_FEC_SENT_TOTAL,
+            "Video FEC packets computed for and sent to subscribers"
+        );
+        // Like the FEC counters, described and not pre-initialised: it only
+        // appears under `LAKKO_SFU_BITRATE_CONTROL=server`.
+        metrics::describe_counter!(
+            names::BITRATE_REMB_SENT_TOTAL,
+            "REMB requests toward publishers under server-side bitrate control"
+        );
+        metrics::describe_counter!(
+            names::PUBLISH_BUDGET_SENT_TOTAL,
+            "publish-budget frames sent to publishers under server-side bitrate control"
+        );
+        // Described and not pre-initialised: it only appears once a
+        // simulcast publisher has a subscriber.
+        metrics::describe_counter!(
+            names::LIGHT_COMPANION_PACKETS_FORWARDED_TOTAL,
+            "RTP packets forwarded on light companion tracks of simulcast video"
+        );
+        // Described and not pre-initialised, like the counter above: they
+        // appear with the first light companion packet sent twice and the
+        // first playout delay raised.
+        metrics::describe_counter!(
+            names::LIGHT_DUPLICATES_SENT_TOTAL,
+            "Second copies of light companion packets sent to subscribers"
+        );
+        metrics::describe_counter!(
+            names::PLAYOUT_DELAY_RAISES_TOTAL,
+            "Times a subscriber's minimum playout delay for a publisher was raised after a burst"
+        );
+        // Described and not pre-initialised: labelled, and only under
+        // downlink control.
+        metrics::describe_counter!(
+            names::DOWNLINK_GIVEN_CHANGES_TOTAL,
+            "Changes of what a subscriber is given of a publisher's video under downlink control"
+        );
+        metrics::describe_counter!(
+            names::DOWNLINK_PROBES_TOTAL,
+            "Probes of subscribers' downlinks that ended, by outcome"
+        );
+        metrics::describe_counter!(
+            names::DOWNLINK_PROBE_PADDING_BYTES_TOTAL,
+            "Bytes of padding sent for probes of subscribers' downlinks"
         );
         // Initialise each counter / gauge so it ships a zero
         // sample at the first scrape.

@@ -58,6 +58,9 @@ export type GuardView =
   /** docs/ux/identity-recovery.md 7.1 — a forgot-password route succeeded
    *  on a device that holds the keys: choose a new password, or "Not now". */
   | "choose-new-password"
+  /** A guest account (`auth/guest-account.ts`): the way back to its call, or
+   *  the question whether to keep the account. Never the app itself. */
+  | "guest"
   /** Navigate to the login page. */
   | "redirect-login"
   /** Navigate home. */
@@ -99,13 +102,27 @@ function sharedView(
   }
 }
 
-/** The guard around protected routes (`<RequireSession>`). */
+/**
+ * The guard around protected routes (`<RequireSession>`).
+ *
+ * `guest`: the session is a guest account. It has no conversations and no
+ * contacts, so the app behind the guard is an empty shell and the guest never
+ * lands in it. Owed recovery words still come first. A guest that keeps its
+ * account (a username and a first password, `GuestAccountOffer`) is not shown
+ * a phrase: its marker goes and the "Protect your account" step follows.
+ */
 export function sessionGuardView(
   kind: GuardAuthKind,
   signupPhrasePending: boolean,
   newPasswordOffered = false,
   protectStepOwed = false,
+  guest = false,
 ): GuardView {
+  // Owed new words still come first. Then the guest screen, before the
+  // steps of a kept account: a guest that chose to keep its account leaves
+  // this branch the moment its marker is cleared, and lands on "Protect
+  // your account" (which is marked owed before the marker goes).
+  if (kind === "session" && guest && !signupPhrasePending) return "guest";
   return (
     sharedView(kind, signupPhrasePending, newPasswordOffered, protectStepOwed) ??
     (kind === "session" ? "children" : "redirect-login")
@@ -171,4 +188,53 @@ export function clearSignupPhraseOwed(storage: MarkerStorage | undefined, accoun
   } catch {
     // Storage blocked: nothing was recorded either.
   }
+}
+
+// ---------------------------------------------------------------------------
+// A new identity whose phrase screen would cover another account
+// ---------------------------------------------------------------------------
+
+/** What happens to a freshly minted recovery phrase once its identity has
+ *  been published. */
+export type FreshPhraseDisposition =
+  /** Show the "save your phrase" screen now. */
+  | "show"
+  /** Leave the screen as it is; the minting account's next sign-in on this
+   *  browser shows the phrase first. */
+  | "owe";
+
+/**
+ * ADR-0017 lost-everything fallback, after the publish. The publish cannot be
+ * taken back, so the phrase is shown whenever this browser is still the
+ * minting account's or nobody's: the binding unchanged, a sign-out, the same
+ * account parked again. When ANOTHER account is bound (signed in, or sitting
+ * in its own restore / new-phrase prompt), its screen is not replaced: the
+ * phrase is already in the minting account's device-protected cache and stays
+ * owed to that account.
+ *
+ * `boundAccount` is the account id the auth state names, `null` when it names
+ * none (`anon`, `loading`).
+ */
+export function freshPhraseDisposition(args: {
+  readonly mintedFor: string;
+  readonly boundAccount: string | null;
+}): FreshPhraseDisposition {
+  if (args.boundAccount === null) return "show";
+  return args.boundAccount === args.mintedFor ? "show" : "owe";
+}
+
+/**
+ * Whether a sign-in that would park in the restore prompt (no readable
+ * AccountIdentity seed on this device) is completed from the phrase this
+ * device kept instead. Only for an account whose phrase screen is still owed:
+ * that phrase was never shown, so the person cannot type it. And only with a
+ * device key, which is what the kept phrase is wrapped under. The completion
+ * itself is the ordinary phrase path, which refuses a phrase the published
+ * identity does not confirm.
+ */
+export function owedPhraseCompletesPark(args: {
+  readonly owed: boolean;
+  readonly deviceKeyPresent: boolean;
+}): boolean {
+  return args.owed && args.deviceKeyPresent;
 }

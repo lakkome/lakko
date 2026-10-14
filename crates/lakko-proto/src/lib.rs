@@ -56,8 +56,9 @@ pub mod mls_app {
     /// (`schemas/mls-app/history_bundle_v1.proto`) — Phase 2a3d8.
     /// HPKE-style sealed payload the scanner-side device hands to
     /// the joining device at add-time so the latter can backfill
-    /// the application-level message log it would otherwise be
-    /// unable to recover from the `whole_storage_snapshot` alone.
+    /// the application-level message log, which no other path
+    /// brings to a new device (the account backup carries no
+    /// message history and no MLS state).
     pub mod history_bundle {
         /// Version 1 of the history-bundle schema.
         #[allow(clippy::pedantic, missing_docs)]

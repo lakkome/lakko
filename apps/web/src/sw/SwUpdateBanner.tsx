@@ -26,7 +26,7 @@
  * the banner too via a sibling mount).
  */
 import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
-import { SW_UPDATE_EVENT } from "./register";
+import { SW_UPDATE_EVENT, waitingServiceWorker } from "./register";
 import { t } from "../l10n";
 
 export function SwUpdateBanner(): JSX.Element {
@@ -42,6 +42,10 @@ export function SwUpdateBanner(): JSX.Element {
       setWaiting(detail);
     };
     window.addEventListener(SW_UPDATE_EVENT, onUpdate);
+    // An update found before this banner mounted: the event is gone, the
+    // worker is not.
+    const already = waitingServiceWorker();
+    if (already !== null) setWaiting(already);
     onCleanup(() => {
       window.removeEventListener(SW_UPDATE_EVENT, onUpdate);
     });

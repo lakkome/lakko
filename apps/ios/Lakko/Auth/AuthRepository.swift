@@ -81,6 +81,11 @@ public final class AuthRepository: ObservableObject {
             case .loading, .anon:
                 break
             }
+            // Whether the account now signed in is a guest account
+            // (``guestAccount``) is a fact about the session, so it follows
+            // every change of it.
+            refreshGuestAccount()
+            if case .anon = state {} else if guestAccountDeleted { guestAccountDeleted = false }
         }
     }
 
@@ -154,6 +159,35 @@ public final class AuthRepository: ObservableObject {
     /// whose only screen there is the "finishing" one while a publish is
     /// owed.
     @Published public private(set) var freshShowsWords: Bool = true
+
+    /// What this device knows about the signed-in account as a GUEST account
+    /// (`docs/ux/call-links.md` section 9, ``GuestAccountMarker``): made to
+    /// join a call from a link, with no username and no password of the
+    /// person's choosing. `nil` for an ordinary account and while signed out.
+    ///
+    /// Derived from the marker and the session: recomputed on every change of
+    /// ``state`` and after every write of the marker.
+    @Published public private(set) var guestAccount: GuestAccountState?
+
+    /// The session is a guest account. A guest never lands in the app: it is
+    /// in its call, or it is asked whether to keep the account.
+    public var isGuest: Bool { guestAccount != nil }
+
+    /// The username an unfinished ``claimGuestAccount(username:password:)``
+    /// already took for this guest account, or `nil`. The claim is not a
+    /// rename, so the form shows it and does not ask again.
+    public var guestClaimedUsername: String? { guestAccount?.claimedUsername }
+
+    /// A guest account was just deleted on this device
+    /// (``discardGuestAccount()``). The call-link landing says so. Cleared by
+    /// the next session landing.
+    @Published public private(set) var guestAccountDeleted = false
+
+    /// A guest account was just kept (``claimGuestAccount(username:password:)``):
+    /// "Protect your account" comes before the app, exactly as after a
+    /// sign-up (ADR-0075 D2). The recovery phrase is not shown. In memory
+    /// only; cleared by ``dismissProtectStep()`` and with the session.
+    @Published public private(set) var protectStepOwed = false
 
     /// ADR-0037 §6 (G-11) — non-nil when a rolled-back / tampered backup was
     /// REFUSED at restore. An unambiguous tamper the user must be told about
@@ -364,6 +398,15 @@ public final class AuthRepository: ObservableObject {
 
     private let proofLoginOperation: ProofLoginOperation
 
+    /// The password step of keeping a guest account (`handle`, the 64-byte
+    /// seed, the new password): ``AuthClient/recover(handle:mnemonicSeed:newPassword:)``
+    /// in the app; injectable for the same reason as ``KeyResetOperation``.
+    typealias FirstPasswordOperation = (
+        _ handle: Data, _ seed: Data, _ newPassword: Data
+    ) async throws -> RecoverResult
+
+    private let firstPasswordOperation: FirstPasswordOperation
+
     /// The fresh-auth proof of the last password or passkey sign-in, signup
     /// or proof block (ADR-0073, amended 2026-10-06). In memory only: never
     /// persisted, never logged.
@@ -515,6 +558,70 @@ public final class AuthRepository: ObservableObject {
     /// first backup and its re-seal after a rotation. A seam: the production
     /// client carries default transports to storage and auth.
     static var makeBackupClient: () -> BackupClient = { BackupClient() }
+    /// Where a phrase restore fetches the account backup from
+    /// (``restoreBackupFromPhrase(accountId:accountIdB64:sessionToken:phrase:context:)``).
+    /// Injectable for tests.
+    private let backupRestoreSource: BackupRestoreSource
+
+    /// The Keychain cache of the recovery phrase: what the automatic backup
+    /// seals under, and what a later attempt at an owed restore opens with.
+    private let phraseStore: PhraseStore
+
+    /// Where the backup bookkeeping lives (``BackupRestoreRetryStore``,
+    /// ``RestoredKnownGroupsStore``). Injectable for tests.
+    private let backupDefaults: UserDefaults
+
+    /// Accounts whose owed backup restore is being attempted right now, so
+    /// two landings close together make one attempt, not two.
+    private var backupRestoreRetryInFlight: Set<String> = []
+
+    /// The guest marker (plain `UserDefaults`).
+    private let guestMarker: GuestAccountMarker
+
+    /// Registers this device for push for `accountIdB64`
+    /// (``PushSubscriber/subscribe(accountIdB64:stillSignedIn:)``).
+    /// Injectable so a test can see which landings register and which do not:
+    /// a guest landing must not.
+    private let pushSubscribe: PushSubscribe
+
+    /// The push registration as the repository calls it.
+    typealias PushSubscribe = @MainActor (
+        _ accountIdB64: String, _ stillSignedIn: @escaping @MainActor () -> Bool
+    ) async throws -> Void
+
+    /// The live push registration.
+    static let livePushSubscribe: PushSubscribe = { accountIdB64, stillSignedIn in
+        _ = try await PushSubscriber.shared.subscribe(
+            accountIdB64: accountIdB64, stillSignedIn: stillSignedIn)
+    }
+
+    /// What ending a guest account needs from outside this repository: the
+    /// two server deletes and the local wipe. The composition root sets the
+    /// wipe (`LakkoApp`).
+    var guestEnvironment = GuestAccountEnvironment()
+
+    /// Unix milliseconds now. A guest account's age is measured with it.
+    private let clock: () -> Int64
+
+    /// Remove every local store of one account (``AccountLocalDataWipe``):
+    /// what a launch runs for a guest account it will not restore. No runtime
+    /// is bound to an account at launch, so the store wipe is the whole wipe
+    /// there. Injectable for tests.
+    private let wipeAccountStores: @MainActor (_ accountIdB64: String) -> Void
+
+    /// The one expiry of a guest account in flight, so the offer appearing
+    /// and `Create account` pressed at the same moment delete it once.
+    private var guestExpiryInFlight: Task<Bool, Never>?
+
+    /// Advanced whenever the account this device is bound to changes: every
+    /// session landing (``adoptIdentitySecrets(_:context:)``), every parking
+    /// in ``AuthState/needsRecoveryPhrase(_:)``, and every sign-out
+    /// (``logout()``, ``endSessionAfterLocalWipe()``). A sign-in or restore
+    /// captures it before its first `await` and checks it after each one, so
+    /// a round trip that outlives a sign-out, or that another account's
+    /// landing overtook, lands nothing. Work outside this repository that
+    /// belongs to the session captures it too.
+    let binding = BindingEpoch()
 
     /// The live `UNUserNotificationCenter` removal.
     nonisolated static func removeAllDeliveredNotifications() {
@@ -525,7 +632,7 @@ public final class AuthRepository: ObservableObject {
         sessionStore: SessionStore = SessionStore(),
         authClientFactory: @escaping () -> AuthClient = { AuthClient() },
         persistence: SessionPersistence = KeychainSessionPersistence(),
-        nowMs: () -> Int64 = SessionRestore.nowMs
+        nowMs: @escaping () -> Int64 = SessionRestore.nowMs
     ) {
         self.init(
             sessionStore: sessionStore,
@@ -540,7 +647,7 @@ public final class AuthRepository: ObservableObject {
         sessionStore: SessionStore,
         authClientFactory: @escaping () -> AuthClient,
         persistence: SessionPersistence,
-        nowMs: () -> Int64,
+        nowMs: @escaping () -> Int64,
         accountDirectory: AccountDirectory,
         loginHandleBinds: LoginHandleBindLedger = .shared,
         restoreDirectory: DeviceRestoreDirectory = DiscoveryDeviceRestoreDirectory(),
@@ -552,6 +659,7 @@ public final class AuthRepository: ObservableObject {
         tokenProvider: SessionTokenProvider = .shared,
         keyResetOperation: KeyResetOperation? = nil,
         proofLoginOperation: ProofLoginOperation? = nil,
+        firstPasswordOperation: FirstPasswordOperation? = nil,
         passkeyPresence: PasskeyPresence? = nil,
         grantNowMs: @escaping () -> Int64 = SessionRestore.nowMs,
         attestationVerifier: KeyResetAttestationVerifying = PinnedKeyResetAttestationVerifier(),
@@ -567,7 +675,13 @@ public final class AuthRepository: ObservableObject {
         ownPredecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore(),
         rotatedNotice: KeysRotatedNoticeStore = KeysRotatedNoticeStore(),
         rotationStore: KeyRotationStore = KeyRotationStore(),
-        sessionUpgradeOperation: SessionUpgradeOperation? = nil
+        sessionUpgradeOperation: SessionUpgradeOperation? = nil,
+        backupRestoreSource: BackupRestoreSource = LiveBackupRestoreSource(),
+        phraseStore: PhraseStore = PhraseStore(),
+        backupDefaults: UserDefaults = .standard,
+        markerDefaults: UserDefaults = .standard,
+        pushSubscribe: PushSubscribe? = nil,
+        wipeAccountStores: (@MainActor (_ accountIdB64: String) -> Void)? = nil
     ) {
         self.rotationPending = rotationPending
         self.ownPredecessors = ownPredecessors
@@ -585,6 +699,15 @@ public final class AuthRepository: ObservableObject {
         self.loginHandleBinds = loginHandleBinds
         self.pushBinding = pushBinding
         self.removeDeliveredNotifications = removeDeliveredNotifications
+        self.backupRestoreSource = backupRestoreSource
+        self.phraseStore = phraseStore
+        self.backupDefaults = backupDefaults
+        self.guestMarker = GuestAccountMarker(defaults: markerDefaults)
+        self.pushSubscribe = pushSubscribe ?? Self.livePushSubscribe
+        self.clock = nowMs
+        self.wipeAccountStores = wipeAccountStores ?? { accountIdB64 in
+            AccountLocalDataWipe.wipe(accountIdB64: accountIdB64)
+        }
         self.passkeyCeremony = passkeyCeremony
         self.markers = markers
         self.protectionStore = protectionStore
@@ -598,6 +721,9 @@ public final class AuthRepository: ObservableObject {
         }
         self.proofLoginOperation = proofLoginOperation ?? { handle, password in
             try await authClientFactory().login(handle: handle, password: password)
+        }
+        self.firstPasswordOperation = firstPasswordOperation ?? { handle, seed, newPassword in
+            try await authClientFactory().recover(handle: handle, mnemonicSeed: seed, newPassword: newPassword)
         }
         self.passkeyPresence = passkeyPresence ?? { sessionToken in
             let client = WebauthnClient()
@@ -676,7 +802,66 @@ public final class AuthRepository: ObservableObject {
     /// (ADR-0041). See ``SessionRestore/decide(marker:persistence:nowMs:)``.
     private func rehydrate(nowMs: Int64) {
         let marker = sessionStore.load()
-        switch SessionRestore.decide(marker: marker, persistence: persistence, nowMs: nowMs) {
+        let decision = SessionRestore.decide(marker: marker, persistence: persistence, nowMs: nowMs)
+        // A guest account (``GuestAccountMarker``) is never left as a cached,
+        // signed-out account, and never outlives its day: nobody knows its
+        // password, so a guest that cannot be restored, or is too old, leaves
+        // the device here, before any session state lands.
+        if let marker, let guest = guestMarker.state(accountIdB64: marker.accountIdB64) {
+            var restorableToken: String?
+            var restorablePair: SessionPair?
+            if case .session(_, let secrets) = decision {
+                restorableToken = secrets.sessionToken
+                restorablePair = secrets.session
+            }
+            switch guestRestoreAction(guest: guest, restorable: restorableToken != nil, nowMs: nowMs) {
+            case .none:
+                break
+            case .wipe:
+                NSLog("[guest] a guest account that cannot be restored is removed from this device")
+                wipeGuestAtLaunch(accountIdB64: marker.accountIdB64)
+                return
+            case .discard:
+                NSLog("[guest] a guest account past its lifetime is deleted")
+                // The state stays `.loading` until the servers were asked
+                // and the device is wiped, so no screen of the session
+                // renders in between. The server calls are read when the
+                // task runs: the composition root has wired them by then.
+                let accountIdB64 = marker.accountIdB64
+                let sessionToken = restorableToken ?? ""
+                // The persisted access token may have run out: with the pair
+                // installed, the two deletes below are refreshed like any
+                // other bearer call (ADR-0073 section 3.3).
+                // ``wipeGuestAtLaunch(accountIdB64:)`` clears it again.
+                if let restorablePair {
+                    tokenProvider.install(restorablePair, accountIdB64: accountIdB64)
+                }
+                Task { [weak self] in
+                    guard let self else { return }
+                    let environment = self.guestEnvironment
+                    let factory = self.authClientFactory
+                    try? await GuestServerDelete.run(
+                        guest: guest,
+                        strict: false,
+                        ports: GuestServerDelete.Ports(
+                            deleteAtAuth: { try await environment.deleteAccountAtAuth(sessionToken, nil) },
+                            deleteInDirectory: { try await environment.deleteAccountInDirectory(sessionToken) },
+                            releaseHandle: {
+                                if let release = environment.releaseLoginHandle {
+                                    try await release(sessionToken, nil)
+                                } else {
+                                    _ = try await factory().removeLoginHandle(sessionToken: sessionToken)
+                                }
+                            }
+                        ))
+                    // An explicit sign-in that completed meanwhile owns the
+                    // state; the guest's stores still go.
+                    self.wipeGuestAtLaunch(accountIdB64: accountIdB64)
+                }
+                return
+            }
+        }
+        switch decision {
         case .anon(let cachedUsername):
             identitySecrets = nil
             state = .anon(cachedUsername: cachedUsername)
@@ -725,6 +910,28 @@ public final class AuthRepository: ObservableObject {
                 accountIdentitySeed: secrets.accountIdentitySeed,
                 requireFresh: true
             )
+            // A session landing: a phrase restore that is still owed gets
+            // one attempt here.
+            retryBackupRestoreIfMarked(
+                accountId: secrets.accountId,
+                sessionToken: secrets.sessionToken,
+                context: "relaunch"
+            )
+        }
+    }
+
+    /// Remove a guest account the launch will not restore: every local store
+    /// of it (the wipe Forget device uses, the cached-account record
+    /// included), then land signed out with no cached username.
+    private func wipeGuestAtLaunch(accountIdB64: String) {
+        persistence.deleteSessionToken(accountIdB64: accountIdB64)
+        if sessionStore.load()?.accountIdB64 == accountIdB64 { sessionStore.clear() }
+        if tokenProvider.account == accountIdB64 { tokenProvider.clear() }
+        wipeAccountStores(accountIdB64)
+        if case .loading = state {
+            binding.advance()
+            identitySecrets = nil
+            state = .anon(cachedUsername: nil)
         }
     }
 
@@ -749,7 +956,8 @@ public final class AuthRepository: ObservableObject {
                 accountIdentitySeed: secrets.accountIdentitySeed,
                 session: pair
             ),
-            context: "refresh"
+            context: "refresh",
+            rebinds: false
         )
     }
 
@@ -758,6 +966,16 @@ public final class AuthRepository: ObservableObject {
     /// Nothing is wiped: the keys are still this account's.
     private func handleRefreshInvalid(accountIdB64: String) {
         guard signedInAccountIdB64 == accountIdB64 else { return }
+        // A guest account whose session can no longer be refreshed (the
+        // servers delete an unkept guest after a day) is never left as a
+        // cached, signed-out account nobody knows the password of: it leaves
+        // this device, as it would at the next launch.
+        if guestMarker.state(accountIdB64: accountIdB64) != nil {
+            NSLog("[guest] the guest session cannot be refreshed; the guest account is removed from this device")
+            guestEndPorts(accountIdB64: accountIdB64, sessionToken: "").wipe()
+            guestAccountDeleted = true
+            return
+        }
         NSLog("[auth] the session refresh was refused as invalid; signing out without a wipe")
         logout()
         sessionExpiredNotice = true
@@ -776,7 +994,15 @@ public final class AuthRepository: ObservableObject {
     /// are kept together. The persist is best-effort: a Keychain failure
     /// costs the relaunch restore (the next launch lands logged out), never
     /// the current session.
-    private func adoptIdentitySecrets(_ secrets: IdentitySecrets, context: String) {
+    ///
+    /// `rebinds` is `false` for the calls that only replace the pair or the
+    /// keys of the session that is ALREADY live (a token refresh, the device
+    /// bind, a proof, a password or key change): the account bound to this
+    /// device did not change, so work started under the binding goes on.
+    private func adoptIdentitySecrets(_ secrets: IdentitySecrets, context: String, rebinds: Bool = true) {
+        if rebinds { binding.advance() }
+        // The account landed: its stores are written again.
+        AccountStoreGate.open(base64Encode(secrets.accountId))
         identitySecrets = secrets
         adoptSessionPair(secrets.session, accountIdB64: base64Encode(secrets.accountId), context: context)
     }
@@ -1035,7 +1261,7 @@ public final class AuthRepository: ObservableObject {
         // and swallowed so a transient transport hiccup does
         // not block signup from completing.
         Task {
-            await Self.bootstrapBackupBestEffort(
+            await self.bootstrapBackupBestEffort(
                 accountId: result.accountId,
                 accountIdB64: accountIdB64,
                 accountIdentitySeed: accountIdentitySeed,
@@ -1053,27 +1279,33 @@ public final class AuthRepository: ObservableObject {
 
     /// ADR-0032 guest join — create a FULL account with NO username and no
     /// user-chosen password, so an anonymous `/c/<slug>` visitor can join a
-    /// call without a login.
+    /// call without a login (`docs/ux/call-links.md` section 9).
     ///
-    /// Reuses the audited ``signup(username:password:)`` machinery VERBATIM
-    /// minus the username claim: the SAME PoW-gated OPAQUE registration
-    /// (``AuthClient/signup(password:enrolRecovery:)``) — under a RANDOM
-    /// 32-byte password the user NEVER sees (recovery is phrase-only, the
-    /// ACCESS-only convention the recovery cascade already uses) — plus the
-    /// device-root-key / export-key / device-identity / account-identity-seed
-    /// derivation, and the first-ever identity-bundle publish (with the genesis
-    /// `leaf_auth`, G-30 #2). SECURITY: guest creation MUST route through this
-    /// same PoW-gated signup — there is no bypass.
+    /// Reuses the audited ``signup(username:password:onCommitting:)``
+    /// machinery VERBATIM minus the username claim: the SAME PoW-gated OPAQUE
+    /// registration (``AuthClient/signup(password:enrolRecovery:)``) — under a
+    /// RANDOM 32-byte password the user NEVER sees — plus the device-root-key
+    /// / export-key / device-identity / account-identity-seed derivation, and
+    /// the first-ever identity-bundle publish (with the genesis `leaf_auth`,
+    /// G-30 #2). SECURITY: guest creation MUST route through this same
+    /// PoW-gated signup — there is no bypass.
     ///
-    /// It then parks the recovery phrase + flips to ``AuthState/saveFreshPhrase(_:)``
-    /// (mirroring ``mintFreshIdentity()``) instead of landing the session
-    /// directly, so the existing `SaveFreshPhraseScreen` + ``confirmFreshPhraseSaved()``
-    /// render + land it unchanged. Claiming a username (`registerUsername`) is a
-    /// later onboarding step; the account is full from the start, just
-    /// username-less. Returns the recovery phrase.
+    /// The session then lands at once
+    /// (``completeGuestSignup(result:onAccountReady:)``): no recovery-phrase
+    /// screen stands between the person and the call they were invited to
+    /// (2026-10-02; the first version parked the phrase and showed it first).
+    /// Whether this becomes an account is asked after the call
+    /// (``claimGuestAccount(username:password:)`` /
+    /// ``discardGuestAccount()``); the servers delete an account that never
+    /// got a username a day after it was made.
+    ///
+    /// - Parameter onAccountReady: called with the new account's id right
+    ///   before its session lands, so what the first screen of the session
+    ///   reads (the guest's own profile name) is in place when it renders.
     public func signupGuest(
-        onCommitting: (@MainActor () -> Void)? = nil
-    ) async throws -> SignupOutcome {
+        onCommitting: (@MainActor () -> Void)? = nil,
+        onAccountReady: (@MainActor (_ accountIdB64: String) -> Void)? = nil
+    ) async throws {
         // A 32-byte random password the user never sees — the guest HAS a real,
         // random password, so the normal signup derivations apply. `SystemRandom-
         // NumberGenerator` is the OS CSPRNG on Apple platforms.
@@ -1086,10 +1318,42 @@ public final class AuthRepository: ObservableObject {
         let client = authClientFactory()
         let result = try await client.signup(
             password: randomPassword, enrolRecovery: true, onCommitting: onCommitting)
-        let accountIdB64 = base64Encode(result.accountId)
+        // A fresh unstructured task does not inherit the caller's cancellation:
+        // an account the finish created is completed regardless.
+        try await Task { @MainActor in
+            try await self.completeGuestSignup(result: result, onAccountReady: onAccountReady)
+        }.value
+    }
 
-        // NOTE: no username claim — the account stays username-less until a
-        // later "claim your username" onboarding step (`registerUsername`).
+    /// Everything the guest signup does once the OPAQUE registration
+    /// committed. Mirror of the post-registration half of the web
+    /// `signupGuest` (`apps/web/src/auth/AuthContext.tsx`); split out so it
+    /// can be driven by a test without an OPAQUE server.
+    ///
+    /// Order, and why:
+    ///
+    ///   1. The device material, exactly as ``completeSignup(result:username:)``
+    ///      persists it. No username claim: the account stays username-less.
+    ///   2. The first-ever identity-bundle publish. Fail-loud: a publish
+    ///      failure rejects the guest signup rather than landing an identity
+    ///      nobody can verify.
+    ///   3. The recovery phrase, kept on this device under the GUEST's own
+    ///      key in the phrase cache (``guestPhraseKey(accountIdB64:)``) and
+    ///      NOT the account's: the automatic backup reads the phrase by the
+    ///      account id, finds nothing, and so keeps nothing on a server for
+    ///      an account the person has not decided to keep. Fail-loud: an
+    ///      account whose phrase is neither shown nor kept could never be
+    ///      kept afterwards.
+    ///   4. The guest marker, and the session record with an EMPTY username.
+    ///   5. The session lands, with the real export key, exactly as the
+    ///      post-phrase path used to land it — and WITHOUT registering for
+    ///      push: a person who was sent a call link is not asked whether this
+    ///      app may send notifications.
+    func completeGuestSignup(
+        result: SignupResult,
+        onAccountReady: (@MainActor (_ accountIdB64: String) -> Void)? = nil
+    ) async throws {
+        let accountIdB64 = base64Encode(result.accountId)
 
         guard let phrase = result.recoveryPhrase else {
             throw AuthClientError.argument(
@@ -1152,27 +1416,329 @@ public final class AuthRepository: ObservableObject {
             seed: accountIdentitySeed
         )
 
-        DevicePhrase.store(phrase, accountIdB64: accountIdB64, context: "signup-guest")
-
-        // ADR-0075 D2: the phrase is not shown at sign-up, a guest's
-        // included. The device holds it; `Save a recovery phrase` in
-        // Settings is where a person gets words to write down. The session
-        // lands directly. Username EMPTY (unclaimed); a guest has no
-        // password to replace.
+        // The phrase, under the guest's own key (step 3 above). ADR-0075 D2:
+        // it is not shown, here or when the account is kept.
+        var phraseBytes = Data(phrase.utf8)
+        defer { phraseBytes.resetBytes(in: 0..<phraseBytes.count) }
+        try phraseStore.putPhrase(
+            accountIdB64: guestPhraseKey(accountIdB64: accountIdB64),
+            phraseBytes: phraseBytes
+        )
+        guestMarker.mark(accountIdB64: accountIdB64, nowMs: clock())
+        // Username EMPTY (unclaimed); a guest has no password to replace.
         newPasswordOwed = false
         sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: ""))
+
+        onAccountReady?(accountIdB64)
+
+        // No push registration and no backup here; neither is registered by
+        // `finishCanonicalSession`.
+        finishCanonicalSession(
+            accountIdentitySeed: accountIdentitySeed,
+            accountIdBytes: result.accountId,
+            exportKey: result.exportKey,
+            session: result.session,
+            username: ""
+        )
+    }
+
+    // MARK: - Guest account: keep it, or delete it
+
+    /// Recompute ``guestAccount`` from the marker and the session.
+    private func refreshGuestAccount() {
+        let next: GuestAccountState?
+        if case .session(let account) = state {
+            next = guestMarker.state(accountIdB64: account.accountIdB64)
+        } else {
+            next = nil
+        }
+        if guestAccount != next { guestAccount = next }
+    }
+
+    /// Keep a guest account: give it `username` and its first `password`
+    /// (``GuestAccountClaim`` holds the order). The one claim of a guest
+    /// account (`docs/ux/call-links.md` section 9 for when it is offered,
+    /// ADR-0076 for what it does): reachable only from the question asked
+    /// once no call is running.
+    ///
+    /// Resolving leaves the account an ordinary one, with a username and a
+    /// password, and "Protect your account" owed (``protectStepOwed``),
+    /// exactly as after a sign-up (ADR-0075 D2). The recovery phrase is not
+    /// shown and no three-word check runs.
+    ///
+    /// A retry after the username was taken and a later step failed goes on
+    /// with the SAME username; `username` is then ignored.
+    ///
+    /// - Throws: ``GuestAccountExpired`` when the account was past its
+    ///   lifetime (it has been deleted and the session is over);
+    ///   ``GuestPhraseUnavailable`` when this device no longer holds
+    ///   the guest's phrase (such an account cannot be kept);
+    ///   ``UsernameTaken`` / ``UsernameBindLimited`` / ``UsernameRuleViolation``
+    ///   from the claim; whatever the password step throws.
+    public func claimGuestAccount(username: String, password: Data) async throws {
+        guard case .session(let account) = state,
+              let secrets = identitySecrets,
+              guestAccount != nil else {
+            throw NoGuestAccount()
+        }
+        guard !password.isEmpty else {
+            throw AuthClientError.argument("password must be non-empty")
+        }
+        // An account past its lifetime is not kept: the servers are about to
+        // delete it, or already have.
+        if await expireGuestIfDue() { throw GuestAccountExpired() }
+        let accountIdB64 = account.accountIdB64
+        try await GuestAccountClaim.run(
+            username: username,
+            password: password,
+            ports: GuestAccountClaim.Ports(
+                readPhrase: { [phraseStore] in
+                    // The guest's own row, else the account's row: an earlier
+                    // attempt that got as far as its last step moved the
+                    // phrase there before it was interrupted.
+                    for key in [guestPhraseKey(accountIdB64: accountIdB64), accountIdB64] {
+                        do {
+                            guard var bytes = try phraseStore.getPhrase(accountIdB64: key) else {
+                                continue
+                            }
+                            defer { bytes.resetBytes(in: 0..<bytes.count) }
+                            if let phrase = String(data: bytes, encoding: .utf8) { return phrase }
+                        } catch {
+                            NSLog("[guest] reading the recovery phrase failed: \(error)")
+                        }
+                    }
+                    return nil
+                },
+                claimedUsername: { [weak self] in self?.guestAccount?.claimedUsername },
+                claimUsername: { [weak self] name in
+                    guard let self else { throw NoGuestAccount() }
+                    // The login handle at auth first, then the directory,
+                    // with the handle released if the directory refuses: the
+                    // `signup` order, through the same helper. The session's
+                    // anonymous-token pool is already bound to this account.
+                    let sessionToken = self.liveSessionToken(for: accountIdB64) ?? secrets.sessionToken
+                    let canonical = try await claimSignupUsername(
+                        accountId: secrets.accountId,
+                        username: name,
+                        sessionToken: sessionToken,
+                        directory: self.accountDirectory,
+                        binder: self.authClientFactory()
+                    )
+                    // The claim just bound the handle with this session.
+                    _ = self.loginHandleBinds.claim(
+                        sessionToken: sessionToken, canonical: canonical)
+                    return canonical
+                },
+                noteUsernameClaimed: { [weak self] name in
+                    guard let self else { return }
+                    self.guestMarker.noteUsernameClaimed(accountIdB64: accountIdB64, username: name)
+                    self.sessionStore.save(
+                        PersistedSession(accountIdB64: accountIdB64, username: name))
+                    self.refreshGuestAccount()
+                },
+                setPassword: { [weak self] _, password, name in
+                    guard let self else { throw NoGuestAccount() }
+                    // The guest account was made under a random password
+                    // nobody saw. Its first password is set from the keys
+                    // this device holds (ADR-0076): the reset is proved by
+                    // the seed, nothing is typed, and nothing on the device
+                    // is re-keyed or replaced.
+                    try await self.setFirstPassword(password, username: name, accountIdB64: accountIdB64)
+                },
+                finish: { [weak self] phrase in
+                    self?.finishGuestClaim(phrase: phrase, accountIdB64: accountIdB64)
+                }
+            )
+        )
+    }
+
+    /// The access token of the live session of `accountIdB64`, or `nil`.
+    private func liveSessionToken(for accountIdB64: String) -> String? {
+        guard signedInAccountIdB64 == accountIdB64 else { return nil }
+        return identitySecrets?.sessionToken
+    }
+
+    /// The password step of ``claimGuestAccount(username:password:)``: the
+    /// account's FIRST password, set through `/password/reset/*` with the
+    /// recovery proof made from the seed this device holds. The session and
+    /// the export-key cache follow the answer; the device key, the cached
+    /// seed and the phrase stay.
+    private func setFirstPassword(_ newPassword: Data, username: String, accountIdB64: String) async throws {
+        guard signedInAccountIdB64 == accountIdB64, let secrets = identitySecrets,
+              secrets.accountIdentitySeed.count == Self.accountIdentitySeedLength else {
+            throw NoGuestAccount()
+        }
+        let name = try LoginName.make(username, emptyError: NoGuestAccount())
+        var seed = Data(secrets.accountIdentitySeed)
+        defer { Self.zeroize(&seed) }
+        let bound = binding.capture()
+        let result = try await firstPasswordOperation(name.handle, seed, newPassword)
+        // Signed out, or deleted, while the reset was out: the password is
+        // set on the server and nothing lands here.
+        try bound.require()
+        guard result.accountId == secrets.accountId else {
+            throw AuthClientError.argument(
+                "internal: the password reset answered for another account")
+        }
+        do {
+            try ExportKeyStore.putExportKey(accountIdB64: accountIdB64, exportKey: result.exportKey)
+        } catch {
+            NSLog("export-key persist (guest claim) failed: \(error)")
+        }
         adoptIdentitySecrets(
             IdentitySecrets(
-                accountId: result.accountId,
+                accountId: secrets.accountId,
                 exportKey: result.exportKey,
-                accountIdentitySeed: accountIdentitySeed,
+                accountIdentitySeed: secrets.accountIdentitySeed,
                 session: result.session
             ),
-            context: "signupGuest"
+            context: "guest claim",
+            rebinds: false
         )
-        state = .session(SessionAccount(accountIdB64: accountIdB64, username: ""))
-        Task { await self.subscribePushBestEffort(context: "signup-guest", accountIdB64: accountIdB64) }
-        return SignupOutcome(recoveryPhrase: phrase)
+        ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "guest claim")
+    }
+
+    /// The last step of ``claimGuestAccount(username:password:)``: only now
+    /// does the account stop being a guest.
+    ///
+    ///   1. The phrase moves from the guest's row to the account's own, so
+    ///      this device seals the account's backup from here on. It is not
+    ///      shown (ADR-0075 D2).
+    ///   2. "Protect your account" becomes owed BEFORE the guest marker goes,
+    ///      so no render sees an ordinary session without that step in front
+    ///      of it.
+    ///   3. The session takes the username; the account's other devices and
+    ///      the profile learn it (ADR-0076).
+    ///   4. The first backup (no MLS state) and the push registration: from
+    ///      here on it is an ordinary account.
+    private func finishGuestClaim(phrase: String, accountIdB64: String) {
+        guard signedInAccountIdB64 == accountIdB64, let secrets = identitySecrets,
+              let username = guestAccount?.claimedUsername ?? sessionStore.load()?.username,
+              !username.isEmpty else {
+            return
+        }
+        DevicePhrase.store(phrase, accountIdB64: accountIdB64, context: "guest-claim", store: phraseStore)
+        protectStepOwed = true
+        guestMarker.clear(accountIdB64: accountIdB64)
+        do {
+            try phraseStore.deletePhrase(accountIdB64: guestPhraseKey(accountIdB64: accountIdB64))
+        } catch {
+            // The account wipe removes the row too.
+            NSLog("[guest] removing the guest recovery phrase row failed: \(error)")
+        }
+        sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: username))
+        let named = SessionAccount(accountIdB64: accountIdB64, username: username)
+        // The landing hook reads the marker: the account is no longer a guest.
+        state = .session(named)
+        onUsernameClaimed?(named)
+        Task { [weak self] in
+            guard let self else { return }
+            // ADR-0076 — the account's other devices learn the name.
+            await self.writeOwnUsernameRegister(username, accountIdB64: accountIdB64)
+            await self.bootstrapBackupBestEffort(
+                accountId: secrets.accountId,
+                accountIdB64: accountIdB64,
+                accountIdentitySeed: secrets.accountIdentitySeed,
+                sessionToken: self.liveSessionToken(for: accountIdB64) ?? secrets.sessionToken,
+                phrase: phrase,
+                context: "guest-claim"
+            )
+        }
+        Task { await self.subscribePushBestEffort(context: "guest-claim", accountIdB64: accountIdB64) }
+    }
+
+    /// "Protect your account" was shown after a guest account was kept.
+    public func dismissProtectStep() {
+        protectStepOwed = false
+    }
+
+    /// Delete a guest account at once (``GuestAccountDiscard`` holds the
+    /// order): on the servers, and every trace of it on this device. Lands
+    /// signed out. A required server delete that fails throws and leaves
+    /// everything in place; the order frees a username an unfinished
+    /// `Create account` took (``guestDeletePlan(_:)``).
+    public func discardGuestAccount() async throws {
+        guard case .session(let account) = state,
+              let secrets = identitySecrets,
+              let guest = guestAccount else {
+            throw NoGuestAccount()
+        }
+        try await GuestAccountDiscard.run(
+            guest: guest,
+            ports: guestEndPorts(accountIdB64: account.accountIdB64, sessionToken: secrets.sessionToken))
+        guestAccountDeleted = true
+    }
+
+    /// If the live session is a guest account past its lifetime
+    /// (``guestExpired(_:nowMs:)``): delete it on the servers best effort,
+    /// wipe the device, land signed out, and answer `true`. Otherwise `false`
+    /// and nothing happens.
+    ///
+    /// Called when the guest's one question appears and at the start of
+    /// ``claimGuestAccount(username:password:)``. Never while a call runs:
+    /// the question is not shown then.
+    @discardableResult
+    public func expireGuestIfDue() async -> Bool {
+        if let running = guestExpiryInFlight { return await running.value }
+        guard case .session(let account) = state,
+              let secrets = identitySecrets,
+              let guest = guestAccount,
+              guestExpired(guest, nowMs: clock()) else {
+            return false
+        }
+        let ports = guestEndPorts(
+            accountIdB64: account.accountIdB64, sessionToken: secrets.sessionToken)
+        let task = Task { @MainActor [weak self] in
+            NSLog("[guest] the guest account is past its lifetime and is deleted")
+            await GuestAccountExpiry.run(guest: guest, ports: ports)
+            self?.guestAccountDeleted = true
+            return true
+        }
+        guestExpiryInFlight = task
+        defer { guestExpiryInFlight = nil }
+        return await task.value
+    }
+
+    /// The server deletes and the local wipe that end a guest account.
+    ///
+    /// The auth service deletes an account with no login handle and no
+    /// passkey on its session alone, and releases the handle of an account
+    /// younger than a day the same way, so nothing here depends on a
+    /// fresh-auth grant. One that is live is sent along for a server that
+    /// refuses unexpectedly.
+    private func guestEndPorts(accountIdB64: String, sessionToken: String) -> GuestAccountDiscard.Ports {
+        let environment = guestEnvironment
+        return GuestAccountDiscard.Ports(
+            servers: GuestServerDelete.Ports(
+                deleteAtAuth: { [weak self] in
+                    try await environment.deleteAccountAtAuth(
+                        self?.liveSessionToken(for: accountIdB64) ?? sessionToken,
+                        self?.liveFreshGrant())
+                },
+                deleteInDirectory: { [weak self] in
+                    try await environment.deleteAccountInDirectory(
+                        self?.liveSessionToken(for: accountIdB64) ?? sessionToken)
+                },
+                releaseHandle: { [weak self] in
+                    let token = self?.liveSessionToken(for: accountIdB64) ?? sessionToken
+                    let grant = self?.liveFreshGrant()
+                    if let release = environment.releaseLoginHandle {
+                        try await release(token, grant)
+                    } else if let self {
+                        _ = try await self.authClientFactory().removeLoginHandle(
+                            sessionToken: token, freshGrant: grant)
+                    }
+                }
+            ),
+            wipe: { [weak self] in
+                if let wipe = environment.wipeLocalData {
+                    wipe(accountIdB64)
+                } else {
+                    self?.wipeAccountStores(accountIdB64)
+                    self?.endSessionAfterLocalWipe()
+                }
+            }
+        )
     }
 
     /// Drive the full OPAQUE-PAKE login flow.
@@ -1210,10 +1776,14 @@ public final class AuthRepository: ObservableObject {
         )
 
         let client = authClientFactory()
+        let bound = binding.capture()
         let result = try await client.login(
             handle: name.handle,
             password: password
         )
+        // A sign-out, or another account's landing, while the round trip was
+        // out: this sign-in was overtaken and lands nothing.
+        try bound.require()
         let accountIdBytes = result.accountId
         let accountIdB64 = base64Encode(accountIdBytes)
         // The fresh-auth proof of this password sign-in: in memory only.
@@ -1376,7 +1946,11 @@ public final class AuthRepository: ObservableObject {
         usernameHint: String? = nil,
         forgotPassword: Bool = false
     ) async throws {
+        let bound = binding.capture()
         let assertion = try await passkeyCeremony(nil)
+        // A sign-out, or another account's landing, while the ceremony was
+        // out: this sign-in was overtaken and lands nothing.
+        try bound.require()
         // The finish response carries URL-safe base64 without padding; the
         // marker and every store on this device use the standard form.
         guard let accountIdBytes = base64UrlDecodeNoPad(assertion.accountIdB64),
@@ -1628,8 +2202,13 @@ public final class AuthRepository: ObservableObject {
         let name = try LoginName.make(
             context.username, emptyError: ThreeWordsError.unavailable)
         let result: TotpRecoverResult
+        let bound = binding.capture()
         do {
             result = try await authClientFactory().recoveryLogin(handle: name.handle, seed: seed)
+            // As in ``login(username:password:)``: overtaken, lands nothing.
+            try bound.require()
+        } catch let stale as StaleBindingError {
+            throw stale
         } catch {
             switch ThreeWords.stalePhraseVerdict(failure: ThreeWords.signInFailure(error)) {
             case .keep:
@@ -1798,11 +2377,10 @@ public final class AuthRepository: ObservableObject {
                 accountIdentitySeed: secrets.accountIdentitySeed,
                 session: result.session
             ),
-            context: "replacePassword"
+            context: "replacePassword",
+            rebinds: false
         )
         newPasswordOwed = false
-        // The account has a password the person chose.
-        protectionStore.setFirstPasswordOwed(false, accountIdB64: account.accountIdB64)
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "replace password")
     }
 
@@ -1934,7 +2512,7 @@ public final class AuthRepository: ObservableObject {
     /// ``UsernameRenameFailed``. Returns the canonical new name.
     public func renameUsername(to typed: String) async throws -> String {
         guard case .session(let account) = state, let secrets = identitySecrets,
-              !UsernameClaim.offered(username: account.username) else {
+              !account.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SessionNotReady()
         }
         let accountIdB64 = account.accountIdB64
@@ -2083,55 +2661,6 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    // MARK: - A guest chooses a username (ADR-0075 pass A, part 2)
-
-    /// Whether the signed-in account chose a username here and still owes
-    /// its first password.
-    public var firstPasswordOwed: Bool {
-        guard case .session(let account) = state else { return false }
-        return protectionStore.firstPasswordOwed(accountIdB64: account.accountIdB64)
-    }
-
-    /// "Choose a username" for a guest account: the sign-up claim, run
-    /// later, in the same order.
-    ///
-    ///   1. The username rule, locally.
-    ///   2. `PUT /auth/login-handle` (``UsernameTaken`` on `409`,
-    ///      ``UsernameBindLimited`` on `429 handle-bind-limited`).
-    ///   3. The name in discovery; on a failure the handle is released
-    ///      (`DELETE /auth/login-handle`) and nothing is saved.
-    ///   4. The name in the local account marker and the live session; the
-    ///      handle is marked bound for this session.
-    ///
-    /// The account's first password is owed from here
-    /// (``replacePassword(newPassword:)`` runs without a proof until it is
-    /// set). The profile and the username certificate are the composition
-    /// root's (``onUsernameClaimed``). Returns the canonical name.
-    public func claimUsername(_ typed: String) async throws -> String {
-        guard case .session(let account) = state, let secrets = identitySecrets,
-              UsernameClaim.offered(username: account.username) else {
-            throw SessionNotReady()
-        }
-        let bound = try await claimSignupUsername(
-            accountId: secrets.accountId,
-            username: typed,
-            sessionToken: secrets.sessionToken,
-            directory: accountDirectory,
-            binder: authClientFactory()
-        )
-        // The claim bound the handle with this session: the landing hook
-        // must not bind it a second time.
-        _ = loginHandleBinds.claim(sessionToken: secrets.sessionToken, canonical: bound)
-        protectionStore.setFirstPasswordOwed(true, accountIdB64: account.accountIdB64)
-        sessionStore.save(PersistedSession(accountIdB64: account.accountIdB64, username: bound))
-        let named = SessionAccount(accountIdB64: account.accountIdB64, username: bound)
-        state = .session(named)
-        // ADR-0076 — the account's other devices learn the name.
-        await writeOwnUsernameRegister(bound, accountIdB64: account.accountIdB64)
-        onUsernameClaimed?(named)
-        return bound
-    }
-
     /// The 64-byte length of the AccountIdentity seed.
     static let accountIdentitySeedLength = 64
 
@@ -2226,11 +2755,15 @@ public final class AuthRepository: ObservableObject {
             .signaturePublicKey()
 
         let client = authClientFactory()
+        let bound = binding.capture()
         let result = try await client.recover(
             handle: name.handle,
             mnemonicSeed: seed,
             newPassword: newPassword
         )
+        // A sign-out, or another account's landing, while the reset was out:
+        // the password is changed on the server, and nothing lands here.
+        try bound.require()
         let accountIdBytes = result.accountId
         let accountIdB64 = base64Encode(accountIdBytes)
         tokenProvider.install(result.session, accountIdB64: accountIdB64)
@@ -2298,6 +2831,7 @@ public final class AuthRepository: ObservableObject {
             oldAccountPubkey: oldAccountPubkey,
             sessionToken: result.sessionToken
         )
+        try bound.require()
         // Phase 2a3b0 (ADR-0007) — DeviceIdentity seed is
         // decoupled from the OPAQUE password, so recovery does
         // NOT rotate it. `ensureDeviceIdentitySeed` returns
@@ -2320,66 +2854,35 @@ public final class AuthRepository: ObservableObject {
             )
         )
 
-        // Phase 2a1d / 2a3d7 — restore-then-bootstrap on recover.
+        // Restore-then-bootstrap on recover.
         //
-        // The user has just gone through recovery, which lands
-        // on a device that may or may not have been used by
-        // them before. If a prior backup envelope sits on the
-        // server, we fetch + decrypt + parse it before posting
-        // a fresh baseline — otherwise the bootstrap-side
-        // upload nukes the prior backup with an empty payload.
+        // The user has just gone through recovery, which lands on a device
+        // that may or may not have been used by them before. If a backup
+        // sits on the server, it is fetched, opened and applied before a
+        // fresh baseline is posted, so the baseline carries the merged
+        // contacts, synced state and conversation list instead of
+        // replacing them with this device's (possibly empty) own.
         //
-        // **Ordering matters:** the restore + snapshot-write to
-        // `IdentitySnapshotStore` happen BEFORE the `state`
-        // flip below. SwiftUI's `SessionRoot.task(id:
-        // identitySecrets?.accountId)` modifier wakes on the
-        // flip and immediately drives
-        // `chatRepository.bootstrap(secrets:)`, which reads
-        // `snapshotStore.getSnapshot(...)` for the MLS state.
-        // If we restored from server AFTER the flip, that read
-        // would race against the write and the new device would
-        // land with no MLS state. Doing it before is the only
-        // way to make the rehydrate path see the restored
-        // snapshot on the very first ChatRepository.bootstrap
-        // call.
+        // The backup carries NO MLS state. After a recover this device's MLS
+        // state is whatever it already held locally for the account
+        // (possibly nothing); it is admitted to the chats it does not hold by
+        // their other members (ADR-0050 section 2.5a). The local snapshot and
+        // the ADR-0040 pending-commit outbox are therefore left exactly as
+        // they are: the outbox still describes the local epochs.
         //
-        // The applying-restored-contacts-into-ContactsRepository
-        // wire is not built yet on iOS — the contacts list is
-        // in-memory only and there's no persistent target to
-        // upsert into (mirror of the Android situation). For
-        // now restore logs the outcome; the merge layer lands
-        // alongside the iOS contact-persistence sub-sprint.
-        let (restoredSnapshot, restoredGroupIdsHex) = await restoreFromServerBackupBestEffort(
+        // **Ordering matters:** the stores are written BEFORE the `state`
+        // flip below. The session shell wakes on the flip and binds the
+        // contacts and synced-state repositories, which read them.
+        let backupOutcome = await restoreBackupFromPhrase(
             accountId: accountIdBytes,
             accountIdB64: accountIdB64,
             sessionToken: result.sessionToken,
             phrase: canonicalPhrase,
             context: "recover"
         )
-        // Written BEFORE the bootstrap below, because that is what reads the
-        // set to rebuild `Group` handles. Additive: a group this device
-        // already knew is not dropped by a backup that predates it.
-        let knownGroups = KnownGroupsStore()
-        for groupIdHex in restoredGroupIdsHex {
-            knownGroups.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-        }
-        if !restoredSnapshot.isEmpty {
-            // Drop the restored MLS blob into the local snapshot
-            // store. `ChatRepository.bootstrap`'s rehydrate path
-            // picks it up automatically — no wiring change
-            // needed beyond this single putSnapshot call.
-            IdentitySnapshotStore().putSnapshot(
-                accountIdB64: accountIdB64,
-                blob: restoredSnapshot
-            )
-        }
-        // ADR-0040 (G-35) — purge any stale pending-commit outbox for this
-        // account on recover. Recover REPLACES the local MLS snapshot (with the
-        // server-restored blob, or leaves the prior one), so any outbox entry
-        // from a previous session references DISCARDED local epochs; the
-        // restart sweep would mis-reconcile it against the freshly-restored
-        // group. Drop the outbox so the new bootstrap sweeps a clean slate.
-        CommitOutboxStore().deleteOutboxForAccount(accountIdB64: accountIdB64)
+        // The fetch suspended; the session must not land over a sign-out or
+        // another account that landed meanwhile.
+        try bound.require()
 
         // ADR-0017: also carry the phrase seed (the canonical identity
         // seed downstream callers rebuild from). Cleared on logout.
@@ -2402,29 +2905,29 @@ public final class AuthRepository: ObservableObject {
             )
         )
 
-        // Phase 2a1c — post-recover backup bootstrap: re-cache
-        // the phrase under the freshly-rotated device root key
-        // and post a baseline /backup envelope that re-publishes
-        // the restored snapshot (so the next device-recover
-        // sees the same state we just rebuilt).
+        // Post-recover backup bootstrap: cache the phrase on this device and
+        // post a baseline /backup envelope carrying what was just merged
+        // (contacts, synced state, and the conversation list: this device's
+        // own groups plus the ones the restored backup named).
         //
-        // G-10 (known-gaps): AWAITED, not a detached `Task`. The
-        // baseline re-seals the backup envelope under the
-        // freshly-rotated export-key material; until it lands the
-        // server still holds the pre-recover envelope. Awaiting
-        // folds the rewrite into the recover round-trip so the
-        // "stale envelope" window collapses to the upload latency.
-        // `bootstrapBackupBestEffort` is non-throwing (it logs +
-        // continues on any internal failure), so awaiting it cannot
-        // fail the recover itself.
-        await Self.bootstrapBackupBestEffort(
+        // G-10 (known-gaps): AWAITED, not a detached `Task`, so the rewrite
+        // is part of the recover round-trip. `bootstrapBackupBestEffort` is
+        // non-throwing (it logs + continues on any internal failure), so
+        // awaiting it cannot fail the recover itself.
+        //
+        // When the fetch above FAILED the restore is still owed and the
+        // baseline is not posted: it would replace the blob the next
+        // landing is going to fetch.
+        await bootstrapBackupBestEffort(
             accountId: accountIdBytes,
             accountIdB64: accountIdB64,
             accountIdentitySeed: accountIdentitySeed,
             sessionToken: result.sessionToken,
             phrase: canonicalPhrase,
             context: "recover",
-            wholeStorageSnapshot: restoredSnapshot
+            uploadBaseline: backupOutcome != .fetchFailed
+                && !BackupRestoreRetryStore.isPending(
+                    accountIdB64: accountIdB64, defaults: backupDefaults)
         )
         ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "recover")
         // 1.20c — best-effort push subscribe.
@@ -2445,6 +2948,7 @@ public final class AuthRepository: ObservableObject {
         pushBinding.clear()
         removeDeliveredNotifications()
         let cached = sessionStore.load()
+        let leaving = signedInAccountIdB64 ?? cached?.accountIdB64
         // Drop the persisted session token so a relaunch after logout lands
         // logged out instead of silently restoring the session this call
         // just ended (``rehydrate(nowMs:)`` requires the token). The seed and
@@ -2478,12 +2982,21 @@ public final class AuthRepository: ObservableObject {
         rotationAdoptRetry?.cancel()
         rotationAdoptRetry = nil
         sessionExpiredNotice = false
+        protectStepOwed = false
+        // A sign-in or restore still in flight must not land after this, and
+        // a restore parked on the stale-backup question is over.
+        binding.advance()
+        resolveStaleBackupOverride(false)
         state = .anon(cachedUsername: cached?.username)
         if let endingPair { logoutAtServer(endingPair) }
         // 1.20c — fire-and-forget unsubscribe so the next page
         // reload doesn't silently keep accepting pushes against
         // a logged-out session.
         Task { await PushSubscriber.shared.unsubscribe(prepaidToken: unregisterToken) }
+        // Last, after the runtimes let go above: wait for this account's
+        // store writes in flight and refuse the later ones until it lands
+        // here again. Nothing is deleted.
+        if let leaving { AccountStoreGate.seal(leaving) }
     }
 
     /// The session half of Forget device and Delete account: end the session
@@ -2521,6 +3034,9 @@ public final class AuthRepository: ObservableObject {
         sessionLanding = nil
         threeWordsPassedAtMs = nil
         noticeAnsweredAtMs = nil
+        // As in ``logout()``.
+        binding.advance()
+        resolveStaleBackupOverride(false)
         identitySecrets = nil
         // ADR-0017/0018 — drop any parked recovery context too (mirror of
         // logout + the Android forgetDevice), so an abandoned recover /
@@ -2538,6 +3054,7 @@ public final class AuthRepository: ObservableObject {
         rotationAdoptRetry?.cancel()
         rotationAdoptRetry = nil
         sessionExpiredNotice = false
+        protectStepOwed = false
         state = .anon(cachedUsername: nil)
         if let endingPair { logoutAtServer(endingPair) }
         // 1.20c — full wipe of push state too. The contract is
@@ -2561,9 +3078,9 @@ public final class AuthRepository: ObservableObject {
     /// one signed in when the subscribe gets there.
     private func subscribePushBestEffort(context: String, accountIdB64: String) async {
         do {
-            _ = try await PushSubscriber.shared.subscribe(
-                accountIdB64: accountIdB64,
-                stillSignedIn: { [weak self] in self?.signedInAccountIdB64 == accountIdB64 }
+            try await pushSubscribe(
+                accountIdB64,
+                { [weak self] in self?.signedInAccountIdB64 == accountIdB64 }
             )
         } catch {
             NSLog("push subscribe (\(context)) failed: \(error)")
@@ -2629,6 +3146,10 @@ public final class AuthRepository: ObservableObject {
             // and flip — `provideRecoveryPhrase` finishes from here. The
             // pair serves the restore prompt's bearer calls meanwhile.
             adoptSessionPair(session, accountIdB64: accountIdB64, context: "needs-recovery-phrase")
+            binding.advance()
+            // ACCESS is granted: the restore that follows writes this
+            // account's stores before the session lands.
+            AccountStoreGate.open(accountIdB64)
             pendingRecovery = PendingRecovery(
                 accountIdBytes: accountIdBytes,
                 accountIdB64: accountIdB64,
@@ -2639,6 +3160,7 @@ public final class AuthRepository: ObservableObject {
             state = .needsRecoveryPhrase(
                 SessionAccount(accountIdB64: accountIdB64, username: username)
             )
+            completeParkFromOwedPhrase(accountIdB64: accountIdB64)
             return
         }
         finishCanonicalSession(
@@ -2664,7 +3186,8 @@ public final class AuthRepository: ObservableObject {
         accountIdBytes: Data,
         exportKey: Data,
         session: SessionPair,
-        username: String
+        username: String,
+        retryMarkedBackupRestore: Bool = true
     ) {
         let accountIdB64 = base64Encode(accountIdBytes)
         // The keys are on this device now; nothing is left to explain.
@@ -2701,6 +3224,16 @@ public final class AuthRepository: ObservableObject {
             accountIdentitySeed: accountIdentitySeed,
             requireFresh: false
         )
+        // A session landing: a backup restore that is still owed gets one
+        // attempt here. The route that has just made its own attempt passes
+        // `false`: the next one belongs to the NEXT landing.
+        if retryMarkedBackupRestore {
+            retryBackupRestoreIfMarked(
+                accountId: accountIdBytes,
+                sessionToken: session.sessionToken,
+                context: "sign-in"
+            )
+        }
         // ADR-0073 section 4.2 — observe the published identity BEFORE any
         // upload, then re-publish this device's bundle on an explicit
         // sign-in. Both run in this one task, in that order, so the
@@ -2948,9 +3481,15 @@ public final class AuthRepository: ObservableObject {
         // the "keys were changed" line survives a relaunch until dismissed.
         pruneKeyRotationPending(accountIdB64: accountIdB64)
         keysRotatedNotice = rotatedNotice.isOwed(accountIdB64: accountIdB64)
-        if case .session = state { onProtectedSessionLanded?(accountIdB64) }
+        // A guest account (`docs/ux/call-links.md` section 9) has no name, no
+        // recovery email and no notices: what protects an account is read
+        // once it is kept (the landing ``finishGuestClaim(phrase:accountIdB64:)``
+        // makes). The device bind and the identity-key record below still
+        // run: the call needs a session that names this device.
+        let guest = guestMarker.state(accountIdB64: accountIdB64) != nil
+        if case .session = state, !guest { onProtectedSessionLanded?(accountIdB64) }
         // ADR-0076 — a rename this device started and did not finish.
-        if case .session = state,
+        if case .session = state, !guest,
            protectionStore.renameOwed(accountIdB64: accountIdB64) != nil, !renameResumeInFlight {
             renameResumeInFlight = true
             Task { [weak self] in
@@ -3002,7 +3541,8 @@ public final class AuthRepository: ObservableObject {
                             exportKey: secrets.exportKey,
                             accountIdentitySeed: secrets.accountIdentitySeed,
                             session: bound),
-                        context: "bind-device (\(context))")
+                        context: "bind-device (\(context))",
+                        rebinds: false)
                 } else {
                     adoptSessionPair(bound, accountIdB64: accountIdB64, context: "bind-device (\(context))")
                 }
@@ -3390,6 +3930,9 @@ public final class AuthRepository: ObservableObject {
         // destroy it before anything else, then the key reset's client order.
         recallRecords.clear(accountIdB64: record.accountIdB64)
         recall = nil
+        // The account lands on this device again: the staged wipe sealed its
+        // stores, and what follows writes them.
+        AccountStoreGate.open(record.accountIdB64)
         freshAuth.put(landed.freshGrant, accountIdB64: record.accountIdB64)
         // The staged wipe removed the phrase-saved flag; the record kept it.
         // Taking the account back with the phrase is itself only possible
@@ -3473,6 +4016,8 @@ public final class AuthRepository: ObservableObject {
                 newSignaturePubkey: newPubkey,
                 deviceId: nil))
         freshAuth.put(landed.freshGrant, accountIdB64: accountIdB64)
+        // The account lands on this device (again): its stores are written.
+        AccountStoreGate.open(accountIdB64)
         accountRecalledThisSession = true
         sessionLanding = .other
         sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: offer.username))
@@ -3609,12 +4154,16 @@ public final class AuthRepository: ObservableObject {
         // The canonical form (12 lower-case words, single spaces), which is
         // what the device stores once the check below has passed.
         let canonicalPhrase = mnemonic.phrase()
+        let bound = binding.capture()
         do {
             try await verifySeedAgainstPublishedIdentity(
                 accountIdBytes: pending.accountIdBytes,
                 sessionToken: pending.sessionToken,
                 accountIdentitySeed: accountIdentitySeed
             )
+            // Signed out (or forgot the device) while the bundle was being
+            // fetched: persist nothing for the account that was parked.
+            try bound.require()
         } catch {
             // On every refusal (mismatch, 404, network) the seed never
             // reached the live IdentitySecrets — zeroize it.
@@ -3651,13 +4200,80 @@ public final class AuthRepository: ObservableObject {
         DevicePhrase.store(
             canonicalPhrase, accountIdB64: pending.accountIdB64, context: "provide-phrase")
 
+        // The phrase restored the identity, so the account backup is fetched
+        // and applied here exactly as the restore screen does it (canonical
+        // phrase, the bytes every envelope is sealed under). This is the
+        // completion of EVERY route that brings the phrase to a parked
+        // sign-in: the typed phrase, a passkey that carries the keys, and
+        // the recovery-email code (ADR-0075), each of which hands the phrase
+        // here. None of this can fail the sign-in.
+        let backupOutcome = await restoreBackupFromPhrase(
+            accountId: pending.accountIdBytes,
+            accountIdB64: pending.accountIdB64,
+            sessionToken: pending.currentSession(tokenProvider).sessionToken,
+            phrase: canonicalPhrase,
+            context: "provideRecoveryPhrase"
+        )
+        // The fetch suspended. If the parked recovery went away meanwhile
+        // (a log out), there is no session to land. The epoch and not the
+        // account id: signing out and parking the same account again is a
+        // new binding, with its own session token.
+        guard bound.isCurrent else {
+            Self.zeroize(&accountIdentitySeed)
+            throw StaleBindingError()
+        }
+
+        let landed = pending.currentSession(tokenProvider)
         finishCanonicalSession(
             accountIdentitySeed: accountIdentitySeed,
             accountIdBytes: pending.accountIdBytes,
             exportKey: pending.exportKey,
-            session: pending.currentSession(tokenProvider),
-            username: pending.username
+            session: landed,
+            username: pending.username,
+            retryMarkedBackupRestore: false
         )
+        // The route ends with the keys on this device: a baseline backup
+        // carrying what was just merged (no MLS state). Not when the fetch
+        // failed: the restore is still owed and the baseline would replace
+        // the blob the next landing is going to fetch.
+        uploadBaselineBackupAfterRestore(
+            accountId: pending.accountIdBytes,
+            accountIdB64: pending.accountIdB64,
+            accountIdentitySeed: accountIdentitySeed,
+            sessionToken: landed.sessionToken,
+            phrase: canonicalPhrase,
+            restoreOutcome: backupOutcome,
+            context: "provideRecoveryPhrase"
+        )
+    }
+
+    /// The baseline backup of a route that just restored the keys on this
+    /// device, in the background: never delays or fails the landing. Stands
+    /// aside while the restore is still owed.
+    private func uploadBaselineBackupAfterRestore(
+        accountId: Data,
+        accountIdB64: String,
+        accountIdentitySeed: Data,
+        sessionToken: String,
+        phrase: String,
+        restoreOutcome: PhraseRestoreBackupOutcome?,
+        context: String
+    ) {
+        let bound = binding.capture()
+        Task { [weak self] in
+            guard let self, bound.isCurrent else { return }
+            await self.bootstrapBackupBestEffort(
+                accountId: accountId,
+                accountIdB64: accountIdB64,
+                accountIdentitySeed: accountIdentitySeed,
+                sessionToken: sessionToken,
+                phrase: phrase,
+                context: context,
+                uploadBaseline: restoreOutcome != .fetchFailed
+                    && !BackupRestoreRetryStore.isPending(
+                        accountIdB64: accountIdB64, defaults: self.backupDefaults)
+            )
+        }
     }
 
     /// Shared HARD-BLOCK verification (ADR-0017 + lakko-security
@@ -3739,12 +4355,16 @@ public final class AuthRepository: ObservableObject {
         // Nothing is written before the check below.
         let transferred = try RecoveryPayload.phraseAndSeed(fromEntropy: phraseEntropy)
         var seed = transferred.seed
+        let bound = binding.capture()
         do {
             try await verifySeedAgainstPublishedIdentity(
                 accountIdBytes: pending.accountIdBytes,
                 sessionToken: session?.sessionToken ?? pending.sessionToken,
                 accountIdentitySeed: seed
             )
+            // Signed out while the bundle was being fetched: no session
+            // lands and nothing is persisted.
+            try bound.require()
         } catch {
             Self.zeroize(&seed)
             throw error
@@ -3835,12 +4455,19 @@ public final class AuthRepository: ObservableObject {
     ) async throws {
         let transferred = try RecoveryPayload.phraseAndSeed(fromEntropy: phraseEntropy)
         var seed = transferred.seed
+        // Another sign-in that lands while the checks below are out owns the
+        // device: this restore then writes nothing and lands nothing.
+        let bound = binding.capture()
+        // The pairing's held state (`persistJoin`) is written before the
+        // session lands.
+        AccountStoreGate.open(base64Encode(accountIdBytes))
         do {
             try await verifySeedAgainstPublishedIdentity(
                 accountIdBytes: accountIdBytes,
                 sessionToken: session.sessionToken,
                 accountIdentitySeed: seed
             )
+            try bound.require()
             try await TypedNameCheck.check(
                 username: username,
                 accountIdBytes: accountIdBytes
@@ -3851,6 +4478,7 @@ public final class AuthRepository: ObservableObject {
                     sessionToken: session.sessionToken
                 )
             }
+            try bound.require()
         } catch {
             Self.zeroize(&seed)
             throw error
@@ -3858,6 +4486,10 @@ public final class AuthRepository: ObservableObject {
         // Both checks passed: the pairing's held state lands first, so the
         // DeviceGroup snapshot is on disk before the session bootstraps.
         await persistJoin()
+        guard bound.isCurrent else {
+            Self.zeroize(&seed)
+            throw StaleBindingError()
+        }
         // Bootstrap the device root key from the identity seed so the
         // next-launch rehydrate gate sees a key on this device.
         // Best-effort: a Keychain failure leaves the in-memory session
@@ -3947,10 +4579,13 @@ public final class AuthRepository: ObservableObject {
         )
 
         let client = authClientFactory()
+        let bound = binding.capture()
         let result = try await client.totpRecover(
             handle: name.handle,
             code: code
         )
+        // As in ``login(username:password:)``: overtaken, lands nothing.
+        try bound.require()
         let accountIdBytes = result.accountId
         let accountIdB64 = base64Encode(accountIdBytes)
         let resolvedUsername = name.canonical
@@ -3989,8 +4624,12 @@ public final class AuthRepository: ObservableObject {
     public func recoverPasswordByEmail(username: String, ticket: String, newPassword: Data) async throws {
         let name = try LoginName.make(
             username, emptyError: AuthClientError.argument("enter the username of the account to recover"))
+        let bound = binding.capture()
         let result = try await authClientFactory().recoveryEmailRecoverPassword(
             ticket: ticket, newPassword: newPassword)
+        // A sign-out, or another account's landing, while the round trip was
+        // out: the password is changed on the server, and nothing lands here.
+        try bound.require()
         let accountIdBytes = result.accountId
         let accountIdB64 = base64Encode(accountIdBytes)
 
@@ -4091,6 +4730,10 @@ public final class AuthRepository: ObservableObject {
         // Cold case — the keys are not on this device: access succeeded,
         // the restore is pending. exportKey EMPTY (no password); the
         // completion paths bootstrap the device key from the VERIFIED seed.
+        // A new binding: ACCESS is granted, and the restore that follows
+        // writes this account's stores before the session lands.
+        binding.advance()
+        AccountStoreGate.open(accountIdB64)
         pendingRecovery = PendingRecovery(
             accountIdBytes: accountIdBytes,
             accountIdB64: accountIdB64,
@@ -4105,6 +4748,35 @@ public final class AuthRepository: ObservableObject {
                 username: username
             )
         )
+        completeParkFromOwedPhrase(accountIdB64: accountIdB64)
+    }
+
+    /// A sign-in parked in the restore prompt because this device holds no
+    /// identity seed for the account, while the phrase of a fresh identity
+    /// the person was never shown is still owed (``RecoveryMarkers``) and
+    /// held on this device (the seed did not persist, or the phrase screen
+    /// never came up). Asking for that phrase would ask for something nobody
+    /// has seen, so the park is completed from the held phrase, through
+    /// ``provideRecoveryPhrase(mnemonicPhrase:)`` and its check against the
+    /// published identity. The landing then shows the owed phrase first
+    /// (``parkOwedFreshPhrase(accountIdBytes:accountIdB64:username:seed:session:)``).
+    ///
+    /// Any failure leaves the account parked in the prompt as before.
+    private func completeParkFromOwedPhrase(accountIdB64: String) {
+        guard markers.isPhraseOwed(accountIdB64: accountIdB64),
+              let phrase = DevicePhrase.read(accountIdB64: accountIdB64, store: phraseStore) else {
+            return
+        }
+        let bound = binding.capture()
+        Task { @MainActor [weak self] in
+            guard let self, bound.isCurrent else { return }
+            do {
+                try await self.provideRecoveryPhrase(mnemonicPhrase: phrase)
+            } catch {
+                if error is StaleBindingError { return }
+                NSLog("[auth] the kept recovery phrase did not complete the restore: \(error)")
+            }
+        }
     }
 
     /// The just-minted fresh recovery phrase, for the
@@ -4206,6 +4878,11 @@ public final class AuthRepository: ObservableObject {
         // ADR-0074 "T1 as built" point 10: the pair a reset returns keeps the
         // device the bearer names, so the client-side note moves with it.
         let bearer = pending.currentSession(tokenProvider)
+        // What the answer lands into is decided by what the device is bound
+        // to once it is back (``FreshIdentityLanding``): the reset cannot be
+        // taken back, but a sign-out, a wipe or another account's landing
+        // while it was out changes what may be written here.
+        let bound = binding.capture()
         let reset: KeyResetResult
         do {
             let answered = try await keyResetOperation(bearer.sessionToken, grant, seed, newPubkey)
@@ -4224,7 +4901,7 @@ public final class AuthRepository: ObservableObject {
         freshAuth.clear()
 
         // 3 to 5. Persist, park the phrase screen, publish.
-        await landKeyReset(
+        let landed = await landKeyReset(
             reset: reset,
             seed: seed,
             phrase: phrase,
@@ -4232,8 +4909,13 @@ public final class AuthRepository: ObservableObject {
             accountIdBytes: pending.accountIdBytes,
             accountIdB64: pending.accountIdB64,
             username: pending.username,
-            context: "key reset"
+            context: "key reset",
+            bound: bound
         )
+        // Not this device's session any more (another account signed in, or
+        // the account was removed from this device): no screen of this flow
+        // is shown and the caller reads no success.
+        guard landed else { throw StaleBindingError() }
         return phrase
     }
 
@@ -4245,6 +4927,7 @@ public final class AuthRepository: ObservableObject {
     /// `POST /account/keys/reset/finish`, and a recall (ADR-0074 section
     /// 1.2: "from the reset's client order onward the recall IS a reset")
     /// after `POST /account/recall/finish`.
+    @discardableResult
     private func landKeyReset(
         reset: KeyResetResult,
         seed: Data,
@@ -4253,10 +4936,32 @@ public final class AuthRepository: ObservableObject {
         accountIdBytes: Data,
         accountIdB64: String,
         username: String,
-        context: String
-    ) async {
-        // 3. Persist, before any further network call.
-        adoptSessionPair(reset.session, accountIdB64: accountIdB64, context: context)
+        context: String,
+        bound: BindingEpoch.Captured? = nil
+    ) async -> Bool {
+        // The account was forgotten on this device (Forget device, Delete
+        // account) while the server step was out: its stores were wiped and
+        // nothing of it is written back. The hold covers the store writes of
+        // step 3 only, never a wait.
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else {
+            NSLog("[auth] account keys reset after the account was removed from this device; nothing is kept here")
+            return false
+        }
+        // Where the answer lands: here, unless another account signed in
+        // while the server step was out. A caller with no binding of its own
+        // (a recall, which runs signed out) lands here.
+        let landing = bound.map {
+            FreshIdentityLanding.decide(
+                mintedFor: accountIdB64,
+                bindingIsCurrent: $0.isCurrent,
+                signedIn: signedInAccountIdB64)
+        } ?? .showPhrase(rebinds: false)
+        // 3. Persist, before any further network call. The pair goes to the
+        // token provider only when this account is the one the device is
+        // bound to: it serves every bearer call of whoever is signed in.
+        if landing != .keepForNextSignIn {
+            adoptSessionPair(reset.session, accountIdB64: accountIdB64, context: context)
+        }
         bootstrapDeviceKeyFromVerifiedSeedIfAbsent(
             accountIdB64: accountIdB64,
             accountIdentitySeed: seed,
@@ -4297,6 +5002,27 @@ public final class AuthRepository: ObservableObject {
                 Continuity.Marker(keyGeneration: reset.session.keyGeneration, signedAtMs: signedAtMs),
                 accountIdB64: accountIdB64)
         }
+        gate.leave()
+
+        switch landing {
+        case .showPhrase(let rebinds):
+            // After a sign-out the phrase screen binds the device to this
+            // account again: a sign-in still out from the signed-out state
+            // was overtaken by it.
+            if rebinds { binding.advance() }
+        case .keepForNextSignIn:
+            // Another account signed in while the reset was out. Its session
+            // and its screens are not this flow's: nothing of the state or
+            // of the token provider is touched. The new seed, the phrase and
+            // the owed records are on this device (above), so this account's
+            // next sign-in here lands on the new keys, shows an owed phrase
+            // first and finishes the publish
+            // (``parkOwedFreshPhrase(accountIdBytes:accountIdB64:username:seed:session:)``,
+            // ``settleOwedKeyResetPublish(accountIdB64:accountIdBytes:accountIdentitySeed:requireFresh:)``).
+            NSLog("[auth] account keys reset after another account signed in; the rest is owed at that account's next sign-in")
+            return false
+        }
+
         keysResetThisSession = true
         // ADR-0074 section 0.1 — auth recorded the new key inside the reset;
         // the mint for it is idempotent and moves this device's mark.
@@ -4344,6 +5070,7 @@ public final class AuthRepository: ObservableObject {
         } catch {
             NSLog("[auth] the publish after a key reset did not finish; the phrase screen offers a retry")
         }
+        return true
     }
 
     /// Whether a live fresh-auth proof is held for the account parked on the
@@ -4519,7 +5246,8 @@ public final class AuthRepository: ObservableObject {
                 accountIdentitySeed: secrets.accountIdentitySeed,
                 session: session
             ),
-            context: context
+            context: context,
+            rebinds: false
         )
         // ADR-0074 — the proof sign-in issued a pair that names no device;
         // name this one again.
@@ -4532,9 +5260,6 @@ public final class AuthRepository: ObservableObject {
     /// live fresh-auth proof, or the local three-word check passed within
     /// the last ten minutes.
     public var passwordChangeAllowed: Bool {
-        // A guest who just chose a username has a random password nobody
-        // knows: its first password needs no proof.
-        if firstPasswordOwed { return true }
         return PasswordChangeGate.allowed(
             holdsLiveProof: holdsLiveFreshAuth(),
             threeWordsPassedAtMs: threeWordsPassedAtMs,
@@ -4827,13 +5552,29 @@ public final class AuthRepository: ObservableObject {
                 username: pending.username
             )
         )
+        let landed = pending.currentSession(tokenProvider)
         finishCanonicalSession(
             accountIdentitySeed: pending.seed,
             accountIdBytes: pending.accountIdBytes,
             exportKey: Data(),
-            session: pending.currentSession(tokenProvider),
+            session: landed,
             username: pending.username
         )
+        // A key reset (and a recall, which is one) ends with the new keys on
+        // this device: the backup on the server is sealed under the phrase
+        // that was replaced, so a baseline under the new one goes up (no MLS
+        // state).
+        if let phrase = DevicePhrase.read(accountIdB64: pending.accountIdB64, store: phraseStore) {
+            uploadBaselineBackupAfterRestore(
+                accountId: pending.accountIdBytes,
+                accountIdB64: pending.accountIdB64,
+                accountIdentitySeed: pending.seed,
+                sessionToken: landed.sessionToken,
+                phrase: phrase,
+                restoreOutcome: nil,
+                context: "key reset"
+            )
+        }
     }
 
     /// ADR-0036 (S6) — mint an auth-attested genesis proof binding the
@@ -5068,49 +5809,78 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    // MARK: - Backup bootstrap helpers (Phase 2a1c)
+    // MARK: - Backup restore + bootstrap helpers
 
-    /// Phase 2a1d — fetch + decrypt + parse the prior backup
-    /// envelope for this account, if any. Best-effort; logs
-    /// every non-`restored` outcome and continues.
+    /// The backup step of EVERY route that restores the identity from the
+    /// recovery phrase: the restore screen (``recover(mnemonicPhrase:newPassword:username:)``)
+    /// and the phrase prompt after an ordinary sign-in on a device with no
+    /// cached seed (``provideRecoveryPhrase(mnemonicPhrase:)``). iOS has no
+    /// three-word vault route; the another-device route is not one of these
+    /// (its state arrives in the pairing bundle).
     ///
-    /// Called from the recover flow BEFORE the bootstrap step
-    /// so the new baseline upload can carry the merged set
-    /// instead of overwriting the server blob with an empty
-    /// list. On iOS the application of restored contacts into
-    /// ``ContactsRepository`` is not yet wired — the contacts
-    /// list is in-memory only and there's no persistent target
-    /// to upsert into; this helper logs the parsed-contact
-    /// count so the wire-decryption end of the flow is
-    /// exercised today, and the merge-into-state layer lands
-    /// alongside the iOS contact-persistence sub-sprint.
-    /// Returns the prior MLS whole-storage snapshot (if any) so
-    /// the bootstrap helper can re-upload it instead of nuking
-    /// the server-side snapshot with an empty one. Empty `Data`
-    /// when there is no prior backup or the prior backup
-    /// pre-dates 2a3d.
+    /// Before anything is fetched, and so before the session lands, the
+    /// phrase is cached on this device and the restore is recorded as OWED
+    /// (``BackupRestoreRetryStore``). It stays owed until it reaches a
+    /// definitive answer, so an app killed mid-restore, or a fetch that
+    /// failed, is tried again at the next session landing.
     ///
-    /// ADR-0037 §6 (G-11): the restore runs behind the rollback gate — a
-    /// tampered / rolled-back head refuses outright and raises
-    /// ``backupRollbackAlarm``; a stale head prompts the user via
-    /// ``pendingStaleBackupOverride`` (fail-closed on decline). An instance
-    /// method (was `static`) so it can arm the gate's confirmation callback +
-    /// set the published alarm.
-    private func restoreFromServerBackupBestEffort(
+    /// Fetch, gate, open, apply:
+    ///
+    ///   * ADR-0037 section 6 (G-11): the served blob runs behind the
+    ///     rollback gate. A tampered / rolled-back head refuses outright and
+    ///     raises ``backupRollbackAlarm``; a stale head asks the user through
+    ///     ``pendingStaleBackupOverride`` (fail-closed on decline). Both are
+    ///     presented at the app root, so every route shows them.
+    ///   * A restored payload is merged through ``PhraseRestoreBackup/apply(_:accountIdB64:context:defaults:)``:
+    ///     contacts, the ADR-0058 synced state, and the list of the account's
+    ///     conversations. Never MLS state: the backup carries none, and this
+    ///     device's MLS state stays whatever it already held locally.
+    ///   * No backup (404) is not an error.
+    ///   * A fetch failure does not fail the sign-in. It is logged and the
+    ///     restore stays owed.
+    ///
+    /// `phrase` is the CANONICAL phrase (`RecoveryMnemonic.phrase()`): the
+    /// envelope is sealed under those bytes.
+    @discardableResult
+    func restoreBackupFromPhrase(
         accountId: Data,
         accountIdB64: String,
         sessionToken: String,
         phrase: String,
         context: String
-    ) async -> (snapshot: Data, knownGroupIdsHex: [String]) {
-        let phraseBytes = Data(phrase.utf8)
-        let client = Self.makeBackupClient()
-        client.setSessionToken(sessionToken)
+    ) async -> PhraseRestoreBackupOutcome {
+        // The phrase first: it is what a later attempt opens the blob with,
+        // and what this device seals its own backups under.
+        cacheBackupPhraseBestEffort(accountIdB64: accountIdB64, phrase: phrase, context: context)
+        BackupRestoreRetryStore.mark(accountIdB64: accountIdB64, defaults: backupDefaults)
+        var phraseBytes = Data(phrase.utf8)
+        defer { phraseBytes.resetBytes(in: 0..<phraseBytes.count) }
+        return await restoreBackup(
+            accountId: accountId,
+            accountIdB64: accountIdB64,
+            sessionToken: sessionToken,
+            phraseBytes: phraseBytes,
+            context: context
+        )
+    }
 
-        // ADR-0037 §6: arm the rollback gate — verify the auth-signed backup
-        // head against the pinned attest key before trusting the served
-        // envelope. A stale head suspends on the confirmation dialog; declining
-        // aborts the restore (fail-closed — never a silent downgrade).
+    /// One attempt. The restore is owed on entry (the caller marked it) and
+    /// stops being owed here on every DEFINITIVE answer: applied, no backup,
+    /// refused by the head gate, a stale head the person declined, a blob
+    /// that does not open under the phrase or does not parse. A transport
+    /// failure is not an answer: the mark stays.
+    private func restoreBackup(
+        accountId: Data,
+        accountIdB64: String,
+        sessionToken: String,
+        phraseBytes: Data,
+        context: String
+    ) async -> PhraseRestoreBackupOutcome {
+        // ADR-0037 section 6: arm the rollback gate — verify the auth-signed
+        // backup head against the pinned attest key before trusting the
+        // served envelope. A stale head suspends on the confirmation dialog;
+        // declining aborts the restore (fail-closed — never a silent
+        // downgrade).
         let gate = RestoreGateContext(
             accountId: accountId,
             accountIdB64: accountIdB64,
@@ -5119,13 +5889,27 @@ public final class AuthRepository: ObservableObject {
                 return await self.awaitStaleBackupOverride(reason: reason)
             }
         )
-        let outcome = await client.restore(phraseBytes: phraseBytes, gate: gate)
+        let bound = binding.capture()
+        // A restore runs for an account whose ACCESS was just granted, on
+        // some routes before its session lands; what it restores is written
+        // to that account's stores.
+        AccountStoreGate.open(accountIdB64)
+        let outcome = await backupRestoreSource.restore(
+            sessionToken: sessionToken, phraseBytes: phraseBytes, gate: gate)
+        // Signed out, or another account landed, while the fetch was out:
+        // the answer is not this session's. Nothing is applied, no alarm is
+        // raised on whoever is signed in now, and the restore stays owed for
+        // this account's next landing.
+        guard bound.isCurrent else {
+            NSLog("backup restore (\(context)): the session ended meanwhile, still owed")
+            return .fetchFailed
+        }
 
-        let parsed: ParsedBackupPayload
+        let result: PhraseRestoreBackupOutcome
         switch outcome {
         case .rollbackBlocked(let hard, let reason):
             if hard {
-                // Refuse + alarm. We do NOT load the served state (invariant #4).
+                // Refuse + alarm. The served state is NOT loaded (invariant #4).
                 NSLog(
                     "backup restore (\(context)) BLOCKED a rolled-back / tampered "
                     + "backup: \(reason)"
@@ -5134,76 +5918,102 @@ public final class AuthRepository: ObservableObject {
             } else {
                 NSLog("backup restore (\(context)): user declined a stale backup: \(reason)")
             }
-            return (Data(), [])
+            result = .refused
         case .noBackup:
             NSLog("backup restore (\(context)): no prior backup")
-            return (Data(), [])
+            result = .noBackup
         case .wrongPhraseOrTampered:
             NSLog("backup restore (\(context)) failed: wrong phrase or tampered blob")
-            return (Data(), [])
+            result = .refused
         case .transportFailed(let error):
-            NSLog("backup restore (\(context)) failed: \(error)")
-            return (Data(), [])
-        case .restored(let payload):
-            parsed = payload
+            NSLog("backup restore (\(context)) fetch failed, still owed: \(error)")
+            return .fetchFailed
+        case .restored(let parsed):
+            result = .applied(PhraseRestoreBackup.apply(
+                parsed, accountIdB64: accountIdB64, context: context, defaults: backupDefaults))
         }
-
-        NSLog(
-            "backup restore (\(context)): restored \(parsed.acceptedContacts.count) contact(s) "
-            + "from snapshot at \(parsed.createdAtMs), "
-            + "MLS snapshot \(parsed.wholeStorageSnapshot.count) bytes"
-        )
-        // Contact-in-backup restore (ADR-0021): reconstruct the accepted
-        // contacts (with their account_id) and MERGE into the persistent
-        // store — skip a pubkey already present so a contact accepted after
-        // the backup is not clobbered. The backup does not carry the inbox
-        // metadata, so reconstruct an IncomingContactRequest with sentinels:
-        // a negative messageId (never collides with a real DS id), a zero
-        // pseudonym, no intro.
-        // Written into the RESTORED account's list, named explicitly: the
-        // session may not be installed yet when a restore runs.
-        let existingContacts = AcceptedContactsStore.load(accountIdB64: accountIdB64)
-        let restoredContacts = reconstructRestoredContacts(
-            existing: existingContacts,
-            restored: parsed.acceptedContacts,
-            createdAtMs: parsed.createdAtMs
-        )
-        if !restoredContacts.isEmpty {
-            AcceptedContactsStore.save(existingContacts + restoredContacts, accountIdB64: accountIdB64)
-            // A live repository already bound to this account merges them
-            // (its next save would otherwise overwrite the write above).
-            NotificationCenter.default.post(
-                name: .lakkoStateBundleApplied, object: restoredContacts,
-                userInfo: [StateBundle.appliedAccountKey: accountIdB64])
-            NSLog("backup restore (\(context)): merged \(restoredContacts.count) contact(s)")
-        }
-        // The index the snapshot cannot supply: `restoreStorage` lays down a
-        // provider holding every group, but nothing can enumerate it, so
-        // `ChatRepository.bootstrap` rebuilds handles from a separately
-        // persisted set of ids. Without this the restored device held every
-        // group and listed none.
-        // ADR-0058 section 5.2 — the folded synced state (folders, pins,
-        // mutes, archive, read cursors, drafts), merged into this device's
-        // store before the DeviceGroup poll seeds from it. A running sync
-        // runtime for the account folds it too.
-        if !parsed.syncedState.isEmpty {
-            SyncedStateStore.mergeIntoStored(bytes: parsed.syncedState, accountIdB64: accountIdB64)
-            NotificationCenter.default.post(
-                name: .lakkoSyncedStateRestored, object: nil,
-                userInfo: ["accountIdB64": accountIdB64, "bytes": parsed.syncedState])
-            NSLog("backup restore (\(context)): synced state restored")
-        }
-        let restoredGroupIdsHex = parsed.knownGroupIds.map(Self.hexString(fromBytes:))
-        if !restoredGroupIdsHex.isEmpty {
-            NSLog(
-                "backup restore (\(context)): \(restoredGroupIdsHex.count) known group(s)")
-        }
-        return (parsed.wholeStorageSnapshot, restoredGroupIdsHex)
+        // A definitive answer: nothing is owed any more.
+        BackupRestoreRetryStore.clear(accountIdB64: accountIdB64, defaults: backupDefaults)
+        return result
     }
 
-    /// Lowercase hex, matching the form `KnownGroupsStore` holds.
-    private static func hexString(fromBytes bytes: Data) -> String {
-        bytes.map { String(format: "%02x", $0) }.joined()
+    /// At a session landing: if a phrase restore is still owed
+    /// (``BackupRestoreRetryStore``), make one attempt in the background.
+    /// Never delays or fails the landing.
+    private func retryBackupRestoreIfMarked(
+        accountId: Data,
+        sessionToken: String,
+        context: String
+    ) {
+        let accountIdB64 = base64Encode(accountId)
+        guard BackupRestoreRetryStore.isPending(accountIdB64: accountIdB64, defaults: backupDefaults) else {
+            return
+        }
+        Task { [weak self] in
+            await self?.runMarkedBackupRestoreRetry(
+                accountId: accountId,
+                accountIdB64: accountIdB64,
+                sessionToken: sessionToken,
+                context: context
+            )
+        }
+    }
+
+    /// One attempt at an owed restore; `nil` when none is owed or one is
+    /// already running for the account. The mark is NOT removed before the
+    /// attempt: it goes only on a definitive answer
+    /// (``restoreBackup(accountId:accountIdB64:sessionToken:phraseBytes:context:)``),
+    /// or when this device holds no cached phrase, since nothing here could
+    /// then ever open the blob. A fetch that fails again leaves the restore
+    /// owed for the next landing.
+    @discardableResult
+    func runMarkedBackupRestoreRetry(
+        accountId: Data,
+        accountIdB64: String,
+        sessionToken: String,
+        context: String
+    ) async -> PhraseRestoreBackupOutcome? {
+        guard BackupRestoreRetryStore.isPending(accountIdB64: accountIdB64, defaults: backupDefaults),
+              !backupRestoreRetryInFlight.contains(accountIdB64)
+        else { return nil }
+        backupRestoreRetryInFlight.insert(accountIdB64)
+        defer { backupRestoreRetryInFlight.remove(accountIdB64) }
+
+        let cached: Data?
+        do {
+            cached = try phraseStore.getPhrase(accountIdB64: accountIdB64)
+        } catch {
+            // A Keychain fault is not an answer about the backup. The same
+            // fault stops this device sealing a backup of its own, so
+            // leaving the restore owed holds back nothing that could go out.
+            NSLog("backup restore retry (\(context)): phrase cache read failed: \(error)")
+            return nil
+        }
+        guard var phraseBytes = cached else {
+            NSLog("backup restore retry (\(context)): no cached phrase on this device, nothing owed")
+            BackupRestoreRetryStore.clear(accountIdB64: accountIdB64, defaults: backupDefaults)
+            return nil
+        }
+        defer { phraseBytes.resetBytes(in: 0..<phraseBytes.count) }
+        return await restoreBackup(
+            accountId: accountId,
+            accountIdB64: accountIdB64,
+            sessionToken: sessionToken,
+            phraseBytes: phraseBytes,
+            context: "retry after \(context)"
+        )
+    }
+
+    /// Cache the recovery phrase in the Keychain. Best-effort: without it
+    /// this device cannot seal a backup of its own, and nothing else.
+    private func cacheBackupPhraseBestEffort(
+        accountIdB64: String,
+        phrase: String,
+        context: String
+    ) {
+        // The one writer of the account's phrase row (canonical form; a
+        // failure is logged by context, never with the words).
+        DevicePhrase.store(phrase, accountIdB64: accountIdB64, context: context, store: phraseStore)
     }
 
     /// Cache the recovery phrase under the Keychain + post a
@@ -5212,6 +6022,11 @@ public final class AuthRepository: ObservableObject {
     /// Best-effort end-to-end; every step logs + continues on
     /// failure so a transient transport hiccup does not block
     /// the user from landing in a working session.
+    ///
+    /// The baseline carries the accepted contacts, the synced state and the
+    /// conversation list (this device's own groups plus the ones a restored
+    /// backup named, ``RestoredKnownGroupsStore``). It carries no MLS state.
+    /// `uploadBaseline == false` caches the phrase and posts nothing.
     ///
     /// ADR-0017: `ed25519Seed` is derived from the canonical
     /// AccountIdentity (phrase) seed — NOT the OPAQUE export key.
@@ -5222,33 +6037,26 @@ public final class AuthRepository: ObservableObject {
     /// `canonical.ed25519Seed`). Re-derive here rather than threading
     /// a handle through the public surface so this helper stays
     /// self-contained.
-    private static func bootstrapBackupBestEffort(
+    private func bootstrapBackupBestEffort(
         accountId: Data,
         accountIdB64: String,
         accountIdentitySeed: Data,
         sessionToken: String,
         phrase: String,
         context: String,
-        wholeStorageSnapshot: Data = Data()
+        uploadBaseline: Bool = true
     ) async {
+        // Cache the phrase first — even if the network leg fails, the
+        // automatic backup re-tries from the cached value.
+        cacheBackupPhraseBestEffort(accountIdB64: accountIdB64, phrase: phrase, context: context)
+        guard uploadBaseline else {
+            NSLog("backup baseline upload (\(context)) skipped: the backup restore is still owed")
+            return
+        }
+
         let phraseBytes = Data(phrase.utf8)
         let backupClient = Self.makeBackupClient()
         backupClient.setSessionToken(sessionToken)
-
-        // Cache the phrase first — even if the network leg
-        // fails, future auto-backups (post-2a3) can re-try from
-        // the cached value.
-        do {
-            try backupClient.cachePhrase(
-                accountIdB64: accountIdB64,
-                phraseBytes: phraseBytes
-            )
-        } catch {
-            NSLog("backup phrase cache (\(context)) failed: \(error)")
-            // Continue — we can still ship a one-shot baseline
-            // backup without the cache. The next signup / recover
-            // re-tries the cache write.
-        }
 
         // ADR-0017: derive the ed25519 seed from the canonical
         // AccountIdentity (phrase) seed — the same `Identity.fromSeed`
@@ -5285,9 +6093,17 @@ public final class AuthRepository: ObservableObject {
                 ed25519Seed: seedBytes,
                 phraseBytes: phraseBytes,
                 contacts: contactRecords,
-                wholeStorageSnapshot: wholeStorageSnapshot,
+                // The chat layer has not bootstrapped yet, so the groups this
+                // device holds are read from their persisted index; with them
+                // go the conversations the restored backup named, so this
+                // baseline never erases the list.
+                knownGroupIdsHex: RestoredKnownGroupsStore.uploadGroupIds(
+                    accountIdB64: accountIdB64,
+                    own: Array(KnownGroupsStore().load(accountIdB64: accountIdB64)),
+                    defaults: backupDefaults
+                ),
                 // ADR-0058 — whatever synced state this device already holds
-                // (after a recover, the one just restored), so the baseline
+                // (after a recover, the one just merged), so the baseline
                 // does not overwrite the backup's folders with none.
                 syncedState: SyncedStateStore.bytes(accountIdB64: accountIdB64)
             )
@@ -5559,6 +6375,28 @@ public struct PasskeyWrongAccount: Error {
 /// account, or no keys on this device).
 public struct SessionNotReady: Error {
     public init() {}
+}
+
+/// Where ``AuthRepository/mintFreshIdentity()`` goes once the fresh identity
+/// is published, which cannot be taken back.
+enum FreshIdentityLanding: Equatable {
+    /// Show the new phrase now. `rebinds` when the binding the mint started
+    /// under has ended (a sign-out, or the same account parked again): the
+    /// phrase screen then binds the device to the account anew.
+    case showPhrase(rebinds: Bool)
+    /// Another account is signed in: its session is left exactly as it is,
+    /// and the phrase is kept for the minting account's next sign-in.
+    case keepForNextSignIn
+
+    /// `signedIn` is ``AuthRepository/signedInAccountIdB64`` after the
+    /// publish returned.
+    static func decide(
+        mintedFor: String, bindingIsCurrent: Bool, signedIn: String?
+    ) -> FreshIdentityLanding {
+        if bindingIsCurrent { return .showPhrase(rebinds: false) }
+        if let signedIn, signedIn != mintedFor { return .keepForNextSignIn }
+        return .showPhrase(rebinds: true)
+    }
 }
 
 /// ADR-0017 — thrown by
@@ -5874,7 +6712,7 @@ extension AuthRepository {
             accountIdentitySeed: seed,
             session: session
         )
-        adoptIdentitySecrets(secrets, context: context)
+        adoptIdentitySecrets(secrets, context: context, rebinds: false)
         // ADR-0074 section 0.1 — auth recorded the new key inside the
         // rotation; the mint for it is idempotent and moves this device's
         // mark.
@@ -5942,11 +6780,10 @@ extension AuthRepository {
     /// ``BackupClient/uploadNow``: a failed mint still writes the legacy
     /// unframed envelope, and that counts as uploaded.
     ///
-    /// `wholeStorageSnapshot` and `knownGroupIdsHex` come from a chat layer
-    /// the caller has already found ready (``KeyRotationBackup``); this
-    /// function never substitutes an empty snapshot.
+    /// The envelope carries no MLS state (the account backup never does).
+    /// `knownGroupIdsHex` comes from a chat layer the caller has already
+    /// found ready (``KeyRotationBackup``).
     public func resealBackupAfterKeyRotation(
-        wholeStorageSnapshot: Data,
         knownGroupIdsHex: [String],
         syncedState: Data?
     ) async throws {
@@ -5988,7 +6825,6 @@ extension AuthRepository {
             ed25519Seed: identity.ed25519Seed(),
             phraseBytes: phraseBytes,
             contacts: contacts,
-            wholeStorageSnapshot: wholeStorageSnapshot,
             knownGroupIdsHex: knownGroupIdsHex,
             syncedState: syncedState
         )

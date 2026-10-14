@@ -118,6 +118,49 @@ public class LakkoFrameEncryptor private constructor(
         return nativeRekey(ptr, seed)
     }
 
+    /**
+     * The codec last given to [setCodec] ([SFrameMediaCodec.OTHER] until
+     * the first call). Kept on the Kotlin side for logs and tests; the
+     * native encryptor holds its own copy.
+     */
+    @Volatile
+    public var codec: SFrameMediaCodec = SFrameMediaCodec.OTHER
+        private set
+
+    /**
+     * Tell the encryptor which codec its sender negotiated (ADR-0071).
+     * libwebrtc hands the native encryptor a media type and no codec, so
+     * the caller reads it from the sender (the first entry of
+     * `sender.parameters.codecs` once the answer is applied) and calls
+     * this after every negotiation that could change it. A [rekey] keeps
+     * the codec; a fresh encryptor starts at [SFrameMediaCodec.OTHER].
+     *
+     * It decides how many leading bytes of each encoded frame stay in the
+     * clear, so that a receiver without the generic frame descriptor
+     * still finds key frames: 10 of a VP8 key frame, 3 of any other VP8
+     * frame, none for Opus and every other codec. Until it is called a
+     * video encryptor seals with nothing in the clear: the frames still
+     * open, but such a receiver cannot decode them. Frames libwebrtc
+     * hands over as audio keep nothing clear whatever is set here.
+     *
+     * Safe to call from any thread while media is flowing. Returns
+     * `false` only if [release] already ran (nothing was changed).
+     */
+    public fun setCodec(codec: SFrameMediaCodec): Boolean {
+        val ptr = nativePtr
+        if (ptr == 0L) return false
+        nativeSetCodec(ptr, codec.wire)
+        this.codec = codec
+        return true
+    }
+
+    /**
+     * [setCodec] taking the codec by name: `RtpParameters.Codec.name`
+     * ("VP8", "opus") or the MIME form ("video/VP8", "audio/opus"), any
+     * case. Any other name, and `null`, is [SFrameMediaCodec.OTHER].
+     */
+    public fun setCodecName(name: String?): Boolean = setCodec(codecForName(name))
+
     @Suppress("ProtectedInFinal")
     protected fun finalize() {
         // Safety net for the case where the consumer forgot to
@@ -178,7 +221,22 @@ public class LakkoFrameEncryptor private constructor(
         @JvmStatic
         private external fun nativeRelease(nativePtr: Long)
 
+        /**
+         * The codec [setCodecName] would set for [name]. The mapping is
+         * the native bridge's (`LakkoFrameEncryptor::CodecFromName`), the
+         * one iOS uses too.
+         */
+        @JvmStatic
+        public fun codecForName(name: String?): SFrameMediaCodec =
+            SFrameMediaCodec.fromWire(nativeCodecFromName(name))
+
         @JvmStatic
         private external fun nativeRekey(nativePtr: Long, seed: ByteArray): Boolean
+
+        @JvmStatic
+        private external fun nativeSetCodec(nativePtr: Long, codec: Int)
+
+        @JvmStatic
+        private external fun nativeCodecFromName(name: String?): Int
     }
 }

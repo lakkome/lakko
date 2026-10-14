@@ -96,6 +96,9 @@ final class SfuCallUi {
     let session: SfuCallSession
     private let ui: CallUiState
     private let videoStateRelay: VideoPublishStateRelay
+    /// Who is speaking, read on this device from the call's own audio
+    /// (`docs/ux/group-call-grid.md` section 7.3).
+    private let speaking: GroupSpeakingMonitor
 
     /// Optional observer for the mid-call camera-on lifecycle (piece B) —
     /// the analog of the web `onVideoPublishState`. Set it to drive a
@@ -110,13 +113,16 @@ final class SfuCallUi {
         config: SfuCallSession.Config,
         ui: CallUiState,
         localDisplayName: String = "",
-        resolveDisplayName: @escaping (_ peerId: String, _ accountPseudonym: String, _ peerTag: String) -> String = { _, pseudonym, _ in
-            pseudonym.isEmpty ? Localization.text("chat.peer.fallback_name") : String(pseudonym.prefix(8))
-        }
+        // Never the SFU pseudonym (a piece of the account id). An empty name is
+        // the tile's unnamed state, for the moment before the person's profile
+        // reaches this device (``CallTileName``).
+        resolveDisplayName: @escaping (_ peerId: String, _ accountPseudonym: String, _ peerTag: String) -> String = { _, _, _ in "" }
     ) {
         self.ui = ui
         let relay = VideoPublishStateRelay()
         self.videoStateRelay = relay
+        let speaking = GroupSpeakingMonitor(ui: ui)
+        self.speaking = speaking
         // Sticky last-known remote camera state (join-race guard, below).
         // Captured by the media-state / track / peer-left closures, not `self`.
         let cameraTracker = CameraStateTracker()
@@ -145,7 +151,10 @@ final class SfuCallUi {
                     // number (derived from the same shared seed) lets
                     // participants verify the E2EE root key out-of-band.
                     ui.setE2ee(CallUiState.E2eeState(active: true, shortFingerprint: safetyNumber))
+                    speaking.start()
                 case .failed, .closed:
+                    speaking.stop()
+                    ui.clearRemoteVideoCopies()
                     ui.setPhase(.ended(endedAt: Date()))
                 case .idle:
                     break
@@ -301,9 +310,33 @@ final class SfuCallUi {
                 // innocent peer.
                 guard let streamId else { return }
                 ui.markUndecryptable(Self.participantId(forPeer: streamId))
+            },
+            onRemoteLightVideoTrack: { track, peerId in
+                // The light companion of that peer's camera (``LightStream``):
+                // kept beside the main track for the peer's tile to draw, and
+                // nothing else. No participant, no camera flag, no probe: it
+                // is not what decides that there is a picture.
+                ui.setRemoteLightVideoTrack(track, forParticipant: Self.participantId(forPeer: peerId))
+            },
+            onRemoteMiddleVideoTrack: { track, peerId in
+                // That peer's middle track (ADR-0070 step 5): the heavy
+                // picture a tile watches when the shared rule says `middle`.
+                // No participant, no camera flag, no probe.
+                ui.setRemoteMiddleVideoTrack(track, forParticipant: Self.participantId(forPeer: peerId))
+            },
+            onVideoGiven: { given in
+                // What the SFU gives of each person (ADR-0070 step 6): a tile
+                // shows the lower of that and what it wants.
+                ui.setRemoteVideoGiven(byPeerId: given)
             }
         )
-        self.session = SfuCallSession(config: config, callbacks: callbacks)
+        let session = SfuCallSession(config: config, callbacks: callbacks)
+        self.session = session
+        speaking.source = { [weak session] in await session?.sampleAudioLevels() }
+        // What a tile shows of a person, for the SFU (``VideoWants``).
+        ui.tileVideoQualitySink = { [weak session] tile, peerId, quality in
+            session?.reportTileVideoQuality(tile: tile, peerId: peerId, quality: quality)
+        }
     }
 
     /// Open the SFU connection + publish (delegates to the session).
@@ -314,6 +347,7 @@ final class SfuCallUi {
     /// Tear down (the session drives the UI to `.ended` via its
     /// state callback). Idempotent.
     func hangUp() {
+        speaking.stop()
         session.hangUp()
     }
 

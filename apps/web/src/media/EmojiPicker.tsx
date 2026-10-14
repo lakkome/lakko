@@ -406,6 +406,11 @@ function GifTab(props: {
       setPreviews(new Map());
       setItems([]);
       setNextOffset(null);
+      // A "load more" of the previous query is abandoned by the generation
+      // bump above and returns without touching anything, so its busy flag
+      // is cleared here; left set, the new results could never load a second
+      // page.
+      setLoadingMore(false);
       setStatus("loading");
       body?.scrollTo({ top: 0 });
     } else {

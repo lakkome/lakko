@@ -25,6 +25,19 @@
 //!   needs a flat C ABI — passing `Mutex<ParticipantKey>` through
 //!   Java first just to come back to a C++ pointer is gratuitous.
 //!
+//! ## Two frame layouts (ADR-0071)
+//!
+//! The media path of every client uses the ADR-0071 layout, which leaves
+//! the codec's frame header in the clear and puts the SFrame header at
+//! the end: [`lakko_sframe_media_clear_prefix_len`],
+//! [`lakko_sframe_seal_media_frame`] and
+//! [`lakko_sframe_call_key_ring_open_media_frame_with_overlap`]. The C++
+//! bridge shared by iOS and Android calls only these three for a frame.
+//! The header-first functions (`_seal_framed`, `_open_framed`,
+//! `_call_key_ring_open_framed_with_overlap`) are still exported and
+//! unchanged, have no caller on a media path, and do not open a frame of
+//! the other layout.
+//!
 //! ## Memory ownership
 //!
 //! Every function that returns a pointer (`*mut CallKey`,
@@ -86,7 +99,9 @@
 use std::sync::Mutex;
 
 use lakko_calls::sframe as core;
-use lakko_calls::{CallKeyRing as CoreRing, Error as CallsError, SframeHeader};
+use lakko_calls::{
+    CallKeyRing as CoreRing, Error as CallsError, MediaCodec, MediaFrameParts, SframeHeader,
+};
 
 // ---------------------------------------------------------------------
 // Status codes
@@ -108,10 +123,11 @@ pub enum LakkoSframeStatus {
     /// HKDF / per-participant key derivation failed (practically
     /// unreachable with valid inputs).
     KeyDerivation = 3,
-    /// 32-bit frame counter rolled over; caller MUST trigger a
-    /// fresh MLS commit and re-derive the call key before
-    /// continuing. Re-using a nonce under the same key is an
-    /// AEAD-fatal mistake.
+    /// The 64-bit frame counter stands at its last value
+    /// (ADR-0069); nothing was sealed and the counter does not
+    /// wrap. The caller derives a new key before continuing.
+    /// Re-using a nonce under the same key is an AEAD-fatal
+    /// mistake.
     CounterExhausted = 4,
     /// AEAD seal or open returned an error (wrong key, wrong AAD,
     /// tampered ciphertext, wrong counter).
@@ -124,9 +140,15 @@ pub enum LakkoSframeStatus {
     /// from a future schema bump this binary does not know how to
     /// dispatch.
     KidOverflow = 7,
-    /// Parsed `ctr` exceeds `u32::MAX`. Same reasoning as
-    /// [`Self::KidOverflow`].
+    /// No longer returned. Before ADR-0069 a parsed `ctr` above
+    /// `u32::MAX` was refused; the counter is 64 bits now and every
+    /// value the header can carry is accepted. The variant keeps its
+    /// number so the status codes do not shift.
     CtrOverflow = 8,
+    /// [`lakko_sframe_seal_media_frame`] was asked to leave more than
+    /// [`LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN`] bytes in the clear
+    /// (ADR-0071). Nothing was sealed.
+    BadClearPrefix = 9,
 }
 
 // ---------------------------------------------------------------------
@@ -239,6 +261,11 @@ pub unsafe extern "C" fn lakko_sframe_call_key_free(call_key: *mut CallKey) {
 /// valid (`0..=255` fits the KID's 8-bit stream field) — there is no
 /// fail-closed rejection here.
 ///
+/// The key's frame counter starts at a uniformly random value in
+/// `[0, 2^62)` (ADR-0069), so deriving a key again for the same
+/// `(call key, leaf, stream)` is safe. No function of this ABI sets
+/// or resets a counter.
+///
 /// # Safety
 ///
 /// - `call_key` must be a live pointer from
@@ -307,8 +334,11 @@ pub unsafe extern "C" fn lakko_sframe_participant_key_sender_leaf(
     unsafe { (*participant_key).inner.sender_leaf() }
 }
 
-/// Borrow the current frame counter — diagnostic only; the
-/// canonical increment lives inside [`lakko_sframe_seal`].
+/// Borrow the current 64-bit frame counter — diagnostic only; the
+/// canonical increment lives inside [`lakko_sframe_seal`]. It is the
+/// counter of the last frame sealed, or the key's random start
+/// (ADR-0069) when none was. Returns `u64::MAX` if `participant_key`
+/// is null.
 ///
 /// # Safety
 ///
@@ -316,9 +346,9 @@ pub unsafe extern "C" fn lakko_sframe_participant_key_sender_leaf(
 #[no_mangle]
 pub unsafe extern "C" fn lakko_sframe_participant_key_counter(
     participant_key: *const ParticipantKey,
-) -> u32 {
+) -> u64 {
     if participant_key.is_null() {
-        return u32::MAX;
+        return u64::MAX;
     }
     // SAFETY: caller upheld the live-pointer contract.
     unsafe { (*participant_key).inner.counter() }
@@ -329,7 +359,7 @@ pub unsafe extern "C" fn lakko_sframe_participant_key_counter(
 // ---------------------------------------------------------------------
 
 /// Seal `plaintext` under the participant key's next counter.
-/// Writes `*out_counter` to the consumed counter value and
+/// Writes `*out_counter` to the consumed 64-bit counter value and
 /// `*out_ciphertext_ptr` / `*out_ciphertext_len` to a freshly-allocated
 /// buffer containing the AEAD-sealed bytes. The caller MUST free the
 /// buffer via [`lakko_sframe_buffer_free`].
@@ -350,7 +380,7 @@ pub unsafe extern "C" fn lakko_sframe_seal(
     aad_len: usize,
     plaintext_ptr: *const u8,
     plaintext_len: usize,
-    out_counter: *mut u32,
+    out_counter: *mut u64,
     out_ciphertext_ptr: *mut *mut u8,
     out_ciphertext_len: *mut usize,
 ) -> LakkoSframeStatus {
@@ -400,7 +430,7 @@ pub unsafe extern "C" fn lakko_sframe_seal(
 }
 
 /// Open `ciphertext` against the participant key, using the
-/// caller-supplied `counter` (from the SFrame wire header) to
+/// caller-supplied 64-bit `counter` (from the SFrame wire header) to
 /// re-derive the AEAD nonce. Writes the recovered plaintext into a
 /// freshly-allocated buffer the caller MUST free via
 /// [`lakko_sframe_buffer_free`].
@@ -415,7 +445,7 @@ pub unsafe extern "C" fn lakko_sframe_open(
     aad_len: usize,
     ciphertext_ptr: *const u8,
     ciphertext_len: usize,
-    counter: u32,
+    counter: u64,
     out_plaintext_ptr: *mut *mut u8,
     out_plaintext_len: *mut usize,
 ) -> LakkoSframeStatus {
@@ -524,8 +554,7 @@ pub unsafe extern "C" fn lakko_sframe_seal_framed(
 /// `participant_key` must be the key derived for the frame's sender
 /// leaf (the platform shim selects it by the header's KID before
 /// calling). Every failure mode — malformed header, KID that doesn't
-/// match this key's leaf, counter beyond the 32-bit range, AEAD
-/// authentication failure — collapses to
+/// match this key's leaf, AEAD authentication failure — collapses to
 /// [`LakkoSframeStatus::AeadFailed`]; the shim drops the frame
 /// (`kFailedToDecrypt`) on any of them, so the granularity is not
 /// load-bearing here.
@@ -701,7 +730,8 @@ pub unsafe extern "C" fn lakko_sframe_call_key_ring_prune(ring: *const CallKeyRi
 /// is a freshly-allocated pointer the caller owns (free via
 /// [`lakko_sframe_participant_key_free`]). A `stream_index` is a `u8`,
 /// so every value composes a valid KID — there is no fail-closed
-/// rejection here.
+/// rejection here. The key starts at a random counter in `[0, 2^62)`
+/// (ADR-0069).
 ///
 /// # Safety
 ///
@@ -795,6 +825,177 @@ pub unsafe extern "C" fn lakko_sframe_call_key_ring_open_framed_with_overlap(
 }
 
 // ---------------------------------------------------------------------
+// Sealed media frame — codec header in the clear, SFrame header at
+// the end (ADR-0071)
+// ---------------------------------------------------------------------
+//
+// These entry points sit BESIDE the header-first `_seal_framed` /
+// `_open_framed` / `_ring_open_framed_with_overlap`, whose behaviour is
+// unchanged. The two layouts do not open as each other. The web client
+// and the native bridge send and accept only the layout below.
+
+// The four constants below are written as literals, not as
+// `MediaCodec::Vp8 as u8` or a path to the core's constant: cbindgen
+// emits a `#define` only for a constant whose value it can read off the
+// source, and with a computed value the generated header carried none of
+// them, so a C++ bridge had nothing to name a codec with. The assertions
+// that follow tie each literal to the core's definition at compile time.
+
+/// [`lakko_sframe_media_clear_prefix_len`] codec value: any codec without
+/// a rule, or one the sender could not determine. Nothing is left clear.
+pub const LAKKO_SFRAME_MEDIA_CODEC_OTHER: u8 = 0;
+/// [`lakko_sframe_media_clear_prefix_len`] codec value: VP8 video.
+pub const LAKKO_SFRAME_MEDIA_CODEC_VP8: u8 = 1;
+/// [`lakko_sframe_media_clear_prefix_len`] codec value: Opus audio.
+pub const LAKKO_SFRAME_MEDIA_CODEC_OPUS: u8 = 2;
+/// The most bytes [`lakko_sframe_seal_media_frame`] leaves in the clear.
+pub const LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN: usize = 16;
+
+const _: () = {
+    assert!(LAKKO_SFRAME_MEDIA_CODEC_OTHER == MediaCodec::Other as u8);
+    assert!(LAKKO_SFRAME_MEDIA_CODEC_VP8 == MediaCodec::Vp8 as u8);
+    assert!(LAKKO_SFRAME_MEDIA_CODEC_OPUS == MediaCodec::Opus as u8);
+    assert!(LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN == lakko_calls::MAX_CLEAR_PREFIX_LEN);
+};
+
+/// How many leading bytes of an encoded frame a sender leaves in the
+/// clear for `codec` (one of the `LAKKO_SFRAME_MEDIA_CODEC_*` values;
+/// an unknown value is treated as `OTHER`): 10 for a VP8 key frame, 3
+/// for any other VP8 frame, 0 for Opus and for `OTHER`. For VP8 the
+/// frame's own tag bit decides whether it is a key frame. Never more
+/// than `frame_len`. A null `frame_ptr` yields 0.
+///
+/// # Safety
+///
+/// `frame_ptr` may be null only when `frame_len == 0`; otherwise
+/// `frame_len` valid bytes must be readable.
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_media_clear_prefix_len(
+    codec: u8,
+    frame_ptr: *const u8,
+    frame_len: usize,
+) -> usize {
+    if frame_ptr.is_null() || frame_len == 0 {
+        return 0;
+    }
+    // SAFETY: pointer + length guarded above.
+    let frame = unsafe { std::slice::from_raw_parts(frame_ptr, frame_len) };
+    lakko_calls::clear_prefix_len(MediaCodec::from_u8(codec), frame)
+}
+
+/// Seal an encoded media frame into the ADR-0071 layout —
+/// `clear_prefix || ciphertext_and_tag || sframe_header || trailer` —
+/// leaving the first `clear_prefix_len` bytes of the frame in the clear
+/// (cut to `frame_len` when the frame is shorter). The key, nonce and
+/// counter are those of [`lakko_sframe_seal_framed`]; the AEAD
+/// additional data is `sframe_header || clear_prefix || trailer`. Wraps
+/// [`core::ParticipantKey::seal_media_frame`]. The caller takes
+/// `clear_prefix_len` from [`lakko_sframe_media_clear_prefix_len`].
+///
+/// Writes the sealed frame into a freshly-allocated buffer the caller
+/// MUST free via [`lakko_sframe_buffer_free`].
+///
+/// # Safety
+///
+/// - `participant_key` must be a live pointer from
+///   [`lakko_sframe_participant_key_new`].
+/// - `frame_ptr` may be null only when `frame_len == 0`.
+/// - `out_wire_ptr` / `out_wire_len` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_seal_media_frame(
+    participant_key: *mut ParticipantKey,
+    frame_ptr: *const u8,
+    frame_len: usize,
+    clear_prefix_len: usize,
+    out_wire_ptr: *mut *mut u8,
+    out_wire_len: *mut usize,
+) -> LakkoSframeStatus {
+    if participant_key.is_null() || out_wire_ptr.is_null() || out_wire_len.is_null() {
+        return LakkoSframeStatus::NullPointer;
+    }
+    if frame_ptr.is_null() && frame_len != 0 {
+        return LakkoSframeStatus::NullPointer;
+    }
+    if clear_prefix_len > LAKKO_SFRAME_MAX_CLEAR_PREFIX_LEN {
+        return LakkoSframeStatus::BadClearPrefix;
+    }
+    // SAFETY: pointer + length guarded above.
+    let frame = if frame_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(frame_ptr, frame_len) }
+    };
+    // SAFETY: caller upheld the live-pointer contract.
+    let pk = unsafe { &mut *participant_key };
+    let wire = match pk.inner.seal_media_frame(frame, clear_prefix_len) {
+        Ok(w) => w,
+        Err(CallsError::CounterExhausted) => return LakkoSframeStatus::CounterExhausted,
+        Err(_) => return LakkoSframeStatus::AeadFailed,
+    };
+    let (ptr, len) = vec_into_raw(wire);
+    // SAFETY: out-pointers non-null per the guard above.
+    unsafe {
+        *out_wire_ptr = ptr;
+        *out_wire_len = len;
+    }
+    LakkoSframeStatus::Ok
+}
+
+/// Open a sealed media frame in the ADR-0071 layout with the overlap
+/// fall-back (ADR-0029) and write the encoded frame
+/// `clear_prefix || plaintext` into a freshly-allocated buffer the
+/// caller MUST free via [`lakko_sframe_buffer_free`]. The KID is read
+/// from the frame's own SFrame header (which sits before the 3-byte
+/// trailer at the end), so the decryptor needs no leaf, stream or
+/// codec argument. A malformed frame — including one in the
+/// header-first layout — returns [`LakkoSframeStatus::WireParse`]; an
+/// authentication failure under both keys returns
+/// [`LakkoSframeStatus::AeadFailed`]. The shim drops the frame on
+/// either.
+///
+/// # Safety
+///
+/// - `ring` must be a live pointer from [`lakko_sframe_call_key_ring_new`].
+/// - `wire_ptr` may be null only when `wire_len == 0`.
+/// - `out_frame_ptr` / `out_frame_len` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_call_key_ring_open_media_frame_with_overlap(
+    ring: *const CallKeyRing,
+    wire_ptr: *const u8,
+    wire_len: usize,
+    out_frame_ptr: *mut *mut u8,
+    out_frame_len: *mut usize,
+) -> LakkoSframeStatus {
+    if ring.is_null() || out_frame_ptr.is_null() || out_frame_len.is_null() {
+        return LakkoSframeStatus::NullPointer;
+    }
+    if wire_ptr.is_null() && wire_len != 0 {
+        return LakkoSframeStatus::NullPointer;
+    }
+    // SAFETY: pointer + length guarded above.
+    let wire = if wire_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(wire_ptr, wire_len) }
+    };
+    if MediaFrameParts::split(wire).is_err() {
+        return LakkoSframeStatus::WireParse;
+    }
+    // SAFETY: caller upheld the live-pointer contract.
+    let ring = unsafe { &*ring };
+    let Ok(frame) = lock_ring(ring).try_open_media_frame_with_overlap(wire) else {
+        return LakkoSframeStatus::AeadFailed;
+    };
+    let (ptr, len) = vec_into_raw(frame);
+    // SAFETY: out-pointers non-null per the guard above.
+    unsafe {
+        *out_frame_ptr = ptr;
+        *out_frame_len = len;
+    }
+    LakkoSframeStatus::Ok
+}
+
+// ---------------------------------------------------------------------
 // Wire frame wrap / unwrap (RFC 9605 §4)
 // ---------------------------------------------------------------------
 
@@ -829,7 +1030,7 @@ pub unsafe extern "C" fn lakko_sframe_call_key_ring_open_framed_with_overlap(
 #[no_mangle]
 pub unsafe extern "C" fn lakko_sframe_wrap_frame(
     sender_leaf: u32,
-    counter: u32,
+    counter: u64,
     ciphertext_ptr: *const u8,
     ciphertext_len: usize,
     out_wire_ptr: *mut *mut u8,
@@ -850,7 +1051,7 @@ pub unsafe extern "C" fn lakko_sframe_wrap_frame(
 
     let header = SframeHeader {
         kid: u64::from(sender_leaf),
-        ctr: u64::from(counter),
+        ctr: counter,
     };
     let mut wire = header.encode();
     wire.extend_from_slice(ciphertext);
@@ -877,7 +1078,7 @@ pub unsafe extern "C" fn lakko_sframe_unwrap_frame(
     wire_ptr: *const u8,
     wire_len: usize,
     out_sender_leaf: *mut u32,
-    out_counter: *mut u32,
+    out_counter: *mut u64,
     out_ciphertext_ptr: *mut *mut u8,
     out_ciphertext_len: *mut usize,
 ) -> LakkoSframeStatus {
@@ -904,9 +1105,7 @@ pub unsafe extern "C" fn lakko_sframe_unwrap_frame(
     let Ok(sender_leaf) = u32::try_from(header.kid) else {
         return LakkoSframeStatus::KidOverflow;
     };
-    let Ok(counter) = u32::try_from(header.ctr) else {
-        return LakkoSframeStatus::CtrOverflow;
-    };
+    let counter = header.ctr;
 
     let ciphertext = wire[consumed..].to_vec();
     let (ct_ptr, ct_len) = vec_into_raw(ciphertext);
@@ -1027,8 +1226,11 @@ mod tests {
             LakkoSframeStatus::Ok
         );
 
-        // Seal
-        let mut counter: u32 = 0;
+        // Seal. The key starts at a random counter below 2^62 (ADR-0069);
+        // the first frame carries start + 1.
+        let start = unsafe { lakko_sframe_participant_key_counter(pk_ptr) };
+        assert!(start < 1 << 62, "random start is below 2^62");
+        let mut counter: u64 = 0;
         let mut ct_ptr: *mut u8 = std::ptr::null_mut();
         let mut ct_len: usize = 0;
         assert_eq!(
@@ -1046,7 +1248,12 @@ mod tests {
             },
             LakkoSframeStatus::Ok
         );
-        assert_eq!(counter, 1, "first seal lands on counter=1");
+        assert_eq!(counter, start + 1, "first seal lands on start + 1");
+        assert_eq!(
+            unsafe { lakko_sframe_participant_key_counter(pk_ptr) },
+            counter,
+            "the getter reports the counter of the last frame sealed"
+        );
         assert!(!ct_ptr.is_null());
         assert!(ct_len > plaintext.len(), "ciphertext carries AEAD tag");
 
@@ -1212,9 +1419,9 @@ mod tests {
         let cam_wire = seal_on_stream(1);
         let screen_wire = seal_on_stream(2);
 
-        // The three wires are pairwise distinct — same plaintext at the same
-        // counter (first frame on each fresh key) MUST NOT collide, proving no
-        // two streams share a `(key, nonce)` pair.
+        // The three wires are pairwise distinct. (Each key starts at its own
+        // random counter since ADR-0069, so this alone no longer shows key
+        // separation; the cross-stream open refusals below do.)
         assert_ne!(audio_wire, cam_wire);
         assert_ne!(audio_wire, screen_wire);
         assert_ne!(
@@ -1388,8 +1595,9 @@ mod tests {
         unsafe { lakko_sframe_call_key_ring_free(ring) };
     }
 
-    /// `sender_leaf` + `counter` getters return sentinel `u32::MAX`
-    /// on null input (and the right values on a live handle).
+    /// The `sender_leaf` getter returns the sentinel `u32::MAX` and the
+    /// `counter` getter `u64::MAX` on null input (and the right values on
+    /// a live handle: the leaf, and a random start below 2^62).
     #[test]
     fn getters_handle_null_and_live() {
         assert_eq!(
@@ -1398,7 +1606,7 @@ mod tests {
         );
         assert_eq!(
             unsafe { lakko_sframe_participant_key_counter(std::ptr::null()) },
-            u32::MAX
+            u64::MAX
         );
 
         let seed = fixture_seed();
@@ -1415,28 +1623,51 @@ mod tests {
             unsafe { lakko_sframe_participant_key_sender_leaf(pk_ptr) },
             9
         );
-        assert_eq!(unsafe { lakko_sframe_participant_key_counter(pk_ptr) }, 0);
+        let start = unsafe { lakko_sframe_participant_key_counter(pk_ptr) };
+        assert!(start < 1 << 62, "a fresh key starts below 2^62 (ADR-0069)");
+        // A second key for the same (call key, leaf, stream) starts elsewhere
+        // (equal with probability 2^-62).
+        let mut pk2_ptr: *mut ParticipantKey = std::ptr::null_mut();
         unsafe {
+            lakko_sframe_participant_key_new(ck_ptr, 9, 0, &mut pk2_ptr);
+        }
+        assert_ne!(
+            unsafe { lakko_sframe_participant_key_counter(pk2_ptr) },
+            start
+        );
+        unsafe {
+            lakko_sframe_participant_key_free(pk2_ptr);
             lakko_sframe_participant_key_free(pk_ptr);
             lakko_sframe_call_key_free(ck_ptr);
         }
     }
 
-    /// Wire wrap/unwrap round trip through the C ABI.
+    /// Wire wrap/unwrap round trip through the C ABI, with a counter that
+    /// needs all 8 bytes (ADR-0069: the counter is 64-bit end to end).
     #[test]
     fn wire_wrap_unwrap_round_trip() {
+        const WIDE_COUNTER: u64 = 0x3FED_CBA9_8765_4321;
         let ct = b"opaque-aead-bytes".to_vec();
         let mut wire_ptr: *mut u8 = std::ptr::null_mut();
         let mut wire_len: usize = 0;
         assert_eq!(
             unsafe {
-                lakko_sframe_wrap_frame(5, 42, ct.as_ptr(), ct.len(), &mut wire_ptr, &mut wire_len)
+                lakko_sframe_wrap_frame(
+                    5,
+                    WIDE_COUNTER,
+                    ct.as_ptr(),
+                    ct.len(),
+                    &mut wire_ptr,
+                    &mut wire_len,
+                )
             },
             LakkoSframeStatus::Ok
         );
+        // config byte (KID 5 inline) + 8 CTR bytes + ciphertext.
+        assert_eq!(wire_len, 1 + 8 + ct.len());
 
         let mut leaf: u32 = 0;
-        let mut counter: u32 = 0;
+        let mut counter: u64 = 0;
         let mut out_ct_ptr: *mut u8 = std::ptr::null_mut();
         let mut out_ct_len: usize = 0;
         assert_eq!(
@@ -1453,7 +1684,7 @@ mod tests {
             LakkoSframeStatus::Ok
         );
         assert_eq!(leaf, 5);
-        assert_eq!(counter, 42);
+        assert_eq!(counter, WIDE_COUNTER);
         let unwrapped = unsafe { std::slice::from_raw_parts(out_ct_ptr, out_ct_len) };
         assert_eq!(unwrapped, ct.as_slice());
 
@@ -1470,7 +1701,7 @@ mod tests {
     #[test]
     fn unwrap_loud_fails_on_malformed_wire() {
         let mut leaf = 0_u32;
-        let mut counter = 0_u32;
+        let mut counter = 0_u64;
         let mut ct_ptr: *mut u8 = std::ptr::null_mut();
         let mut ct_len: usize = 0;
 

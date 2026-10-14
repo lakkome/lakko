@@ -173,6 +173,7 @@ internal fun DeviceLinkCodePanel(
                             } catch (_: DeviceLinkInvalidCode) {
                                 state = NewDeviceLinkState.EnterCode
                             } catch (cause: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(cause)
                                 error = deviceLinkFailureCopy(cause)
                                 state = NewDeviceLinkState.EnterCode
                             }

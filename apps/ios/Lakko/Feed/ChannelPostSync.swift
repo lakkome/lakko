@@ -138,10 +138,16 @@ final class ChannelPostSync: ObservableObject {
             return lastSyncTally
         }
         running = true
-        lastSyncTally = await syncAll()
-        onSyncDone?(lastSyncTally)
+        let tally = await syncAll()
+        // This run belongs to the caller's task (pull to refresh). Called
+        // off, its tally counts requests that were stopped, not channels that
+        // did not answer: it is not reported and not kept.
+        if !Task.isCancelled {
+            lastSyncTally = tally
+            onSyncDone?(tally)
+        }
         running = false
-        return lastSyncTally
+        return tally
     }
 
     private struct Readable {

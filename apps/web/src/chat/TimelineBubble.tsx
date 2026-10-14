@@ -22,6 +22,9 @@
  * on a deliberate gesture and rendered outside the bubble.
  */
 import { createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
+import { A } from "@solidjs/router";
+
+import { callInviteOf } from "../calls/call-invite-link";
 
 import type { MemberIdentity } from "./author-identity";
 import {
@@ -386,6 +389,11 @@ function ChatBubbleBody(
   const editedText = (): string | undefined => state()?.editedText;
   const displayText = (): string => editedText() ?? props.originalText;
   const isEdited = (): boolean => editedText() !== undefined;
+  /** `docs/ux/call-links.md` section 3: a message that is one call link of
+   *  this deployment is an invitation, drawn with a `Join` button instead of
+   *  a line of characters. */
+  const callInvite = (): ReturnType<typeof callInviteOf> =>
+    typeof location === "undefined" ? null : callInviteOf(displayText(), location.origin);
   const isEditing = (): boolean =>
     props.messageId !== undefined && props.editingId === props.messageId;
 
@@ -775,7 +783,22 @@ function ChatBubbleBody(
                 <Show when={props.unsupported === true}>
                   <div class="lk-bubble-deleted">{t("chat.message.unsupported")}</div>
                 </Show>
-                <Show when={displayText().length > 0}>
+                <Show when={callInvite()}>
+                  {(invite) => (
+                    <div class="lk-bubble-call-invite">
+                      <span class="lk-bubble-call-invite-icon" aria-hidden="true">
+                        <Icon name="phone" size={20} />
+                      </span>
+                      <span class="lk-bubble-call-invite-title">
+                        {t("chat.call_invite.title")}
+                      </span>
+                      <A class="lk-button-link primary" href={invite().href}>
+                        {t("chat.call.join_short")}
+                      </A>
+                    </div>
+                  )}
+                </Show>
+                <Show when={displayText().length > 0 && callInvite() === null}>
                   <div class="lk-bubble-text">
                     {displayText()}
                     <Show when={isEdited()}>

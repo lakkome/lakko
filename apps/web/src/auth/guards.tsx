@@ -34,6 +34,7 @@ import SignupPhrasePrompt from "./SignupPhrasePrompt";
 import ProtectAccountPrompt from "./protect/ProtectAccountPrompt";
 import NewPasswordPrompt from "./NewPasswordPrompt";
 import { RemovedDeviceScreen } from "../devices/RemovedDeviceScreen";
+import { GuestAccountScreen } from "./GuestAccountOffer";
 import { readReturnUrl } from "./return-url";
 import {
   anonymousGuardView,
@@ -50,6 +51,7 @@ export function RequireSession(props: { children: JSX.Element }): JSX.Element {
       auth.signupPhrase() !== null,
       auth.newPasswordOffered(),
       auth.protectStepOwed(),
+      auth.isGuest(),
     );
   return (
     <SignedOutGate>
@@ -116,6 +118,8 @@ export function RequireAnonymous(props: {
  *   UX 19.1a), until the person chose. Clearing it re-runs the decision: on
  *   a public auth page that is `redirect-home`, which honours `?return=`;
  *   inside the app the route underneath simply renders.
+ * - `guest`: a guest account (`guest-account.ts`) never lands in the app; it
+ *   is sent back to its call, or asked whether to keep the account.
  */
 function GuardFallback(props: { view: GuardView }): JSX.Element {
   const location = useLocation();
@@ -138,6 +142,9 @@ function GuardFallback(props: { view: GuardView }): JSX.Element {
       </Match>
       <Match when={props.view === "choose-new-password"}>
         <NewPasswordPrompt />
+      </Match>
+      <Match when={props.view === "guest"}>
+        <GuestAccountScreen />
       </Match>
       <Match when={props.view === "redirect-login"}>
         <Navigate href={paths.login} />

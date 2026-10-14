@@ -320,6 +320,7 @@ public final class WebRTCPeerConnection: NSObject {
         peer = nil
         localAudioTrack = nil
         localVideoTrack = nil
+        cameraCopies = [:]
     }
 
     // MARK: - Local tracks
@@ -370,6 +371,9 @@ public final class WebRTCPeerConnection: NSObject {
     /// call (no local video track present).
     public func setCameraEnabled(_ on: Bool) {
         localVideoTrack?.isEnabled = on
+        // The copies of an SFU call's camera carry the same picture and are
+        // switched with it.
+        for copy in cameraCopies.values { copy.track.isEnabled = on }
     }
 
     /// G3-1-conn-quality — one-shot connection-stats sample
@@ -511,6 +515,76 @@ public final class WebRTCPeerConnection: NSObject {
             decoder: inbound.values["decoderImplementation"] as? String)
     }
 
+    /// The audio entries of the statistics report, for the sound levels a
+    /// group call reads (`docs/ux/group-call-grid.md` section 7.3): the
+    /// `inbound-rtp` audio streams and the local `media-source`. `nil` when
+    /// there is no peer connection.
+    ///
+    /// Only the entries: which person a stream belongs to, and what a level
+    /// means, is ``CallAudioLevelStats``'s, so it can be tested without a
+    /// peer connection.
+    func sampleAudioStatEntries() async -> [CallStatEntry]? {
+        guard let peer = peer else { return nil }
+        let report: RTCStatisticsReport = await withCheckedContinuation { cont in
+            peer.statistics { cont.resume(returning: $0) }
+        }
+        return report.statistics.values
+            .filter { $0.type == "inbound-rtp" || $0.type == "media-source" }
+            .map { CallStatEntry(type: $0.type, values: $0.values) }
+    }
+
+    /// The `inbound-rtp` entries of the statistics report, audio and video,
+    /// for the sound-and-picture alignment of a group call
+    /// (``AvAlignStats``): one read of the whole connection's report per
+    /// reading interval. `nil` when there is no peer connection.
+    func sampleInboundStatEntries() async -> [CallStatEntry]? {
+        guard let peer = peer else { return nil }
+        let report: RTCStatisticsReport = await withCheckedContinuation { cont in
+            peer.statistics { cont.resume(returning: $0) }
+        }
+        return report.statistics.values
+            .filter { $0.type == "inbound-rtp" }
+            .map { CallStatEntry(type: $0.type, values: $0.values) }
+    }
+
+    /// Set the minimum playout delay of a remote `receiver` to `ms`
+    /// milliseconds (`0` gives it back to the engine), for the
+    /// sound-and-picture alignment of a group call (``AvReceiverDelay``).
+    ///
+    /// The engine's receiver is a proxy that blocks the caller until the
+    /// worker thread has run the call, so the set runs on the queue every
+    /// other blocking libwebrtc call uses and never on the main thread
+    /// (``libwebrtcQueue``). Serial, so sets keep the order they were asked
+    /// in. The receiver is retained for the call.
+    func setReceiverPlayoutDelay(
+        _ receiver: RTCRtpReceiver, ms: UInt32
+    ) async -> LakkoReceiverDelayStatus {
+        await withCheckedContinuation { cont in
+            Self.libwebrtcQueue.async {
+                cont.resume(
+                    returning: LakkoReceiverDelay.setMinimumPlayoutDelayMs(
+                        ms, forReceiver: receiver))
+            }
+        }
+    }
+
+    /// The video entries of the statistics report (`inbound-rtp`,
+    /// `outbound-rtp` and the `media-source` each sender reads from), with
+    /// their ids, for the group call's media log
+    /// (``CallMediaCounters``). `nil` when there is no peer connection.
+    func sampleVideoStatEntries() async -> [CallMediaStatEntry]? {
+        guard let peer = peer else { return nil }
+        let report: RTCStatisticsReport = await withCheckedContinuation { cont in
+            peer.statistics { cont.resume(returning: $0) }
+        }
+        return report.statistics
+            .filter {
+                $0.value.type == "inbound-rtp" || $0.value.type == "outbound-rtp"
+                    || $0.value.type == "media-source"
+            }
+            .map { CallMediaStatEntry(id: $0.key, type: $0.value.type, values: $0.value.values) }
+    }
+
     /// Factory entry point for a fresh `RTCVideoSource`
     /// bound to this process's shared `RTCPeerConnectionFactory`.
     /// `LocalCameraCapture` (G3-1-video) drives frames into the
@@ -563,6 +637,290 @@ public final class WebRTCPeerConnection: NSObject {
         self.localVideoSender = sender
     }
 
+    // MARK: - The SFU call's camera: three senders (ADR-0070 steps 1 and 5)
+
+    /// A copy of the camera beside the main sender: a further track on the
+    /// camera's own `RTCVideoSource`, on a transceiver of its own, scaled
+    /// down by its one encoding (``CameraSender``).
+    struct CameraCopy {
+        let track: RTCVideoTrack
+        let transceiver: RTCRtpTransceiver
+        var sender: RTCRtpSender { transceiver.sender }
+    }
+
+    /// The copies this connection sends, by kind. Never more than one of a
+    /// kind; empty on the one-to-one path.
+    private var cameraCopies: [CameraCopyKind: CameraCopy] = [:]
+
+    /// Add the camera of an SFU call (group and link calls) as its main
+    /// sender: the picture as captured, one encoding, SFrame stream index 1
+    /// as before. Created with `add(_:streamIds:)`, the way the one-to-one
+    /// call creates its sender, on the first publish and on a mid-call
+    /// camera-on alike (mid-call it may reuse a video transceiver the SFU
+    /// already negotiated). The copies are added by ``addCameraCopies(_:middleActive:)``.
+    func addLocalCameraTrack(_ source: RTCVideoSource) {
+        guard let peer = peer else { return }
+        let track = Self.sharedFactory.videoTrack(
+            with: source, trackId: CameraSender.trackId(of: .main))
+        let sender = peer.add(track, streamIds: ["lakko-local-stream"])
+        self.localVideoTrack = track
+        self.localVideoSender = sender
+        if let sender { configureMainCameraSender(sender) }
+    }
+
+    /// Ask the main camera sender for its temporal layers
+    /// (``CameraSender/mainTemporalLayers``) and for the frame-rate
+    /// preference, in one set of its parameters, then read the layers back
+    /// and say in one line what the stack kept. `add(_:streamIds:)` takes no
+    /// encodings, so this is the only way to ask. Best effort: a stack that
+    /// refuses keeps one layer, and the line says so.
+    private func configureMainCameraSender(_ sender: RTCRtpSender) {
+        let asked = CameraSender.mainTemporalLayers
+        let framerate = NSNumber(value: RTCDegradationPreference.maintainFramerate.rawValue)
+        SenderParameterWrites.enqueue(sender, on: Self.libwebrtcQueue) { parameters, set in
+            if let first = parameters.encodings.first {
+                first.numTemporalLayers = NSNumber(value: asked)
+            }
+            parameters.degradationPreference = framerate
+            let kept = set(parameters).encodings.first?.numTemporalLayers?.intValue
+            NSLog(
+                "WebRTCPeerConnection: %@",
+                CameraSender.temporalLayersLine(asked: asked, kept: kept))
+        }
+    }
+
+    /// Add the light and the middle copy of the camera, each an ordinary
+    /// sender on a transceiver of its own, in that order (so the light one
+    /// keeps the media line it had before there was a middle one). Call it
+    /// right after ``addLocalCameraTrack(_:)``, before SFrame is armed and
+    /// before any offer is built.
+    ///
+    /// `source` is the camera's own source: each copy is a further track on
+    /// it, so one capturer feeds all three senders, and the copy's size is
+    /// its encoding's `scaleResolutionDownBy`. `middleActive` says whether
+    /// the middle sender is created sending (``SenderActivityRule``); the
+    /// light one always is.
+    ///
+    /// Never fails the call: a copy the binding will not take is absent,
+    /// said once, and the call goes on without it. A copy that exists is
+    /// left alone.
+    ///
+    /// A transceiver refused with its encoding is asked for again without
+    /// one, and the size, the ceiling and the activity are then set through
+    /// the sender's parameters (``CameraSender/copyAddStep(withEncodingTaken:plainTaken:)``,
+    /// the web client's fallback). A copy that cannot be sized that way is
+    /// removed here, before SFrame is armed and before any offer: the camera
+    /// is never sent another time at full size.
+    func addCameraCopies(_ source: RTCVideoSource, middleActive: Bool) {
+        guard let peer = peer, localVideoSender != nil else { return }
+        let plan = CameraSender.plan(middleActive: middleActive)
+        for kind in CameraCopyKind.addOrder where cameraCopies[kind] == nil {
+            guard let spec = plan.first(where: { $0.kind == kind.senderKind }) else { continue }
+            let track = Self.sharedFactory.videoTrack(with: source, trackId: spec.trackId)
+            track.isEnabled = localVideoTrack?.isEnabled ?? true
+            let transceiverInit = RTCRtpTransceiverInit()
+            transceiverInit.direction = .sendOnly
+            transceiverInit.sendEncodings = [CameraSender.rtcEncoding(spec.encoding)]
+            var transceiver = peer.addTransceiver(with: track, init: transceiverInit)
+            let step = CameraSender.copyAddStep(
+                withEncodingTaken: transceiver != nil,
+                plainTaken: {
+                    let plainInit = RTCRtpTransceiverInit()
+                    plainInit.direction = .sendOnly
+                    transceiver = peer.addTransceiver(with: track, init: plainInit)
+                    return transceiver != nil
+                }())
+            guard let transceiver, step != .absent else {
+                track.isEnabled = false
+                NSLog(
+                    "WebRTCPeerConnection: publishing the camera without a %@ sender: "
+                        + "the transceiver was refused", kind.rawValue)
+                continue
+            }
+            cameraCopies[kind] = CameraCopy(track: track, transceiver: transceiver)
+            if step == .configureWithParameters {
+                NSLog(
+                    "WebRTCPeerConnection: the %@ camera transceiver was refused with its "
+                        + "encoding, added without and sized through the sender", kind.rawValue)
+                guard configureCameraCopy(transceiver.sender, wanted: spec.encoding) else {
+                    removeCameraCopy(kind, reason: "its size and bitrate ceiling were refused")
+                    continue
+                }
+            }
+            preferFramerate(transceiver.sender)
+        }
+    }
+
+    /// Give an already-added copy's sender its size, its bitrate ceiling and
+    /// its activity through the sender's parameters, and read them back: the
+    /// binding's setter reports nothing, so what the sender holds afterwards
+    /// is the only answer. `false` when the sender has no encoding or does
+    /// not hold what was asked.
+    ///
+    /// Made on the calling thread, the one parameter write that does not go
+    /// through ``SenderParameterWrites``: the caller must know the answer
+    /// before SFrame is armed and an offer is built, and waiting for the
+    /// queue from the main thread is the deadlock ``libwebrtcQueue`` exists
+    /// to avoid. It cannot overlap another write of the same sender: the
+    /// sender was created earlier in this same main-actor turn, and every
+    /// other writer (its frame-rate preference, its activity, its ceiling) is
+    /// asked from the main actor after this returns.
+    private func configureCameraCopy(_ sender: RTCRtpSender, wanted: CameraEncodingSpec) -> Bool {
+        let parameters = sender.parameters
+        guard let first = parameters.encodings.first else { return false }
+        CameraSender.apply(wanted, to: first)
+        sender.parameters = parameters
+        return CameraSender.copyIsSized(
+            wanted: wanted, readBack: sender.parameters.encodings.first.map(CameraSender.spec(of:)))
+    }
+
+    /// Take a copy's sender off the connection. Used when it could not be
+    /// sealed: an unsealed sender is never left in place (invariant #4).
+    func removeCameraCopy(_ kind: CameraCopyKind, reason: String) {
+        guard let copy = cameraCopies.removeValue(forKey: kind) else { return }
+        NSLog(
+            "WebRTCPeerConnection: publishing the camera without a %@ sender: %@",
+            kind.rawValue, reason)
+        copy.track.isEnabled = false
+        LakkoSFrameAttach.detach(fromSender: copy.sender)
+        if let peer = peer {
+            _ = peer.removeTrack(copy.sender)
+        }
+        copy.transceiver.stopInternal()
+    }
+
+    /// One of the camera's senders, or `nil` when this connection has none
+    /// of that kind.
+    func cameraSender(_ kind: CameraSenderKind) -> RTCRtpSender? {
+        switch kind {
+        case .main: return localVideoSender
+        case .light: return cameraCopies[.light]?.sender
+        case .middle: return cameraCopies[.middle]?.sender
+        }
+    }
+
+    /// The `mid`s of the offer's m-lines that carry the `kind` copy of the
+    /// camera: one once a local description that includes the copy is set,
+    /// none otherwise (``CameraSender/mids(ofCopyMid:)``). Sent with every
+    /// offer this client makes.
+    func cameraCopyMids(_ kind: CameraCopyKind) -> [String] {
+        CameraSender.mids(ofCopyMid: cameraCopies[kind]?.transceiver.mid)
+    }
+
+    /// Which camera sender each of this connection's media lines carries,
+    /// by `mid`, for the media log. A sender whose transceiver has no `mid`
+    /// yet is absent.
+    func cameraSenderMids() -> [String: CameraSenderKind] {
+        var out: [String: CameraSenderKind] = [:]
+        for kind in CameraCopyKind.addOrder {
+            for mid in cameraCopyMids(kind) { out[mid] = kind.senderKind }
+        }
+        if let peer = peer, let main = localVideoSender,
+            let mid = peer.transceivers.first(where: { $0.sender == main })?.mid, !mid.isEmpty {
+            out[mid] = .main
+        }
+        return out
+    }
+
+    /// A camera sender as ``SenderActivity`` drives it: its first encoding's
+    /// `isActive`, read and set off the main thread. `nil` without that
+    /// sender. The same object for the same sender, so a re-bind of an
+    /// unchanged sender is recognised as such.
+    func cameraActivitySender(_ kind: CameraSenderKind) -> RtcActivitySender? {
+        guard let sender = cameraSender(kind) else {
+            activitySenders[kind] = nil
+            return nil
+        }
+        if let held = activitySenders[kind], held.sender === sender { return held }
+        let made = RtcActivitySender(sender: sender, queue: Self.libwebrtcQueue)
+        activitySenders[kind] = made
+        return made
+    }
+
+    private var activitySenders: [CameraSenderKind: RtcActivitySender] = [:]
+
+    /// A camera sender as ``SenderCeiling`` drives it: its first encoding's
+    /// `maxBitrateBps`, read and set off the main thread. `nil` without that
+    /// sender. The same object for the same sender, so a re-bind of an
+    /// unchanged sender is recognised as such, and a new object for a sender
+    /// created again, which then gets the ceiling in force.
+    func cameraCeilingSender(_ kind: CameraSenderKind) -> RtcCeilingSender? {
+        guard let sender = cameraSender(kind) else {
+            ceilingSenders[kind] = nil
+            return nil
+        }
+        if let held = ceilingSenders[kind], held.sender === sender { return held }
+        let made = RtcCeilingSender(sender: sender, queue: Self.libwebrtcQueue)
+        ceilingSenders[kind] = made
+        return made
+    }
+
+    private var ceilingSenders: [CameraSenderKind: RtcCeilingSender] = [:]
+
+    /// The bitrate ceiling each existing camera sender's encoding holds now,
+    /// bits a second, for the media log; `nil` as a value when the encoding
+    /// holds none. A sender this connection does not have is absent. Read on
+    /// the queue the writes run on, so it is what the last write left.
+    func cameraSenderCeilings() async -> [CameraSenderKind: Int?] {
+        var senders: [(kind: CameraSenderKind, sender: RTCRtpSender)] = []
+        for kind in CameraSenderKind.allCases {
+            if let sender = cameraSender(kind) { senders.append((kind, sender)) }
+        }
+        if senders.isEmpty { return [:] }
+        return await withCheckedContinuation { continuation in
+            Self.libwebrtcQueue.async {
+                var out: [CameraSenderKind: Int?] = [:]
+                for entry in senders {
+                    out[entry.kind] = .some(
+                        entry.sender.parameters.encodings.first?.maxBitrateBps?.intValue)
+                }
+                continuation.resume(returning: out)
+            }
+        }
+    }
+
+    /// Ask a camera sender to keep its frame rate under a bitrate shortfall:
+    /// sharpness is what the camera gives up, not motion. Best effort; a
+    /// binding that does not take it keeps its default.
+    private func preferFramerate(_ sender: RTCRtpSender) {
+        let wanted = NSNumber(value: RTCDegradationPreference.maintainFramerate.rawValue)
+        SenderParameterWrites.enqueue(sender, on: Self.libwebrtcQueue) { parameters, set in
+            if parameters.degradationPreference == wanted { return }
+            parameters.degradationPreference = wanted
+            _ = set(parameters)
+        }
+    }
+
+    /// Tell every sender's SFrame encryptor which codec the sender
+    /// negotiated (ADR-0071): the first entry of the sender's negotiated
+    /// codecs. A video encryptor leaves nothing of a frame clear until it is
+    /// told, and an encryptor attached again starts untold, so this runs
+    /// after every negotiation and after every attach.
+    ///
+    /// The read of a sender's parameters blocks on libwebrtc's signaling
+    /// thread, so it is made off the main thread; the setter itself is safe
+    /// from any thread.
+    func syncSenderCodecs() {
+        var senders: [(name: String, sender: RTCRtpSender)] = []
+        if let sender = localAudioSender { senders.append(("audio", sender)) }
+        for kind in CameraSenderKind.allCases {
+            if let sender = cameraSender(kind) { senders.append((kind.rawValue, sender)) }
+        }
+        if senders.isEmpty { return }
+        Self.libwebrtcQueue.async {
+            let told = senders.map { entry -> String in
+                let parameters = entry.sender.parameters
+                let codec = parameters.codecs.first?.name
+                let set = LakkoSFrameAttach.setCodecName(codec, forSender: entry.sender)
+                // The temporal layers the main sender holds once negotiated.
+                let layers = entry.name == CameraSenderKind.main.rawValue
+                    ? "/t\(parameters.encodings.first?.numTemporalLayers?.intValue ?? 1)" : ""
+                return "\(entry.name)=\(codec ?? "-")\(layers)\(set ? "" : "(no encryptor)")"
+            }
+            NSLog("WebRTCPeerConnection: sender codecs %@", told.joined(separator: " "))
+        }
+    }
+
     /// G3-1-video-ui — expose the currently-attached local
     /// video track so the SwiftUI call screen can hand it
     /// to `LocalVideoPreviewView`. Returns `nil` if
@@ -586,6 +944,10 @@ public final class WebRTCPeerConnection: NSObject {
         }
         localVideoSender = nil
         localVideoTrack = nil
+        // The copies of an SFU call's camera go with the camera.
+        for kind in CameraCopyKind.addOrder {
+            removeCameraCopy(kind, reason: "the camera sender was removed")
+        }
     }
 
     /// Stop or resume OFFERING video, without touching the sender.
@@ -653,8 +1015,8 @@ public final class WebRTCPeerConnection: NSObject {
         // across the two streams of this leaf keys into disjoint
         // `(key, nonce_salt)` spaces and no longer reuses a nonce.
         let armSet: [(RTCRtpSender?, UInt8)] = [
-            (localAudioSender, 0),
-            (localVideoSender, 1),
+            (localAudioSender, CameraSender.streamIndexAudio),
+            (localVideoSender, CameraSender.streamIndexCamera),
         ]
         for (maybeSender, streamIndex) in armSet {
             guard let sender = maybeSender else { continue }
@@ -668,7 +1030,28 @@ public final class WebRTCPeerConnection: NSObject {
                 allOk = false
             }
         }
+        armCameraCopyEncryptors(seed: seed, localLeaf: localLeaf)
         return allOk
+    }
+
+    /// Arm SFrame on the copies of an SFU call's camera, each under its own
+    /// stream index (3 the light one, 4 the middle one), so no two senders of
+    /// this leaf share a key. A copy that cannot be sealed is REMOVED rather
+    /// than left unsealed (invariant #4) and the call goes on without it: a
+    /// copy is a second picture, never the only one.
+    private func armCameraCopyEncryptors(seed: Data, localLeaf: UInt32) {
+        for kind in CameraCopyKind.addOrder {
+            guard let copy = cameraCopies[kind] else { continue }
+            let status = LakkoSFrameAttach.attachEncryptor(
+                toSender: copy.sender,
+                seed: seed,
+                localLeaf: localLeaf,
+                streamIndex: CameraSender.streamIndex(of: kind.senderKind)
+            )
+            if status != .OK {
+                removeCameraCopy(kind, reason: "its SFrame encryptor could not be attached")
+            }
+        }
     }
 
     /// Arm SFrame on ONLY the local VIDEO sender (mid-call
@@ -691,14 +1074,17 @@ public final class WebRTCPeerConnection: NSObject {
             return false
         }
         guard let sender = localVideoSender else { return false }
-        // Stream 1 (ADR-0035): v1 carries at most one video track; a
-        // future second video / screen-share would use stream 2.
-        return LakkoSFrameAttach.attachEncryptor(
+        // Stream 1 (ADR-0035) for the camera's main sender; the copies of an
+        // SFU call's camera are sealed under 3 and 4 below, and a shared
+        // screen would use 2.
+        guard LakkoSFrameAttach.attachEncryptor(
             toSender: sender,
             seed: seed,
             localLeaf: localLeaf,
-            streamIndex: 1
-        ) == .OK
+            streamIndex: CameraSender.streamIndexCamera
+        ) == .OK else { return false }
+        armCameraCopyEncryptors(seed: seed, localLeaf: localLeaf)
+        return true
     }
 
     /// Arm SFrame for a freshly-arrived remote `RTCRtpReceiver`.
@@ -1034,6 +1420,135 @@ public final class WebRTCPeerConnection: NSObject {
             // `services/auth/src/turn.rs` for the credential REST
             // shape.
         ]
+    }
+}
+
+// MARK: - Sender parameter writes
+
+/// The one path every write to an `RTCRtpSender`'s parameters takes; the twin
+/// of `apps/web/src/calls/sender-parameters.ts`.
+///
+/// A write is a read (`sender.parameters`), a change and a set. Two of them
+/// on one sender must not overlap, or the second puts back what the first
+/// just changed (it read before the first landed). Several parts of the group
+/// call write a camera sender's parameters: its temporal layers and
+/// frame-rate preference, whether its encoding is active
+/// (``SenderActivity``) and its bitrate ceiling (``SenderCeiling``).
+///
+/// Each hands its change here. The whole read-change-set, and the read-back
+/// that follows, run as ONE synchronous block on the serial queue the peer
+/// connection's blocking calls use. A serial queue runs one block at a time
+/// in the order they were queued, and this binding's getter and setter are
+/// synchronous, so on any sender (on all of them, in fact) the writes run one
+/// after the other, each on a reading no other write can outdate. The web
+/// client needs a promise queue per sender because its `setParameters` is
+/// asynchronous; here the block is the transaction.
+///
+/// Never called on the main thread: the read and the set block on
+/// libwebrtc's signaling thread.
+enum SenderParameterWrites {
+
+    /// Queue one write of `sender`'s parameters.
+    ///
+    /// `write` runs on `queue` with the parameters as the sender holds them
+    /// at that moment, and with `set`: hand it the changed parameters and it
+    /// sets them and returns the sender's parameters read again. The
+    /// binding's setter reports nothing, so that reading is where a caller
+    /// learns whether the write took. A `write` that never calls `set`
+    /// writes nothing.
+    static func enqueue(
+        _ sender: RTCRtpSender,
+        on queue: DispatchQueue,
+        write: @escaping (
+            _ held: RTCRtpParameters, _ set: (RTCRtpParameters) -> RTCRtpParameters
+        ) -> Void
+    ) {
+        queue.async {
+            write(sender.parameters) { changed in
+                sender.parameters = changed
+                return sender.parameters
+            }
+        }
+    }
+}
+
+// MARK: - Sender activity
+
+/// An `RTCRtpSender` as ``SenderActivity`` drives it: one read-modify-set of
+/// its first encoding's `isActive`, nothing else. No renegotiation: the media
+/// line, the SSRC and the SFrame encryptor stay.
+///
+/// The read and the write of a sender's parameters block on libwebrtc's
+/// signaling thread, so both are made through ``SenderParameterWrites``, on
+/// the queue the peer connection's own blocking calls use, never on the main
+/// thread. The binding's setter reports nothing, so whether it took is read
+/// back.
+final class RtcActivitySender: ActivitySender {
+
+    let sender: RTCRtpSender
+    private let queue: DispatchQueue
+
+    init(sender: RTCRtpSender, queue: DispatchQueue) {
+        self.sender = sender
+        self.queue = queue
+    }
+
+    func applyEncodingActive(_ active: Bool) async -> SenderActivityOutcome {
+        let sender = self.sender
+        return await withCheckedContinuation { continuation in
+            SenderParameterWrites.enqueue(sender, on: queue) { parameters, set in
+                guard let first = parameters.encodings.first else {
+                    continuation.resume(returning: .noEncoding)
+                    return
+                }
+                if first.isActive == active {
+                    continuation.resume(returning: .applied)
+                    return
+                }
+                first.isActive = active
+                let now = set(parameters).encodings.first?.isActive
+                continuation.resume(returning: now == active ? .applied : .refused)
+            }
+        }
+    }
+}
+
+// MARK: - Sender ceiling
+
+/// An `RTCRtpSender` as ``SenderCeiling`` drives it: one read-modify-set of
+/// its first encoding's `maxBitrateBps`, nothing else of the encoding and no
+/// renegotiation. Made through ``SenderParameterWrites``, as every other
+/// write of the sender's parameters; whether it took is read back
+/// (``SenderCeilingWrite``).
+final class RtcCeilingSender: CeilingSender {
+
+    let sender: RTCRtpSender
+    private let queue: DispatchQueue
+
+    init(sender: RTCRtpSender, queue: DispatchQueue) {
+        self.sender = sender
+        self.queue = queue
+    }
+
+    func applyEncodingCeiling(_ maxBitrateBps: Int) async -> SenderCeilingOutcome {
+        let sender = self.sender
+        return await withCheckedContinuation { continuation in
+            SenderParameterWrites.enqueue(sender, on: queue) { parameters, set in
+                let first = parameters.encodings.first
+                switch SenderCeilingWrite.step(
+                    hasEncoding: first != nil, current: first?.maxBitrateBps?.intValue,
+                    wanted: maxBitrateBps)
+                {
+                case let .done(outcome):
+                    continuation.resume(returning: outcome)
+                case let .set(bps):
+                    first?.maxBitrateBps = NSNumber(value: bps)
+                    let readBack = set(parameters).encodings.first?.maxBitrateBps?.intValue
+                    continuation.resume(
+                        returning: SenderCeilingWrite.outcome(readBack: readBack, wanted: bps))
+                }
+            }
+        }
     }
 }
 

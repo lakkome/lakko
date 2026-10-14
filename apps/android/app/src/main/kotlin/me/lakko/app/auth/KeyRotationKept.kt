@@ -211,8 +211,8 @@ public class PendingRotationStore(private val storage: SealedBlobStorage) {
         }
         val plain = PendingRotationCodec.encode(rows)
         return try {
-            storage.write(name, plain)
-            true
+            // Refused for a signed-out or wiped account: not stored.
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.write(name, plain) } != null
         } catch (_: Throwable) {
             false
         } finally {
@@ -485,8 +485,8 @@ public class OwnPredecessorStore(private val storage: SealedBlobStorage) {
         }
         val plain = OwnPredecessorCodec.encode(rows)
         return try {
-            storage.write(name, plain)
-            true
+            // Refused for a signed-out or wiped account: not stored.
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.write(name, plain) } != null
         } catch (_: Throwable) {
             false
         } finally {
@@ -617,7 +617,8 @@ public class PreparedRotationStore(private val storage: SealedBlobStorage) {
         val name = nameOf(accountIdB64) ?: return false
         val plain = PreparedRotationCodec.encode(prepared)
         return try {
-            storage.write(name, plain)
+            // Refused for a signed-out or wiped account: not stored.
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.write(name, plain) } ?: return false
             val again = storage.read(name)
             val ok = again != null && again.contentEquals(plain)
             again?.fill(0)

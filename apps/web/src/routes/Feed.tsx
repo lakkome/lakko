@@ -41,7 +41,7 @@
  */
 
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
-import { useNavigate } from "@solidjs/router";
+import { useLocation, useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
@@ -137,6 +137,7 @@ import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
 import { KeyedError, RenderedError, keyedErrorText } from "../l10n/keyed-error";
 import { readFeedSelection, writeFeedSelection } from "../feed/feed-selection-store";
+import { screenAnchor } from "../ui/screen-anchor";
 
 const BANNER_STORAGE_KEY = "lakko.feed.device-banner-dismissed";
 /** Within this many pixels of the top, new items are shown at once;
@@ -194,6 +195,7 @@ export default function Feed(): JSX.Element {
   const groupNames = useGroupNames();
   const sync = useDeviceGroupSync();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [core, setCore] = createSignal<(FeedCore & FeedDraftCore) | null>(null);
   onMount(() => {
@@ -904,6 +906,9 @@ export default function Feed(): JSX.Element {
   async function forwardTo(target: ForwardPickerRow): Promise<void> {
     const ref = forwarding();
     if (ref === null) return;
+    // The forward is sent and recorded whether or not the person waits; only
+    // opening the target is addressed to this screen (`ui/screen-anchor.ts`).
+    const here = screenAnchor(location);
     const entry = chats.get(target.id);
     if (entry === undefined) throw new KeyedError("chat.error.conversation_gone");
     let payload;
@@ -927,6 +932,8 @@ export default function Feed(): JSX.Element {
     let result: Awaited<ReturnType<typeof forwardClient.sendMessage>>;
     const openTarget = (): void => {
       setForwarding(null);
+      // Only for a person still on this screen.
+      if (!here()) return;
       const slug = base64UrlEncodeNoPad(entry.group.groupId);
       navigate(conversationKindOf(entry.group) === "chat" ? paths.chat(slug) : paths.groupChat(slug));
     };

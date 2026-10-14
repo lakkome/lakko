@@ -13,7 +13,7 @@ Every SFrame-sealed media frame carries a short variable-length header naming wh
 
 ## Public contract
 
-- `SframeHeader { kid: u64, ctr: u64 }` — the parsed header. Both fields are 64-bit on the wire per RFC 9605, even though today's call-keying layer (`sframe::ParticipantKey`) only uses a `u32` per-leaf counter. The extra width is deliberate headroom (and is what lets the composite `(leaf << 8) | stream` KID fit) and must not be narrowed — that would be a wire break.
+- `SframeHeader { kid: u64, ctr: u64 }` — the parsed header. Both fields are 64-bit on the wire per RFC 9605. The call-keying layer (`sframe::ParticipantKey`) uses the whole CTR width: it counts in `u64` from a random start below `2^62` (ADR-0069), so a frame's CTR field is usually 8 bytes. The KID width is what lets the composite `(leaf << 8) | stream` KID fit. Neither may be narrowed — that would be a wire break.
 - `encode(&self) -> Vec<u8>` — produces the on-wire bytes. Infallible. Length is at most `MAX_HEADER_LEN` (= 17 = 1 config byte + 8 KID + 8 CTR). Values `<= 7` are packed inline in the config byte; larger values set the extended flag and append big-endian bytes.
 - `decode(bytes: &[u8]) -> Result<(SframeHeader, usize), HeaderError>` — parses the header and returns it plus the number of bytes consumed, so the caller slices `bytes[consumed..]` to reach the ciphertext without a second length probe.
 - `MAX_HEADER_LEN` — the ceiling, for callers pre-allocating scratch.

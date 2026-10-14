@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -25,8 +26,14 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -41,14 +48,26 @@ import kotlinx.coroutines.launch
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.calls.CallInviteIdentity
-import me.lakko.app.calls.CallInviteLinkState
+import me.lakko.app.calls.InCallInvite
 import me.lakko.app.calls.CallUiState
+import me.lakko.app.calls.EndedForEveryoneNotice
 import me.lakko.app.calls.GroupCallHost
 import me.lakko.app.calls.LinkCallHost
+import me.lakko.app.calls.LinkCallPhase
 import me.lakko.app.calls.LinkCallNoticeAction
 import me.lakko.app.calls.linkCallNotice
 import me.lakko.app.calls.showsCallInvite
-import me.lakko.app.ui.contacts.launchShareIntent
+import me.lakko.app.calls.InviteContactPorts
+import me.lakko.app.calls.inviteContactRows
+import me.lakko.app.calls.inviteContactToCall
+import me.lakko.app.chat.ChatRepository
+import me.lakko.app.contacts.AcceptedContact
+import me.lakko.app.contacts.ContactsRepository
+import me.lakko.app.contacts.foundOneToOneWith
+import me.lakko.app.l10n.UiText
+import me.lakko.app.profile.ProfileDirectory
+import me.lakko.app.ui.contacts.ContactRowModel
+import me.lakko.app.ui.contacts.contactRouteKey
 
 /**
  * The in-call screens of the calls the app-level host drives through a
@@ -71,6 +90,9 @@ public fun GroupCallOverlay(
      * label is not a name for it.
      */
     groupNameFor: (groupIdHex: String) -> String? = { null },
+    /** `docs/ux/calls.md` section 4.1.2 — why the call ended, when its starter
+     *  ended it for everyone; drawn under `Call ended`. */
+    endedForEveryone: EndedForEveryoneNotice? = null,
 ) {
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
     // `docs/ux/calls.md` section 4.5 — the call has been put away into the bar.
@@ -81,9 +103,18 @@ public fun GroupCallOverlay(
     val collapsed by host.collapsed.collectAsStateWithLifecycle()
     if (!visible || collapsed) return
     val slot by host.slot.collectAsStateWithLifecycle()
+    // Section 4.1.2 — only the account that started the call is offered to end
+    // it for everyone.
+    val startedByMe by host.startedByThisAccount.collectAsStateWithLifecycle()
     HostedCallDialog(
         state = host.ui,
         onEndCall = { host.leave() },
+        onEndForEveryone = if (startedByMe) {
+            { host.endForEveryone() }
+        } else {
+            null
+        },
+        endedForEveryoneLine = endedForEveryoneLineOf(endedForEveryone),
         onExit = { host.onOverlayExit() },
         onCollapse = { host.collapse() },
         // Section 4.5 — the CALL's connect moment, so the screen's running time
@@ -96,13 +127,20 @@ public fun GroupCallOverlay(
 /**
  * See [GroupCallOverlay]. Up from the moment the link call is live.
  *
- * This is the only call screen that carries `Invite`
- * (`docs/ux/call-links.md` section 3): a link names the call it was minted for,
- * and only this kind of call is the one a `/c/` link leads into.
+ * This is the only call screen whose Participants control carries the invite
+ * items (`docs/ux/call-links.md` section 3): a link names the call it was
+ * minted for, and only this kind of call is the one a `/c/` link leads into.
  *
- * @param identity read at the moment `Invite` is pressed, never held — see
- *   [CallInviteIdentity]. `null` means the session is gone, which the control
- *   reports in one sentence without touching the call.
+ * @param identity read at the moment an invite item is chosen, never held —
+ *   see [CallInviteIdentity]. `null` means the session is gone, which the
+ *   status line reports in one sentence without touching the call.
+ * @param chatRepository where an invitation is sent from: the one-to-one
+ *   with the chosen contact, founded first when this device holds none.
+ * @param contactsRepository the person's contacts, which is the list
+ *   `Invite contacts` shows. Without both repositories the item is left out.
+ * @param guest the session is a guest account's (`auth/GuestAccount.kt`): it
+ *   never has conversations, so its menu is the link alone. Every other
+ *   account gets `Invite contacts`, with or without conversations.
  */
 @Composable
 public fun LinkCallOverlay(
@@ -119,21 +157,34 @@ public fun LinkCallOverlay(
      * link is not the app.
      */
     onLeaveLanding: () -> Unit = {},
+    chatRepository: ChatRepository? = null,
+    contactsRepository: ContactsRepository? = null,
+    guest: Boolean = false,
+    /** See [GroupCallOverlay]'s parameter of the same name. */
+    endedForEveryone: EndedForEveryoneNotice? = null,
 ) {
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
     /** See [GroupCallOverlay] — section 4.5's collapsed presentation. */
     val collapsed by host.collapsed.collectAsStateWithLifecycle()
     if (!visible || collapsed) return
     val slot by host.slot.collectAsStateWithLifecycle()
-    val inviteState by host.inviteLink.collectAsStateWithLifecycle()
+    val invite by host.invite.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    // Only the host of a live call has a link to offer; everyone else gets no
-    // control at all rather than one that cannot work.
+    // Only the host of a live call has a link to offer; everyone else gets the
+    // participant list alone rather than an item that cannot work.
     val canInvite = slot?.let { showsCallInvite(it.owner, it.phase) } == true
+    var pickerOpen by remember { mutableStateOf(false) }
     HostedCallDialog(
         state = host.ui,
         onEndCall = { host.leave() },
+        // Section 4.1.2 — the link's owner, in a live call.
+        onEndForEveryone = if (slot?.let { it.owner && it.phase == LinkCallPhase.LIVE } == true) {
+            { host.endForEveryone() }
+        } else {
+            null
+        },
+        endedForEveryoneLine = endedForEveryoneLineOf(endedForEveryone),
         onExit = { host.onOverlayExit() },
         onCollapse = {
             host.collapse()
@@ -141,21 +192,181 @@ public fun LinkCallOverlay(
         },
         // See [GroupCallOverlay] — section 4.5's running time.
         connectedSinceMs = host.connectedSinceMs.collectAsStateWithLifecycle().value,
-        inviteState = inviteState.takeIf { canInvite },
-        onInvite = {
+        invite = invite.takeIf { canInvite },
+        onCopyInviteLink = {
             scope.launch {
-                // The mint runs on the host's scope, so it survives this
-                // composition; only the wait for it is scoped here.
-                host.inviteLinkUrl(identity())?.let { url -> launchShareIntent(context, url) }
+                // The mint and the copy run on the host's scope, so they
+                // survive this composition; only the wait is scoped here.
+                host.copyInviteLink(identity(), clipboardCopier(context))
             }
         },
+        // Always there for an account, with or without contacts: an item
+        // that comes and goes with a list reads as a missing feature, so the
+        // list itself says when it is empty. Only a guest, who has neither
+        // contacts nor conversations, gets the link alone.
+        onInviteContact = if (chatRepository != null && contactsRepository != null && !guest) {
+            { pickerOpen = true }
+        } else {
+            null
+        },
     )
+    if (pickerOpen && chatRepository != null && contactsRepository != null) {
+        CallInvitePickerDialog(
+            host = host,
+            identity = identity,
+            chatRepository = chatRepository,
+            contactsRepository = contactsRepository,
+            onClose = { pickerOpen = false },
+        )
+    }
+}
+
+/**
+ * Put a string on the clipboard, or `null` where there is no clipboard to
+ * reach; the call's link is then shown to be copied by hand.
+ */
+private fun clipboardCopier(context: Context): ((String) -> Unit)? {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return null
+    return { text ->
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText(me.lakko.app.l10n.Localization.strings.value["common.clipboard.link"], text),
+        )
+    }
+}
+
+/**
+ * `Invite contacts` (`docs/ux/call-links.md` section 3): the person's
+ * CONTACTS, in the order the Contacts list shows them, over the call. Groups
+ * are not in the list: an invitation is addressed to a person.
+ *
+ * Choosing a contact sends the invitation into the one-to-one with them: one
+ * plain text message whose whole text is the call's link, through the
+ * conversation's ordinary send, so it is recorded there like any other sent
+ * message and every client draws it as an invitation with a `Join` button.
+ * When this device holds no one-to-one with the contact, one is founded
+ * first ([me.lakko.app.contacts.foundOneToOneWith]). Which conversation that
+ * is, and the order of the steps, is `calls/InviteContacts.kt`.
+ *
+ * The list stays open so several contacts can be invited; a contact that was
+ * invited shows a check and takes no second press. A failure says so above
+ * the list and leaves the row pressable; the call is untouched either way.
+ * The person closes the list with its own back control.
+ */
+@Composable
+private fun CallInvitePickerDialog(
+    host: LinkCallHost,
+    identity: () -> CallInviteIdentity?,
+    chatRepository: ChatRepository,
+    contactsRepository: ContactsRepository,
+    onClose: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var busyKey by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<UiText?>(null) }
+    var invited by remember { mutableStateOf(emptySet<String>()) }
+
+    val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
+    val directory = remember(chatRepository) { ProfileDirectory.get(chatRepository.context) }
+    val nameVersion by directory.version.collectAsStateWithLifecycle()
+    val rows = remember(contactsState.accepted, nameVersion) {
+        inviteContactRows(
+            contactsState.accepted.map { contact ->
+                val resolved = directory.resolve(contact.request.fromPubkey)
+                ContactRowModel(
+                    key = contactRouteKey(contact.request.fromPubkey),
+                    name = resolved.primary,
+                    username = resolved.verifiedUsername,
+                    placeholder = resolved.isPlaceholder,
+                )
+            },
+        )
+    }
+    val ports = remember(chatRepository, contactsRepository) {
+        callInviteContactPorts(chatRepository, contactsRepository)
+    }
+
+    Dialog(
+        onDismissRequest = { if (busyKey == null) onClose() },
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = true,
+            dismissOnClickOutside = false,
+        ),
+    ) {
+        InviteContactsPicker(
+            rows = rows,
+            busyKey = busyKey,
+            invitedKeys = invited,
+            error = error,
+            onBack = onClose,
+            onInvite = { row ->
+                if (busyKey == null && row.key !in invited) {
+                    busyKey = row.key
+                    error = null
+                    scope.launch {
+                        val sent = try {
+                            inviteContactToCall(ports, row.key) { send ->
+                                host.sendInvite(identity(), row.name, send)
+                            }
+                        } finally {
+                            busyKey = null
+                        }
+                        if (sent) invited = invited + row.key else error = UiText("call.invite.send_failed")
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
+/** The production [InviteContactPorts]: the contact list, the one rule for
+ *  "the one-to-one with a contact", the one creation path, the ordinary
+ *  send. */
+private fun callInviteContactPorts(
+    chatRepository: ChatRepository,
+    contactsRepository: ContactsRepository,
+): InviteContactPorts = object : InviteContactPorts {
+    override fun contactFor(rowKey: String): AcceptedContact? =
+        contactsRepository.state.value.accepted.firstOrNull { contactRouteKey(it.request.fromPubkey) == rowKey }
+
+    override fun conversationWith(contact: AcceptedContact): String? =
+        chatRepository.chatGroupIdHexFor(contact.groupIdHex, contact.request.fromPubkey)
+
+    override suspend fun foundOneToOne(contact: AcceptedContact): String =
+        foundOneToOneWith(
+            contact = contact,
+            // ADR-0062 — a contact's conversation is a one-to-one for good.
+            startOneToOne = { accountId, signatureKey ->
+                chatRepository.startGroupWith(
+                    recipientAccountId = accountId,
+                    recipientSignaturePubkey = signatureKey,
+                    kind = uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE,
+                )
+            },
+            link = { signatureKey, groupIdHex -> contactsRepository.linkOneToOne(signatureKey, groupIdHex) },
+        )
+
+    override suspend fun sendText(groupIdHex: String, text: String) =
+        chatRepository.sendMessage(groupIdHex = groupIdHex, plaintext = text)
+}
+
+/** The line [notice] holds right now, in the screen's language, or `null`. */
+@Composable
+private fun endedForEveryoneLineOf(notice: EndedForEveryoneNotice?): String? {
+    if (notice == null) return null
+    val line by notice.line.collectAsStateWithLifecycle()
+    return line?.text()
 }
 
 @Composable
 private fun HostedCallDialog(
     state: CallUiState,
     onEndCall: () -> Unit,
+    /** `docs/ux/calls.md` section 4.1.2; `null` for everyone but the person
+     *  who started the call. */
+    onEndForEveryone: (() -> Unit)?,
+    endedForEveryoneLine: String?,
     onExit: () -> Unit,
     /** `docs/ux/calls.md` section 4.5 — put the call away into the bar. */
     onCollapse: () -> Unit,
@@ -163,9 +374,11 @@ private fun HostedCallDialog(
      *  running time counts from the call and not from this screen's mount. */
     connectedSinceMs: Long?,
     groupName: String? = null,
-    /** `docs/ux/call-links.md` section 3; `null` draws no `Invite` control. */
-    inviteState: CallInviteLinkState? = null,
-    onInvite: () -> Unit = {},
+    /** `docs/ux/call-links.md` section 3; `null` for a call with no link to
+     *  offer. */
+    invite: InCallInvite? = null,
+    onCopyInviteLink: () -> Unit = {},
+    onInviteContact: (() -> Unit)? = null,
 ) {
     Dialog(
         // Section 4.5 — the system back COLLAPSES the call and never ends it.
@@ -188,16 +401,19 @@ private fun HostedCallDialog(
         EdgeToEdgeDialogWindow()
         Box(modifier = Modifier.fillMaxSize()) {
             // Both of these are multi-party calls, so the screen keeps the
-            // grid, the roster and the in-call chat even while only one other
-            // person is on it (docs/ux/calls.md section 4.1, section 9).
+            // tiles and the roster even while only one other person is on it
+            // (docs/ux/calls.md section 4.1).
             CallScreen(
                 onExit = onExit,
                 state = state,
                 onEndCall = onEndCall,
+                onEndForEveryone = onEndForEveryone,
+                endedForEveryoneLine = endedForEveryoneLine,
                 groupCall = true,
                 groupName = groupName,
-                inviteState = inviteState,
-                onInvite = onInvite,
+                invite = invite,
+                onCopyInviteLink = onCopyInviteLink,
+                onInviteContact = onInviteContact,
                 // Section 4.5 — the chevron, beside the system back.
                 onCollapse = onCollapse,
                 connectedSinceMs = connectedSinceMs,
@@ -319,6 +535,43 @@ public fun BoxScope.LinkCallNoticeBar(host: LinkCallHost, onOpen: (slug: String)
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * `docs/ux/calls.md` section 4.1.2 — "{name} ended the call for everyone", for
+ * a few seconds after the starter of the call this device was in ended it,
+ * wherever the person is in the app. The ended call screen carries the same
+ * line while it is up; this is what a person who had put the call away sees,
+ * and what stays once that screen has closed. Same visual pattern as
+ * [LinkCallNoticeBar]; never a system alert, and nothing to press.
+ */
+@Composable
+public fun BoxScope.EndedForEveryoneNoticeBar(notice: EndedForEveryoneNotice) {
+    val line by notice.line.collectAsStateWithLifecycle()
+    val text = line?.text() ?: return
+    Surface(
+        modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite },
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        shadowElevation = 4.dp,
+    ) {
+        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Filled.CallEnd,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(12.dp))
+            Text(text = text, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }

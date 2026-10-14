@@ -44,6 +44,7 @@ manifests=(
     "lakko-call-jwt:crates/lakko-call-jwt/fuzz/Cargo.toml"
     "lakko-backup:crates/lakko-backup/fuzz/Cargo.toml"
     "lakko-feed:crates/lakko-feed/fuzz/Cargo.toml"
+    "lakko-vault:crates/lakko-vault/fuzz/Cargo.toml"
     "lakko-svc-sfu:services/sfu/fuzz/Cargo.toml"
 )
 

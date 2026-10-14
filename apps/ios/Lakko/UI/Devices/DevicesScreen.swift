@@ -176,9 +176,6 @@ struct AddDeviceScreen: View {
     /// ADR-0050 section 2.8 — called with a device's 32-byte key once the
     /// scan flow added it to the DeviceGroup; the composition root admits it
     /// to every chat.
-    /// "Choose a username", for a guest account: a pairing code names the
-    /// account by its username.
-    var onChooseUsername: (() -> Void)?
     var onDeviceAdded: (Data) -> Void = { _ in }
 
     private enum Side: String, CaseIterable, Identifiable {
@@ -217,9 +214,6 @@ struct AddDeviceScreen: View {
                     Text(PairingScanFailure.needsUsernameCopy)
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoTextMuted)
-                    if let onChooseUsername {
-                        ChooseUsernameButton(username: nil, action: onChooseUsername)
-                    }
                 } else if let session = DeviceSession.current(authRepository),
                           let handle = session.loginHandle {
                     Picker("", selection: $side) {

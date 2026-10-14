@@ -162,11 +162,11 @@ public class AccountNoticeStore(private val storage: MarkerStorage) {
     public fun cursor(accountIdB64: String): Long? = read(CURSOR_PREFIX + accountIdB64)?.toLongOrNull()
 
     public fun setCursor(accountIdB64: String, cursor: Long): Unit =
-        write(CURSOR_PREFIX + accountIdB64, cursor.toString())
+        write(accountIdB64, CURSOR_PREFIX + accountIdB64, cursor.toString())
 
     /** This device did [kind] at [atMs]: the notice it causes is not shown here. */
     public fun markOwn(accountIdB64: String, kind: AccountNoticeKind, atMs: Long): Unit =
-        write(ownKey(accountIdB64, kind), atMs.toString())
+        write(accountIdB64, ownKey(accountIdB64, kind), atMs.toString())
 
     public fun ownActions(accountIdB64: String): Map<AccountNoticeKind, Long> =
         AccountNoticeKind.entries.mapNotNull { kind ->
@@ -198,9 +198,11 @@ public class AccountNoticeStore(private val storage: MarkerStorage) {
         null
     }
 
-    private fun write(key: String, value: String) {
+    private fun write(accountIdB64: String, key: String, value: String) {
         try {
-            storage.set(key, value)
+            // Refused for a signed-out or wiped account
+            // ([me.lakko.app.account.AccountStoreGate]).
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.set(key, value) }
         } catch (_: Throwable) {
             // The value then lives for this process only.
         }

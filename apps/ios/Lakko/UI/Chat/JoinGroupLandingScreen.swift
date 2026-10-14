@@ -141,6 +141,13 @@ public final class JoinGroupLandingViewModel: ObservableObject {
             state = .invalid
             return
         } catch {
+            // The screen was left while the link was being looked up. Nothing
+            // was posted and nothing failed: stay on the loading card and let
+            // the next appearance look it up again.
+            if Cancellation.endedByCancellation(error) {
+                didRun = false
+                return
+            }
             NSLog("group join: resolving the invite link failed: %@", String(describing: error))
             state = .failed(JoinRequestFailure.classify(error))
             return

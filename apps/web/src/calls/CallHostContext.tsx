@@ -101,7 +101,9 @@ import {
 } from "./call-invite-values";
 import {
   INVITE_IDLE,
-  deliverCallLink,
+  copyCallLink,
+  mintedInviteFate,
+  mintedInviteUrl,
   inviteBusy as inviteIsBusy,
   inviteStatusHoldMs,
   inviteStatusLine,
@@ -112,6 +114,8 @@ import { DiscoveryClient } from "../discovery/client";
 import { TurnCredentialClient } from "./turn-credential-client";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
+import { sendTextToConversation } from "../chat/send-text";
+import { KeyedError } from "../l10n/keyed-error";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { useLineage } from "../chat/use-lineage";
 import {
@@ -139,10 +143,20 @@ import { makeCallSignalingPublisher } from "../chat/call-signaling-publish";
 import { readIsActive } from "../chat/membership-ended";
 import { memberKeysOf, peerName } from "../chat/peer-name";
 import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
+import { ContactsClient } from "../contacts/client";
+import { conversationWithContact } from "../contacts/contact-conversation";
+import { foundOneToOneWith } from "../contacts/found-one-to-one";
+import { InviteContactsPicker } from "./InviteContactsPicker";
 import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { loadAccepted } from "../contacts/local-store";
 import { onGroupMlsIdle } from "../mls/group-lock";
 import { buildPeerTagMap, personForPeerTag, type PeerTagBinding, type PeerTagMap } from "./peer-tag-map";
+import { callTileName, personNameOrNull } from "./tile-name";
+import {
+  ENDED_FOR_ALL,
+  endedForEveryoneLine,
+  endsTheCallForMe,
+} from "./end-for-everyone";
 import { useProfiles } from "../profile/ProfileContext";
 import { memberNameOf } from "../profile/member-label";
 import { useGroupNames } from "../chat/GroupNameContext";
@@ -183,6 +197,8 @@ import {
   GROUP_CALL_ALONE_END_MS,
   decideGroupCallEpochChange,
   groupCallAloneAction,
+  groupCallStartAbandoned,
+  runGroupCallStart,
   planGroupCallLeave,
   selectGroupCallBanner,
   type GroupLeaveReason,
@@ -216,6 +232,7 @@ import type { SfuCallState } from "./sfu-call-session";
 import { SFU_CALL_STATE_PROBE_MS, parseSfuCallState, sfuCallStateUrl } from "./sfu-call-state";
 import { callEndedAtMs } from "./sfu-keepalive";
 import { createSfuCallUi, type SfuCallUiHandle } from "./sfu-call-ui";
+import { groupCallTileSources } from "./group-call-tile-sources";
 import { sfuBaseUrl } from "./sfu-config";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { uiRules } from "../chat/ui-rules";
@@ -302,6 +319,18 @@ export interface CallHostApi {
   startGroupCall(opts: StartGroupCallOptions): Promise<GroupCallStartOutcome>;
   /** Leave the group call this device is in (publishes Leave / End as owed). */
   leaveGroupCall(): Promise<void>;
+  /** This account started the group call this device is in, so `End` offers
+   *  to end it for everyone (`docs/ux/calls.md` section 4.1.2). */
+  startedGroupCall(): boolean;
+  /** End the group call this device is in for every person in it. Only acts
+   *  for the call's starter. */
+  endGroupCallForEveryone(): Promise<void>;
+  /** End the link call for every person in it. Only acts for the link's
+   *  owner. */
+  endLinkCallForEveryone(): void;
+  /** One line saying the call this device was in was ended for everyone, for
+   *  a few seconds after it happened; `null` otherwise. */
+  readonly endedForEveryoneNotice: Accessor<string | null>;
   /** The call occupying the one call slot, or `null` when it is free. */
   callOccupant(): CallKind | null;
   /** Why starting / joining a call now would be refused, or `null` when the
@@ -317,16 +346,21 @@ export interface CallHostApi {
   /** Leave the link call (or stop waiting to be admitted). */
   leaveLinkCall(): void;
   /**
-   * Offer a link to the link call in the slot
+   * `Copy link` for the link call in the slot
    * (`docs/ux/call-links.md` section 3).
    *
-   * The first call in a given call mints the capability — a round trip and a
-   * proof-of-work solve — and hands the link to the platform's share
-   * mechanism or the clipboard; a second re-offers the same link. Never
-   * rejects, and never ends the call: a failure becomes a sentence in
-   * {@link CallHostApi.linkCallInvite}.
+   * The first use in a given call mints the capability — a network round
+   * trip — and later uses reuse the link. Never rejects, and never ends the
+   * call: a failure becomes a sentence in {@link CallHostApi.linkCallInvite}.
    */
-  inviteToLinkCall(): Promise<void>;
+  copyLinkCallInvite(): Promise<void>;
+  /** `Invite a contact`: whether the picker of conversations is open. */
+  readonly linkCallInvitePickerOpen: Accessor<boolean>;
+  openLinkCallInvitePicker(): void;
+  closeLinkCallInvitePicker(): void;
+  /** Send the invitation into the picked conversation. Rejects when it was
+   *  not sent; the call is untouched either way. */
+  sendLinkCallInvite(target: { readonly keyB64: string; readonly name: string }): Promise<void>;
   /** What `Invite` is doing for the call in the link slot. */
   readonly linkCallInvite: Accessor<InCallInvite>;
   /** The one line the call screen shows about it, or `null` once it has been
@@ -413,6 +447,9 @@ export type GroupCallStartOutcome =
   | { readonly kind: "busy"; readonly message: CallText }
   /** The call to join is no longer live. */
   | { readonly kind: "ended" }
+  /** The person left while the call was still connecting. Nothing failed
+   *  and nothing is said. */
+  | { readonly kind: "left" }
   | { readonly kind: "failed"; readonly message: CallText };
 
 const CallHostContext = createContext<CallHostApi>();
@@ -430,6 +467,8 @@ const LIVE_STATES: readonly WebCallState[] = ["ringing", "outgoing", "connecting
  * restated here.
  */
 const QUIET_OFFER_SWEEP_MS = 1_000;
+/** How long "{name} ended the call for everyone" stays on screen. */
+const ENDED_FOR_EVERYONE_NOTICE_MS = 6_000;
 
 /** Display bands for the connection RTT — the same as the native clients. */
 export function qualityTierForRtt(rttMs: number | null): QualityTier {
@@ -479,6 +518,25 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const [state, setState] = createSignal<WebCallState>("idle");
   const [callGroup, setCallGroup] = createSignal<string | null>(null);
   const [lastEnded, setLastEnded] = createSignal<EndedCallNotice | null>(null);
+  // "{name} ended the call for everyone", shown for a few seconds to a person
+  // whose call was ended by its starter (`docs/ux/calls.md` section 4.1.2).
+  const [endedForEveryoneNotice, setEndedForEveryoneNotice] = createSignal<string | null>(null);
+  let endedForEveryoneTimer: ReturnType<typeof setTimeout> | null = null;
+  function showEndedForEveryone(starterName: string | null): void {
+    setEndedForEveryoneNotice(endedForEveryoneLine(starterName));
+    if (endedForEveryoneTimer !== null) clearTimeout(endedForEveryoneTimer);
+    endedForEveryoneTimer = setTimeout(() => {
+      endedForEveryoneTimer = null;
+      setEndedForEveryoneNotice(null);
+    }, ENDED_FOR_EVERYONE_NOTICE_MS);
+  }
+  onCleanup(() => {
+    if (endedForEveryoneTimer !== null) clearTimeout(endedForEveryoneTimer);
+  });
+  /** The group call whose terminating `CallEnd` is already on the journal
+   *  (the starter ended it for everyone), so leaving it publishes no second
+   *  one. */
+  let groupCallEndedForEveryone: string | null = null;
   const [remoteStream, setRemoteStream] = createSignal<MediaStream | null>(null);
   const [localStream, setLocalStream] = createSignal<MediaStream | null>(null);
   const [videoCall, setVideoCall] = createSignal(false);
@@ -863,12 +921,22 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     ringWindowMs: number,
   ): CallSession {
     const session: CallSession = new CallSession(callId, {
+      // Each of these, like `onStateChange` below, is dropped unless it comes
+      // from the session that holds (or last held) the slot: a session that
+      // was replaced can still finish an await and report.
       onRemoteStream: (s) => {
+        if (slotSession !== session) return;
         setRemoteStream(s);
         watchRemoteVideo(s, setRemoteHasVideo);
       },
-      onLocalStream: (s) => setLocalStream(s),
-      onVideoPublishState: (s) => setVideoPublishState(s),
+      onLocalStream: (s) => {
+        if (slotSession !== session) return;
+        setLocalStream(s);
+      },
+      onVideoPublishState: (s) => {
+        if (slotSession !== session) return;
+        setVideoPublishState(s);
+      },
       onOutboundSignaling: publisherFor(groupIdB64),
       onStateChange: (s, reason) => {
         // Only the session that holds (or last held) the slot drives the UI; a
@@ -898,6 +966,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         }
       },
       onConnectionStats: (stats) => {
+        // Only for the live call: a sample read by a session that has ended
+        // would be written onto whatever call is current.
+        if (activeCall !== session) return;
         setConnStats(stats);
         callActions.setConnectionDetail({
           rttMs: stats.rttMs,
@@ -1012,7 +1083,28 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       if (decision.groupRecord === "apply-control") {
         applyGroupControlBody(account, item.groupIdB64, parsed, hex, item.row);
       } else if (decision.groupRecord === "end") {
+        // Read before the record is closed: who started this call.
+        const starter = groupCallsFor(account, item.groupIdB64).get(hex)?.initiatorPersonKey ?? null;
         applyGroupCallEventFor(account, item.groupIdB64, { kind: "end", callIdHex: hex }, Date.now());
+        // The starter ended the call for everyone: a device that is in it
+        // leaves. The same body from anyone else closes the record and takes
+        // nobody out of a call (`end-for-everyone.ts`).
+        const g = activeGroupCall;
+        if (
+          g !== null &&
+          g.callIdHex === hex &&
+          g.groupIdB64 === item.groupIdB64 &&
+          endsTheCallForMe({
+            endReason: parsed.endReason,
+            senderPersonKey: item.row.senderPersonKey ?? item.row.senderMemberKey,
+            starterPersonKey: starter,
+          })
+        ) {
+          groupCallEndedForEveryone = hex;
+          showEndedForEveryone(starter === null ? null : callNameOfPerson(starter));
+          // The ended-phase effect leaves the call.
+          callActions.endCall();
+        }
       }
 
       switch (decision.oneToOne) {
@@ -1087,6 +1179,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
             kind: "start",
             callIdHex: hex,
             initiatorLeaf: parsed.initiatorLeaf,
+            // The MLS sender resolved at receipt, never the leaf the body
+            // names (C-68): this is who may end the call for everyone.
+            initiatorPersonKey: row.senderPersonKey ?? row.senderMemberKey ?? null,
             createdAtMs: Number(parsed.createdAtMs),
             mediaAudio: parsed.mediaAudio,
             mediaVideo: parsed.mediaVideo,
@@ -1184,6 +1279,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         videoDeviceId: callUi.settings().selectedVideoInput,
       });
     } catch (err) {
+      // A later call has the slot: this one was already over, and neither its
+      // failure nor its video flag belongs to the call that replaced it.
+      if (slotSession !== session) return;
       // `dial` drives the session to `done` on a capture / setup failure; make
       // sure the slot is free even if it threw before reporting a state.
       if (activeCall === session) {
@@ -1202,8 +1300,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (withVideo) setVideoCall(true);
     await call.accept();
     // Opting into video on accept drives the same mid-call camera-on path the
-    // caller uses (see the camera effect below).
-    if (withVideo) callActions.setCamera(true);
+    // caller uses (see the camera effect below). Only for the call that was
+    // accepted: it may have ended, or been replaced, while the answer was made.
+    if (withVideo && activeCall === call) callActions.setCamera(true);
   }
 
   async function decline(): Promise<void> {
@@ -1279,7 +1378,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const local = callUi.participants().find((p) => p.isLocal);
     if (local === undefined || activeCall === null) return;
     if (local.camOn) {
-      void activeCall.addLocalVideo().catch((err: unknown) => {
+      const call = activeCall;
+      void call.addLocalVideo().catch((err: unknown) => {
+        // The call ended, or another took its place, while the camera was
+        // starting: the failure is not the current call's to show.
+        if (activeCall !== call) return;
         const outcome = cameraStartFailure(err);
         setVideoCall(outcome.videoCall);
         callActions.setCamera(outcome.camOn);
@@ -1344,8 +1447,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     aloneTimer: ReturnType<typeof setTimeout> | null;
   }
   let activeGroupCall: ActiveGroupCall | null = null;
-  /** Synchronous latch so a double tap cannot open two SFU sessions. */
-  let groupCallStarting = false;
+  /** The start the group slot belongs to while it has no session yet: a
+   *  joiner's group sync, the JWT mint and the Start publish all run before
+   *  there is anything to hang up. Leaving clears it (`releaseGroupSlot`),
+   *  and a start that finds it changed after an await builds nothing
+   *  (`runGroupCallStart`). The same shape as `linkAttempt`. */
+  let groupAttempt: object | null = null;
 
   function readEpoch(group: { readonly epoch: bigint }): bigint | undefined {
     try {
@@ -1427,7 +1534,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    */
   async function startGroupCall(opts: StartGroupCallOptions): Promise<GroupCallStartOutcome> {
     {
-      const occupant = groupCallStarting ? "group" : currentOccupant();
+      // The slot is the latch: it is written below with no await in between,
+      // so a double tap finds it taken.
+      const occupant = currentOccupant();
       if (occupant !== null) {
         return { kind: "busy", message: callBusyMessage(occupant, opts.joinCallIdHex === null ? "start" : "join") };
       }
@@ -1447,211 +1556,307 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
     const groupIdB64 = opts.groupIdB64;
     const hex = callIdHex(callId);
-    groupCallStarting = true;
+    const attempt = {};
+    groupAttempt = attempt;
     // One call at a time, app-wide: from here on a 1x1 offer from any chat is
     // answered busy, and the receive paths keep this group polled.
     setGroupSlot({ groupIdB64, callIdHex: hex, starting: true });
+    // The session this start builds, once it exists: what the outcome is
+    // read from when the start does not end connected.
+    let started: SfuCallUiHandle | null = null;
+    /** What the awaits before the session produce. */
+    interface StartMaterial {
+      readonly base: string;
+      readonly id: NonNullable<ReturnType<typeof chats.identity>>;
+      readonly wasm: Awaited<ReturnType<typeof loadWasm>>;
+      readonly seed: Uint8Array;
+      readonly localLeaf: number;
+      readonly keyedEpoch: bigint | null;
+      readonly safetyNumber: string | undefined;
+      readonly jwt: string;
+      /** When this device asked for the call. */
+      readonly startedAtMs: number;
+    }
+    const callOf = (m: StartMaterial): ActiveGroupCall => ({
+      groupIdB64,
+      callId,
+      callIdHex: hex,
+      ownLeaf: m.localLeaf,
+      ownMemberKey: base64Encode(m.id.signaturePublicKey),
+      ownPersonKey: ownPersonKeyB64(m.id) ?? base64Encode(m.id.signaturePublicKey),
+      initiator,
+      joinPublished: false,
+      heartbeat: null,
+      keyedEpoch: m.keyedEpoch,
+      video: opts.withVideo,
+      startedAtMs: m.startedAtMs,
+      connectedAtMs: null,
+      sawRemote: false,
+      aloneTimer: null,
+    });
+    const sessionEnded = (): GroupCallStartOutcome => ({
+      kind: "failed",
+      message: () => t("common.error.session_ended"),
+    });
     try {
-      const base = sfuBaseUrl();
-      if (base === null) {
-        return {
-          kind: "failed",
-          // No SFU endpoint in this build (`VITE_LAKKO_SFU_URL`).
-          message: () => t("chat.call.unavailable"),
-        };
-      }
-      if (chats.identity() === null || auth.identitySecrets() === null) {
-        return {
-          kind: "failed",
-          message: () => t("common.error.session_ended"),
-        };
-      }
-      if (!initiator) {
-        if (opts.syncGroup !== undefined) {
+      const run = await runGroupCallStart<StartMaterial, GroupCallStartOutcome>({
+        initiator,
+        isCurrent: () => groupAttempt === attempt,
+        sync: async () => {
+          if (opts.syncGroup !== undefined) {
+            try {
+              await opts.syncGroup();
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.warn("group call join: syncing the group failed; joining on the state in hand", err);
+            }
+          }
+          // The sync enqueues any signaling it decrypted; wait for it to apply.
+          await queue.whenIdle();
+        },
+        callStillLive: () => {
+          const account = accountId();
+          const still = account === null ? undefined : groupCallsFor(account, groupIdB64).get(hex);
+          // Not in this call yet: this device's own stale entry (a session that
+          // died before a reload) must not make a finished call look joinable.
+          const ownId = chats.identity();
+          const viewer: GroupCallViewer | undefined =
+            ownId === null
+              ? undefined
+              : { ownMemberKey: base64Encode(ownId.signaturePublicKey), inCallIdHex: null };
+          return still !== undefined && isGroupCallLive(still, Date.now(), viewer);
+        },
+        prepare: async () => {
+          const base = sfuBaseUrl();
+          if (base === null) {
+            return {
+              ok: false,
+              // No SFU endpoint in this build (`VITE_LAKKO_SFU_URL`).
+              reason: { kind: "failed", message: () => t("chat.call.unavailable") },
+            };
+          }
+          const id = chats.identity();
+          const secrets = auth.identitySecrets();
+          const entry = groupEntry(groupIdB64);
+          if (id === null || secrets === null) return { ok: false, reason: sessionEnded() };
+          if (entry === undefined || readIsActive(entry.group) === false) {
+            return {
+              ok: false,
+              reason: { kind: "failed", message: () => t("call.error.not_member") },
+            };
+          }
+          const wasm = await loadWasm();
+          // Per-call SFrame seed + this client's leaf. Deterministic per MLS epoch
+          // (audit-pack C-1) so every participant derives identical bytes.
+          // `ownLeafIndex` is the leaf this client stamps into the frame KID.
+          const keyedEpoch = readEpoch(entry.group) ?? null;
+          const seed = entry.group.exportSecret(id, "lakko/call/v1", callId, 32);
+          const localLeaf = entry.group.ownLeafIndex;
+          // Canonical call safety number — display-only; a derivation failure must
+          // never abort the call.
+          let safetyNumber: string | undefined;
           try {
-            await opts.syncGroup();
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.warn("group call join: syncing the group failed; joining on the state in hand", err);
+            safetyNumber = wasm.callSafetyNumber(seed);
+          } catch {
+            safetyNumber = undefined;
           }
-        }
-        // The sync enqueues any signaling it decrypted; wait for it to apply.
-        await queue.whenIdle();
-        const account = accountId();
-        const still = account === null ? undefined : groupCallsFor(account, groupIdB64).get(hex);
-        // Not in this call yet: this device's own stale entry (a session that
-        // died before a reload) must not make a finished call look joinable.
-        const ownId = chats.identity();
-        const viewer: GroupCallViewer | undefined =
-          ownId === null
-            ? undefined
-            : { ownMemberKey: base64Encode(ownId.signaturePublicKey), inCallIdHex: null };
-        if (still === undefined || !isGroupCallLive(still, Date.now(), viewer)) {
-          return { kind: "ended" };
-        }
-      }
-      const id = chats.identity();
-      const secrets = auth.identitySecrets();
-      const entry = groupEntry(groupIdB64);
-      if (id === null || secrets === null) {
-        return {
-          kind: "failed",
-          message: () => t("common.error.session_ended"),
-        };
-      }
-      if (entry === undefined || readIsActive(entry.group) === false) {
-        return { kind: "failed", message: () => t("call.error.not_member") };
-      }
-      const wasm = await loadWasm();
-      // Per-call SFrame seed + this client's leaf. Deterministic per MLS epoch
-      // (audit-pack C-1) so every participant derives identical bytes.
-      // `ownLeafIndex` is the leaf this client stamps into the frame KID.
-      const keyedEpoch = readEpoch(entry.group) ?? null;
-      const seed = entry.group.exportSecret(id, "lakko/call/v1", callId, 32);
-      const localLeaf = entry.group.ownLeafIndex;
-      // Canonical call safety number — display-only; a derivation failure must
-      // never abort the call.
-      let safetyNumber: string | undefined;
-      try {
-        safetyNumber = wasm.callSafetyNumber(seed);
-      } catch {
-        safetyNumber = undefined;
-      }
-      // Call-admission JWT (JWS Compact, EdDSA) bound to the session.
-      const jwt = new CallJwtClient(wasm);
-      jwt.setSessionToken(secrets.sessionToken);
-      const minted = await jwt.mint(hex, "participant");
-      // ADR-0021 — the per-call peer_tag -> person map, derived locally (the
-      // SFU never sends a name) over every account id this device holds: the
-      // accepted contacts' AND the ones members claimed in their profiles
-      // (ADR-0048 v2). Not frozen at call start — a newcomer's profile is
-      // answered within the first poll or so, and the roster event that
-      // named its tile may have run before it landed. The map is rebuilt
-      // whenever the profile store changes (`profiles.version` also bumps on
-      // an accepted-contacts change), and `refreshNames` below re-runs the
-      // roster through it.
-      let tagMap: { version: number; map: PeerTagMap } | null = null;
-      const currentTagMap = (): PeerTagMap => {
-        const v = profiles.version();
-        if (tagMap !== null && tagMap.version === v) return tagMap.map;
-        const bindings: PeerTagBinding[] = [];
-        for (const c of loadAccepted()) {
-          if (c.accountIdHex !== undefined) {
-            bindings.push({ personKeyB64: c.signaturePubkeyB64, accountIdHex: c.accountIdHex });
-          }
-        }
-        for (const b of profiles.accountIdBindings()) bindings.push(b);
-        const map = buildPeerTagMap(bindings, (accountIdHex) => wasm.sfuPeerTag(hex, accountIdHex));
-        tagMap = { version: v, map };
-        return map;
-      };
-      const resolveDisplayName = (
-        _peerId: string,
-        pseudonym: string,
-        peerTag: string | undefined,
-      ): string => {
-        // The one resolver every screen names people through; a call tile
-        // shows the name only.
-        const person = personForPeerTag(currentTagMap(), peerTag);
-        if (person !== null) return profiles.resolve(person).name;
-        return pseudonym.length > 0 ? pseudonym.slice(0, 8) : t("chat.peer.fallback_name");
-      };
-      if (initiator) {
+          // Call-admission JWT (JWS Compact, EdDSA) bound to the session.
+          const jwt = new CallJwtClient(wasm);
+          jwt.setSessionToken(secrets.sessionToken);
+          const minted = await jwt.mint(hex, "participant");
+          return {
+            ok: true,
+            material: {
+              base,
+              id,
+              wasm,
+              seed,
+              localLeaf,
+              keyedEpoch,
+              safetyNumber,
+              jwt: minted.jwt,
+              startedAtMs: Date.now(),
+            },
+          };
+        },
         // Announce before connecting, so a member who opens the chat while the
         // SFU handshake is still running already sees a call to join.
-        const now = Date.now();
-        const announced = await publishGroupControl(groupIdB64, (w) =>
-          w.composeGroupCallStartSignaling(callId, localLeaf, BigInt(now), true, opts.withVideo),
-        );
-        if (!announced) throw new Error("the call could not be announced to the group");
-        // Our own publish never comes back to us (the poll drops the echo), so
-        // the record is updated here as it would be on every other member.
-        applyGroupCallEvent(groupIdB64, {
-          kind: "start",
-          callIdHex: hex,
-          initiatorLeaf: localLeaf,
-          createdAtMs: now,
-          mediaAudio: true,
-          mediaVideo: opts.withVideo,
-          observedAtMs: now,
-        });
-      }
-      // Set before any further await, so a failure from here on reaches
-      // `leaveGroupCall` — which is what publishes the End an initiator owes.
-      activeGroupCall = {
-        groupIdB64,
-        callId,
-        callIdHex: hex,
-        ownLeaf: localLeaf,
-        ownMemberKey: base64Encode(id.signaturePublicKey),
-        ownPersonKey: ownPersonKeyB64(id) ?? base64Encode(id.signaturePublicKey),
-        initiator,
-        joinPublished: false,
-        heartbeat: null,
-        keyedEpoch,
-        video: opts.withVideo,
-        startedAtMs: Date.now(),
-        connectedAtMs: null,
-        sawRemote: false,
-        aloneTimer: null,
-      };
-      const handle = createSfuCallUi(
-        {
-          sfuBaseUrl: base,
-          jwt: minted.jwt,
-          seed,
-          localLeaf,
-          media: {
-            audio: true,
-            // A group video call publishes the camera at connect (SFrame-sealed
-            // like the audio sender); the in-call toggle gates the live track.
-            video: opts.withVideo,
-            audioDeviceId: callUi.settings().selectedAudioInput,
-            videoDeviceId: callUi.settings().selectedVideoInput,
-          },
+        announce: (m) =>
+          publishGroupControl(groupIdB64, (w) =>
+            w.composeGroupCallStartSignaling(callId, m.localLeaf, BigInt(m.startedAtMs), true, opts.withVideo),
+          ),
+        // The Start is on the journal and no call follows it: tell the group
+        // what leaving tells it (the End an initiator owes), through the same
+        // ordered queue, so the End lands behind the Start.
+        takeBackAnnouncement: (m, why) => {
+          void announceGroupLeave(callOf(m), why === "left" ? "hungUp" : "error", false, Date.now());
         },
-        {
-          localDisplayName: ownTileName(),
-          safetyNumber,
-          resolveDisplayName,
-          onSessionStateChange: (state) => onGroupSessionState(hex, state),
+        open: (m) => {
+          // Set before anything else, so a failure from here on reaches
+          // `leaveGroupCall` — which is what publishes the End an initiator owes.
+          activeGroupCall = callOf(m);
+          if (initiator) {
+            // Our own publish never comes back to us (the poll drops the echo), so
+            // the record is updated here as it would be on every other member.
+            applyGroupCallEvent(groupIdB64, {
+              kind: "start",
+              callIdHex: hex,
+              initiatorLeaf: m.localLeaf,
+              initiatorPersonKey: ownPersonKeyB64(m.id) ?? base64Encode(m.id.signaturePublicKey),
+              createdAtMs: m.startedAtMs,
+              mediaAudio: true,
+              mediaVideo: opts.withVideo,
+              observedAtMs: m.startedAtMs,
+            });
+          }
+          // ADR-0021 — the per-call peer_tag -> person map, derived locally (the
+          // SFU never sends a name) over every account id this device holds: the
+          // accepted contacts' AND the ones members claimed in their profiles
+          // (ADR-0048 v2). Not frozen at call start — a newcomer's profile is
+          // answered within the first poll or so, and the roster event that
+          // named its tile may have run before it landed. The map is rebuilt
+          // whenever the profile store changes (`profiles.version` also bumps on
+          // an accepted-contacts change), and `refreshNames` re-runs the
+          // roster through it.
+          const resolveDisplayName = peerNameResolver(m.wasm, hex);
+          const handle = createSfuCallUi(
+            {
+              sfuBaseUrl: m.base,
+              jwt: m.jwt,
+              seed: m.seed,
+              localLeaf: m.localLeaf,
+              media: {
+                audio: true,
+                // A group video call publishes the camera at connect (SFrame-sealed
+                // like the audio sender); the in-call toggle gates the live track.
+                video: opts.withVideo,
+                audioDeviceId: callUi.settings().selectedAudioInput,
+                videoDeviceId: callUi.settings().selectedVideoInput,
+              },
+            },
+            {
+              localDisplayName: ownTileName(),
+              safetyNumber: m.safetyNumber,
+              resolveDisplayName,
+              onSessionStateChange: (state) => onGroupSessionState(hex, state),
+            },
+          );
+          // The SFU has a public address, so most clients reach it on a
+          // server-reflexive candidate - but one behind a symmetric NAT has none,
+          // and for it the relay is the only way into the room.
+          handle.session.setTurnProvider(async () => {
+            turn.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
+            return turn.fetchOrNull();
+          });
+          started = handle;
+          setGroupHandle(handle);
+          setGroupSlot({ groupIdB64, callIdHex: hex, starting: false });
+          // The awaits above (JWT mint, the Start publish — which itself runs under
+          // the group lock) can straddle an epoch advance whose drain found no
+          // session to rekey. Catch up now, before any media is sealed.
+          onGroupMlsSettled(groupIdB64);
         },
-      );
-      // The SFU has a public address, so most clients reach it on a
-      // server-reflexive candidate - but one behind a symmetric NAT has none,
-      // and for it the relay is the only way into the room.
-      handle.session.setTurnProvider(async () => {
-        turn.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
-        return turn.fetchOrNull();
+        connect: async () => {
+          await (started as SfuCallUiHandle | null)?.connect();
+        },
       });
-      setGroupHandle(handle);
-      setGroupSlot({ groupIdB64, callIdHex: hex, starting: false });
-      // The awaits above (JWT mint, the Start publish — which itself runs under
-      // the group lock) can straddle an epoch advance whose drain found no
-      // session to rekey. Catch up now, before any media is sealed.
-      onGroupMlsSettled(groupIdB64);
-      await handle.connect();
-      return { kind: "connected" };
-    } catch (err) {
+      switch (run.kind) {
+        case "connected":
+        case "left":
+        case "ended":
+          // `left`: the person left (or a newer call took the slot) while this
+          // start was in flight. Nothing failed, the screens are told nothing,
+          // and the slot is not this attempt's to touch.
+          return { kind: run.kind };
+        case "refused":
+          return run.reason;
+        case "failed":
+          break;
+      }
+      const session = started as SfuCallUiHandle | null;
+      // The person left while the session was connecting (`leaveGroupCall`
+      // took it out of the slot and hung it up). An attempt that is no longer
+      // current never gets here; this is the same answer read off the session.
+      if (
+        groupCallStartAbandoned({
+          sessionState: session?.session.getState() ?? null,
+          stillInSlot: session !== null && groupHandle() === session,
+        })
+      ) {
+        return { kind: "left" };
+      }
       // The SFU says the call ended before this device arrived
       // (`sfu-call-state.ts`): close the chat's record for everyone rather
       // than report a failure, since nothing failed on this side.
-      const endedByServer = groupHandle()?.session.callEndedByServer() === true;
+      const endedByServer = session?.session.callEndedByServer() === true;
       await leaveGroupCall("error");
       if (endedByServer) {
         await endGroupCallRecord(groupIdB64, hex, callId);
         return { kind: "ended" };
       }
       // eslint-disable-next-line no-console
-      console.warn("group call could not start", err);
+      console.warn("group call could not start", run.error);
       return {
         kind: "failed",
-        message: callFailureText(err, couldNot),
+        message: callFailureText(run.error, couldNot),
       };
     } finally {
-      groupCallStarting = false;
-      if (groupHandle() === null && activeGroupCall === null) setGroupSlot(null);
+      // Only the attempt the slot still belongs to frees it: one the person
+      // left has had it taken back already, and it may be a newer call's now.
+      if (groupAttempt === attempt) {
+        groupAttempt = null;
+        if (groupHandle() === null && activeGroupCall === null) setGroupSlot(null);
+      }
     }
+  }
+
+  /**
+   * ADR-0021 — names a call's peers from the people this device knows.
+   *
+   * The per-call peer_tag -> person map is derived locally (the SFU never
+   * sends a name) over every account id this device holds: the accepted
+   * contacts' AND the ones people claimed in their profiles (ADR-0048 v2).
+   * Not frozen at call start: the map is rebuilt whenever the profile store
+   * changes (`profiles.version` also bumps on an accepted-contacts change).
+   * `null` while the peer is nobody this device can name yet; never a piece
+   * of the account id (`tile-name.ts`).
+   */
+  function peerNameResolver(
+    wasm: Awaited<ReturnType<typeof loadWasm>>,
+    callIdHex: string,
+  ): (peerId: string, pseudonym: string, peerTag: string | undefined) => string | null {
+    let tagMap: { version: number; map: PeerTagMap } | null = null;
+    const currentTagMap = (): PeerTagMap => {
+      const v = profiles.version();
+      if (tagMap !== null && tagMap.version === v) return tagMap.map;
+      const bindings: PeerTagBinding[] = [];
+      for (const c of loadAccepted()) {
+        if (c.accountIdHex !== undefined) {
+          bindings.push({ personKeyB64: c.signaturePubkeyB64, accountIdHex: c.accountIdHex });
+        }
+      }
+      for (const b of profiles.accountIdBindings()) bindings.push(b);
+      const map = buildPeerTagMap(bindings, (accountIdHex) =>
+        wasm.sfuPeerTag(callIdHex, accountIdHex),
+      );
+      tagMap = { version: v, map };
+      return map;
+    };
+    return (_peerId, _pseudonym, peerTag) => {
+      const person = personForPeerTag(currentTagMap(), peerTag);
+      return person === null ? null : callNameOfPerson(person);
+    };
+  }
+
+  /** A person's name on a call tile: the one resolver every screen names
+   *  people through, then the username they claim as plain text while it is
+   *  not verified yet (`tile-name.ts`). */
+  function callNameOfPerson(personKeyB64: string): string | null {
+    return callTileName({
+      resolved: personNameOrNull(profiles.resolve(personKeyB64)),
+      announcedName: null,
+      claimedUsername: profiles.claimedUsernameOf(personKeyB64),
+    });
   }
 
   // A profile, a rename or an accepted contact landing while a group call is
@@ -1662,6 +1867,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     profiles.version();
     const h = groupHandle();
     if (h !== null) untrack(() => h.refreshNames());
+    // A link call too: a member's username verified, a contact renamed.
+    const link = linkHandle();
+    if (link !== null) untrack(() => link.refreshNames());
   });
 
   /** SFU session lifecycle -> the group journal. */
@@ -1784,10 +1992,19 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       // Clear the slot BEFORE `hangUp`: the adapter's `closed` transition moves
       // the store to `ended`, whose effect must find no handle left to tear down
       // a second time.
-      setGroupHandle(null);
-      h.hangUp();
+      // `finally`: clearing the slot takes the call screen down, and nothing
+      // the screen does on its way out may leave the session open (camera and
+      // microphone on, senders sending, the SFU socket up).
+      try {
+        setGroupHandle(null);
+      } finally {
+        h.hangUp();
+      }
     }
-    if (!groupCallStarting) setGroupSlot(null);
+    // A start still in its awaits is no longer the current attempt: it
+    // builds no session, and the slot is free now, not when it returns.
+    groupAttempt = null;
+    setGroupSlot(null);
     return { call: g, failed };
   }
 
@@ -1795,6 +2012,44 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    * Leave the group call this device is in: tear the SFU session down and tell
    * the group, as `planGroupCallLeave` decides. Idempotent.
    */
+  /** This account started the group call this device is in. Account-level:
+   *  any device of the starter that is in the call. */
+  function startedGroupCall(): boolean {
+    const g = activeGroupCall;
+    const account = accountId();
+    if (g === null || account === null) return false;
+    const starter = groupCallsFor(account, g.groupIdB64).get(g.callIdHex)?.initiatorPersonKey;
+    return starter !== undefined && starter !== null && starter === g.ownPersonKey;
+  }
+
+  /**
+   * End the group call for every person in it (`docs/ux/calls.md` section
+   * 4.1.2). The end is a `CallEnd` with the reason `endedForAll`, published
+   * into the group like any call signal; every device in the call checks
+   * that it comes from the call's starter before it leaves. Published before
+   * this device leaves, so it is on its way while the session goes down.
+   */
+  async function endGroupCallForEveryone(): Promise<void> {
+    const g = activeGroupCall;
+    if (g === null || !startedGroupCall()) return;
+    groupCallEndedForEveryone = g.callIdHex;
+    applyGroupCallEvent(g.groupIdB64, { kind: "end", callIdHex: g.callIdHex });
+    const published = publishGroupControl(g.groupIdB64, (w) =>
+      w.composeCallEndSignaling(g.callId, ENDED_FOR_ALL),
+    );
+    // The ended-phase effect leaves the call (and publishes this device's
+    // Leave behind the End, through the same queue).
+    callActions.endCall();
+    try {
+      await published;
+    } catch (err) {
+      // The starter has left either way; the others stay until they hang up
+      // or the call empties.
+      // eslint-disable-next-line no-console
+      console.warn("group call: the end for everyone could not be published", err);
+    }
+  }
+
   /**
    * Write the group call's row (`docs/ux/calls.md` §6).
    *
@@ -1825,7 +2080,22 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const lastInbound = groupHandle()?.session.lastInboundAtMs() ?? 0;
     const { call: g, failed } = releaseGroupSlot();
     if (g === null) return;
-    recordGroupCall(g, callEndedAtMs(Date.now(), lastInbound));
+    await announceGroupLeave(g, reason, failed, callEndedAtMs(Date.now(), lastInbound));
+  }
+
+  /**
+   * Write the call's row and tell the group this device is out of the call
+   * `g`, as `planGroupCallLeave` decides. `g` is already out of the slot, or
+   * never reached it: a start the person left after its `GroupCallStart` was
+   * published takes the announcement back through here.
+   */
+  async function announceGroupLeave(
+    g: ActiveGroupCall,
+    reason: GroupLeaveReason,
+    failed: boolean,
+    endedAtMs: number,
+  ): Promise<void> {
+    recordGroupCall(g, endedAtMs);
     const account = accountId();
     const rec = account === null ? undefined : groupCallsFor(account, g.groupIdB64).get(g.callIdHex);
     const plan = planGroupCallLeave({
@@ -1851,7 +2121,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         w.composeGroupCallLeaveSignaling(g.callId, g.ownLeaf, plan.leaveReason),
       );
     }
-    if (plan.publishEnd) {
+    const endAlreadyPublished = groupCallEndedForEveryone === g.callIdHex;
+    if (endAlreadyPublished) groupCallEndedForEveryone = null;
+    if (plan.publishEnd && !endAlreadyPublished) {
       applyGroupCallEvent(g.groupIdB64, { kind: "end", callIdHex: g.callIdHex });
       await publishGroupControl(g.groupIdB64, (w) =>
         w.composeCallEndSignaling(g.callId, plan.leaveReason),
@@ -1994,6 +2266,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (local === undefined || h === null) return;
     if (local.camOn) {
       void h.publishVideo().catch((err: unknown) => {
+        // Left, or replaced by another call, while the camera was starting.
+        if (untrack(groupHandle) !== h) return;
         callActions.setCamera(false);
         // eslint-disable-next-line no-console
         console.warn("could not start the camera", err);
@@ -2061,16 +2335,21 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (slot === null) return;
     const phase = reduceLinkCallPhase(slot.phase, event);
     if (phase === slot.phase) return;
-    setLinkSlot({
-      ...slot,
-      phase,
-      errorMessage: phase === "error" ? (errorMessage ?? slot.errorMessage) : slot.errorMessage,
-    });
-    if (!linkCallOccupiesSlot(phase)) {
-      // Over on its own: drop the session (idempotent — it also resets the
-      // shared in-call store) and keep the outcome for the user to see.
-      const h = linkHandle();
-      setLinkHandle(null);
+    // Over on its own: drop the session (idempotent — it also resets the
+    // shared in-call store) and keep the outcome for the user to see.
+    // `finally`, as in `releaseGroupSlot`: both writes below take the call
+    // screen down, and the session is closed whatever the screen does on its
+    // way out.
+    const over = !linkCallOccupiesSlot(phase);
+    const h = over ? linkHandle() : null;
+    try {
+      setLinkSlot({
+        ...slot,
+        phase,
+        errorMessage: phase === "error" ? (errorMessage ?? slot.errorMessage) : slot.errorMessage,
+      });
+      if (over) setLinkHandle(null);
+    } finally {
       h?.hangUp();
     }
   }
@@ -2136,14 +2415,33 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       media: { audio: true, video: opts.mediaVideo },
       localDisplayName: ownTileName(),
       ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
+      // Tiles are named by the one resolver: a member's sealed profile is
+      // filed like any received profile (which verifies a claimed username),
+      // and a person this device already knows is named before they announce.
+      resolveDisplayName: peerNameResolver(await loadWasm(), hex),
+      onMemberProfile: (personKeyB64, profile) => profiles.ingest(personKeyB64, profile),
+      // The link's owner ended the call for everyone: say who, then end it
+      // here the way a call that ended on its own ends.
+      onEndedForEveryone: (peerId) => {
+        const name =
+          callUi.participants().find((p) => p.id === `peer-${peerId}`)?.displayName ?? "";
+        showEndedForEveryone(name.length > 0 ? name : null);
+        applyLinkEvent(attempt, { kind: "ended" });
+      },
+      resolvePersonName: callNameOfPerson,
       onJoined: () => applyLinkEvent(attempt, { kind: "joined" }),
       onEnded: () => applyLinkEvent(attempt, { kind: "ended" }),
       onNoCommitter: () => applyLinkEvent(attempt, { kind: "no-committer" }),
       onError: (err: unknown) => {
+        // An attempt the person already left has nothing to report.
+        if (linkAttempt !== attempt) return;
         // eslint-disable-next-line no-console
         console.warn("link call failed", err);
         applyLinkEvent(attempt, { kind: "error" }, callFailureReason(err));
       },
+      // The shared call store belongs to the attempt in the slot; an older
+      // one that finishes later writes nothing to it and is never started.
+      isCurrent: () => linkAttempt === attempt,
     };
 
     try {
@@ -2162,6 +2460,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       applyLinkEvent(attempt, { kind: "signaling-open", role: opts.isOwner ? "owner" : "joiner" });
       return { kind: "started" };
     } catch (err) {
+      // Left, or replaced, while the start was in flight: whatever the
+      // attempt ran into afterwards is not shown as a call that could not
+      // start. The same neutral outcome as the branch above.
+      if (linkAttempt !== attempt) return { kind: "started" };
       // eslint-disable-next-line no-console
       console.warn("link call could not start", err);
       const reason = callFailureReason(err);
@@ -2170,16 +2472,40 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
   }
 
+  /** End the link call for every person in it. Only the link's owner. The
+   *  ended-phase effect then leaves, as after `End`. */
+  function endLinkCallForEveryone(): void {
+    const h = linkHandle();
+    if (h === null || linkSlot()?.role !== "owner") return;
+    h.endForEveryone();
+    callActions.endCall();
+  }
+
   /** Leave the link call: no outcome to show, the user chose it. */
   function leaveLinkCall(): void {
+    // Read before the slot is cleared: whether a link call holds the shared
+    // call store at all (this also runs at sign-out with none).
+    const slot = untrack(linkSlot);
+    const h = untrack(linkHandle);
+    const held = h !== null || (slot !== null && linkCallOccupiesSlot(slot.phase));
     linkAttempt = null;
-    const h = linkHandle();
-    setLinkHandle(null);
-    setLinkSlot(null);
-    setLinkCallId(null);
-    setLinkInvite(INVITE_IDLE);
-    setInviteLineShown(false);
-    h?.hangUp();
+    // `finally`, as in `releaseGroupSlot`: the writes below take the call
+    // screen down, and the session is closed whatever it does on its way out.
+    try {
+      setLinkHandle(null);
+      setLinkSlot(null);
+      setLinkCallId(null);
+      setLinkInvite(INVITE_IDLE);
+      setInviteLineShown(false);
+    } finally {
+      h?.hangUp();
+      // The attempt is no longer current, so its `hangUp` leaves the store
+      // alone (`MultiJoinerCallOptions.isCurrent`); the store is put back
+      // here, now, by the call that held it. A session still being built
+      // when the person left is hung up when it arrives and by then writes
+      // nothing: the store may be a newer call's.
+      if (held) callActions.reset();
+    }
   }
 
   function dismissLinkCallOutcome(): void {
@@ -2210,38 +2536,21 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const linkInviteStatus = (): string | null =>
     inviteLineShown() ? inviteStatusLine(linkInvite()) : null;
 
-  /** Hand the link to the platform, and say where it went. */
-  async function offerLink(url: string): Promise<void> {
-    const nav: Navigator | undefined = globalThis.navigator;
-    const clipboard = nav?.clipboard;
-    const delivery = await deliverCallLink(url, {
-      share:
-        nav !== undefined && typeof nav.share === "function"
-          ? async (u: string): Promise<void> => {
-              await nav.share({ url: u });
-            }
-          : undefined,
-      copy:
-        clipboard !== undefined && typeof clipboard.writeText === "function"
-          ? async (text: string): Promise<void> => {
-              await clipboard.writeText(text);
-            }
-          : undefined,
-    });
-    showInvite({ kind: "ready", url, delivery });
-  }
-
-  async function inviteToLinkCall(): Promise<void> {
+  /**
+   * The link to the call in the slot, minted on first use.
+   *
+   * `null` when there is none to give: no call, no session, or the mint
+   * failed — and in each case the status line already says so.
+   */
+  async function linkForCall(): Promise<string | null> {
     const state = untrack(linkInvite);
     const press = nextInvitePress(state);
-    if (press === "ignore") return;
-    if (press === "reoffer" && state.kind === "ready") {
-      await offerLink(state.url);
-      return;
-    }
+    if (press === "ignore") return null;
+    const have = mintedInviteUrl(state);
+    if (press === "reoffer" && have !== null) return have;
     const callId = untrack(linkCallId);
     const slot = untrack(linkSlot);
-    if (callId === null || slot === null || !linkCallOccupiesSlot(slot.phase)) return;
+    if (callId === null || slot === null || !linkCallOccupiesSlot(slot.phase)) return null;
     // The canonical identity, not a throwaway: the capability's owner key is
     // derived from this seed, and `MultiJoinerCall` refuses a group whose
     // roster does not contain the owner named by the link.
@@ -2249,7 +2558,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const secrets = auth.identitySecrets();
     if (identity === null || secrets === null) {
       showInvite({ kind: "failed", failure: "signed-out" });
-      return;
+      return null;
     }
     showInvite({ kind: "minting" });
     let url: string;
@@ -2285,16 +2594,133 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       // eslint-disable-next-line no-console
       console.warn("call host: could not prepare a link for this call", err);
       showInvite({ kind: "failed", failure: "unavailable" });
-      return;
+      return null;
     }
-    // The call may have ended while the mint was in flight; the link is still
-    // worth handing over if the person is still in it.
+    // The call may have ended while the mint was in flight, or ended and
+    // been followed by another: the link is the first call's and is never
+    // shown on the second.
     const after = untrack(linkSlot);
-    if (after === null || !linkCallOccupiesSlot(after.phase)) {
-      showInvite(INVITE_IDLE);
-      return;
+    switch (
+      mintedInviteFate({
+        mintedForCallIdHex: slot.callIdHex,
+        slotCallIdHex:
+          after !== null && linkCallOccupiesSlot(after.phase) ? after.callIdHex : null,
+      })
+    ) {
+      case "show":
+        return url;
+      case "call-over":
+        showInvite(INVITE_IDLE);
+        return null;
+      case "another-call":
+        // The line and the state are the new call's: left as they are.
+        return null;
     }
-    await offerLink(url);
+  }
+
+  /** `Copy link`: the link goes to the clipboard, and the line says so. */
+  async function copyLinkCallInvite(): Promise<void> {
+    const url = await linkForCall();
+    if (url === null) return;
+    const clipboard = globalThis.navigator?.clipboard;
+    const delivery = await copyCallLink(
+      url,
+      clipboard !== undefined && typeof clipboard.writeText === "function"
+        ? async (text: string): Promise<void> => {
+            await clipboard.writeText(text);
+          }
+        : undefined,
+    );
+    showInvite({ kind: "ready", url, delivery });
+  }
+
+  // `Invite contacts`: a picker of this person's contacts; the invitation is
+  // sent into the one-to-one with the contact they choose.
+  const [invitePickerOpen, setInvitePickerOpen] = createSignal(false);
+
+  // Founds the one-to-one with a contact who has never been written to from
+  // this device. The same construction as the mailbox's client: groups are
+  // this device's, the account mailbox is the person's (ADR-0050).
+  const contactsClient = new ContactsClient(undefined, undefined, {
+    identityProvider: () => chats.identity(),
+    accountIdentityProvider: () => chats.accountIdentity(),
+    onPersist: async () => {
+      const s = auth.state();
+      if (s.kind !== "session") return;
+      await chats.persistSnapshot(s.account.accountId);
+    },
+    ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
+    onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
+  });
+
+  /**
+   * Send the invitation to a contact.
+   *
+   * It goes into the one-to-one with that contact
+   * (`contacts/contact-conversation.ts`); when this device holds none, one is
+   * founded first, the way `Message` on the contact's card does. The message
+   * is the call's link and nothing else, which is what lets every client draw
+   * it as an invitation with a `Join` button (`calls/call-invite-link.ts`).
+   * Rejects when it could not be sent, so the picker shows the reason and the
+   * row stays pressable; the call is untouched either way.
+   */
+  async function sendLinkCallInvite(target: {
+    readonly keyB64: string;
+    readonly name: string;
+  }): Promise<void> {
+    const s = auth.state();
+    const secrets = auth.identitySecrets();
+    const contact = loadAccepted().find((c) => c.signaturePubkeyB64 === target.keyB64);
+    if (s.kind !== "session" || secrets === null || contact === undefined) {
+      throw new KeyedError("call.invite.send_failed");
+    }
+    const url = await linkForCall();
+    if (url === null) throw new KeyedError("call.invite.send_failed");
+    const forCallIdHex = untrack(linkSlot)?.callIdHex ?? null;
+    // Whether the call the link was made for still holds the slot; asked
+    // after the send, before its outcome is written to the call's status.
+    const sameCall = (): boolean => {
+      const now = untrack(linkSlot);
+      return now !== null && linkCallOccupiesSlot(now.phase) && now.callIdHex === forCallIdHex;
+    };
+    try {
+      let entry = conversationWithContact({
+        contact,
+        conversations: chats.groups(),
+        ownKeyB64: ownPersonKeyB64(chats.identity()),
+        peopleOf: (g) => personKeysOf(g.group),
+        isOneToOne: (g) => conversationKindOf(g.group) === "chat",
+      });
+      if (entry === undefined) {
+        // No conversation with this contact on this device yet. Founding one
+        // needs the contact's account id, which the record holds for every
+        // contact accepted since ADR-0021.
+        const accountId =
+          contact.accountIdHex === undefined ? null : hexToBytes(contact.accountIdHex);
+        if (accountId === null) throw new Error("contact has no account id");
+        const founded = await foundOneToOneWith({
+          client: contactsClient,
+          identity: secrets,
+          chats,
+          profiles,
+          contact,
+          peerAccountId: accountId,
+          peerPubkey: base64Decode(contact.signaturePubkeyB64),
+        });
+        entry = founded.conversation;
+      }
+      await sendTextToConversation({ chat, accountId: s.account.accountId, entry, text: url });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("call host: could not send the call invitation", err);
+      if (sameCall()) showInvite({ kind: "failed", failure: "not-sent", url });
+      throw new KeyedError("call.invite.send_failed");
+    }
+    // The picker stays open: several contacts can be invited one after
+    // another, and it is closed by the person.
+    if (sameCall()) {
+      showInvite({ kind: "ready", url, delivery: { kind: "sent", name: target.name } });
+    }
   }
 
   // The embedded in-call UI's End button moves the store to `ended`. A session
@@ -2333,6 +2759,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (local === undefined || h === null) return;
     if (local.camOn) {
       void h.publishVideo().catch((err: unknown) => {
+        // Left, or replaced by another call, while the camera was starting.
+        if (untrack(linkHandle) !== h) return;
         callActions.setCamera(false);
         // eslint-disable-next-line no-console
         console.warn("could not start the camera", err);
@@ -2462,6 +2890,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     anyCallInProgress,
     startGroupCall,
     leaveGroupCall: () => leaveGroupCall("hungUp"),
+    startedGroupCall,
+    endGroupCallForEveryone,
+    endLinkCallForEveryone,
+    endedForEveryoneNotice,
     callOccupant: currentOccupant,
     callBusyMessage: (verb) => {
       const occupant = currentOccupant();
@@ -2471,7 +2903,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     linkCall: linkSlot,
     startLinkCall,
     leaveLinkCall,
-    inviteToLinkCall,
+    copyLinkCallInvite,
+    linkCallInvitePickerOpen: invitePickerOpen,
+    openLinkCallInvitePicker: () => setInvitePickerOpen(true),
+    closeLinkCallInvitePicker: () => setInvitePickerOpen(false),
+    sendLinkCallInvite,
     linkCallInvite: linkInvite,
     linkCallInviteStatus: linkInviteStatus,
     dismissLinkCallOutcome,
@@ -2572,9 +3008,12 @@ export function useCallHost(): CallHostApi {
  */
 export function CallHostView(): JSX.Element {
   const host = useCallHost();
+  const auth = useAuth();
   const internals = useContext(CallHostInternalsContext);
   if (internals === undefined) throw new Error("CallHostView outside <CallHostProvider>");
   const [audioEl, setAudioEl] = createSignal<HTMLAudioElement | null>(null);
+  /** What the group call's tiles ask of it, safe to ask after it is over. */
+  const groupTiles = groupCallTileSources(() => internals.groupHandle());
 
   /**
    * `docs/ux/calls.md` §2.1 — a ringing call is audible, not only visible.
@@ -2764,34 +3203,38 @@ export function CallHostView(): JSX.Element {
       {/* The group (SFU) call's in-call UI. The session is the host's, so this
           stays up on every screen and a return to the call's chat shows it
           rather than offering a second call. */}
-      <Show when={internals.groupHandle()}>
-        {(handle) => (
-          <>
-            {/* The overlay is what `collapsed` hides; the audio sinks below
-                are not, so they stay outside this branch and a collapsed call
-                keeps its sound. */}
-            <Show when={!host.callCollapsed()}>
-              <Call
-                embedded={true}
-                group={true}
-                onExit={() => void host.leaveGroupCall()}
-                onCollapse={collapse()}
-                remoteStreamFor={(participantId): MediaStream | undefined =>
-                  // The roster id is `peer-<peerId>`; the SFU sets the downstream
-                  // MSID stream id to that same peer id.
-                  handle().remoteStreams().get(participantId.replace(/^peer-/, ""))
-                }
-                localStream={(): MediaStream | undefined => handle().localStream() ?? undefined}
-              />
-            </Show>
-            {/* One hidden sink per remote stream, keyed by stream identity, so
-                audio does not cut on roster churn. Remote video renders per tile
-                through `remoteStreamFor`. */}
-            <For each={[...handle().remoteStreams().values()]}>
-              {(stream) => <RemoteAudio stream={stream} />}
-            </For>
-          </>
-        )}
+      <Show when={internals.groupHandle() !== null}>
+        {/* The tiles read the call through `groupTiles`, never through the
+            accessor this `<Show>` could hand over: they are read while the
+            screen is taken down, after the handle was cleared
+            (`calls/group-call-tile-sources.ts`). */}
+        {/* The overlay is what `collapsed` hides; the audio sinks below
+            are not, so they stay outside this branch and a collapsed call
+            keeps its sound. */}
+        <Show when={!host.callCollapsed()}>
+          <Call
+            embedded={true}
+            group={true}
+            onExit={() => void host.leaveGroupCall()}
+            onEndForEveryone={
+              host.startedGroupCall() ? () => void host.endGroupCallForEveryone() : undefined
+            }
+            onCollapse={collapse()}
+            remoteStreamFor={groupTiles.remoteStreamFor}
+            remoteLightStreamFor={groupTiles.remoteLightStreamFor}
+            remoteMiddleStreamFor={groupTiles.remoteMiddleStreamFor}
+            remoteVideoGivenFor={groupTiles.remoteVideoGivenFor}
+            reportTileVideoQuality={groupTiles.reportTileVideoQuality}
+            localStream={groupTiles.localStream}
+            remoteAudioReceiverFor={groupTiles.remoteAudioReceiverFor}
+          />
+        </Show>
+        {/* One hidden sink per remote stream, keyed by stream identity, so
+            audio does not cut on roster churn. Remote video renders per tile
+            through `remoteStreamFor`. */}
+        <For each={groupTiles.remoteStreamList()}>
+          {(stream) => <RemoteAudio stream={stream} />}
+        </For>
       </Show>
 
       {/* The call-link call's in-call UI, once this device is in the call's
@@ -2812,29 +3255,61 @@ export function CallHostView(): JSX.Element {
           embedded={true}
           group={true}
           onExit={() => host.leaveLinkCall()}
+          onEndForEveryone={
+            host.linkCall()?.role === "owner" ? () => host.endLinkCallForEveryone() : undefined
+          }
           onCollapse={collapse()}
           /* `docs/ux/call-links.md` section 3: the one control the call screen
              gains. Only this kind of call has it — a link names a `call_id`,
              and a call placed inside a conversation is reached through that
              conversation instead. */
-          onInvite={() => void host.inviteToLinkCall()}
+          onCopyInviteLink={() => void host.copyLinkCallInvite()}
+          /* Always there for an account, with or without contacts: an item
+             that comes and goes reads as a missing feature (found live
+             2026-10-02), so the list itself says when it is empty. Only a
+             guest (`auth/guest-account.ts`), who has no contacts, gets the
+             link alone. */
+          onInviteContact={
+            auth.isGuest() ? undefined : () => host.openLinkCallInvitePicker()
+          }
           inviteBusy={inviteIsBusy(host.linkCallInvite())}
           inviteStatus={host.linkCallInviteStatus()}
           remoteStreamFor={(participantId): MediaStream | undefined =>
             internals.linkHandle()?.remoteStreamFor(participantId)
           }
+          remoteLightStreamFor={(participantId): MediaStream | undefined =>
+            internals.linkHandle()?.remoteLightStreamFor(participantId)
+          }
+          remoteMiddleStreamFor={(participantId): MediaStream | undefined =>
+            internals.linkHandle()?.remoteMiddleStreamFor(participantId)
+          }
+          remoteVideoGivenFor={(participantId) =>
+            internals.linkHandle()?.remoteVideoGivenFor(participantId)
+          }
+          reportTileVideoQuality={(tile, participantId, quality): void => {
+            internals
+              .linkHandle()
+              ?.reportTileVideoQuality(tile, participantId.replace(/^peer-/, ""), quality);
+          }}
           localStream={(): MediaStream | undefined =>
             internals.linkHandle()?.localStream() ?? undefined
           }
+          remoteAudioReceiverFor={(participantId) =>
+            internals.linkHandle()?.remoteAudioReceiverFor(participantId)
+          }
         />
       </Show>
-      <Show when={internals.linkHandle()}>
-        {(handle) => (
-          <For each={[...handle().remoteStreams().values()]}>
-            {(stream) => <RemoteAudio stream={stream} />}
-          </For>
-        )}
-      </Show>
+      <For each={[...(internals.linkHandle()?.remoteStreams().values() ?? [])]}>
+        {(stream) => <RemoteAudio stream={stream} />}
+      </For>
+
+      {/* `Invite a contact` (`docs/ux/call-links.md` section 3): the same list
+          of conversations a forward offers, under its own title. */}
+      <InviteContactsPicker
+        open={host.linkCallInvitePickerOpen()}
+        onClose={() => host.closeLinkCallInvitePicker()}
+        onInvite={(row) => host.sendLinkCallInvite({ keyB64: row.keyB64, name: row.name })}
+      />
 
       {/* The call, put away (`docs/ux/calls.md` section 4.5). Last in the
           fragment so it paints over the app and under nothing that matters:
@@ -2854,6 +3329,21 @@ export function CallHostView(): JSX.Element {
       />
 
       <LinkCallNoticeView />
+      {/* "{name} ended the call for everyone", for a few seconds after the
+          starter of the call this device was in ended it
+          (`docs/ux/calls.md` section 4.1.2). */}
+      <Show when={host.endedForEveryoneNotice()}>
+        {(text) => (
+          <div class="lk-call-incoming bottom" role="status">
+            <span class="lk-call-incoming-icon" aria-hidden="true">
+              <Icon name="phoneEnd" size={20} />
+            </span>
+            <div class="lk-call-incoming-text">
+              <span>{text()}</span>
+            </div>
+          </div>
+        )}
+      </Show>
       <GroupCallBanner />
     </>
   );

@@ -64,6 +64,22 @@ struct ForwardPickerScreen: View {
 
     /// Ordered, unfiltered, live memberships only.
     let rows: [ConversationListRow]
+    /// The title, when the list is opened for something other than a forward
+    /// (`Invite to call`, `docs/ux/call-links.md` section 3). `nil` is the
+    /// forward's own.
+    var title: String? = nil
+    /// One line above the list, in the danger colour: why the last pick did
+    /// not go through. The list stays open under it.
+    var notice: String? = nil
+    /// Rows already dealt with, for a list that stays open after a pick (a
+    /// call's `Invite contacts`): each shows a check and ``doneLabel`` and
+    /// cannot be picked again.
+    var doneIds: Set<String> = []
+    var doneLabel: String? = nil
+    /// The word on the control that closes the list. `nil` is `Cancel`, which
+    /// is right for a list one pick closes; a list that stays open is closed,
+    /// not cancelled.
+    var cancelTitle: String? = nil
     let onPick: (ConversationListRow) -> Void
     let onCancel: () -> Void
 
@@ -75,7 +91,16 @@ struct ForwardPickerScreen: View {
 
     var body: some View {
         NavigationStack {
-            Group {
+            VStack(spacing: 0) {
+                if let notice {
+                    Text(notice)
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoDanger)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .accessibilityIdentifier(ForwardPickerScreen.noticeAccessibilityID)
+                }
                 if visible.isEmpty {
                     Text(Localization.text(rows.isEmpty ? "chat.forward.empty" : "chats.search.no_results"))
                         .foregroundStyle(Color.lakkoTextMuted)
@@ -84,10 +109,20 @@ struct ForwardPickerScreen: View {
                 } else {
                     List {
                         ForEach(visible) { row in
+                            let done = doneIds.contains(row.id)
                             Button { onPick(row) } label: {
-                                ConversationRowView(row: row, timeLabel: timeLabel(row))
+                                HStack(spacing: 8) {
+                                    ConversationRowView(row: row, timeLabel: timeLabel(row))
+                                    if done {
+                                        Label(doneLabel ?? "", systemImage: "checkmark")
+                                            .font(.footnote.weight(.medium))
+                                            .foregroundStyle(Color.lakkoTextMuted)
+                                            .fixedSize()
+                                    }
+                                }
                             }
                             .buttonStyle(.plain)
+                            .disabled(done)
                             .listRowSeparator(.hidden)
                             .listRowInsets(
                                 EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
@@ -96,13 +131,13 @@ struct ForwardPickerScreen: View {
                     .listStyle(.plain)
                 }
             }
-            .navigationTitle(Localization.text("chat.forward.picker_title"))
+            .navigationTitle(title ?? Localization.text("chat.forward.picker_title"))
             .navigationBarTitleDisplayMode(.inline)
             .searchable(
                 text: $searchText, prompt: Text(Localization.text("chat.forward.search_label")))
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(Localization.text("common.cancel"), action: onCancel)
+                    Button(cancelTitle ?? Localization.text("common.cancel"), action: onCancel)
                 }
             }
         }
@@ -117,4 +152,5 @@ struct ForwardPickerScreen: View {
     }
 
     static let accessibilityID = "forward-picker"
+    static let noticeAccessibilityID = "forward-picker-notice"
 }

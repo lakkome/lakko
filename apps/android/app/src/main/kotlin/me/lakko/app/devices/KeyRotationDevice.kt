@@ -176,22 +176,18 @@ internal object KeyRotationDevice {
 
             override suspend fun sealBackup(): Boolean {
                 // ADR section 3.5, "Backup": re-sealed under the new phrase
-                // and uploaded, awaited. A chat layer that is not ready
-                // leaves the step owed: an envelope with an empty snapshot
-                // would overwrite the one the server holds.
+                // and uploaded, awaited. The backup carries no MLS state:
+                // contacts, the synced state and the conversations' ids. A
+                // chat layer that is not ready leaves the step owed: an
+                // envelope listing no conversations would overwrite the one
+                // the server holds.
                 val chats = chatRepository ?: return false
                 val state = chats.state.value
                 if (!state.bootstrapped) return false
-                val snapshot = chats.currentStorageSnapshot() ?: return false
-                try {
-                    authRepository.rotationSealBackup(
-                        wholeStorageSnapshot = snapshot,
-                        knownGroupIdsHex = state.threads.map { it.groupIdHex },
-                        syncedState = DeviceGroupSyncRepository.active?.currentSyncedStateBytes(),
-                    )
-                } finally {
-                    snapshot.fill(0)
-                }
+                authRepository.rotationSealBackup(
+                    knownGroupIdsHex = state.threads.map { it.groupIdHex },
+                    syncedState = DeviceGroupSyncRepository.active?.currentSyncedStateBytes(),
+                )
                 return true
             }
 

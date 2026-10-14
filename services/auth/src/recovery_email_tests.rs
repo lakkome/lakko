@@ -2766,3 +2766,84 @@ async fn notices_are_paged_by_cursor_scoped_to_the_account_and_pruned() {
     crate::account_notices::prune(&pool, now).await.unwrap();
     assert_eq!(count().await, 151);
 }
+
+/// Whether the account row exists.
+async fn account_exists(pool: &MySqlPool, id: &[u8; 16]) -> bool {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM accounts WHERE id = ?")
+        .bind(&id[..])
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        == 1
+}
+
+/// `DELETE /auth/login-handle`, with or without the fresh-auth header.
+async fn release_handle(
+    state: &AppState,
+    bearer: &str,
+    fresh: Option<&str>,
+) -> (StatusCode, Bytes) {
+    call(
+        state,
+        Method::DELETE,
+        "/auth/login-handle",
+        Some(bearer),
+        fresh.map(|g| ("x-lakko-fresh-grant", g)),
+        None,
+    )
+    .await
+}
+
+/// `DELETE /account` on the session alone.
+async fn delete_account_bare(state: &AppState, bearer: &str) -> (StatusCode, Bytes) {
+    call(state, Method::DELETE, "/account", Some(bearer), None, None).await
+}
+
+/// ADR-0032 guest lifecycle meeting the fresh-auth rule: an account nobody
+/// named is deleted on its session alone; a named one is not; and a named
+/// account past the unclaimed lifetime cannot shed its name on a session
+/// alone to become deletable.
+#[tokio::test]
+async fn an_unnamed_account_is_deleted_on_its_session_and_an_old_one_keeps_its_name() {
+    let pool = db_or_skip!("an_unnamed_account_is_deleted_on_its_session");
+    let rig = rig_with(pool.clone(), wide());
+
+    // A named account: the session alone deletes nothing.
+    let named = person(&rig.state).await;
+    let bearer = token(&named.session);
+    let (st, body) = delete_account_bare(&rig.state, &bearer).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{}", text(&body));
+    assert_eq!(code(&body), "fresh-auth-required");
+    assert!(account_exists(&pool, &named.account.id).await);
+
+    // Young (a sign-up or a guest claim being undone): the name is released
+    // freely, and the account, now unnamed, goes on its session alone.
+    let (st, body) = release_handle(&rig.state, &bearer, None).await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+    let (st, body) = delete_account_bare(&rig.state, &bearer).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{}", text(&body));
+    assert!(!account_exists(&pool, &named.account.id).await);
+
+    // Past the unclaimed lifetime the release needs the grant, so a stolen
+    // session cannot turn a named account into a deletable one.
+    let old = person(&rig.state).await;
+    let bearer = token(&old.session);
+    sqlx::query("UPDATE accounts SET created_at = NOW() - INTERVAL 2 DAY WHERE id = ?")
+        .bind(&old.account.id[..])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, body) = release_handle(&rig.state, &bearer, None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{}", text(&body));
+    assert_eq!(code(&body), "fresh-auth-required");
+    assert_eq!(
+        handle_state(&rig.state, &bearer, &old.account.handle).await,
+        "same"
+    );
+    let (st, _) = delete_account_bare(&rig.state, &bearer).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert!(account_exists(&pool, &old.account.id).await);
+    // With the grant the owner may still release it.
+    let (st, body) = release_handle(&rig.state, &bearer, Some(&grant(&old.session))).await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+}

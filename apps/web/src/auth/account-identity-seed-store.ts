@@ -61,6 +61,8 @@
  * length, no length prefix needed.
  */
 
+import { accountStoresWritable } from "./account-store-gate";
+
 const DB_NAME = "lakko-account-identity-seed";
 const DB_VERSION = 1;
 const STORE = "seeds";
@@ -127,6 +129,7 @@ export async function putAccountIdentitySeed(
 
   const db = await openDb();
   try {
+    if (!accountStoresWritable(accountIdB64)) return;
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite");
       tx.oncomplete = (): void => resolve();

@@ -4,17 +4,16 @@
 package me.lakko.app.calls
 
 import kotlinx.coroutines.CoroutineScope
-import me.lakko.app.l10n.UiText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import org.webrtc.VideoTrack
+import uniffi.lakko_ffi_uniffi.TileVideoQuality
 
 /**
  * In-call UI state (Phase 3c6-android).
@@ -25,14 +24,26 @@ import org.webrtc.VideoTrack
  * `collectAsStateWithLifecycle`; mutations go through the
  * `setX` methods.
  *
- * No WebRTC integration here — the live media path lands in
- * the platform's WebRTC pod (3a-pod-followup). Until then,
- * UI consumes mock data + the BandwidthController (#39) for
- * the connection-quality glyph.
+ * No WebRTC here: a host feeds it (the 1x1 [CallSession] through
+ * [driveFrom], the SFU session through [SfuCallUi], the link call through
+ * [MultiJoinerCall]) and the call screen draws what it holds.
  */
 public class CallUiState(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+    /**
+     * The call's device choices when something that outlives this state holds
+     * them: the one-to-one screen builds its state anew every time the call
+     * comes back from the bar, and a choice made in the Settings sheet has to
+     * hold for the call. `null` makes this state the owner.
+     */
+    devices: CallDeviceSelection? = null,
 ) {
+    /** What the person chose in the call's Settings sheet
+     *  (`docs/ux/calls.md` section 4.1): microphone, camera, speaker. */
+    public val devices: CallDeviceSelection = devices ?: CallDeviceSelection()
+
+    /** Whether [reset] clears [devices]: only the ones this state made. */
+    private val ownsDevices: Boolean = devices == null
 
     // ----------------------------------------------------------
     // Types
@@ -58,10 +69,10 @@ public class CallUiState(
         val isLocal: Boolean,
         val micOn: Boolean,
         val camOn: Boolean,
-        val handRaised: Boolean,
         val quality: QualityTier,
+        /** The speaking ring, from [setSpeech]: heard on this device, never
+         *  told by a server (`docs/ux/group-call-grid.md` section 7.3). */
         val speaking: Boolean,
-        val screenSharing: Boolean,
     )
 
     public sealed class CallPhase {
@@ -107,54 +118,6 @@ public class CallUiState(
         }
     }
 
-    /** A capture / playback device the OS exposes
-     *  (S-3-A-settings). Same shape as the web `CallDevice`
-     *  and iOS counterpart. */
-    public data class CallDevice(
-        val id: String,
-        val label: String,
-        val kind: Kind,
-    ) {
-        public enum class Kind { AudioInput, VideoInput, AudioOutput }
-    }
-
-    /** In-call audio / video settings (S-3-A-settings).
-     *  Drives the gear-menu device pickers + the processing
-     *  toggles applied to the local capture chain. */
-    public data class CallSettings(
-        val selectedAudioInput: String? = null,
-        val selectedVideoInput: String? = null,
-        val selectedAudioOutput: String? = null,
-        val availableDevices: List<CallDevice> = emptyList(),
-        val noiseSuppression: Boolean = true,
-        val echoCancellation: Boolean = true,
-        val autoGain: Boolean = true,
-        val mirrorLocal: Boolean = true,
-        val lowDataMode: Boolean = false,
-    ) {
-        public companion object {
-            public val Default: CallSettings = CallSettings()
-        }
-    }
-
-    /** A single chat message inside the call (S-3-A-chat).
-     *  Same shape as the web `ChatMessage` and iOS counterpart. */
-    public data class ChatMessage(
-        val id: String,
-        val kind: Kind,
-        /** Author participant id; `null` for system events. */
-        val senderId: String?,
-        val senderName: String,
-        val text: String,
-        /** Unix milliseconds. */
-        val tsMs: Long,
-        /** A system event's words, rendered in the interface language
-         *  (ADR-0061); [text] is empty for one. */
-        val systemText: UiText? = null,
-    ) {
-        public enum class Kind { Text, System }
-    }
-
     // ----------------------------------------------------------
     // State flows
     // ----------------------------------------------------------
@@ -193,9 +156,52 @@ public class CallUiState(
     private val _participants = MutableStateFlow<List<Participant>>(emptyList())
     public val participants: StateFlow<List<Participant>> = _participants.asStateFlow()
 
-    /** `null` = follow active speaker. */
+    /** The tile the person pinned to the stage, or `null`. A pin is local:
+     *  nobody else learns of it (`docs/ux/group-call-grid.md` section 6.2). */
     private val _pinnedId = MutableStateFlow<String?>(null)
     public val pinnedId: StateFlow<String?> = _pinnedId.asStateFlow()
+
+    /**
+     * The group layout the person chose by hand, or `null` for the default
+     * (`docs/ux/group-call-grid.md` section 3). Remembered for this call only:
+     * [reset] clears it, so the next call starts from the defaults. What is
+     * actually drawn is [groupLayoutKind], which a pin overrides.
+     */
+    private val _layoutChoice = MutableStateFlow<GroupLayoutKind?>(null)
+    public val layoutChoice: StateFlow<GroupLayoutKind?> = _layoutChoice.asStateFlow()
+
+    public fun setLayoutChoice(choice: GroupLayoutKind?) {
+        _layoutChoice.value = choice
+    }
+
+    /**
+     * Who holds the floor and who held it last, as the stage of the Focus
+     * layout reads it. Written by [setSpeech]; [StageSpeech.None] until a level
+     * has been heard, in which case the stage falls back to the roster.
+     */
+    private val _speech = MutableStateFlow(StageSpeech.None)
+    public val speech: StateFlow<StageSpeech> = _speech.asStateFlow()
+
+    /**
+     * Whether a call screen is showing this call's tiles. [SpeakingMonitor]
+     * reads sound levels only while one is: a ring nobody can see is not worth
+     * polling the connection for.
+     */
+    private val _speakingWatched = MutableStateFlow(false)
+    public val speakingWatched: StateFlow<Boolean> = _speakingWatched.asStateFlow()
+
+    public fun setSpeakingWatched(watched: Boolean) {
+        _speakingWatched.value = watched
+    }
+
+    /**
+     * Which of the two short sounds this call has already played for
+     * (`docs/ux/calls.md` section 3.4). Held here, beside the call, because the
+     * call screen is destroyed and rebuilt whenever the call is put away and
+     * brought back, and a screen that kept this itself would play the
+     * connected sound again on every return.
+     */
+    public val cues: CallCueTracker = CallCueTracker()
 
     private val _participantListOpen = MutableStateFlow(false)
     public val participantListOpen: StateFlow<Boolean> = _participantListOpen.asStateFlow()
@@ -229,36 +235,10 @@ public class CallUiState(
     /** ADR-0032 piece B2a — mid-call camera-on lifecycle (see
      *  [VideoPublishState]). Driven from the bound session; `CallScreen`
      *  reads it for the camera-button spinner + the self-tile "Starting
-     *  camera…" hint. Untouched by [seedMockState] (the mock design path
-     *  never spins). */
+     *  camera…" hint. */
     private val _videoPublishState = MutableStateFlow(VideoPublishState.Off)
     public val videoPublishState: StateFlow<VideoPublishState> =
         _videoPublishState.asStateFlow()
-
-    /** Gear-menu open / closed (S-3-A-settings). */
-    private val _settingsOpen = MutableStateFlow(false)
-    public val settingsOpen: StateFlow<Boolean> = _settingsOpen.asStateFlow()
-
-    /** Settings + enumerated devices (S-3-A-settings). */
-    private val _settings = MutableStateFlow(CallSettings.Default)
-    public val settings: StateFlow<CallSettings> = _settings.asStateFlow()
-
-    /** Chat panel open / closed (S-3-A-chat). */
-    private val _chatOpen = MutableStateFlow(false)
-    public val chatOpen: StateFlow<Boolean> = _chatOpen.asStateFlow()
-
-    /** Chat-message log — oldest first. */
-    private val _chatMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
-    public val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages.asStateFlow()
-
-    /** In-progress compose-box content. */
-    private val _composeText = MutableStateFlow("")
-    public val composeText: StateFlow<String> = _composeText.asStateFlow()
-
-    /** Unread-message count since the user last opened the
-     *  chat panel. System events do not count towards unread. */
-    private val _chatUnreadCount = MutableStateFlow(0)
-    public val chatUnreadCount: StateFlow<Int> = _chatUnreadCount.asStateFlow()
 
     /** G3-2-video-ui-screen — live local-camera track from the
      *  underlying [CallSession] (when one is attached via
@@ -267,9 +247,7 @@ public class CallUiState(
      *  in-flight. Compose consumers (the self-tile in the
      *  participant grid, the prejoin preview) render
      *  `LocalVideoPreviewView(track:)` when this is non-null
-     *  **and** the local participant's `camOn == true`.
-     *  Untouched by [seedMockState] — the mock-driven design
-     *  path keeps the legacy "(video)" placeholder. */
+     *  **and** the local participant's `camOn == true`. */
     private val _localVideoTrack = MutableStateFlow<VideoTrack?>(null)
     public val localVideoTrack: StateFlow<VideoTrack?> = _localVideoTrack.asStateFlow()
 
@@ -278,10 +256,8 @@ public class CallUiState(
      *  audio-only, before the remote adds a camera, or after
      *  teardown. The 1×1 direct-PeerConnection path has exactly
      *  one remote track; `CallScreen` renders it on the **sole
-     *  remote participant's** tile (see [soleRemoteParticipantId]).
-     *  Untouched by [seedMockState] so the mock design path keeps
-     *  the legacy placeholder; the N-way SFU path will replace
-     *  this with a per-participant track map. */
+     *  remote participant's** tile (see [soleRemoteParticipantId]);
+     *  a group call uses the per-participant map below. */
     private val _remoteVideoTrack = MutableStateFlow<VideoTrack?>(null)
     public val remoteVideoTrack: StateFlow<VideoTrack?> = _remoteVideoTrack.asStateFlow()
 
@@ -292,38 +268,93 @@ public class CallUiState(
      *  peer's own video on its own tile; a `null` track removes the entry
      *  (peer left / camera off). The single [remoteVideoTrack] above is
      *  retained for the 1×1 P2P [driveFrom] path (a direct PeerConnection
-     *  has no MSID map). Untouched by [seedMockState]. */
+     *  has no MSID map). */
     private val _remoteVideoTracks = MutableStateFlow<Map<String, VideoTrack>>(emptyMap())
     public val remoteVideoTracks: StateFlow<Map<String, VideoTrack>> =
         _remoteVideoTracks.asStateFlow()
+
+    /** The light companion track of each remote peer that sends one
+     *  (`LightStream.kt`, ADR-0067 step 5), keyed on the same roster
+     *  participant id as [remoteVideoTracks]. A second picture of a person
+     *  already in the call: an entry here never creates a participant, a tile
+     *  or a camera flag, and never replaces the main track. The peer's tile
+     *  decodes it beside the main track and shows it while the main one
+     *  stands still. Removed with its peer and when the call ends. */
+    private val _remoteLightVideoTracks = MutableStateFlow<Map<String, VideoTrack>>(emptyMap())
+    public val remoteLightVideoTracks: StateFlow<Map<String, VideoTrack>> =
+        _remoteLightVideoTracks.asStateFlow()
+
+    /** The middle track of each remote peer that sends one (`LightStream.kt`,
+     *  ADR-0070 step 5), keyed like [remoteVideoTracks]. A second picture of a
+     *  person already in the call, as the light companion is: a tile that
+     *  asks the SFU for the middle picture puts its heavy sink on this track
+     *  (`VideoWants.kt`). Removed with its peer and when the call ends. */
+    private val _remoteMiddleVideoTracks = MutableStateFlow<Map<String, VideoTrack>>(emptyMap())
+    public val remoteMiddleVideoTracks: StateFlow<Map<String, VideoTrack>> =
+        _remoteMiddleVideoTracks.asStateFlow()
+
+    /** What the SFU says it gives of each remote peer's video
+     *  (`VideoGiven.kt`, ADR-0070 step 6), by roster participant id. A peer
+     *  with no entry is given what is asked for. Empty with downlink control
+     *  off, and when the call ends. */
+    private val _remoteVideoGiven = MutableStateFlow<Map<String, TileVideoQuality>>(emptyMap())
+    public val remoteVideoGiven: StateFlow<Map<String, TileVideoQuality>> =
+        _remoteVideoGiven.asStateFlow()
+
+    public fun setRemoteVideoGiven(given: Map<String, TileVideoQuality>) {
+        if (_remoteVideoGiven.value != given) _remoteVideoGiven.value = given
+    }
+
+    /**
+     * Where a tile says which picture of a person it shows (`VideoWants.kt`),
+     * or `null` when the call cannot act on it (a one-to-one call, or no call).
+     * Set by the SFU call's adapter and cleared when the call ends, so a tile
+     * taken down after the call is over reports to nobody.
+     */
+    @Volatile
+    private var tileVideoQualityReporter:
+        ((tile: Any, participantId: String, quality: TileVideoQuality?) -> Unit)? = null
+
+    /** What every drawn tile last reported, so a call bound after its tiles
+     *  were drawn still hears of them. Main thread only. */
+    private val tileVideoQualityReports = LinkedHashMap<Any, Pair<String, TileVideoQuality>>()
+
+    /**
+     * Bind (or, with `null`, unbind) the call that takes the tiles' reports.
+     * A newly bound call is told at once what every drawn tile shows.
+     */
+    public fun setTileVideoQualityReporter(
+        reporter: ((tile: Any, participantId: String, quality: TileVideoQuality?) -> Unit)?,
+    ) {
+        tileVideoQualityReporter = reporter
+        if (reporter == null) return
+        for ((tile, shown) in tileVideoQualityReports) reporter(tile, shown.first, shown.second)
+    }
+
+    /**
+     * The tile [tile] (any object that is the same for the tile's lifetime)
+     * shows [participantId] at [quality]; `null` when it stops showing a
+     * picture of them. Kept for a call bound later; forwarded to the bound
+     * one. Call on the main thread.
+     */
+    public fun reportTileVideoQuality(tile: Any, participantId: String, quality: TileVideoQuality?) {
+        if (quality == null) {
+            tileVideoQualityReports.remove(tile)
+        } else {
+            tileVideoQualityReports[tile] = participantId to quality
+        }
+        tileVideoQualityReporter?.invoke(tile, participantId, quality)
+    }
 
     /** Job for an active [bindTo] subscription. Cancelled on
      *  [reset] / re-bind to a different session so the previous
      *  flow doesn't keep pushing onto the StateFlow. */
     private var bindJob: Job? = null
 
-    /** Monotone counter for client-side chat-message ids. */
-    private var chatIdCounter: Long = 0
-    private fun nextChatId(): String {
-        chatIdCounter += 1
-        return "local-${System.currentTimeMillis() / 1000}-$chatIdCounter"
-    }
-
     // ----------------------------------------------------------
     // Derived helpers (UI calls these inline; Compose recomposes
     // on the StateFlow this peeks at).
     // ----------------------------------------------------------
-
-    /** The tile the group stage draws large, or `null` for an equal grid. The
-     *  rule is [me.lakko.app.calls.featuredParticipant] (section 4.4), shared
-     *  with the web and iOS stores. */
-    public fun featuredParticipant(): Participant? =
-        featuredParticipant(_participants.value, _pinnedId.value)
-
-    /** The grid: everyone but the featured tile in roster order, or everyone
-     *  when there is no featured tile. */
-    public fun galleryParticipants(): List<Participant> =
-        galleryParticipants(_participants.value, featuredParticipant())
 
     /** Local participant quality (drives the header dot). */
     public fun localQualityTier(): QualityTier =
@@ -355,15 +386,43 @@ public class CallUiState(
 
     public fun participantLeft(id: String) {
         _participants.value = _participants.value.filterNot { it.id == id }
+        // Section 6.2: if the pinned person leaves, the pin is cleared and the
+        // stage goes back to the speaker; the layout stays as it is.
         if (_pinnedId.value == id) _pinnedId.value = null
+        // A light companion and a middle track go with their peer, and so
+        // does what the SFU said it gives of them.
+        if (id in _remoteLightVideoTracks.value) {
+            _remoteLightVideoTracks.value = _remoteLightVideoTracks.value - id
+        }
+        if (id in _remoteMiddleVideoTracks.value) {
+            _remoteMiddleVideoTracks.value = _remoteMiddleVideoTracks.value - id
+        }
+        if (id in _remoteVideoGiven.value) {
+            _remoteVideoGiven.value = _remoteVideoGiven.value - id
+        }
     }
 
     public fun setQuality(id: String, tier: QualityTier) {
         patch(id) { it.copy(quality = tier) }
     }
 
-    public fun setSpeaking(id: String?) {
-        _participants.value = _participants.value.map { it.copy(speaking = it.id == id) }
+    /**
+     * What the sound levels say ([SpeakingRule]): whose ring is on, who
+     * holds the floor and who held it last. Several people can be speaking at
+     * once; only one holds the floor.
+     *
+     * Writes only what changed, so a reading that says the same as the last one
+     * does not re-emit the roster and recompose every tile.
+     */
+    public fun setSpeech(speakingIds: Set<String>, next: StageSpeech) {
+        val current = _participants.value
+        if (current.any { it.speaking != (it.id in speakingIds) }) {
+            _participants.value = current.map { p ->
+                val on = p.id in speakingIds
+                if (p.speaking == on) p else p.copy(speaking = on)
+            }
+        }
+        if (_speech.value != next) _speech.value = next
     }
 
     public fun setMic(on: Boolean) {
@@ -374,16 +433,6 @@ public class CallUiState(
     public fun setCamera(on: Boolean) {
         val local = _participants.value.firstOrNull { it.isLocal } ?: return
         patch(local.id) { it.copy(camOn = on) }
-    }
-
-    public fun setHandRaised(raised: Boolean) {
-        val local = _participants.value.firstOrNull { it.isLocal } ?: return
-        patch(local.id) { it.copy(handRaised = raised) }
-    }
-
-    public fun setScreenSharing(on: Boolean) {
-        val local = _participants.value.firstOrNull { it.isLocal } ?: return
-        patch(local.id) { it.copy(screenSharing = on) }
     }
 
     public fun pin(id: String?) {
@@ -427,125 +476,6 @@ public class CallUiState(
     }
 
     // ----------------------------------------------------------
-    // Settings actions (S-3-A-settings)
-    // ----------------------------------------------------------
-
-    /** Open / close the gear menu. */
-    public fun setSettingsOpen(open: Boolean) {
-        _settingsOpen.value = open
-    }
-
-    /** Replace the enumerated devices snapshot. Called by the
-     *  WebRTC pod after `AudioManager.getDevices()` +
-     *  `CameraManager.cameraIdList` have produced their
-     *  results. */
-    public fun setAvailableDevices(devices: List<CallDevice>) {
-        _settings.value = _settings.value.copy(availableDevices = devices)
-    }
-
-    public fun setSelectedAudioInput(id: String?) {
-        _settings.value = _settings.value.copy(selectedAudioInput = id)
-    }
-
-    public fun setSelectedVideoInput(id: String?) {
-        _settings.value = _settings.value.copy(selectedVideoInput = id)
-    }
-
-    public fun setSelectedAudioOutput(id: String?) {
-        _settings.value = _settings.value.copy(selectedAudioOutput = id)
-    }
-
-    public fun setNoiseSuppression(on: Boolean) {
-        _settings.value = _settings.value.copy(noiseSuppression = on)
-    }
-
-    public fun setEchoCancellation(on: Boolean) {
-        _settings.value = _settings.value.copy(echoCancellation = on)
-    }
-
-    public fun setAutoGain(on: Boolean) {
-        _settings.value = _settings.value.copy(autoGain = on)
-    }
-
-    public fun setMirrorLocal(on: Boolean) {
-        _settings.value = _settings.value.copy(mirrorLocal = on)
-    }
-
-    public fun setLowDataMode(on: Boolean) {
-        _settings.value = _settings.value.copy(lowDataMode = on)
-    }
-
-    // ----------------------------------------------------------
-    // Chat actions (S-3-A-chat)
-    // ----------------------------------------------------------
-
-    /** Open / close the chat panel. Opening clears the unread
-     *  badge. */
-    public fun setChatOpen(open: Boolean) {
-        _chatOpen.value = open
-        if (open) _chatUnreadCount.value = 0
-    }
-
-    /** Update the in-progress compose-box content. */
-    public fun setComposeText(text: String) {
-        _composeText.value = text
-    }
-
-    /** Send a chat message from the local participant. Returns
-     *  the constructed message so the WebRTC pod can hand it
-     *  to MLS application-message encryption. Returns `null`
-     *  for whitespace-only input. */
-    public fun sendChatMessage(text: String): ChatMessage? {
-        val trimmed = text.trim()
-        if (trimmed.isEmpty()) return null
-        val local = _participants.value.firstOrNull { it.isLocal }
-        val senderId = local?.id ?: "local"
-        // Empty: this device's own name is drawn as `call.participant.you`.
-        val senderName = local?.displayName.orEmpty()
-        val msg = ChatMessage(
-            id = nextChatId(),
-            kind = ChatMessage.Kind.Text,
-            senderId = senderId,
-            senderName = senderName,
-            text = trimmed,
-            tsMs = System.currentTimeMillis(),
-        )
-        _chatMessages.value = _chatMessages.value + msg
-        _composeText.value = ""
-        return msg
-    }
-
-    /** Receive a chat message from a remote participant
-     *  (decrypted MLS application message). If the chat panel
-     *  is closed, the unread badge increments. */
-    public fun receiveChatMessage(msg: ChatMessage) {
-        _chatMessages.value = _chatMessages.value + msg
-        if (!_chatOpen.value && msg.kind == ChatMessage.Kind.Text) {
-            _chatUnreadCount.value = _chatUnreadCount.value + 1
-        }
-    }
-
-    /** Append a system event ("Alice joined the call"). Does
-     *  NOT bump the unread counter — system events are
-     *  background context. */
-    public fun addSystemEvent(text: UiText) {
-        val msg = ChatMessage(
-            id = nextChatId(),
-            kind = ChatMessage.Kind.System,
-            senderId = null,
-            senderName = "",
-            text = "",
-            tsMs = System.currentTimeMillis(),
-            systemText = text,
-        )
-        _chatMessages.value = _chatMessages.value + msg
-    }
-
-    public fun clearChatUnread() {
-        _chatUnreadCount.value = 0
-    }
-
-    // ----------------------------------------------------------
     // Live video track (G3-2-video-ui-screen)
     // ----------------------------------------------------------
 
@@ -582,6 +512,45 @@ public class CallUiState(
     }
 
     /**
+     * Set / remove a remote peer's light companion track, keyed on the peer's
+     * roster participant id. A `null` [track] removes the entry. Touches
+     * nothing else: not the roster, not a camera flag, not the main track.
+     */
+    public fun setRemoteLightVideoTrack(track: VideoTrack?, participantId: String) {
+        _remoteLightVideoTracks.value =
+            if (track == null) {
+                _remoteLightVideoTracks.value - participantId
+            } else {
+                _remoteLightVideoTracks.value + (participantId to track)
+            }
+    }
+
+    /**
+     * Set / remove a remote peer's middle track, keyed on the peer's roster
+     * participant id. A `null` [track] removes the entry. Touches nothing
+     * else: not the roster, not a camera flag, not the main track.
+     */
+    public fun setRemoteMiddleVideoTrack(track: VideoTrack?, participantId: String) {
+        _remoteMiddleVideoTracks.value =
+            if (track == null) {
+                _remoteMiddleVideoTracks.value - participantId
+            } else {
+                _remoteMiddleVideoTracks.value + (participantId to track)
+            }
+    }
+
+    /**
+     * The call ended: drop every light companion and middle track and what
+     * the SFU said it gives, and take no further tile reports.
+     */
+    public fun clearRemoteCopyVideoTracks() {
+        _remoteLightVideoTracks.value = emptyMap()
+        _remoteMiddleVideoTracks.value = emptyMap()
+        _remoteVideoGiven.value = emptyMap()
+        tileVideoQualityReporter = null
+    }
+
+    /**
      * N-way SFU — flip a specific participant's camera flag. Used for a
      * REMOTE peer when its video track arrives / is dropped, so the tile's
      * video surface (gated on `camOn`) actually renders — the Kotlin twin
@@ -608,10 +577,8 @@ public class CallUiState(
     /**
      * Attach a live [CallSession] so the UI mirrors its video
      * StateFlows. Bridges the local **and** remote video tracks
-     * (G3-2-video-ui-screen + G3-2-remote-video); the audio /
-     * participant / e2ee / connection-detail fields stay on the
-     * mock path until the full-session-integration sub-sprint
-     * lands (the screen today reads from [seedMockState]).
+     * (G3-2-video-ui-screen + G3-2-remote-video) and nothing else;
+     * [driveFrom] is the full binding.
      *
      * Cancels any previous bind subscription so re-attaching
      * to a different session is safe.
@@ -646,12 +613,9 @@ public class CallUiState(
      * Scope (1×1): roster is exactly two; `camOn` is driven by
      * track presence. **Not** mapped here (each needs a dedicated
      * [CallSession] signal, deferred): the e2ee fingerprint pill,
-     * connection-quality detail, and the mic / hand / share
-     * controls writing back into the session. The prejoin Join →
-     * `dial` / `acceptCall` action and the navigation that
-     * presents this screen with a session are separate
-     * follow-ups — `CallScreen` calls this when a session is
-     * injected and falls back to [seedMockState] otherwise.
+     * connection-quality detail, and the mic control writing back
+     * into the session. `CallScreen` calls this when a session is
+     * injected.
      */
     public fun driveFrom(
         session: CallSession,
@@ -681,6 +645,21 @@ public class CallUiState(
     /** ADR-0048 — the name [driveFrom] gave the 1x1 remote participant. */
     private var remoteName: String = ""
 
+    /**
+     * Take the session's present state once, without subscribing.
+     *
+     * For a state built for a screen that is coming BACK to a running call
+     * (`docs/ux/calls.md` section 4.5): its first frame then shows the call as
+     * it is, instead of one frame of `Calling...` before [driveFrom]'s
+     * collectors catch up. That frame was not only a flicker: the screen read
+     * it as the call changing phase and played the connected sound again on
+     * every return.
+     */
+    public fun syncFrom(session: CallSession, remoteName: String = "") {
+        this.remoteName = remoteName
+        rebuildFromSession(session)
+    }
+
     /** Recompute phase + roster + video from the session's
      *  current state. Called from each [driveFrom] collector. */
     private fun rebuildFromSession(session: CallSession) {
@@ -697,10 +676,8 @@ public class CallUiState(
                 isLocal = true,
                 micOn = session.micEnabled.value,
                 camOn = session.cameraEnabled.value,
-                handRaised = false,
                 quality = tier,
                 speaking = false,
-                screenSharing = false,
             ),
         )
         if (connected || remoteTrack != null) {
@@ -711,10 +688,8 @@ public class CallUiState(
                     isLocal = false,
                     micOn = true,
                     camOn = remoteTrack != null,
-                    handRaised = false,
                     quality = QualityTier.Good,
                     speaking = false,
-                    screenSharing = false,
                 ),
             )
         }
@@ -803,19 +778,15 @@ public class CallUiState(
         _connectedSinceMs.value = null
         _participants.value = emptyList()
         _pinnedId.value = null
+        // The layout choice and what was heard are per-call.
+        _layoutChoice.value = null
+        _speech.value = StageSpeech.None
+        cues.reset()
+        if (ownsDevices) devices.reset()
         _participantListOpen.value = false
         _e2ee.value = E2eeState.Inactive
         _connectionDetail.value = ConnectionDetail.Unknown
         _qualityPopoverOpen.value = false
-        _settingsOpen.value = false
-        // Preferences (toggles + selected ids) survive a reset
-        // — only the enumerated-devices snapshot is cleared.
-        _settings.value = _settings.value.copy(availableDevices = emptyList())
-        // Chat is per-call — wipe.
-        _chatOpen.value = false
-        _chatMessages.value = emptyList()
-        _composeText.value = ""
-        _chatUnreadCount.value = 0
         // Live media — drop the local track + cancel any
         // bound CallSession subscription so the next call
         // re-binds against a fresh session.
@@ -825,54 +796,15 @@ public class CallUiState(
         _remoteVideoTrack.value = null
         // N-way SFU per-peer video map — wipe so the next call starts empty.
         _remoteVideoTracks.value = emptyMap()
+        _remoteLightVideoTracks.value = emptyMap()
+        _remoteMiddleVideoTracks.value = emptyMap()
+        _remoteVideoGiven.value = emptyMap()
+        tileVideoQualityReporter = null
+        tileVideoQualityReports.clear()
         // ADR-0032 piece B2a — no camera-on in flight for a fresh call.
         _videoPublishState.value = VideoPublishState.Off
         // Every call starts on the front camera, so the self-view starts mirrored.
         _cameraFrontFacing.value = true
-    }
-
-    /** Mock seed — same shape as the web `seedMockParticipants` /
-     *  iOS `seedMockState`. Replaced by the WebRTC pod once
-     *  3a-pod-followup lands. */
-    public fun seedMockState() {
-        setE2ee(E2eeState(active = true, shortFingerprint = "3F7A B2C1 9E0D"))
-        setConnectionDetail(
-            ConnectionDetail(
-                rttMs = 45,
-                downBps = 720_000,
-                upBps = 380_000,
-                connectionType = ConnectionDetail.ConnectionType.Direct,
-            ),
-        )
-        setHasMultipleCameras(false)
-        setParticipants(
-            listOf(
-                Participant(
-                    id = "local", displayName = "You", isLocal = true,
-                    micOn = true, camOn = true, handRaised = false,
-                    quality = QualityTier.Excellent, speaking = false, screenSharing = false,
-                ),
-                Participant(
-                    id = "leaf-1", displayName = "Alice", isLocal = false,
-                    micOn = true, camOn = true, handRaised = false,
-                    quality = QualityTier.Good, speaking = true, screenSharing = false,
-                ),
-                Participant(
-                    id = "leaf-2", displayName = "Bob", isLocal = false,
-                    micOn = false, camOn = true, handRaised = false,
-                    quality = QualityTier.Fair, speaking = false, screenSharing = false,
-                ),
-                Participant(
-                    id = "leaf-3", displayName = "Carl", isLocal = false,
-                    micOn = true, camOn = false, handRaised = true,
-                    quality = QualityTier.Poor, speaking = false, screenSharing = false,
-                ),
-            ),
-        )
-        scope.launch {
-            delay(400)
-            setPhase(CallPhase.Connected)
-        }
     }
 
     private fun patch(id: String, mutate: (Participant) -> Participant) {

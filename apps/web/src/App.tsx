@@ -52,7 +52,6 @@ import { ScopedDiscoveryRuntime } from "./reach/ScopedDiscoveryRuntime";
 import { OwedDeviceRemovals } from "./devices/OwedDeviceRemovals";
 import { OwedKeyRotation } from "./devices/OwedKeyRotation";
 import { AccountNotices } from "./auth/protect/AccountNotices";
-import { UsernameClaimHost } from "./auth/UsernameClaim";
 import { UsernameChangeHost } from "./auth/UsernameChange";
 import { GroupClosedProvider } from "./chat/GroupClosedContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
@@ -230,8 +229,6 @@ const App: Component = () => (
            * of its devices.
            */}
           <AccountNotices />
-          {/* ADR-0075 pass A - a guest chooses a username and a password. */}
-          <UsernameClaimHost />
           {/* ADR-0076 - changing a username, and finishing one left undone. */}
           <UsernameChangeHost />
           {/*

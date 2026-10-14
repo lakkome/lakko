@@ -863,10 +863,20 @@ fn as_sdp(session: &Session, params: AsSdpParams) -> Sdp {
                     ssrcs.extend(pending.ssrcs_for_mid(m.mid()))
                 }
 
+                // LAKKO FORK: a media line the remote offered is answered
+                // without `transport-cc` feedback when transport-wide
+                // congestion control is for locally offered lines only.
+                let no_transport_cc = session.twcc_on_local_media_only && m.remote_created();
                 let params: Vec<_> = session
                     .codec_config
                     .all_for_kind(m.kind())
                     .cloned()
+                    .map(|mut p| {
+                        if no_transport_cc {
+                            p.fb_transport_cc = false;
+                        }
+                        p
+                    })
                     .collect();
 
                 m.as_media_line(attrs, &ssrcs, &session.exts, &params)
@@ -1114,6 +1124,7 @@ fn sync_medias<'a>(
                         &session.exts,
                         &mut session.streams,
                         bundle_mids,
+                        session.twcc_on_local_media_only,
                     );
 
                     continue;
@@ -1194,6 +1205,7 @@ fn add_new_lines(
                 &session.exts,
                 &mut session.streams,
                 bundle_mids,
+                session.twcc_on_local_media_only,
             );
 
             session.add_media(media);
@@ -1253,6 +1265,7 @@ fn update_media(
     exts: &ExtensionMap,
     streams: &mut Streams,
     bundle_mids: Option<&[Mid]>,
+    twcc_on_local_media_only: bool,
 ) {
     // If the m-line has port=0, it could mean:
     // 1. The m-line is rejected (not in BUNDLE group)
@@ -1343,6 +1356,17 @@ fn update_media(
             continue;
         }
 
+        // LAKKO FORK: no transport-wide sequence number on a media line the
+        // remote offered when transport-wide congestion control is for
+        // locally offered lines only. Left out here, it is neither echoed
+        // in the answer nor expected on the line's packets.
+        if twcc_on_local_media_only
+            && media.remote_created()
+            && matches!(ext, Extension::TransportSequenceNumber)
+        {
+            continue;
+        }
+
         // Use the Extension from session, since there might be a special
         // serializer for cases like VLA.
         remote_extmap.set(id, in_session.clone());
@@ -1397,6 +1421,10 @@ trait AsSdpMediaLine {
     fn msid(&self) -> Option<&Msid>;
     fn index(&self) -> usize;
     fn kind(&self) -> MediaKind;
+    // LAKKO FORK: whether the remote side offered this line.
+    fn remote_created(&self) -> bool {
+        false
+    }
     fn as_media_line(
         &self,
         attrs: Vec<MediaAttribute>,
@@ -1453,6 +1481,9 @@ impl AsSdpMediaLine for Media {
     }
     fn kind(&self) -> MediaKind {
         Media::kind(self)
+    }
+    fn remote_created(&self) -> bool {
+        Media::remote_created(self)
     }
     fn as_media_line(
         &self,

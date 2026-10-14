@@ -48,6 +48,14 @@ public final class PushSubscriber {
     private let bindingStore: PushAccountBindingStore
     private var pendingContinuation: CheckedContinuation<Data, Error>?
 
+    /// The newest ``unsubscribe(prepaidToken:)`` (each one runs after the one
+    /// before it). A ``subscribe(accountIdB64:stillSignedIn:)`` waits for it
+    /// first: the device pseudonym is one per device, so a sign-out's
+    /// unregister that is still in flight when the next account signs in
+    /// would otherwise take that account's registration off the server and
+    /// clear the pseudonym it has just been bound under.
+    private var unsubscribing: Task<Void, Never>?
+
     public init(
         client: PushClient = PushClient(),
         bindingStore: PushAccountBindingStore = .live
@@ -83,6 +91,8 @@ public final class PushSubscriber {
         accountIdB64: String,
         stillSignedIn: @MainActor () -> Bool
     ) async throws -> SubscribeResult {
+        // A sign-out's unregister still in flight finishes first.
+        await unsubscribing?.value
         // (1) Authorization prompt. If the user has previously
         // denied, the system returns `false` without showing
         // the prompt again — we surface this as
@@ -119,6 +129,10 @@ public final class PushSubscriber {
         } catch {
             throw PushSubscribeError.registerFailed(error)
         }
+        // `docs/ux/calls.md` section 2.1 — the VoIP token is registered under
+        // the same pseudonym. PushKit delivers it once per launch, so a
+        // sign-in in a running app registers it here. Best effort inside.
+        await VoipPushRegistrar.shared.registerForSignIn(devicePseudonym: pseudonym)
 
         return SubscribeResult(
             devicePseudonym: pseudonym,
@@ -134,6 +148,16 @@ public final class PushSubscriber {
     /// unregister spends, taken by the caller before it cleared the session;
     /// without one the unregister draws from the pool.
     public func unsubscribe(prepaidToken: AnonToken? = nil) async {
+        let previous = unsubscribing
+        let task = Task { @MainActor [weak self] in
+            await previous?.value
+            await self?.performUnsubscribe(prepaidToken: prepaidToken)
+        }
+        unsubscribing = task
+        await task.value
+    }
+
+    private func performUnsubscribe(prepaidToken: AnonToken?) async {
         let pseudonym: Data?
         do {
             pseudonym = try DevicePushId.peek()
@@ -157,7 +181,10 @@ public final class PushSubscriber {
         // `docs/ux/calls.md` section 2.1 — the VoIP token is a SECOND
         // registration under its own provider (``PushTokenKind``), so signing
         // out has to drop it too; the alert unregister above does not touch it.
-        await VoipPushRegistrar.shared.unregister()
+        // Under the pseudonym read above, before the await: this sign-in's.
+        if let pseudonym {
+            await VoipPushRegistrar.shared.unregister(devicePseudonym: pseudonym)
+        }
         // iOS doesn't expose a `unregisterForRemoteNotifications`
         // in 16+ (it was deprecated in 9 and removed). Apple's
         // canonical advice: just stop registering. The OS keeps

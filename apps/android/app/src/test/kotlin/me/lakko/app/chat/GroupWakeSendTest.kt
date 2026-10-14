@@ -49,7 +49,7 @@ class GroupWakeSendTest {
         val seen = mutableListOf<Seen>()
         val wake = DsWake.forPublish(ByteArray(32), DsWakeKind.MESSAGE)
         val result = chatClient(seen).use {
-            it.publishPreparedSend(PreparedSend(groupId = groupId, wireBytes = byteArrayOf(1, 2)), wake = wake)
+            it.publishPreparedSend(it.preparedForTest(groupId, byteArrayOf(1, 2)), wake = wake)
         }
         assertEquals(11L, result.messageId)
         val request = seen.single()
@@ -62,7 +62,7 @@ class GroupWakeSendTest {
     fun `a control publish carries no wake`() = runTest {
         val seen = mutableListOf<Seen>()
         chatClient(seen).use {
-            it.publishPreparedSend(PreparedSend(groupId = groupId, wireBytes = byteArrayOf(1)))
+            it.publishPreparedSend(it.preparedForTest(groupId, byteArrayOf(1)))
         }
         assertNull(seen.single().wake)
     }

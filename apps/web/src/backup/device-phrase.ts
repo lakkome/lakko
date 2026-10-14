@@ -36,8 +36,13 @@ import { getPhrase, putPhrase } from "./phrase-store";
 export const PHRASE_LANDING_PATHS = [
   /** `signup`: the phrase was just generated. */
   "signup",
-  /** `signupGuest` (ADR-0032): generated for a username-less account. */
+  /** `signupGuest` (ADR-0032): generated for a username-less account, and
+   *  kept under the guest's own key of the store (`guestPhraseKey`) until
+   *  the person decides whether to keep the account. */
   "signup-guest",
+  /** A guest account was kept (a username and a first password): the phrase
+   *  moves under the account's own key. */
+  "guest-kept",
   /** `recover`: the 12 words plus a new password. */
   "recover",
   /** `provideRecoveryPhrase`: typed in the restore prompt, or opened from a

@@ -51,10 +51,17 @@ import { markLogoutOwed } from "./logout-owed";
 import { newRemoval, writeRemoval } from "../devices/removal";
 import { markRotatedNotice, newRotation, writeRotation } from "../devices/key-rotation";
 import { markOwnerMoved } from "../channels/owner-moved";
+import { openAccountStores, resetAccountStoreGateForTests } from "./account-store-gate";
+import { guestPhraseKey, markGuestAccount } from "./guest-account";
 import { upsertAccepted } from "../contacts/local-store";
 import { rememberInviteLinkSecret } from "../contacts/invite-link-secrets";
 import { writeKnockCursor } from "../chat/knock-cursor";
 import { saveKnownGroupIds } from "../devices/state-bundle";
+import {
+  addRestoredKnownGroups,
+  loadRestoredKnownGroups,
+} from "../backup/restored-known-groups";
+import { isBackupRestoreOwed, markBackupRestoreOwed } from "../backup/restore-owed";
 import { localStorageAnswerLog } from "../devices/device-link";
 import { saveAppointmentRecord } from "../ds/appointments";
 import { recordRegistrarListEntry } from "../ds/registrar-list";
@@ -92,6 +99,9 @@ beforeEach(() => {
   g["localStorage"] = local;
   g["sessionStorage"] = session;
   g["indexedDB"] = idb;
+  // A wipe seals the account's stores until it lands again
+  // (`account-store-gate.ts`); every test starts with nothing sealed.
+  resetAccountStoreGateForTests();
 });
 
 afterEach(() => {
@@ -160,6 +170,12 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     },
     byId("lakko-session-tokens", "tokens"),
     byId("lakko.backup.phrase", "phrases"),
+    // A guest account's phrase, under its own key (`guest-account.ts`).
+    {
+      db: "lakko.backup.phrase",
+      store: "phrases",
+      row: { accountId: guestPhraseKey(acct), ciphertext: new Uint8Array([1]), cachedAtMs: 1 },
+    },
     byId("lakko.backup.floor", "floors"),
     byId("lakko-export-keys", "keys"),
     byId("lakko-device-identity", "seeds"),
@@ -219,6 +235,7 @@ function seedAccount(acct: string, acctUrl: string): void {
     JSON.stringify({ adoptedAtMs: 1700000000000, links: true, requests: true }),
   );
   markOwnerMoved(acct, "c0ffee", local);
+  markGuestAccount(local, acct, 1);
   put(`lakko.pending-requests.v1.${acct}.${G}`, "{}");
   put(`lakko.unapplied-requests.v1.${acct}.${G}`, "[]");
   put(`lakko.own-requests.v1.${acct}.${G}`, "{}");
@@ -257,6 +274,8 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.backup.auto.${acct}`, JSON.stringify({ lastUploadAtMs: 1, dirtySinceMs: null, groupsKey: null }));
   writeKnockCursor(G, 7, acct);
   saveKnownGroupIds([G], acct);
+  addRestoredKnownGroups(acct, [G]);
+  markBackupRestoreOwed(acct);
   put(`lakko.channels.rotation-state.v2.${acct}.c0ffee`, "{}");
   saveCounter("c0ffee", 42n, acct);
   put(`lakko/publisher-group-unclaimed/v2/${acct}/c0ffee`, "1");
@@ -368,6 +387,8 @@ describe("wipeAccountLocalData", () => {
     await wipeAccountLocalData(A);
     expect(loadPersistedAccount()?.accountIdB64).toBe(B);
 
+    // The account lands on this browser again (the first wipe sealed it).
+    openAccountStores([A]);
     savePersistedAccount({ v: 1, accountIdB64: A, username: "alice" });
     await wipeAccountLocalData(A);
     expect(loadPersistedAccount()).toBeNull();
@@ -480,6 +501,19 @@ describe("wipeAccountLocalData", () => {
     expect(idb.walk().filter((e) => e.where === "lakko-recall-record/records" && namesA(e.text))).toEqual([]);
   });
 
+  it("drops the restored known groups and the owed-restore flag; another account keeps its own", async () => {
+    await createSchemas();
+    addRestoredKnownGroups(A, [G]);
+    addRestoredKnownGroups(B, [G]);
+    markBackupRestoreOwed(A);
+    markBackupRestoreOwed(B);
+    await wipeAccountLocalData(A);
+    expect(loadRestoredKnownGroups(A)).toEqual([]);
+    expect(isBackupRestoreOwed(A)).toBe(false);
+    expect(loadRestoredKnownGroups(B)).toEqual([G]);
+    expect(isBackupRestoreOwed(B)).toBe(true);
+  });
+
   it("names every step once", () => {
     const names = accountWipeSteps(A).map((s) => s.name);
     expect(new Set(names).size).toBe(names.length);
@@ -558,6 +592,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.contacts.predecessor-mailbox-adopted.v2.": "account",
   "lakko.contacts.rotation-spend-owed.v1.": "account",
   "lakko:channel-owner-moved:": "account",
+  "lakko:guest-account:": "account",
   "lakko.pending-requests.v1": "account",
   "lakko.unapplied-requests.v1": "account",
   "lakko.own-requests.v1": "account",
@@ -588,6 +623,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko/ds-root-handover/v1/": "account",
   "lakko/ds-root-held/v1/": "account",
   "lakko.backup.auto.": "account",
+  "lakko.backup.restored-groups.v1.": "account",
+  "lakko.backup.restore-owed.v1.": "account",
   "lakko.ds.knock-cursor.v2:": "account",
   "lakko.pairing.known-groups.v2.": "account",
   "lakko.channels.rotation-state.v2.": "account",
@@ -613,12 +650,16 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   // ADR-0061: the interface language is chosen per device.
   "lakko.language": "device",
   "lakko.transparency.last-seen-root.v1": "device",
+  // The store gate's cross-tab marker: digests of the accounts wiped in the
+  // last minute, never an account id; it prunes itself.
+  "lakko.account-store-gate.wiped.v1": "device",
   "lakko.push.device.v1": "device",
   "lakko.composer.recordMode": "device",
   "lakko.media.autoplayVideoNotes": "device",
   "lakko.feed.device-banner-dismissed": "device",
-  // sessionStorage, tab-wide, holds no account id ("device" / "phrase")
-  "lakko.restored-identity": "device",
+  // A diagnostic switch of this device (`calls/av-align.ts`): `off` makes a
+  // call without audio/video alignment. Names no account.
+  "lakko.call.av-align": "device",
   // not storage names
   "lakko/state-bundle-row/v1": "not-storage",
   "lakko/state-bundle/v1": "not-storage",

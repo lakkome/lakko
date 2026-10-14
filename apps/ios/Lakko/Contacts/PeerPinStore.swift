@@ -211,6 +211,11 @@ public final class PeerPinStore {
     }
 
     private func saveMap(_ map: [String: AccountPubkeyPin]) {
+        // The pins are their owner's. The contacts client that writes them is
+        // not a main-actor type, so this can run beside the owner's wipe.
+        let owner = ownerAccountIdB64 ?? AcceptedContactsStore.boundAccountIdB64
+        guard let gate = AccountStoreGate.enter(owner ?? "") else { return }
+        defer { gate.leave() }
         guard let storageKey else {
             // No signed-in account: a pin with no owner would be a shared
             // trust decision, which is what this store exists not to keep.

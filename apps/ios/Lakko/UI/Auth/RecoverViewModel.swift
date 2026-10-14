@@ -307,6 +307,8 @@ public final class RecoverViewModel: ObservableObject {
                 // A bad phrase (unknown word or checksum) reads as one
                 // sentence; a wrong phrase and an unknown account too.
                 busy = false
+                // Overtaken by a sign-out or another sign-in: not a failure.
+                if error is StaleBindingError { return }
                 self.errorText = UiText { AuthErrorCopy.recover(error) }
             }
         }
@@ -470,6 +472,8 @@ public final class RecoverViewModel: ObservableObject {
                 totpCode = ""
             } catch {
                 busy = false
+                // Overtaken by a sign-out or another sign-in: not a failure.
+                if error is StaleBindingError { return }
                 if case .http(503, _, _) = error as? AuthClientError,
                    let err = error as? AuthClientError,
                    !AuthRateLimit.isLimiterUnavailable(err),
@@ -582,6 +586,8 @@ public final class RecoverViewModel: ObservableObject {
                 }
             } catch {
                 busy = false
+                // Overtaken by a sign-out or another sign-in: not a failure.
+                if error is StaleBindingError { return }
                 // The words matched (or the check could not run); nothing
                 // here is a wrong guess, so the budget is not charged.
                 if case .suspended = error as? ThreeWordsError {

@@ -158,7 +158,14 @@ describe("the callers (source)", () => {
   it("every sign-in subscribe names the account", () => {
     const src = read("../auth/AuthContext.tsx");
     expect(src).not.toMatch(/subscribeToPush\(\)/);
-    expect(src.match(/subscribeToPush\([A-Za-z0-9.]+\)/g)?.length).toBe(3);
+    expect(src).not.toMatch(/subscribePushFor\(\)/);
+    // Signup, the session landing, a guest account that was kept, recover.
+    // Each goes through `subscribePushFor`, the one caller of
+    // `subscribeToPush`, which names the account and passes the "is this
+    // account still signed in" check with it.
+    expect(src.match(/subscribePushFor\([A-Za-z0-9.]+\)\.catch/g)?.length).toBe(4);
+    expect(src.match(/subscribeToPush\(/g)?.length).toBe(1);
+    expect(src).toMatch(/return subscribeToPush\(accountIdB64, \(\) => \{/);
   });
 
   it("the service worker gates before it posts to a tab or shows anything", () => {

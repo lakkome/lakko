@@ -25,7 +25,7 @@ use crate::rtp_::SeqNo;
 use crate::rtp_::{Bitrate, ExtensionMap, Mid, Rtcp, RtcpFb};
 use crate::rtp_::{RtpHeader, SessionId, TwccPacketId, extend_u16};
 use crate::rtp_::{SrtpContext, Ssrc};
-use crate::rtp_::{TwccRecvRegister, TwccSendRegister};
+use crate::rtp_::{TwccRecvRegister, TwccSendRecord, TwccSendRegister};
 use crate::stats::StatsSnapshot;
 use crate::streams::{RtpPacket, Streams};
 use crate::util::{Soonest, already_happened, not_happening};
@@ -109,6 +109,37 @@ pub(crate) struct Session {
 
     raw_packets: Option<VecDeque<Box<RawPacket>>>,
 
+    // LAKKO FORK: whether to keep each received RTP packet as it was on the
+    // wire after SRTP decryption (see `DirectApi::keep_received_rtp`).
+    pub(crate) keep_received_rtp: bool,
+
+    // LAKKO FORK: the whole decrypted packet behind `pending_packet`: fixed
+    // header, CSRC list, header extension block, payload and padding, byte
+    // for byte as the sender wrote them. `None` when not kept, and for a
+    // packet that arrived as a retransmission (its extension block is the
+    // RTX packet's, not the original's).
+    pub(crate) pending_packet_received: Option<Vec<u8>>,
+
+    // LAKKO FORK: packets of send streams that asked for it
+    // (`StreamTx::keep_sent_rtp`), each as it was serialized for its first
+    // transmission: fixed header, header extension block, payload and
+    // padding, before SRTP. Oldest first, at most `MAX_SENT_RTP_KEPT`; taken
+    // by `DirectApi::take_sent_rtp`.
+    pub(crate) sent_rtp: VecDeque<Vec<u8>>,
+
+    // LAKKO FORK: negotiate transport-wide congestion control only on the
+    // media lines this side offered (see
+    // `DirectApi::set_twcc_on_local_media_only`).
+    pub(crate) twcc_on_local_media_only: bool,
+
+    // LAKKO FORK: what the receiver's transport-wide feedback said of each
+    // packet sent, kept for the caller when asked for (see
+    // `DirectApi::keep_twcc_feedback`): when it was sent, its size, and
+    // when the receiver says it arrived (`None`: reported as not
+    // received). Oldest first, at most `MAX_TWCC_FEEDBACK_KEPT`.
+    pub(crate) keep_twcc_feedback: bool,
+    pub(crate) twcc_feedback: VecDeque<(Instant, usize, Option<Instant>)>,
+
     #[cfg(feature = "_internal_test_exports")]
     pending_probe: Option<crate::bwe_::ProbeClusterConfig>,
 }
@@ -173,6 +204,14 @@ impl Session {
             } else {
                 None
             },
+            // LAKKO FORK: off unless asked for through the direct API.
+            twcc_on_local_media_only: false,
+            keep_twcc_feedback: false,
+            twcc_feedback: VecDeque::new(),
+            keep_received_rtp: false,
+            pending_packet_received: None,
+            // LAKKO FORK: empty until a send stream asks for it.
+            sent_rtp: VecDeque::new(),
             #[cfg(feature = "_internal_test_exports")]
             pending_probe: None,
         }
@@ -490,6 +529,18 @@ impl Session {
             }
         };
 
+        // LAKKO FORK: keep the packet as received, before the padding is cut
+        // off and before an RTX packet is rewritten. One allocation and one
+        // copy per packet, only when asked for.
+        let received = if self.keep_received_rtp && !is_repair && !ssrc.is_probe() {
+            let mut whole = Vec::with_capacity(header.header_len + data.len());
+            whole.extend_from_slice(&buf[..header.header_len]);
+            whole.extend_from_slice(&data);
+            Some(whole)
+        } else {
+            None
+        };
+
         if header.has_padding && !RtpHeader::unpad_payload(&mut data) {
             // Unpadding failed. Broken data?
             trace!("unpadding of unprotected payload failed");
@@ -559,6 +610,8 @@ impl Session {
             // resends for padding.
             if receipt.is_new_packet {
                 self.pending_packet = Some(packet);
+                // LAKKO FORK: travels with the packet it belongs to.
+                self.pending_packet_received = received;
             }
         } else {
             // In non-RTP mode, we let the Media use a Depayloader.
@@ -572,6 +625,62 @@ impl Session {
                 &self.codec_config,
             );
         }
+    }
+
+    // LAKKO FORK: a packet of a receive stream that was obtained by other
+    // means than receiving it (forward error correction, done by the caller).
+    // `message` is the whole RTP packet in the clear. It goes through the
+    // same registers as a received packet, so it is no longer asked for by
+    // NACK and not counted lost in receiver reports, and comes back in the
+    // form `Event::RtpPacket` would have carried it. `None`, and nothing
+    // changed, when the packet does not parse, names no receive stream by
+    // its main SSRC, has a payload type the session does not know as a main
+    // payload type, or carries a sequence number already received. No SRTP,
+    // TWCC or absolute-send-time handling: those belong to a packet that was
+    // on the wire.
+    pub(crate) fn handle_recovered_rtp(
+        &mut self,
+        now: Instant,
+        message: &[u8],
+    ) -> Option<RtpPacket> {
+        let mut header = RtpHeader::parse(message, &self.exts)?;
+        let ssrc = header.ssrc;
+        if ssrc.is_probe() {
+            return None;
+        }
+        let clock_rate = self
+            .codec_config
+            .iter()
+            .find(|p| p.pt() == header.payload_type)?
+            .spec()
+            .clock_rate;
+        let stream = self.streams.stream_rx(&ssrc)?;
+        if stream.ssrc() != ssrc {
+            return None;
+        }
+
+        let max_seq_lookup = make_max_seq_lookup(&self.max_rx_seq_lookup);
+        let seq_no = stream.extend_seq(&header, false, max_seq_lookup);
+        if !stream.is_new_packet(false, seq_no) {
+            return None;
+        }
+
+        let mut data = message.get(header.header_len..)?.to_vec();
+        if header.has_padding && !RtpHeader::unpad_payload(&mut data) {
+            return None;
+        }
+
+        // Written by the sender's pacer after the repair data was computed,
+        // so not part of what was recovered.
+        header.ext_vals.abs_send_time = None;
+        header.ext_vals.transport_cc = None;
+
+        update_max_seq(&mut self.max_rx_seq_lookup, ssrc, seq_no);
+        let receipt = stream.update_register(now, &header, clock_rate, false, seq_no);
+        if !receipt.is_new_packet {
+            return None;
+        }
+        Some(stream.handle_rtp(now, header, data, seq_no, receipt.time))
     }
 
     fn handle_rtcp(&mut self, now: Instant, buf: &[u8]) -> Option<()> {
@@ -591,6 +700,22 @@ impl Session {
             if let RtcpFb::Twcc(twcc) = fb {
                 trace!("Handle TWCC: {:?}", twcc);
                 let maybe_records = self.twcc_tx_register.apply_report(twcc, now);
+
+                // LAKKO FORK: hand the records of this report to the caller
+                // too, when it asked for them. A caller that never takes
+                // them loses the oldest.
+                let maybe_records = maybe_records.map(|records| {
+                    let records: Vec<&TwccSendRecord> = records.collect();
+                    if self.keep_twcc_feedback {
+                        for r in &records {
+                            keep_twcc_record(
+                                &mut self.twcc_feedback,
+                                (r.local_send_time(), r.size(), r.remote_recv_time()),
+                            );
+                        }
+                    }
+                    records.into_iter()
+                });
 
                 if let (Some(maybe_records), Some(bwe)) = (maybe_records, &mut self.bwe) {
                     bwe.update(maybe_records, now);
@@ -821,7 +946,17 @@ impl Session {
             seq_no,
             is_padding,
             payload_size,
+            keep_wire,
         } = receipt;
+
+        // LAKKO FORK: the packet exactly as it goes on the wire, before SRTP.
+        // A caller that never takes them loses the oldest.
+        if keep_wire {
+            if self.sent_rtp.len() >= MAX_SENT_RTP_KEPT {
+                self.sent_rtp.pop_front();
+            }
+            self.sent_rtp.push_back(buf.clone());
+        }
 
         trace!(payload_size, is_padding, "Poll RTP: {:?}", header);
 
@@ -906,7 +1041,16 @@ impl Session {
             return None;
         }
 
-        Some(self.last_nack + NACK_MIN_INTERVAL)
+        // LAKKO FORK: a stream with its own, shorter retry interval
+        // (`StreamRx::set_nack_retry_interval`) makes the whole session
+        // build NACKs that often, or its requests would go out on the
+        // 33 ms tick whatever its interval.
+        let interval = self
+            .streams
+            .min_nack_retry_interval()
+            .map_or(NACK_MIN_INTERVAL, |i| i.min(NACK_MIN_INTERVAL));
+
+        Some(self.last_nack + interval)
     }
 
     fn twcc_at(&self) -> Option<Instant> {
@@ -1081,6 +1225,29 @@ pub struct PacketReceipt {
     pub seq_no: SeqNo,
     pub is_padding: bool,
     pub payload_size: usize,
+    // LAKKO FORK: the stream asked for this packet's serialized bytes to be
+    // kept, and it is a first transmission (not RTX, not padding).
+    pub keep_wire: bool,
+}
+
+// LAKKO FORK: most serialized sent packets held for
+// `DirectApi::take_sent_rtp` before the oldest is dropped.
+const MAX_SENT_RTP_KEPT: usize = 1024;
+
+// LAKKO FORK: most transport-wide feedback records held for the caller
+// (`DirectApi::take_twcc_feedback`); the oldest is dropped beyond it.
+const MAX_TWCC_FEEDBACK_KEPT: usize = 8192;
+
+// LAKKO FORK: one transport-wide feedback record for the caller; the
+// oldest is dropped beyond the bound.
+fn keep_twcc_record(
+    kept: &mut VecDeque<(Instant, usize, Option<Instant>)>,
+    record: (Instant, usize, Option<Instant>),
+) {
+    if kept.len() >= MAX_TWCC_FEEDBACK_KEPT {
+        kept.pop_front();
+    }
+    kept.push_back(record);
 }
 
 /// Find the PayloadParams for the given Pt, either when the Pt is the main Pt for the Codec or
@@ -1097,5 +1264,30 @@ fn update_max_seq(map: &mut HashMap<Ssrc, SeqNo>, ssrc: Ssrc, seq_no: SeqNo) {
     let current = map.entry(ssrc).or_insert(seq_no);
     if seq_no > *current {
         *current = seq_no;
+    }
+}
+
+// LAKKO FORK: the transport-wide feedback records kept for the caller.
+#[cfg(test)]
+mod lakko_twcc_feedback_test {
+    use super::*;
+
+    #[test]
+    fn nothing_is_kept_unless_asked_for_and_the_oldest_record_goes_first() {
+        let now = Instant::now();
+        let mut session = Session::new(&RtcConfig::default());
+        assert!(!session.keep_twcc_feedback, "off by default");
+        assert!(session.twcc_feedback.is_empty());
+
+        for i in 0..MAX_TWCC_FEEDBACK_KEPT + 3 {
+            let received = (i % 2 == 0).then_some(now);
+            keep_twcc_record(&mut session.twcc_feedback, (now, i, received));
+        }
+        assert_eq!(session.twcc_feedback.len(), MAX_TWCC_FEEDBACK_KEPT);
+        assert_eq!(session.twcc_feedback.front(), Some(&(now, 3, None)));
+        assert_eq!(
+            session.twcc_feedback.back(),
+            Some(&(now, MAX_TWCC_FEEDBACK_KEPT + 2, Some(now)))
+        );
     }
 }

@@ -265,6 +265,10 @@ final class DiscoverModel: ObservableObject {
                 }
             }
         }
+        // The screen was left mid-refresh: every bucket still in flight reads
+        // as a failure, which is not the directory being unavailable. Nothing
+        // is filed, so the refresh is still due on the next visit.
+        if Task.isCancelled { return }
         var next = prefs
         next.decoys = draw
         if asked > 0, failures == asked {

@@ -52,22 +52,21 @@ import {
   createMemo,
   createSignal,
   For,
+  on,
   onCleanup,
   onMount,
   Show,
+  untrack,
   type Component,
   type JSX,
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
 import {
-  featuredParticipant,
   callActions,
   callState,
-  galleryParticipants,
   qualityColour,
   type CallDevice,
-  type ChatMessage,
   type Participant,
   type QualityTier,
 } from "../state/call-state";
@@ -78,12 +77,7 @@ import {
   safetyNumberSpokenLabel,
   showsEncryptionChip,
 } from "../calls/encryption-chip";
-import {
-  audioOutputName,
-  callControls,
-  nextAudioOutput,
-  type CallControlSpec,
-} from "../calls/call-controls";
+import { callControls, type CallControlSpec } from "../calls/call-controls";
 import {
   ENDED_DISMISS_MS,
   callFillSource,
@@ -98,6 +92,48 @@ import {
   type CallPhaseKind,
   type CallSurfaceKind,
 } from "../calls/call-screen-model";
+import { endOpensMenu } from "../calls/end-for-everyone";
+import { lastDefined } from "../calls/held";
+import {
+  FIRST_FRAME_GRACE_MS,
+  LayerDisplay,
+  shownLayerLedger,
+  TileFrameTally,
+  type LayerShown,
+} from "../calls/layer-display";
+import { canWatchVideoFrames, watchVideoFrames } from "../calls/video-frame-watch";
+import {
+  askedQuality,
+  coversHeavySwap,
+  physicalTileWidth,
+  SettledWidth,
+  sharedTileQualityRules,
+  tileQualityOf,
+  type VideoQuality,
+} from "../calls/video-wants";
+import { heavyStreamForGiven } from "../calls/video-given";
+import {
+  describeLocalPreview,
+  LocalPreviewBinder,
+  PREVIEW_CHECK_MS,
+  PREVIEW_DIAG_AFTER_MS,
+} from "../calls/local-preview";
+import { callBarPhase } from "../calls/call-bar-model";
+import { callSettingsSections, type SettingsSectionKind } from "../calls/call-settings";
+import {
+  gridLayout,
+  gridPage,
+  groupLayoutKind,
+  stagePerson,
+  stageSize,
+  stripMetrics,
+  stripPeople,
+} from "../calls/group-call-layout";
+import { SpeakingMonitor, type VoiceSource } from "../calls/speaking-monitor";
+import { TileControlsReveal } from "../calls/tile-controls-reveal";
+import { describeVoices, stageReason } from "../calls/voice-diagnostics";
+import type { LevelReceiver } from "../calls/audio-level";
+import { uiRules } from "../chat/ui-rules";
 import { paths } from "./paths";
 import { Icon } from "../ui/icons";
 import { initialsOf, toneOf } from "../ui/Avatar";
@@ -385,6 +421,120 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
 };
 
 // ============================================================================
+// Call settings (§4.1): which microphone, camera and speaker the call uses
+// ============================================================================
+
+/** Whether this browser can move a call's sound to a chosen output. Absent in
+ *  Firefox and in Safari on iOS, where the speaker section is left out rather
+ *  than shown as a list whose rows change nothing. */
+function canSelectAudioOutput(): boolean {
+  return (
+    typeof HTMLMediaElement !== "undefined" &&
+    typeof HTMLMediaElement.prototype.setSinkId === "function"
+  );
+}
+
+/**
+ * The settings sheet. The app's own radio lists, never a `<select>`: on a
+ * phone that opens the system's picker. A choice applies at once; the call
+ * host already follows the store's selected devices for every kind of call.
+ */
+const CallSettingsSheet: Component<{ onClose: () => void }> = (props) => {
+  let doneButton: HTMLButtonElement | undefined;
+  createEffect(() => {
+    doneButton?.focus();
+  });
+  createEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      props.onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    onCleanup(() => document.removeEventListener("keydown", onKeyDown));
+  });
+
+  const sections = createMemo(() => {
+    const s = callState.settings();
+    return callSettingsSections(
+      s.availableDevices,
+      {
+        audioInput: s.selectedAudioInput,
+        videoInput: s.selectedVideoInput,
+        audioOutput: s.selectedAudioOutput,
+      },
+      canSelectAudioOutput(),
+    );
+  });
+
+  const choose = (kind: SettingsSectionKind, id: string | null): void => {
+    if (kind === "microphone") callActions.setSelectedAudioInput(id);
+    else if (kind === "camera") callActions.setSelectedVideoInput(id);
+    else callActions.setSelectedAudioOutput(id);
+  };
+
+  return (
+    <div
+      class="lk-call-modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="lk-call-settings-title"
+      onClick={(e): void => {
+        if (e.target === e.currentTarget) props.onClose();
+      }}
+    >
+      <div class="lk-call-modal lk-call-settings">
+        <h2 id="lk-call-settings-title">{t("call.settings.title")}</h2>
+        <Show
+          when={sections().length > 0}
+          fallback={<p class="lk-call-settings-empty">{t("call.settings.no_devices")}</p>}
+        >
+          <div class="lk-call-settings-body">
+            <For each={sections()}>
+              {(section) => (
+                <section>
+                  <h3 id={`lk-call-settings-${section.kind}`}>{section.title}</h3>
+                  <div role="radiogroup" aria-labelledby={`lk-call-settings-${section.kind}`}>
+                    <For each={section.options}>
+                      {(option) => (
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={option.selected}
+                          class="lk-call-menu-item lk-call-settings-option"
+                          onClick={(): void => choose(section.kind, option.id)}
+                        >
+                          <span class="lk-ellipsis">{option.label}</span>
+                          <Show when={option.selected}>
+                            <Icon name="check" size={18} />
+                          </Show>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </section>
+              )}
+            </For>
+          </div>
+        </Show>
+        <div class="lk-encryption-sheet-actions">
+          <button
+            type="button"
+            class="primary"
+            ref={(el) => {
+              doneButton = el;
+            }}
+            onClick={() => props.onClose()}
+          >
+            {t("common.done")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
 // The control bar (§4.1, §4.1.1)
 // ============================================================================
 
@@ -400,6 +550,38 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
  * action plus the state it will produce, so a screen-reader user is told what
  * pressing does rather than what is currently true.
  */
+/** The gap a call menu keeps from the edges of the call screen. */
+const MENU_EDGE_GAP = 12;
+
+/**
+ * Place a menu a control opens directly over that control, so it reads as the
+ * button's own menu rather than a panel in the middle of the screen: centred
+ * on the button, slid inward when that would cross an edge. Re-placed when the
+ * window resizes while it is open. Used as a `ref`.
+ */
+function anchorToControl(control: CallControlSpec["id"]): (menu: HTMLElement) => void {
+  return (menu) => {
+    const place = (): void => {
+      const root = menu.closest<HTMLElement>(".lk-call");
+      const button = root?.querySelector<HTMLElement>(`[data-control="${control}"] .lk-call-ctl-btn`);
+      if (root === null || root === undefined || button === null || button === undefined) return;
+      const area = root.getBoundingClientRect();
+      const at = button.getBoundingClientRect();
+      const width = menu.offsetWidth;
+      const centred = at.left + at.width / 2 - area.left - width / 2;
+      const left = Math.min(
+        Math.max(centred, MENU_EDGE_GAP),
+        Math.max(MENU_EDGE_GAP, area.width - width - MENU_EDGE_GAP),
+      );
+      menu.style.left = `${left}px`;
+      menu.style.transform = "none";
+    };
+    requestAnimationFrame(place);
+    window.addEventListener("resize", place);
+    onCleanup(() => window.removeEventListener("resize", place));
+  };
+}
+
 const ControlButton: Component<{
   spec: CallControlSpec;
   busy?: boolean;
@@ -407,7 +589,7 @@ const ControlButton: Component<{
 }> = (props) => {
   const inert = (): boolean => props.spec.disabled || props.busy === true;
   return (
-    <div class="lk-call-ctl" classList={{ end: props.spec.tone === "end" }}>
+    <div class="lk-call-ctl" classList={{ end: props.spec.tone === "end" }} data-control={props.spec.id}>
       <button
         type="button"
         class="lk-call-ctl-btn"
@@ -463,6 +645,7 @@ const ControlBar: Component<{
     class="lk-call-bar"
     data-surface={props.surface}
     classList={{ faded: props.hidden }}
+    style={{ "--call-ctl-count": String(props.controls.length) }}
     role="toolbar"
     aria-label={t("call.control.bar_a11y")}
   >
@@ -472,7 +655,7 @@ const ControlBar: Component<{
           spec={spec}
           busy={
             (spec.id === "camera" && props.cameraBusy) ||
-            (spec.id === "invite" && props.inviteBusy)
+            (spec.id === "participants" && props.inviteBusy)
           }
           onPress={(): void => props.onPress(spec)}
         />
@@ -652,18 +835,12 @@ const SelfView: Component<{
           </div>
         }
       >
-        {(stream) => (
-          <video
-            class="lk-call-self-video"
-            autoplay
-            playsinline
-            muted
-            aria-label={t("call.self.camera_a11y")}
-            ref={(el) => {
-              el.srcObject = stream();
-            }}
-          />
-        )}
+        <LocalVideo
+          stream={props.stream}
+          where="self"
+          class="lk-call-self-video"
+          ariaLabel={t("call.self.camera_a11y")}
+        />
       </Show>
 
       <Show when={props.starting}>
@@ -699,36 +876,529 @@ function clamp(value: number, low: number, high: number): number {
 // The group roster (§9 keeps this as it is)
 // ============================================================================
 
+/** Whether a tile shows its connection: fair or worse only. */
+function connectionIsWorthShowing(tier: QualityTier): boolean {
+  return tier === "fair" || tier === "poor" || tier === "bad";
+}
+
+/**
+ * How often a remote picture looks at the clock, milliseconds, so a track
+ * that stands still is noticed without a frame arriving. Chosen, not
+ * measured: a third of the stall threshold (`calls/layer-display.ts`).
+ */
+const LAYER_TICK_MS = 50;
+
+/** The roster id of a remote person is `peer-<peer id>`; the peer id is what
+ *  the stream ids and the media counters carry. */
+function peerIdOfParticipant(participantId: string): string {
+  return participantId.replace(/^peer-/, "");
+}
+
+interface RemoteVideoProps {
+  /** The person's main stream. */
+  stream: MediaStream;
+  /** Their middle stream (`calls/light-stream.ts`), when the publisher sends
+   *  one. */
+  middle?: MediaStream | undefined;
+  /** Their light companion (`calls/light-stream.ts`), when the publisher
+   *  sends one. */
+  light: MediaStream | undefined;
+  /**
+   * Which picture this tile shows (`calls/video-wants.ts`): the main one, the
+   * middle one, or the light one alone. Left out (a one-to-one call, which
+   * has one picture per person), the main one.
+   */
+  quality?: VideoQuality | undefined;
+  /**
+   * The picture the SFU says it gives of this person (`calls/video-given.ts`,
+   * ADR-0070 step 6); `undefined` when it has not said. The tile shows the
+   * lower of this and {@link quality}; what the tile asks for is not changed
+   * by it.
+   */
+  given?: VideoQuality | undefined;
+  /** The SFU peer id, for the `shown` line of the media counters. */
+  peerId: string;
+  /** The class the single `<video>` has always had here; with a companion
+   *  both elements carry it, so both fill the same box the same way. */
+  class: string;
+  ariaLabel?: string | undefined;
+}
+
+/**
+ * A remote person's picture.
+ *
+ * Up to two `<video>` elements, stacked in the same box with the same
+ * `object-fit`:
+ *
+ *   * the **heavy** one plays the lower of the picture the tile asked for and
+ *     the one the SFU says it gives (`calls/video-given.ts`): the main stream
+ *     at `main`, the middle stream at `middle` (the main one while the person
+ *     has no middle track), and at `light` it does not exist at all;
+ *   * the **light** one plays the light companion for as long as the person
+ *     has one.
+ *
+ * Both are in layout and playing all the time so both keep decoding, and the
+ * one the layer display (`calls/layer-display.ts`) names is the one that is
+ * opaque and on top. The switch is `opacity` and stacking order with no
+ * transition; neither element is ever `display: none` or
+ * `visibility: hidden`, because a browser stops presenting frames for those.
+ *
+ * When the heavy picture is replaced (the tile changed size, the person's
+ * middle track arrived) the heavy element keeps its place and takes the new
+ * stream; the tile and the light element are not rebuilt. The layer display
+ * starts again as for a new tile, and the light copy is shown until the new
+ * picture's first frame, so the swap is never a blank box.
+ *
+ * The frames each element shows are read through `calls/video-frame-watch.ts`:
+ * `requestVideoFrameCallback` where the browser has it, the statistics of the
+ * track's receiver where it does not. Where neither can be had nothing is
+ * observed, the heavy picture stays shown, and nothing is reported to the
+ * media counters. A hidden page presents no frames, so the clock stops while
+ * it is hidden and the display starts again on the heavy picture when it
+ * returns.
+ *
+ * Muted: audio plays through the dedicated hidden `<audio>` sinks.
+ */
+const RemoteVideo: Component<RemoteVideoProps> = (props) => {
+  const clock = (): number => performance.now();
+  const display = new LayerDisplay(clock());
+  /** The frames each element shows, for the `shown` line of the media
+   *  counters; decides nothing. */
+  const tally = new TileFrameTally();
+  const [shown, setShown] = createSignal<LayerShown>("full");
+  const sync = (): void => {
+    setShown(display.shown());
+  };
+  let heavyEl: HTMLVideoElement | undefined;
+  let lightEl: HTMLVideoElement | undefined;
+  const [lightMounted, setLightMounted] = createSignal(false);
+
+  /**
+   * The stream the heavy element plays: the one for the lower of what the
+   * tile asked for and what the SFU gives (`calls/video-given.ts`). None when
+   * the light one is shown alone, which it is only while there is a light
+   * stream. A track the SFU paused on purpose is therefore not the one this
+   * element waits on: when the SFU says it gives less, the memo changes and
+   * the effect below starts the layer rule again on the picture that is
+   * actually sent.
+   */
+  /**
+   * What `heavy` last answered, as a plain value for the teardown to read.
+   *
+   * A cleanup must not read a memo. While Solid takes a subtree down inside
+   * the update that removed it, a memo read there that the same change made
+   * stale is brought up to date on the spot, and Solid first re-runs every
+   * stale owner above it: among them the very computation that is in the
+   * middle of taking this subtree down. It is then cleaned a second time
+   * under the first, and the outer pass fails ("Cannot read properties of
+   * null") with the update half applied. Seen as: pinning from the grid left
+   * the grid up and the screen no longer following the call, and a person on
+   * the large tile leaving the call left their tile in place.
+   */
+  let heavyNow: MediaStream | undefined;
+  const heavy = createMemo(() => {
+    heavyNow = heavyStreamForGiven(
+      props.quality ?? "main",
+      props.given,
+      props.stream,
+      props.middle,
+      props.light !== undefined,
+    );
+    return heavyNow;
+  });
+  /** `live`: read the memo (and depend on it). Not `live`: the teardown's
+   *  read of the last answer. */
+  const heavyAt = (live: boolean): MediaStream | undefined => (live ? heavy() : heavyNow);
+  const lightOnly = (live = true): boolean => heavyAt(live) === undefined;
+  tally.setHeavy(!lightOnly());
+  const heavyTrack = (live = true): MediaStreamTrack | undefined =>
+    heavyAt(live)?.getVideoTracks()[0];
+  const lightTrack = (): MediaStreamTrack | undefined => props.light?.getVideoTracks()[0];
+  /** The stream the light element plays; kept while that element is taken
+   *  down after the companion went away (`calls/held.ts`). */
+  const shownLight = lastDefined(() => props.light);
+
+  /** When the heavy picture was last replaced and has not shown a frame
+   *  since; `null` otherwise. */
+  const [heavySwappedAt, setHeavySwappedAt] = createSignal<number | null>(null);
+
+  /** The rule is told of a light track only while it is the companion of a
+   *  heavy one. Shown alone, the light stream is the tile's one picture and
+   *  its frames are reported as that picture's. */
+  const tellLightAvailable = (live = true): void => {
+    display.setLightAvailable(lightMounted() && !lightOnly(live), clock());
+  };
+
+  // The heavy picture was replaced (the tile asked for another, the SFU
+  // gives another, the person's middle track arrived): start the rule again,
+  // as for a new tile. `resync` forgets the last frame of the old picture,
+  // and the rule counts a displayed stall only from a frame it has seen, so
+  // neither the picture the SFU paused nor the wait for the new one's first
+  // key frame is counted as a stall.
+  createEffect(
+    on(
+      heavy,
+      (now) => {
+        display.resync(clock());
+        tally.setHeavy(now !== undefined, true);
+        tellLightAvailable();
+        setHeavySwappedAt(now === undefined ? null : clock());
+        sync();
+      },
+      { defer: true },
+    ),
+  );
+
+  /** Whether the frames of the picture this tile shows can be observed. */
+  const observable = (live = true): boolean =>
+    lightOnly(live)
+      ? lightEl !== undefined && canWatchVideoFrames(lightEl, lightTrack)
+      : heavyEl !== undefined && canWatchVideoFrames(heavyEl, () => heavyTrack(live));
+  const report = (live = true): void => {
+    if (!observable(live)) return;
+    shownLayerLedger.add(
+      props.peerId,
+      display.drain(),
+      tally.drain(clock(), lightShown(live) ? "light" : "full"),
+    );
+  };
+
+  onMount(() => {
+    const pageVisible = (): boolean => document.visibilityState === "visible";
+    const timer = setInterval(() => {
+      if (!pageVisible()) return;
+      const swappedAt = heavySwappedAt();
+      if (
+        swappedAt !== null &&
+        (!observable() || clock() - swappedAt >= FIRST_FRAME_GRACE_MS)
+      ) {
+        // No first frame can be seen, or none came in the time the rule
+        // itself waits for one: the rule decides from here.
+        setHeavySwappedAt(null);
+      }
+      display.tick(clock());
+      sync();
+      report();
+    }, LAYER_TICK_MS);
+    const onVisibility = (): void => {
+      if (!pageVisible()) return;
+      display.resync(clock());
+      tally.unobserved();
+      sync();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    onCleanup(() => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (pageVisible()) display.tick(clock());
+      // The teardown: no memo is read (see `heavyNow`).
+      report(false);
+      display.dispose();
+    });
+  });
+
+  /** Whether the light element is the one on top. */
+  const lightShown = (live = true): boolean =>
+    lightOnly(live) ||
+    coversHeavySwap(heavySwappedAt() !== null, lightMounted()) ||
+    shown() === "light";
+
+  return (
+    <>
+      <Show when={heavy() !== undefined}>
+        <LayerVideo
+          stream={heavy() ?? props.stream}
+          class={props.light !== undefined ? `${props.class} lk-call-layer` : props.class}
+          shown={props.light !== undefined ? !lightShown() : undefined}
+          ariaLabel={props.ariaLabel}
+          elRef={(el): void => {
+            heavyEl = el;
+          }}
+          onFrame={(now): void => {
+            if (heavySwappedAt() !== null) setHeavySwappedAt(null);
+            tally.heavyFrame(now);
+            display.fullFrame(now);
+            sync();
+          }}
+        />
+      </Show>
+      <Show when={props.light !== undefined}>
+        {
+          <LayerVideo
+            stream={shownLight() as MediaStream}
+            class={`${props.class} lk-call-layer`}
+            shown={lightShown()}
+            ariaLabel={lightOnly() ? props.ariaLabel : undefined}
+            ariaHidden={!lightOnly()}
+            elRef={(el): void => {
+              lightEl = el;
+              setLightMounted(el !== undefined);
+              // `undefined` is the element's teardown: no memo is read there
+              // (see `heavyNow`).
+              tellLightAvailable(el !== undefined);
+              sync();
+            }}
+            onFrame={(now): void => {
+              tally.lightFrame();
+              if (lightOnly()) display.fullFrame(now);
+              else display.lightFrame(now);
+              sync();
+            }}
+          />
+        }
+      </Show>
+    </>
+  );
+};
+
+/**
+ * The person's own camera on their own screen (`calls/local-preview.ts`).
+ *
+ * Bound once the element is in the document, to a stream of its own made
+ * from the camera track, with `play()` called on every engine; looked at
+ * again when the stream changes and on a slow timer, because the call swaps
+ * the camera track inside one stream object and nothing announces that.
+ * Muted: a person never hears their own microphone from this element, and it
+ * plays no audio track at all. A little after each new camera the element's
+ * and the track's state are written to the console once.
+ */
+const LocalVideo: Component<{
+  stream: MediaStream | undefined;
+  /** Which own-camera element this is, for the console line. */
+  where: string;
+  class: string;
+  ariaLabel?: string | undefined;
+}> = (props) => {
+  let el: HTMLVideoElement | undefined;
+  const binder = new LocalPreviewBinder<MediaStreamTrack, MediaProvider>(
+    (track) => new MediaStream([track]),
+  );
+  let diagTimer: ReturnType<typeof setTimeout> | undefined;
+  const look = (): void => {
+    if (el === undefined) return;
+    // The attribute alone is not relied on for the muted state either.
+    if (!el.muted) el.muted = true;
+    if (!binder.sync(el, props.stream)) return;
+    if (diagTimer !== undefined) clearTimeout(diagTimer);
+    if (binder.track() === null) return;
+    diagTimer = setTimeout(() => {
+      diagTimer = undefined;
+      if (el === undefined) return;
+      // eslint-disable-next-line no-console
+      console.info(describeLocalPreview(props.where, el, binder.track(), binder.counts()));
+    }, PREVIEW_DIAG_AFTER_MS);
+  };
+  onMount(() => {
+    // The stream signal changed: look at once. Created here, so the first
+    // look is with the element in the document.
+    createEffect(() => {
+      void props.stream;
+      look();
+    });
+    const timer = setInterval(look, PREVIEW_CHECK_MS);
+    onCleanup(() => {
+      clearInterval(timer);
+      if (diagTimer !== undefined) clearTimeout(diagTimer);
+      if (el !== undefined) el.srcObject = null;
+      binder.reset();
+    });
+  });
+  return (
+    <video class={props.class} aria-label={props.ariaLabel} autoplay playsinline muted ref={el} />
+  );
+};
+
+/**
+ * One `<video>` of a remote picture: the heavy one or the light companion.
+ * It keeps its element while its stream is replaced (`srcObject` is swapped),
+ * and reports each frame it shows.
+ */
+const LayerVideo: Component<{
+  stream: MediaStream;
+  class: string;
+  /** Whether this is the element on top; `undefined` where there is only
+   *  one and nothing is stacked. */
+  shown: boolean | undefined;
+  ariaLabel?: string | undefined;
+  ariaHidden?: boolean | undefined;
+  /** The element, and `undefined` when it is gone. */
+  elRef: (el: HTMLVideoElement | undefined) => void;
+  onFrame: (now: number) => void;
+}> = (props) => {
+  let el: HTMLVideoElement | undefined;
+  createEffect(() => {
+    const stream = props.stream;
+    if (el !== undefined && el.srcObject !== stream) el.srcObject = stream;
+  });
+  onMount(() => {
+    if (el === undefined) return;
+    props.elRef(el);
+    const stopFrames = watchVideoFrames(
+      el,
+      (now) => props.onFrame(now),
+      // Read each time: the stream this element plays can be replaced.
+      () => props.stream.getVideoTracks()[0],
+    );
+    onCleanup(() => {
+      stopFrames();
+      props.elRef(undefined);
+    });
+  });
+  return (
+    <video
+      class={props.class}
+      data-shown={props.shown === undefined ? undefined : String(props.shown)}
+      aria-label={props.ariaLabel}
+      aria-hidden={props.ariaHidden === true ? "true" : undefined}
+      autoplay
+      playsinline
+      muted
+      ref={el}
+    />
+  );
+};
+
+/** What a call screen passes down so a tile can say which picture of a person
+ *  it shows (`calls/video-wants.ts`). `tile` is the same object for the
+ *  tile's lifetime; `null` when it stops showing one. */
+type ReportTileVideoQuality = (
+  tile: object,
+  participantId: string,
+  quality: VideoQuality | null,
+) => void;
+
 interface TileProps {
   participant: Participant;
   large: boolean;
   onPin?: (id: string) => void;
+  /** A strip tile: its pin button is drawn smaller with a pointer. */
+  compact?: boolean | undefined;
+  /** Whether this tile's controls were brought up by a tap (section 6.2). */
+  controlsShown?: boolean | undefined;
+  /** A tap on the tile itself, anywhere but a control on it. */
+  onTap?: ((id: string) => void) | undefined;
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  remoteLightStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  remoteMiddleStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  remoteVideoGivenFor?: ((participantId: string) => VideoQuality | undefined) | undefined;
+  reportTileVideoQuality?: ReportTileVideoQuality | undefined;
   localStream?: (() => MediaStream | undefined) | undefined;
 }
 
 const ParticipantTile: Component<TileProps> = (props) => {
-  const isPinned = (): boolean => callState.pinnedId() === props.participant.id;
+  // A tile is one person for as long as it is mounted (tiles are keyed by
+  // participant id), so who it shows is read once. Its teardown must not ask
+  // the roster again: the person may be the very one who just left
+  // (`calls/held.ts`).
+  const participantId = untrack(() => props.participant.id);
+  const local = untrack(() => props.participant.isLocal);
+  const isPinned = (): boolean => callState.pinnedId() === participantId;
   const tileStream = (): MediaStream | undefined =>
-    props.participant.isLocal
-      ? props.localStream?.()
-      : props.remoteStreamFor?.(props.participant.id);
+    local ? props.localStream?.() : props.remoteStreamFor?.(participantId);
+  /** The stream the picture below plays; kept while the picture is taken
+   *  down after the stream went away. */
+  const shownStream = lastDefined(tileStream);
+
+  // Which picture of the person this tile shows
+  // (`docs/ux/group-call-grid.md` section 7.6): asked of the shared rule from
+  // the people in the call, this tile's own drawn width in physical pixels,
+  // and whether it is the pinned person or the stage. Only where the call can
+  // act on it (a call through the SFU); elsewhere a person has one picture.
+  let tileEl: HTMLDivElement | undefined;
+  const tileKey = {};
+  const asksQuality = (): boolean => !local && props.reportTileVideoQuality !== undefined;
+  /** The tile's width in physical pixels, once measured and settled. */
+  const [widthPx, setWidthPx] = createSignal<number | null>(null);
+  onMount(() => {
+    const el = tileEl;
+    if (el === undefined || !asksQuality()) return;
+    const settled = new SettledWidth((width) => {
+      setWidthPx(width);
+    });
+    const measured = (cssWidth: number): void => {
+      // A tile not laid out yet has no width to ask about.
+      if (cssWidth > 0) settled.observe(physicalTileWidth(cssWidth, window.devicePixelRatio));
+    };
+    const measure = (): void => measured(el.getBoundingClientRect().width);
+    measure();
+    // A resize of the window also covers a change of the pixel ratio (zoom,
+    // another display).
+    window.addEventListener("resize", measure);
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(measure);
+      observer.observe(el);
+    }
+    onCleanup(() => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+      settled.dispose();
+    });
+  });
+  const tileQuality = createMemo((): VideoQuality | null => {
+    if (!asksQuality()) return null;
+    const width = widthPx();
+    if (width === null) return null;
+    // Read so the answer is asked again once the shared rules have loaded.
+    uiRules();
+    return askedQuality(
+      tileQualityOf(
+        sharedTileQualityRules,
+        callState.participants().length,
+        width,
+        props.large || isPinned(),
+      ),
+      props.remoteLightStreamFor?.(participantId) !== undefined,
+    );
+  });
+  // Tell the call what this tile shows; a tile that draws no picture of the
+  // person (camera off, no stream yet, not measured yet) shows none.
+  createEffect(() => {
+    const report = props.reportTileVideoQuality;
+    if (report === undefined || local) return;
+    const drawsPicture = props.participant.camOn && tileStream() !== undefined;
+    report(tileKey, participantId, drawsPicture ? tileQuality() : null);
+  });
+  onCleanup(() => {
+    if (local) return;
+    // The tile is gone: it shows no picture of the person. Nothing here may
+    // stop the rest of the screen from being taken down.
+    try {
+      untrack(() => props.reportTileVideoQuality)?.(tileKey, participantId, null);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("call ui: a tile could not withdraw what it asked for", err);
+    }
+  });
+
   const name = (): string =>
     props.participant.displayName ||
     (props.participant.isLocal ? t("call.participant.you") : t("call.participant.unnamed"));
+  // Section 6.2: pinning and unpinning happen only through the pin button
+  // in the corner of someone else's tile, on a grid tile, a strip tile and
+  // the stage tile alike. The tile itself is never the control: a press on
+  // it pinned people by accident. A tap on the tile only brings its controls
+  // up for a few seconds, which is how a touch screen, with no hover, gets
+  // to the button. This device's own tile has no pin button: it is never on
+  // the stage while anyone else is present.
+  const hasPinButton = (): boolean => !local && props.onPin !== undefined;
+  const pinAction = (): string =>
+    t(isPinned() ? "call.participant.unpin_a11y" : "call.participant.pin_a11y", { name: name() });
   return (
     <div
       class="lk-call-tile"
+      ref={tileEl}
       classList={{
         large: props.large,
         speaking: props.participant.speaking,
-        pinnable: !props.participant.isLocal && props.onPin !== undefined,
+        pinned: isPinned(),
+        "controls-shown": hasPinButton() && props.controlsShown === true,
       }}
-      data-tone={toneOf(props.participant.id)}
+      data-tone={toneOf(participantId)}
+      data-tile-id={participantId}
       onClick={(): void => {
-        if (props.onPin !== undefined && !props.participant.isLocal) {
-          props.onPin(isPinned() ? "" : props.participant.id);
-        }
+        // Reveals the controls and does nothing else.
+        if (hasPinButton()) props.onTap?.(participantId);
       }}
     >
       <Show
@@ -743,25 +1413,34 @@ const ParticipantTile: Component<TileProps> = (props) => {
             dedicated hidden <audio> sinks, so this element never doubles the
             audio. The mock path passes no stream and falls through. */}
         <Show
-          when={tileStream()}
+          when={tileStream() !== undefined}
           fallback={
             <div class="lk-call-tile-blank" aria-hidden="true">
               <Icon name="video" size={props.large ? 36 : 24} strokeWidth={1.4} />
             </div>
           }
         >
-          {(stream) => (
-            <video
+          {/* `shownStream`, not the accessor `<Show>` would hand over: the
+              picture reads its stream while it is being taken down
+              (`calls/held.ts`). */}
+          <Show
+            when={!local}
+            fallback={
+              <LocalVideo stream={tileStream()} where="tile" class="lk-call-tile-video mirrored" />
+            }
+          >
+            {/* The other person: the picture this tile asked for, and their
+                light one shown the moment that one stands still. */}
+            <RemoteVideo
+              stream={shownStream() as MediaStream}
+              middle={props.remoteMiddleStreamFor?.(participantId)}
+              light={props.remoteLightStreamFor?.(participantId)}
+              quality={tileQuality() ?? undefined}
+              given={props.remoteVideoGivenFor?.(participantId)}
+              peerId={peerIdOfParticipant(participantId)}
               class="lk-call-tile-video"
-              classList={{ mirrored: props.participant.isLocal }}
-              autoplay
-              playsinline
-              muted
-              ref={(el) => {
-                el.srcObject = stream();
-              }}
             />
-          )}
+          </Show>
         </Show>
       </Show>
 
@@ -769,12 +1448,6 @@ const ParticipantTile: Component<TileProps> = (props) => {
         <div class="lk-call-tile-overlay" role="status" aria-live="polite">
           <Spinner size={props.large ? 30 : 24} />
           <span>{t("call.self.starting_camera")}</span>
-        </div>
-      </Show>
-
-      <Show when={!props.participant.micOn && !props.participant.isLocal}>
-        <div class="lk-call-tile-mute" aria-hidden="true">
-          <Icon name="micOff" size={props.large ? 22 : 16} />
         </div>
       </Show>
 
@@ -789,53 +1462,346 @@ const ParticipantTile: Component<TileProps> = (props) => {
           </span>
         </Show>
         <span class="lk-call-tile-name">{name()}</span>
-        <QualityDot tier={props.participant.quality} />
+        {/* Section 7.2: a connection is drawn only when it is fair or worse.
+            A dot on every healthy tile says nothing, and for other people it
+            was never a measurement at all. */}
+        <Show when={connectionIsWorthShowing(props.participant.quality)}>
+          <QualityDot tier={props.participant.quality} />
+        </Show>
         <Show when={isPinned()}>
           <span class="lk-call-tile-pin" title={t("call.participant.pinned")}>
             <Icon name="pin" size={14} />
           </span>
         </Show>
       </div>
+
+      {/* The pin button, top right. The stylesheet shows it while the pointer
+          or the keyboard focus is on the tile, for a few seconds after a tap
+          on the tile, and always on the pinned tile, in its active state. */}
+      <Show when={hasPinButton()}>
+        <button
+          type="button"
+          class="lk-call-tile-pin-btn"
+          classList={{ compact: props.compact === true }}
+          aria-pressed={isPinned()}
+          aria-label={pinAction()}
+          title={pinAction()}
+          onClick={(event): void => {
+            event.stopPropagation();
+            props.onPin?.(participantId);
+          }}
+        >
+          <Icon name="pin" size={props.compact === true ? 14 : 16} />
+        </button>
+      </Show>
     </div>
   );
 };
 
-const GroupStage: Component<{
+/**
+ * The tiles of a group call (`docs/ux/group-call-grid.md` sections 3 to 6).
+ *
+ * Two layouts and no scrolling. **Grid**: everyone the same size, filling the
+ * space between the status line and the control bar; more people than a page
+ * holds means pages. **Focus**: the person speaking, or the pinned one, large
+ * in the middle, and everyone else in a strip above.
+ *
+ * The geometry and the choice of the stage are the shared rules
+ * (`calls/group-call-layout.ts`); this component measures its own area and
+ * draws the answer. Tiles are keyed by participant id, not by the roster
+ * object: the store replaces a person's object whenever anything about them
+ * changes, and a tile rebuilt on every change of the speaking ring would
+ * restart its video each time.
+ */
+const GroupArea: Component<{
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  remoteLightStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  remoteMiddleStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  remoteVideoGivenFor?: ((participantId: string) => VideoQuality | undefined) | undefined;
+  reportTileVideoQuality?: ReportTileVideoQuality | undefined;
   localStream?: (() => MediaStream | undefined) | undefined;
-}> = (props) => (
-  <>
-    <Show when={featuredParticipant()}>
-      {(featured) => (
-        <div class="lk-call-stage">
-          <ParticipantTile
-            participant={featured()}
-            large={true}
-            onPin={(id): void => callActions.pin(id === "" ? null : id)}
-            remoteStreamFor={props.remoteStreamFor}
-            localStream={props.localStream}
-          />
+}> = (props) => {
+  let area: HTMLDivElement | undefined;
+  const [size, setSize] = createSignal({ width: 0, height: 0 });
+  const [page, setPage] = createSignal(0);
+
+  onMount(() => {
+    if (area === undefined || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (rect === undefined) return;
+      setSize({ width: Math.floor(rect.width), height: Math.floor(rect.height) });
+    });
+    observer.observe(area);
+    onCleanup(() => observer.disconnect());
+  });
+
+  const people = (): Participant[] => callState.participants();
+  const personById = (id: string): Participant | undefined => people().find((p) => p.id === id);
+  const kind = createMemo(() =>
+    groupLayoutKind(callState.layoutChoice(), callState.pinnedId(), people()),
+  );
+
+  const grid = createMemo(() => {
+    const rules = uiRules();
+    if (rules === null) return null;
+    return gridLayout(rules, people().length, size().width, size().height);
+  });
+  const shown = createMemo(() => gridPage(people(), grid()?.perPage ?? 0, page()));
+  const gridIds = createMemo(() => shown().tiles.map((p) => p.id), undefined, {
+    equals: (a, b) => a.length === b.length && a.every((id, i) => id === b[i]),
+  });
+
+  const stageId = createMemo((): string | null => {
+    const rules = uiRules();
+    if (rules === null) return null;
+    return stagePerson(rules, people(), callState.pinnedId(), callState.speech())?.id ?? null;
+  });
+  const stripIds = createMemo(
+    () => stripPeople(people(), personById(stageId() ?? "") ?? null).map((p) => p.id),
+    undefined,
+    { equals: (a, b) => a.length === b.length && a.every((id, i) => id === b[i]) },
+  );
+  const strip = createMemo(() => stripMetrics(size().width));
+  const stage = createMemo(() => {
+    const rules = uiRules();
+    if (rules === null) return { width: 0, height: 0 };
+    return stageSize(rules, size().width, size().height);
+  });
+
+  // A horizontal swipe turns the page (section 4.5). A move that is mostly
+  // vertical, or short, is not a swipe, so a press on a pin control still pins.
+  let swipeFrom: { readonly x: number; readonly y: number } | null = null;
+  let swiped = false;
+  const onSwipeStart = (event: PointerEvent): void => {
+    swiped = false;
+    swipeFrom = shown().pages > 1 ? { x: event.clientX, y: event.clientY } : null;
+  };
+  const onSwipeEnd = (event: PointerEvent): void => {
+    const from = swipeFrom;
+    swipeFrom = null;
+    if (from === null) return;
+    const dx = event.clientX - from.x;
+    const dy = event.clientY - from.y;
+    if (Math.abs(dx) < 48 || Math.abs(dx) < 2 * Math.abs(dy)) return;
+    swiped = true;
+    const next = shown().page + (dx < 0 ? 1 : -1);
+    setPage(Math.min(shown().pages - 1, Math.max(0, next)));
+  };
+
+  const togglePin = (id: string): void => {
+    // The click that ends a swipe is not a press.
+    if (swiped) {
+      swiped = false;
+      return;
+    }
+    if (callState.pinnedId() === id) {
+      // Unpinning leaves the layout as it is: the large tile goes back to
+      // following the speaker.
+      callActions.pin(null);
+      return;
+    }
+    // A pin is asking to see the person large: it switches to Focus, and
+    // Focus is where an unpin leaves the screen.
+    // The layout first, so the tiles are rebuilt once, for Focus, and the
+    // pin then only moves the large tile.
+    callActions.setLayoutChoice("focus");
+    callActions.pin(id);
+  };
+
+  // The tile whose controls a tap brought up (section 6.2): one at a time,
+  // for a few seconds, gone on a press anywhere else.
+  const [revealedId, setRevealedId] = createSignal<string | null>(null);
+  const reveal = new TileControlsReveal(setRevealedId);
+  onCleanup(() => reveal.dispose());
+  onMount(() => {
+    const onPress = (event: Event): void => {
+      const target = event.target;
+      const tileEl = target instanceof Element ? target.closest("[data-tile-id]") : null;
+      reveal.pressBegan(tileEl?.getAttribute("data-tile-id") ?? null);
+    };
+    document.addEventListener("pointerdown", onPress, true);
+    onCleanup(() => document.removeEventListener("pointerdown", onPress, true));
+  });
+  const onTileTap = (id: string): void => {
+    // The click that ends a swipe is not a tap.
+    if (swiped) {
+      swiped = false;
+      return;
+    }
+    reveal.tap(id);
+  };
+  const onPinPressed = (id: string): void => {
+    togglePin(id);
+    reveal.hide();
+  };
+  // A tile is drawn for a person in the roster, and reads them through
+  // `lastDefined`, never through the accessor a `<Show>` hands its child: a
+  // tile of someone who just left is taken down while the roster no longer
+  // holds them, and that accessor throws when read then, which stopped the
+  // whole roster update half way (`calls/held.ts`). Which tiles exist is
+  // decided by the lists of ids above, which follow the roster.
+  const tile = (id: string, large: boolean, compact = false): JSX.Element => {
+    const person = lastDefined(() => personById(id));
+    return (
+      <Show when={person() !== undefined}>
+        <ParticipantTile
+          participant={person() as Participant}
+          large={large}
+          onPin={onPinPressed}
+          compact={compact}
+          controlsShown={revealedId() === id}
+          onTap={onTileTap}
+          remoteStreamFor={props.remoteStreamFor}
+          remoteLightStreamFor={props.remoteLightStreamFor}
+          remoteMiddleStreamFor={props.remoteMiddleStreamFor}
+          remoteVideoGivenFor={props.remoteVideoGivenFor}
+          reportTileVideoQuality={props.reportTileVideoQuality}
+          localStream={props.localStream}
+        />
+      </Show>
+    );
+  };
+
+  return (
+    <main
+      class="lk-call-main"
+      data-layout={kind()}
+      ref={area}
+      onPointerDown={onSwipeStart}
+      onPointerUp={onSwipeEnd}
+      onPointerCancel={(): void => {
+        swipeFrom = null;
+      }}
+    >
+      <Show when={kind() === "grid"}>
+        <Show when={grid()}>
+          {(g) => (
+            <div
+              class="lk-call-grid"
+              style={{
+                width: `${g().cols * g().tileWidth + Math.max(0, g().cols - 1) * g().gap}px`,
+                gap: `${g().gap}px`,
+              }}
+            >
+              <For each={gridIds()}>
+                {(id) => (
+                  <div
+                    class="lk-call-cell"
+                    style={{ width: `${g().tileWidth}px`, height: `${g().tileHeight}px` }}
+                  >
+                    {tile(id, false)}
+                  </div>
+                )}
+              </For>
+            </div>
+          )}
+        </Show>
+        <Show when={shown().pages > 1}>
+          <button
+            type="button"
+            class="lk-call-page-arrow prev"
+            aria-label={t("call.grid.prev_a11y")}
+            disabled={shown().page === 0}
+            onClick={(): void => void setPage(Math.max(0, shown().page - 1))}
+          >
+            <Icon name="chevron" size={20} />
+          </button>
+          <button
+            type="button"
+            class="lk-call-page-arrow next"
+            aria-label={t("call.grid.next_a11y")}
+            disabled={shown().page >= shown().pages - 1}
+            onClick={(): void => void setPage(Math.min(shown().pages - 1, shown().page + 1))}
+          >
+            <Icon name="chevron" size={20} />
+          </button>
+          <div class="lk-call-pages" role="tablist">
+            <For each={Array.from({ length: shown().pages }, (_, i) => i)}>
+              {(i) => (
+                <button
+                  type="button"
+                  role="tab"
+                  class="lk-call-page-dot"
+                  aria-selected={shown().page === i}
+                  aria-label={t("call.grid.page_a11y", {
+                    page: String(i + 1),
+                    total: String(shown().pages),
+                  })}
+                  onClick={(): void => void setPage(i)}
+                />
+              )}
+            </For>
+          </div>
+        </Show>
+      </Show>
+
+      <Show when={kind() === "focus"}>
+        <div class="lk-call-strip" style={{ gap: `${strip().gap}px`, height: `${strip().tileHeight}px` }}>
+          <For each={stripIds()}>
+            {(id) => (
+              <div
+                class="lk-call-cell"
+                style={{ width: `${strip().tileWidth}px`, height: `${strip().tileHeight}px` }}
+              >
+                {/* A strip tile is small: its pin button is too. */}
+                {tile(id, false, true)}
+              </div>
+            )}
+          </For>
         </div>
-      )}
-    </Show>
-    <div class="lk-call-gallery" classList={{ equal: featuredParticipant() === null }}>
-      <For each={galleryParticipants()}>
-        {(p) => (
-          <ParticipantTile
-            participant={p}
-            large={false}
-            onPin={(id): void => callActions.pin(id === "" ? null : id)}
-            remoteStreamFor={props.remoteStreamFor}
-            localStream={props.localStream}
-          />
-        )}
-      </For>
-    </div>
-  </>
-);
+        <Show when={stageId()}>
+          {(id) => (
+            <div
+              class="lk-call-cell lk-call-stage"
+              style={{
+                width: `${stage().width}px`,
+                height: `${stage().height}px`,
+                "margin-top": `${strip().gap}px`,
+              }}
+            >
+              {tile(id(), true)}
+            </div>
+          )}
+        </Show>
+      </Show>
+    </main>
+  );
+};
+
+/**
+ * Switch between the two group layouts, top right.
+ *
+ * It shows the layout a press leads to, not the one on screen. Pinning
+ * someone means Focus, so from Focus the button also unpins: a grid has no
+ * large tile for a pin to hold.
+ */
+const LayoutSwitch: Component = () => {
+  const kind = (): "grid" | "focus" =>
+    groupLayoutKind(callState.layoutChoice(), callState.pinnedId(), callState.participants());
+  return (
+    <button
+      type="button"
+      class="lk-call-layout"
+      aria-label={kind() === "grid" ? t("call.layout.focus_a11y") : t("call.layout.grid_a11y")}
+      title={kind() === "grid" ? t("call.layout.focus_a11y") : t("call.layout.grid_a11y")}
+      onClick={(event): void => {
+        event.stopPropagation();
+        if (kind() === "focus") {
+          callActions.pin(null);
+          callActions.setLayoutChoice("grid");
+        } else {
+          callActions.setLayoutChoice("focus");
+        }
+      }}
+    >
+      <Icon name={kind() === "grid" ? "layoutFocus" : "layoutGrid"} size={20} />
+    </button>
+  );
+};
 
 // ============================================================================
-// The group overflow: participants and chat (§4.1 allows exactly one)
+// The participant list
 // ============================================================================
 
 const ParticipantList: Component = () => (
@@ -878,104 +1844,6 @@ const ParticipantList: Component = () => (
   </Show>
 );
 
-const ChatMessageRow: Component<{ msg: ChatMessage }> = (props) => {
-  const isSystem = (): boolean => props.msg.kind === "system";
-  const time = (): string => {
-    const d = new Date(props.msg.ts);
-    const hh = `${d.getHours()}`.padStart(2, "0");
-    const mm = `${d.getMinutes()}`.padStart(2, "0");
-    return `${hh}:${mm}`;
-  };
-  return (
-    <Show when={!isSystem()} fallback={<div class="lk-call-msg-sys">{props.msg.text}</div>}>
-      <div class="lk-call-msg">
-        <div class="lk-call-msg-meta">
-          <span class="lk-call-msg-sender">{props.msg.senderName}</span>
-          <span>{time()}</span>
-        </div>
-        <div class="lk-call-msg-text">{props.msg.text}</div>
-      </div>
-    </Show>
-  );
-};
-
-const ChatPanel: Component = () => {
-  let scrollRef: HTMLDivElement | undefined;
-  let inputRef: HTMLInputElement | undefined;
-
-  createEffect((): void => {
-    void callState.chatMessages().length;
-    queueMicrotask((): void => {
-      if (scrollRef !== undefined) scrollRef.scrollTop = scrollRef.scrollHeight;
-    });
-  });
-
-  createEffect((): void => {
-    if (callState.chatOpen() && inputRef !== undefined) {
-      queueMicrotask((): void => inputRef?.focus());
-    }
-  });
-
-  return (
-    <Show when={callState.chatOpen()}>
-      <aside class="lk-call-drawer lk-call-chat" aria-label={t("call.chat.a11y")}>
-        <header class="lk-call-drawer-head">
-          <h2>{t("call.control.chat")}</h2>
-          <button
-            type="button"
-            class="lk-icon-button"
-            aria-label={t("call.chat.close_a11y")}
-            onClick={(): void => callActions.setChatOpen(false)}
-          >
-            <Icon name="close" size={18} />
-          </button>
-        </header>
-
-        <div class="lk-call-chat-log" ref={scrollRef}>
-          <Show
-            when={callState.chatMessages().length > 0}
-            fallback={
-              <div class="lk-call-chat-empty">{t("call.chat.empty")}</div>
-            }
-          >
-            <For each={callState.chatMessages()}>
-              {(msg): JSX.Element => <ChatMessageRow msg={msg} />}
-            </For>
-          </Show>
-        </div>
-
-        <form
-          class="lk-composer lk-call-chat-form"
-          onSubmit={(e): void => {
-            e.preventDefault();
-            callActions.sendChatMessage(callState.composeText());
-          }}
-        >
-          <input
-            ref={inputRef}
-            class="lk-composer-input"
-            type="text"
-            placeholder={t("chat.composer.placeholder")}
-            aria-label={t("chat.composer.placeholder")}
-            autocomplete="off"
-            value={callState.composeText()}
-            onInput={(e): void => callActions.setComposeText(e.currentTarget.value)}
-          />
-          <button
-            type="submit"
-            class="lk-icon-button lk-send"
-            disabled={callState.composeText().trim().length === 0}
-            aria-label={t("chat.composer.send")}
-            title={t("chat.composer.send")}
-          >
-            <Icon name="send" size={20} />
-          </button>
-        </form>
-      </aside>
-    </Show>
-  );
-};
-
 // ============================================================================
 // The ended screen (§4: "`Call ended` and the duration, the screen closes
 // itself after 2 s")
@@ -1002,9 +1870,9 @@ const CallEndedOverlay: Component<{ summary: string; onDismiss: () => void }> = 
 
 /** Enumerate the OS's capture / playback devices into the shared store. Labels
  *  populate only once a capture permission has been granted, which during a
- *  live call it has. Drives the Speaker control and the self-view's flip
- *  button, which is why it now runs from the call screen rather than from a
- *  settings panel that no longer exists. */
+ *  live call it has. Drives the self-view's flip button, which is why it runs
+ *  from the call screen rather than from a settings panel that no longer
+ *  exists. */
 async function refreshCallDevices(): Promise<void> {
   const md = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
   if (!md?.enumerateDevices) return;
@@ -1018,16 +1886,6 @@ async function refreshCallDevices(): Promise<void> {
     // eslint-disable-next-line no-console
     console.warn("call ui: enumerateDevices failed", err);
   }
-}
-
-/** Whether this browser can move a call's sound to a chosen output. Absent in
- *  Firefox and in Safari on iOS, where §4.1 says to omit Speaker entirely
- *  rather than show a button that does nothing. */
-function canSelectAudioOutput(): boolean {
-  return (
-    typeof HTMLMediaElement !== "undefined" &&
-    typeof HTMLMediaElement.prototype.setSinkId === "function"
-  );
 }
 
 // ============================================================================
@@ -1089,12 +1947,41 @@ const Call: Component<{
   /** SFU group-call only: resolve a roster participant id to its live remote
    *  `MediaStream`. */
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  /** SFU group-call only: resolve a roster participant id to that person's
+   *  light companion stream (`calls/light-stream.ts`), when their device
+   *  sends one. Their picture then shows it while the main one stands still. */
+  remoteLightStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  /** SFU group-call only: resolve a roster participant id to that person's
+   *  middle stream (`calls/light-stream.ts`, ADR-0070 step 5), when their
+   *  device sends one. A grid tile watches it in place of the main one. */
+  remoteMiddleStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  /** SFU group-call only: the picture the SFU says it gives this device of a
+   *  person (`calls/video-given.ts`, ADR-0070 step 6); `undefined` when it
+   *  has not said. A tile shows the lower of that and what it asked for. */
+  remoteVideoGivenFor?: ((participantId: string) => VideoQuality | undefined) | undefined;
+  /** SFU group-call only: a tile says which picture of a person it shows
+   *  (`calls/video-wants.ts`), so the call asks the SFU for that one and the
+   *  SFU stops sending the others. Without it every tile shows the main
+   *  picture, as a one-to-one call does. */
+  reportTileVideoQuality?: ReportTileVideoQuality | undefined;
   /** The local capture `MediaStream`, for the self-view. */
   localStream?: (() => MediaStream | undefined) | undefined;
-  /** Hand out a link to this call (`docs/ux/call-links.md` section 3). The
+  /** SFU group-call only: resolve a roster participant id to the receiver
+   *  that decodes that person's audio. Their sound level is read from it on
+   *  this device (`calls/audio-level.ts`) for the speaking ring and the large
+   *  tile; without it the level is read from the stream being played. */
+  remoteAudioReceiverFor?: ((participantId: string) => LevelReceiver | undefined) | undefined;
+  /** Copy the link to this call (`docs/ux/call-links.md` section 3). The
    *  `Invite` control exists only where this is given: a call in a
    *  conversation is reached through that conversation, not through a link. */
-  onInvite?: (() => void) | undefined;
+  onCopyInviteLink?: (() => void) | undefined;
+  /** Choose a conversation and send the invitation into it. */
+  onInviteContact?: (() => void) | undefined;
+  /** End the call for every person in it. Given only to the person who
+   *  started a group or link call; while anyone else is in the call, `End`
+   *  then opens a choice between leaving and this
+   *  (`docs/ux/calls.md` section 4.1.2). */
+  onEndForEveryone?: (() => void) | undefined;
   /** The link is being prepared — a network round trip and a proof of work. */
   inviteBusy?: boolean;
   /** One line on what `Invite` is doing, or `null`. */
@@ -1112,6 +1999,9 @@ const Call: Component<{
 }> = (props) => {
   const navigate = useNavigate();
   const [encryptionSheetOpen, setEncryptionSheetOpen] = createSignal(false);
+  const [inviteMenuOpen, setInviteMenuOpen] = createSignal(false);
+  const [endMenuOpen, setEndMenuOpen] = createSignal(false);
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [now, setNow] = createSignal(Date.now());
   const [lastInteraction, setLastInteraction] = createSignal(Date.now());
 
@@ -1157,31 +2047,39 @@ const Call: Component<{
     if (props.embedded !== true) callActions.reset();
   });
 
-  // Phase -> sound. Mirrors the same trigger map on iOS / Android.
+  // The outgoing tone (`docs/ux/calls.md` section 3.4). The shared rule
+  // decides: only a one-to-one call this device placed, and only until it is
+  // answered. A group call rings nobody, and neither does joining one from a
+  // link; before this every call that was not yet connected looped the tone,
+  // so a person alone in a call they had just started heard a phone ringing.
   createEffect(() => {
-    switch (callState.phase().kind) {
-      case "idle":
-        sounds.stopAll();
-        break;
-      case "calling":
-      case "connecting":
-        sounds.startLoop("ringback-outgoing");
-        break;
-      case "connected":
-        sounds.stopLoop("ringback-outgoing");
-        sounds.playOnce("join");
-        break;
-      case "reconnecting":
-        sounds.stopLoop("ringback-outgoing");
-        break;
-      case "ended":
-        sounds.stopAll();
-        sounds.playOnce("leave");
-        break;
+    const rules = uiRules();
+    const rings =
+      rules !== null &&
+      rules.ringbackPlays(
+        props.group === true,
+        callBarPhase(rules, callState.phase().kind, false),
+      );
+    if (rings) sounds.startLoop("ringback-outgoing");
+    else sounds.stopLoop("ringback-outgoing");
+  });
+
+  // The two short cues: in, and out. On the change of phase only, so a
+  // re-run of this effect for any other reason cannot play one twice.
+  let lastPhaseKind: CallPhaseKind | null = null;
+  createEffect(() => {
+    const kind = callState.phase().kind;
+    if (kind === lastPhaseKind) return;
+    lastPhaseKind = kind;
+    if (kind === "idle") sounds.stopAll();
+    else if (kind === "connected") sounds.playOnce("join");
+    else if (kind === "ended") {
+      sounds.stopAll();
+      sounds.playOnce("leave");
     }
   });
 
-  // Peer arrival / departure cues + chat system events.
+  // Peer arrival / departure cues.
   let lastRemoteIds: ReadonlyArray<string> = [];
   createEffect(() => {
     const remote = callState.participants().filter((p) => !p.isLocal);
@@ -1190,23 +2088,86 @@ const Call: Component<{
       for (const p of remote) {
         if (!lastRemoteIds.includes(p.id)) {
           sounds.playOnce("join");
-          callActions.addSystemEvent(
-            t("call.chat.joined", {
-              name: p.displayName || t("call.participant.unnamed"),
-            }),
-          );
         }
       }
       const present = new Set(remoteIds);
       for (const prevId of lastRemoteIds) {
         if (!present.has(prevId)) {
           sounds.playOnce("leave");
-          callActions.addSystemEvent(t("call.chat.left"));
         }
       }
     }
     lastRemoteIds = remoteIds;
   });
+
+  // Who is speaking (`docs/ux/group-call-grid.md` sections 5.2 and 7.3): read
+  // on this device, for the ring on a tile and for the large tile in the
+  // Focus layout. A group call only; a one-to-one has one voice. One timer
+  // for the call screen, stopped when it is taken down.
+  const speaking = new SpeakingMonitor(
+    (snapshot) => {
+      callActions.setSpeech(snapshot.speakingIds, {
+        activeSpeakerId: snapshot.activeSpeakerId,
+        lastSpokeAtMs: snapshot.lastSpokeAtMs,
+      });
+    },
+    {
+      // Every two seconds, beside the call's other media lines: where each
+      // person's level came from, how loud, whether it counted; the floor;
+      // the large tile and why (`calls/voice-diagnostics.ts`).
+      onReport: (voices, floorId) => {
+        const rules = untrack(uiRules);
+        const people = untrack(callState.participants);
+        const pinned = untrack(callState.pinnedId);
+        const speech = untrack(callState.speech);
+        const layout = groupLayoutKind(untrack(callState.layoutChoice), pinned, people);
+        const onStage =
+          rules === null || layout !== "focus" ? null : stagePerson(rules, people, pinned, speech);
+        // eslint-disable-next-line no-console
+        console.info(
+          describeVoices(
+            "call media interval",
+            voices,
+            floorId,
+            onStage === null
+              ? null
+              : { id: onStage.id, reason: stageReason(onStage.id, people, pinned, speech) },
+            layout,
+          ),
+        );
+      },
+    },
+  );
+  onCleanup(() => speaking.dispose());
+  const voices = createMemo(
+    (): VoiceSource[] =>
+      props.group === true && props.embedded === true
+        ? callState.participants().map((p) => ({
+            id: p.id,
+            isLocal: p.isLocal,
+            micOn: p.micOn,
+            stream: p.isLocal ? props.localStream?.() : props.remoteStreamFor?.(p.id),
+            receiver: p.isLocal ? undefined : props.remoteAudioReceiverFor?.(p.id),
+          }))
+        : [],
+    undefined,
+    {
+      equals: (a, b) =>
+        a.length === b.length &&
+        a.every((x, i) => {
+          const y = b[i];
+          return (
+            y !== undefined &&
+            x.id === y.id &&
+            x.isLocal === y.isLocal &&
+            x.micOn === y.micOn &&
+            x.stream === y.stream &&
+            x.receiver === y.receiver
+          );
+        }),
+    },
+  );
+  createEffect(() => speaking.sync(voices()));
 
   // ----- derived state ------------------------------------------------------
 
@@ -1230,6 +2191,11 @@ const Call: Component<{
    *  camera on gets the video layout even when the other side has not, and the
    *  only picture that exists then is their own. */
   const fill = createMemo(() => callFillSource(surface(), remoteCameraOn(), localCameraOn()));
+  /** The other person's stream on the video surface, and the one its picture
+   *  keeps reading while it is taken down (`calls/held.ts`). */
+  const fillStream = (): MediaStream | undefined =>
+    props.remoteStreamFor?.(remotes()[0]?.id ?? "");
+  const shownFillStream = lastDefined(fillStream);
 
   /** Who is on the call, by the shared rule — lifted out of this view when the
    *  collapsed bar was built, so the bar can show "the same label the call
@@ -1247,6 +2213,7 @@ const Call: Component<{
 
   const statusDetail = createMemo(() =>
     callStatusDetail({
+      groupCall: props.group === true,
       phase: phaseKind(),
       connectedAtMs: callState.connectedAt(),
       nowMs: now(),
@@ -1261,15 +2228,6 @@ const Call: Component<{
       : statusDetail(),
   );
 
-  const audioOutputs = createMemo(() =>
-    callState
-      .settings()
-      .availableDevices.filter((d) => d.kind === "audiooutput")
-      .map((d) => ({ id: d.id, label: d.label })),
-  );
-  const nextOutput = createMemo(() =>
-    nextAudioOutput(audioOutputs(), callState.settings().selectedAudioOutput),
-  );
   const videoInputs = createMemo(() =>
     callState.settings().availableDevices.filter((d) => d.kind === "videoinput"),
   );
@@ -1281,11 +2239,9 @@ const Call: Component<{
       micOn: local()?.micOn === true,
       cameraOn: local()?.camOn === true,
       cameraBusy: callState.videoPublishState() === "starting",
-      canSelectAudioOutput: canSelectAudioOutput(),
-      nextAudioOutputLabel: audioOutputName(nextOutput()),
       participantsOpen: callState.participantListOpen(),
-      chatOpen: callState.chatOpen(),
-      canInvite: props.onInvite !== undefined,
+      othersPresent: remotes().length > 0,
+      canInvite: props.onCopyInviteLink !== undefined,
       inviteBusy: props.inviteBusy === true,
     }),
   );
@@ -1302,11 +2258,6 @@ const Call: Component<{
 
   function press(spec: CallControlSpec): void {
     switch (spec.id) {
-      case "speaker": {
-        const next = nextOutput();
-        if (next !== null) callActions.setSelectedAudioOutput(next.id);
-        return;
-      }
       case "mic":
         callActions.setMic(local()?.micOn !== true);
         return;
@@ -1314,15 +2265,20 @@ const Call: Component<{
         callActions.setCamera(local()?.camOn !== true);
         return;
       case "participants":
-        callActions.setParticipantListOpen(!callState.participantListOpen());
+        // With a link to hand out: the menu. Without one: the list itself,
+        // since a menu of one item is a second step for nothing.
+        if (props.onCopyInviteLink !== undefined) setInviteMenuOpen(!inviteMenuOpen());
+        else callActions.setParticipantListOpen(!callState.participantListOpen());
         return;
-      case "chat":
-        callActions.setChatOpen(!callState.chatOpen());
-        return;
-      case "invite":
-        props.onInvite?.();
+      case "settings":
+        void refreshCallDevices();
+        setSettingsOpen(true);
         return;
       case "end":
+        if (endOpensMenu(props.onEndForEveryone !== undefined, remotes().length)) {
+          setEndMenuOpen(!endMenuOpen());
+          return;
+        }
         callActions.endCall();
         return;
     }
@@ -1344,6 +2300,12 @@ const Call: Component<{
   /** Any interaction wakes the faded bar (§4: "come back on a tap"). */
   const wake = (): void => {
     setLastInteraction(Date.now());
+  };
+  /** A press or a key: also the moment a browser lets an audio context
+   *  start, which the sound levels may need (`calls/speaking-monitor.ts`). */
+  const gesture = (): void => {
+    wake();
+    speaking.userGesture();
   };
 
   const exit = (): void => {
@@ -1370,7 +2332,17 @@ const Call: Component<{
     if (collapse === undefined) return;
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== "Escape") return;
-      if (encryptionSheetOpen()) return;
+      if (encryptionSheetOpen() || settingsOpen()) return;
+      if (inviteMenuOpen()) {
+        event.preventDefault();
+        setInviteMenuOpen(false);
+        return;
+      }
+      if (endMenuOpen()) {
+        event.preventDefault();
+        setEndMenuOpen(false);
+        return;
+      }
       event.preventDefault();
       collapse();
     };
@@ -1386,10 +2358,10 @@ const Call: Component<{
       data-notice={callState.notice() !== null ? "" : undefined}
       onPointerMove={wake}
       onPointerDown={(): void => {
-        wake();
+        gesture();
         if (callState.qualityPopoverOpen()) callActions.setQualityPopoverOpen(false);
       }}
-      onKeyDown={wake}
+      onKeyDown={gesture}
       onFocusIn={wake}
     >
       {/* Put the call away, top left — §4.5's web collapse affordance, and the
@@ -1427,35 +2399,24 @@ const Call: Component<{
           bars that read as an empty box. Own camera mirrored, the other
           person's never. */}
       <Show when={fill() === "remote"}>
-        <Show when={props.remoteStreamFor?.(remotes()[0]?.id ?? "")}>
-          {(stream) => (
-            <video
-              class="lk-call-fill"
-              autoplay
-              playsinline
-              muted
-              aria-label={t("call.fill.remote_camera_a11y", { name: peerLabel() })}
-              ref={(el) => {
-                el.srcObject = stream();
-              }}
-            />
-          )}
+        <Show when={fillStream() !== undefined}>
+          <RemoteVideo
+            stream={shownFillStream() as MediaStream}
+            light={props.remoteLightStreamFor?.(remotes()[0]?.id ?? "")}
+            peerId={peerIdOfParticipant(remotes()[0]?.id ?? "")}
+            class="lk-call-fill"
+            ariaLabel={t("call.fill.remote_camera_a11y", { name: peerLabel() })}
+          />
         </Show>
       </Show>
       <Show when={fill() === "local"}>
-        <Show when={props.localStream?.()}>
-          {(stream) => (
-            <video
-              class="lk-call-fill mirrored"
-              autoplay
-              playsinline
-              muted
-              aria-label={t("call.self.camera_a11y")}
-              ref={(el) => {
-                el.srcObject = stream();
-              }}
-            />
-          )}
+        <Show when={props.localStream?.() !== undefined}>
+          <LocalVideo
+            stream={props.localStream?.()}
+            where="fill"
+            class="lk-call-fill mirrored"
+            ariaLabel={t("call.self.camera_a11y")}
+          />
         </Show>
       </Show>
 
@@ -1471,9 +2432,17 @@ const Call: Component<{
       />
 
       <Show when={surface() === "group"}>
-        <main class="lk-call-main">
-          <GroupStage remoteStreamFor={props.remoteStreamFor} localStream={props.localStream} />
-        </main>
+        <GroupArea
+          remoteStreamFor={props.remoteStreamFor}
+          remoteLightStreamFor={props.remoteLightStreamFor}
+          remoteMiddleStreamFor={props.remoteMiddleStreamFor}
+          remoteVideoGivenFor={props.remoteVideoGivenFor}
+          reportTileVideoQuality={props.reportTileVideoQuality}
+          localStream={props.localStream}
+        />
+        <Show when={remotes().length > 0}>
+          <LayoutSwitch />
+        </Show>
       </Show>
 
       <Show when={selfViewVisible(surface(), localCameraOn(), fill())}>
@@ -1495,7 +2464,117 @@ const Call: Component<{
       />
 
       <ParticipantList />
-      <ChatPanel />
+
+      {/* Participants: the list of who is here and the two ways to invite, in a
+          menu of the app's own, never the system's share sheet
+          (`docs/ux/call-links.md` section 3). */}
+      <Show when={inviteMenuOpen() && props.onCopyInviteLink !== undefined}>
+        <div
+          class="lk-call-menu-scrim"
+          onPointerDown={(event): void => {
+            event.stopPropagation();
+            setInviteMenuOpen(false);
+          }}
+        />
+        <div
+          class="lk-call-menu"
+          role="menu"
+          aria-label={t("call.invite.menu_a11y")}
+          ref={anchorToControl("participants")}
+        >
+          <Show when={remotes().length > 0}>
+            <button
+              type="button"
+              role="menuitem"
+              class="lk-call-menu-item"
+              onClick={(): void => {
+                setInviteMenuOpen(false);
+                callActions.setParticipantListOpen(true);
+              }}
+            >
+              <Icon name="groups" size={20} />
+              <span>{t("call.control.participants")}</span>
+            </button>
+          </Show>
+          <button
+            type="button"
+            role="menuitem"
+            class="lk-call-menu-item"
+            onClick={(): void => {
+              setInviteMenuOpen(false);
+              props.onCopyInviteLink?.();
+            }}
+          >
+            <Icon name="copy" size={20} />
+            <span>{t("call.invite.menu_copy")}</span>
+          </button>
+          <Show when={props.onInviteContact}>
+            {(invite) => (
+              <button
+                type="button"
+                role="menuitem"
+                class="lk-call-menu-item"
+                onClick={(): void => {
+                  setInviteMenuOpen(false);
+                  invite()();
+                }}
+              >
+                <Icon name="user" size={20} />
+                <span>{t("call.invite.menu_contact")}</span>
+              </button>
+            )}
+          </Show>
+        </div>
+      </Show>
+
+      {/* `End` for the person who started a group call: leave, or end it for
+          everyone (`docs/ux/calls.md` section 4.1.2). A menu of the app's
+          own, attached to the button; the first press never ends the call. */}
+      <Show when={endMenuOpen() && props.onEndForEveryone !== undefined}>
+        <div
+          class="lk-call-menu-scrim"
+          onPointerDown={(event): void => {
+            event.stopPropagation();
+            setEndMenuOpen(false);
+          }}
+        />
+        <div
+          class="lk-call-menu lk-call-menu-end"
+          role="menu"
+          aria-label={t("call.end_menu.a11y")}
+          ref={anchorToControl("end")}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            class="lk-call-menu-item"
+            autofocus
+            onClick={(): void => {
+              setEndMenuOpen(false);
+              callActions.endCall();
+            }}
+          >
+            <Icon name="logout" size={20} />
+            <span>{t("call.end_menu.leave")}</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            class="lk-call-menu-item lk-call-menu-item-danger"
+            onClick={(): void => {
+              setEndMenuOpen(false);
+              props.onEndForEveryone?.();
+            }}
+          >
+            <Icon name="phoneEnd" size={20} />
+            <span>{t("call.end_menu.end_for_all")}</span>
+          </button>
+        </div>
+      </Show>
+
+      <Show when={settingsOpen()}>
+        <CallSettingsSheet onClose={(): void => void setSettingsOpen(false)} />
+      </Show>
 
       <Show when={encryptionSheetOpen()}>
         <EncryptionSheet

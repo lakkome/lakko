@@ -8,6 +8,8 @@
  * drop it when it names the account being wiped (`wipe-account.ts`).
  */
 
+import { accountStoresWritable } from "./account-store-gate";
+
 const STORAGE_KEY = "lakko.auth.v1";
 
 /** The stored marker. */
@@ -48,6 +50,9 @@ export function loadPersistedAccount(): PersistedSession | null {
 /** Write the marker. */
 export function savePersistedAccount(record: PersistedSession): void {
   if (typeof localStorage === "undefined") return;
+  // The marker's key names no account, so the storage gate cannot see whose
+  // it is: ask for the account in the record (`account-store-gate.ts`).
+  if (!accountStoresWritable(record.accountIdB64)) return;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(record));
 }
 

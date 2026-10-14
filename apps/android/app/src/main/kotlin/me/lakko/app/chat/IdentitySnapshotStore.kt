@@ -127,23 +127,25 @@ public object IdentitySnapshotStore {
         accountIdB64: String,
         snapshotBytes: ByteArray,
     ) {
-        if (snapshotBytes.isEmpty()) {
-            throw IllegalArgumentException("snapshotBytes must be non-empty")
-        }
-        val wrap = getOrCreateWrapKey()
-        val cipher = Cipher.getInstance(AES_GCM_NOPAD)
-        cipher.init(Cipher.ENCRYPT_MODE, wrap)
-        val iv = cipher.iv
-        check(iv.size == GCM_IV_LEN) {
-            "unexpected GCM IV length from Keystore: ${iv.size}"
-        }
-        val ciphertext = cipher.doFinal(snapshotBytes)
+        me.lakko.app.account.AccountStoreGate.writeOrEnd(accountIdB64) {
+            if (snapshotBytes.isEmpty()) {
+                throw IllegalArgumentException("snapshotBytes must be non-empty")
+            }
+            val wrap = getOrCreateWrapKey()
+            val cipher = Cipher.getInstance(AES_GCM_NOPAD)
+            cipher.init(Cipher.ENCRYPT_MODE, wrap)
+            val iv = cipher.iv
+            check(iv.size == GCM_IV_LEN) {
+                "unexpected GCM IV length from Keystore: ${iv.size}"
+            }
+            val ciphertext = cipher.doFinal(snapshotBytes)
 
-        val out = ByteArray(GCM_IV_LEN + ciphertext.size)
-        System.arraycopy(iv, 0, out, 0, GCM_IV_LEN)
-        System.arraycopy(ciphertext, 0, out, GCM_IV_LEN, ciphertext.size)
+            val out = ByteArray(GCM_IV_LEN + ciphertext.size)
+            System.arraycopy(iv, 0, out, 0, GCM_IV_LEN)
+            System.arraycopy(ciphertext, 0, out, GCM_IV_LEN, ciphertext.size)
 
-        envelopeFile(context, accountIdB64).writeBytes(out)
+            envelopeFile(context, accountIdB64).writeBytes(out)
+        }
     }
 
     /**
@@ -195,19 +197,23 @@ public object IdentitySnapshotStore {
     /**
      * ADR-0050 — record the leaf signature key of the identity the snapshot on
      * disk was taken under. Public bytes, so a plaintext sidecar. A snapshot
-     * taken under another leaf identity (a pre-ADR-0050 account-key snapshot, a
-     * snapshot restored from another device's backup) must not be restored into
-     * this device's identity: `restoreStorage` replaces the whole provider with
-     * groups signed by a key this identity does not hold.
+     * taken under another leaf identity (a pre-ADR-0050 account-key snapshot)
+     * must not be restored into this device's identity: `restoreStorage`
+     * replaces the whole provider with groups signed by a key this identity
+     * does not hold. The only writer of this store is the device itself: the
+     * account backup carries no MLS state (2026-10-02), so nothing restored
+     * from a backup ever lands here.
      *
      * Called after [putSnapshot] by every writer that owns the live identity;
      * a snapshot written without it reads as "another identity".
      */
     public fun putSnapshotLeafKey(context: Context, accountIdB64: String, leafKey: ByteArray) {
-        val encoded = android.util.Base64.encodeToString(leafKey, android.util.Base64.NO_WRAP)
-        val file = leafKeyFile(context, accountIdB64)
-        if (file.exists() && runCatching { file.readText() }.getOrNull() == encoded) return
-        file.writeText(encoded)
+        me.lakko.app.account.AccountStoreGate.writeOrEnd(accountIdB64) {
+            val encoded = android.util.Base64.encodeToString(leafKey, android.util.Base64.NO_WRAP)
+            val file = leafKeyFile(context, accountIdB64)
+            if (file.exists() && runCatching { file.readText() }.getOrNull() == encoded) return
+            file.writeText(encoded)
+        }
     }
 
     /** The leaf key [putSnapshotLeafKey] recorded, or `null` when none was

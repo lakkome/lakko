@@ -255,7 +255,7 @@
       "status": "machine"
     },
     "backup.stale_restore.consequence": {
-      "text": "بازیابی آن حساب شما را به وضعیتی قدیمی‌تر برمی‌گرداند؛ پیام‌ها قدیمی‌تر می‌شوند و دستگاه‌هایی که حذف کرده‌اید ممکن است دوباره ظاهر شوند.",
+      "text": "بازیابی آن فهرست مخاطبان و تنظیمات قدیمی‌تر را برمی‌گرداند. تغییراتی که پس از آن داده‌اید از بین می‌رود.",
       "status": "machine"
     },
     "backup.stale_restore.reason.anchor_unreadable": {
@@ -447,7 +447,7 @@
       "status": "machine"
     },
     "call.control.mute": {
-      "text": "بی‌صدا",
+      "text": "میکروفون",
       "status": "machine"
     },
     "call.control.mute_a11y": {
@@ -462,12 +462,20 @@
       "text": "پنهان کردن شرکت‌کنندگان",
       "status": "machine"
     },
+    "call.control.participants_menu_a11y": {
+      "text": "شرکت‌کنندگان و دعوت‌ها",
+      "status": "machine"
+    },
     "call.control.participants_show_a11y": {
       "text": "نمایش شرکت‌کنندگان",
       "status": "machine"
     },
     "call.control.raise_hand": {
       "text": "بالا بردن دست",
+      "status": "machine"
+    },
+    "call.control.settings": {
+      "text": "تنظیمات",
       "status": "machine"
     },
     "call.control.share_screen": {
@@ -550,6 +558,26 @@
       "text": "این تماس رمزگذاری شده است",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "گزینه‌های پایان تماس",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "پایان تماس برای همه",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "ترک تماس",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "تماس برای همه پایان یافت",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} تماس را برای همه پایان داد",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "راه‌اندازی رمزگذاری تماس ممکن نشد، برای همین تماس شروع نشد.",
       "status": "machine"
@@ -594,6 +622,18 @@
       "text": "دوربین {name}",
       "status": "machine"
     },
+    "call.grid.next_a11y": {
+      "text": "صفحهٔ بعد",
+      "status": "machine"
+    },
+    "call.grid.page_a11y": {
+      "text": "صفحهٔ {page} از {total}",
+      "status": "machine"
+    },
+    "call.grid.prev_a11y": {
+      "text": "صفحهٔ قبل",
+      "status": "machine"
+    },
     "call.group_banner.join_video": {
       "text": "ویدیو",
       "status": "machine"
@@ -608,6 +648,10 @@
     },
     "call.guest.default_name": {
       "text": "مهمان",
+      "status": "machine"
+    },
+    "call.guest.note": {
+      "text": "به‌عنوان مهمان وارد می‌شوید. حساب لازم نیست.",
       "status": "machine"
     },
     "call.guest.working.title": {
@@ -710,8 +754,28 @@
       "text": "پیوند تماس",
       "status": "machine"
     },
+    "call.invite.menu_a11y": {
+      "text": "دعوت به این تماس",
+      "status": "machine"
+    },
+    "call.invite.menu_contact": {
+      "text": "دعوت از مخاطبان",
+      "status": "machine"
+    },
+    "call.invite.menu_copy": {
+      "text": "کپی پیوند دعوت",
+      "status": "machine"
+    },
     "call.invite.minting": {
       "text": "در حال آماده‌سازی پیوند این تماس. چند ثانیه طول می‌کشد.",
+      "status": "machine"
+    },
+    "call.invite.picker_empty": {
+      "text": "هنوز مخاطبی ندارید. پیوند دعوت را کپی کنید و از راه دیگری بفرستید.",
+      "status": "machine"
+    },
+    "call.invite.picker_title": {
+      "text": "دعوت به تماس",
       "status": "machine"
     },
     "call.invite.ready": {
@@ -720,6 +784,18 @@
     },
     "call.invite.retry_a11y": {
       "text": "تلاش دوباره برای آماده‌سازی پیوند دعوت",
+      "status": "machine"
+    },
+    "call.invite.row_invited": {
+      "text": "دعوت شد",
+      "status": "machine"
+    },
+    "call.invite.send_failed": {
+      "text": "دعوت‌نامه فرستاده نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "call.invite.sent": {
+      "text": "دعوت‌نامه برای {name} فرستاده شد.",
       "status": "machine"
     },
     "call.invite.share_a11y": {
@@ -752,6 +828,14 @@
     },
     "call.label.group": {
       "text": "تماس گروهی",
+      "status": "machine"
+    },
+    "call.layout.focus_a11y": {
+      "text": "نمایش بزرگ گوینده",
+      "status": "machine"
+    },
+    "call.layout.grid_a11y": {
+      "text": "نمایش همه در یک اندازه",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -914,6 +998,10 @@
       "text": "شرکت‌کننده {number}",
       "status": "machine"
     },
+    "call.participant.pin_a11y": {
+      "text": "سنجاق کردن {name}",
+      "status": "machine"
+    },
     "call.participant.pinned": {
       "text": "سنجاق‌شده",
       "status": "machine"
@@ -928,6 +1016,10 @@
     },
     "call.participant.unnamed": {
       "text": "شرکت‌کننده",
+      "status": "machine"
+    },
+    "call.participant.unpin_a11y": {
+      "text": "برداشتن سنجاق {name}",
       "status": "machine"
     },
     "call.participant.you": {
@@ -1068,6 +1160,14 @@
     },
     "call.settings.system_default": {
       "text": "پیش‌فرض سیستم",
+      "status": "machine"
+    },
+    "call.settings.title": {
+      "text": "تنظیمات تماس",
+      "status": "machine"
+    },
+    "call.settings.unnamed_device": {
+      "text": "دستگاه {n}",
       "status": "machine"
     },
     "call.settings.video": {
@@ -1832,6 +1932,10 @@
     },
     "chat.call.voice": {
       "text": "تماس",
+      "status": "machine"
+    },
+    "chat.call_invite.title": {
+      "text": "دعوت به تماس",
       "status": "machine"
     },
     "chat.composer.attach": {
@@ -5702,6 +5806,58 @@
       "text": "هیچ‌یک از این دو مرحله محدودیت زمانی ندارد. اگر اتفاقی نیفتاد، می‌توانید دوباره درخواست بفرستید.",
       "status": "machine"
     },
+    "guest.claim.error.generic": {
+      "text": "حساب ساخته نشد. دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "guest.claim.error.phrase_missing": {
+      "text": "این حساب مهمان را نمی‌توان در این دستگاه نگه داشت. می‌توانید از صفحهٔ ثبت‌نام حساب تازه‌ای بسازید.",
+      "status": "machine"
+    },
+    "guest.claim.username_taken_for_you": {
+      "text": "نام کاربری شما @{username} است.",
+      "status": "machine"
+    },
+    "guest.claim.working": {
+      "text": "در حال ساخت حساب شما...",
+      "status": "machine"
+    },
+    "guest.in_call.return": {
+      "text": "بازگشت به تماس",
+      "status": "machine"
+    },
+    "guest.in_call.title": {
+      "text": "به‌عنوان مهمان در یک تماس هستید.",
+      "status": "machine"
+    },
+    "guest.offer.body": {
+      "text": "شما به‌عنوان مهمان اینجا هستید. برای نگه داشتن نامتان و تماس یا پیام دوباره به دیگران، یک حساب بسازید.",
+      "status": "machine"
+    },
+    "guest.offer.decline": {
+      "text": "نه، ممنون",
+      "status": "machine"
+    },
+    "guest.offer.decline_note": {
+      "text": "اگر نپذیرید، حساب مهمان فوراً حذف می‌شود.",
+      "status": "machine"
+    },
+    "guest.offer.delete_failed": {
+      "text": "حساب مهمان اکنون حذف نشد. دوباره تلاش کنید؛ ظرف یک روز خودکار هم حذف می‌شود.",
+      "status": "machine"
+    },
+    "guest.offer.deleted": {
+      "text": "حساب مهمان حذف شد.",
+      "status": "machine"
+    },
+    "guest.offer.deleting": {
+      "text": "در حال حذف...",
+      "status": "machine"
+    },
+    "guest.offer.title": {
+      "text": "به استفاده از Lakko ادامه می‌دهید؟",
+      "status": "machine"
+    },
     "invite.contact.accept_failed": {
       "text": "پذیرفتن دعوت ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
@@ -7072,6 +7228,10 @@
     },
     "restore_identity.lost.create": {
       "text": "بازنشانی کلیدهای حساب",
+      "status": "machine"
+    },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "ذخیره عبارت بازیابی جدید در این دستگاه ممکن نشد. چیزی تغییر نکرد.",
       "status": "machine"
     },
     "restore_identity.lost.sub": {

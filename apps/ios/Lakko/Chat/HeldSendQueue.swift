@@ -326,6 +326,9 @@ public final class HeldSendQueue {
 
     private func write(_ entries: [Entry], to url: URL) -> Bool {
         if entries.isEmpty { return removeFile(url) }
+        // A held message of a wiped account is not written back.
+        guard let gate = AccountStoreGate.enterUnlessWiped(ownerAccountId) else { return false }
+        defer { gate.leave() }
         do {
             let dir = url.deletingLastPathComponent()
             try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)

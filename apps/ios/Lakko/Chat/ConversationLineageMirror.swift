@@ -53,6 +53,8 @@ public enum ConversationLineageMirror {
         defaults: UserDefaults? = SharedStorage.sharedDefaults()
     ) {
         guard let defaults, let accountIdB64 else { return }
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         let prefix = accountPrefix(accountIdB64)
         var wanted: [String: String] = [:]
         for (successor, conversation) in conversationOfSuccessor

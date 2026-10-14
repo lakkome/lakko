@@ -1,30 +1,36 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 //
-// Standalone round-trip test for the N-3 C++ subclass. Pure C++17
-// — no gtest, no libwebrtc runtime — to keep the build chain
-// short: cargo build the staticlib, c++ compile + link, run.
+// Standalone test for the N-3 C++ subclass. Pure C++17 — no gtest, no
+// libwebrtc runtime — to keep the build chain short: cargo build the
+// staticlib, c++ compile + link, run.
 //
-// What it proves:
-//   1. LakkoFrameEncryptor::Create + Encrypt produces a wire frame
-//      libwebrtc would accept (header + ciphertext, fits in the
-//      reported max-size).
-//   2. LakkoFrameDecryptor::Create + Decrypt of that wire frame
-//      recovers the original plaintext.
-//   3. The decryptor's per-sender_leaf ParticipantKey cache
-//      correctly serves N senders into one receiver (mirrors the
-//      SFU forwarding shape).
-//   4. AAD binding works: an encryptor frame decrypted with the
-//      wrong additional_data fails (kFailedToDecrypt).
-//   5. Refcount machinery — AddRef + Release reach 0 and free.
+// What it proves, all in the ADR-0071 frame layout
+// (`clear_prefix || ciphertext_and_tag || sframe_header || trailer`):
+//   1. LakkoFrameEncryptor::Encrypt produces a sealed frame that fits the
+//      reported max size (frame + 36), and LakkoFrameDecryptor::Decrypt
+//      recovers the original frame, never longer than its input.
+//   2. One decryptor serves N senders (the SFU forwarding shape), keyed by
+//      the KID each frame carries.
+//   3. The host `additional_data` is not authenticated; every byte of the
+//      sealed frame is (clear prefix, ciphertext, tag, header, trailer).
+//   4. The codec decides the clear prefix: a VP8 key frame keeps 10 bytes,
+//      any other VP8 frame 3, audio / OTHER / an unknown value none.
+//   5. The canonical ADR-0071 golden frame opens; the header-first layout
+//      of ADR-0013 is refused.
+//   6. `SetCodec` may race `Encrypt`; a mid-call rekey keeps its overlap.
+//   7. Refcount machinery — AddRef + Release reach 0 and free.
 
 #include "sframe-bridge.h"
 
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -55,6 +61,108 @@ constexpr std::array<uint8_t, kSeedLen> kTestSeed = {
     0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
 };
 
+using DecryptStatus = webrtc::FrameDecryptorInterface::Status;
+
+constexpr std::size_t kTagBytes = 16;
+constexpr std::size_t kTrailerBytes = 3;
+
+// Seal `frame` through the encryptor exactly as libwebrtc would: size the
+// output with GetMaxCiphertextByteSize, call Encrypt, cut to what was
+// written.
+std::vector<uint8_t> seal_frame(lakko::sframe::LakkoFrameEncryptor* enc,
+                                cricket::MediaType media_type,
+                                const std::vector<uint8_t>& frame) {
+  const std::size_t max = enc->GetMaxCiphertextByteSize(media_type, frame.size());
+  assert(max == frame.size() + 36 &&
+         "a sealed frame is allowed tag 16 + header 17 + trailer 3");
+  std::vector<uint8_t> wire(max);
+  std::size_t written = 0;
+  int rc = enc->Encrypt(media_type, /*ssrc=*/0,
+                        rtc::ArrayView<const uint8_t>(),
+                        rtc::MakeArrayView(frame.data(), frame.size()),
+                        rtc::MakeArrayView(wire.data(), wire.size()), &written);
+  assert(rc == 0 && "Encrypt failed");
+  assert(written <= wire.size());
+  wire.resize(written);
+  return wire;
+}
+
+// Open `wire` through the decryptor exactly as libwebrtc would. On failure
+// the returned vector is empty.
+std::pair<DecryptStatus, std::vector<uint8_t>> open_frame(
+    lakko::sframe::LakkoFrameDecryptor* dec,
+    cricket::MediaType media_type,
+    const std::vector<uint8_t>& wire) {
+  const std::size_t max = dec->GetMaxPlaintextByteSize(media_type, wire.size());
+  assert(max <= wire.size() && "the opened frame never exceeds the sealed one");
+  std::vector<uint8_t> out(max);
+  auto result = dec->Decrypt(media_type, std::vector<uint32_t>{},
+                             rtc::ArrayView<const uint8_t>(),
+                             rtc::MakeArrayView(wire.data(), wire.size()),
+                             rtc::MakeArrayView(out.data(), out.size()));
+  if (result.status != DecryptStatus::kOk) {
+    assert(result.bytes_written == 0 &&
+           "a frame that does not open hands no bytes upward");
+    return {result.status, {}};
+  }
+  assert(result.bytes_written <= wire.size());
+  out.resize(result.bytes_written);
+  return {result.status, out};
+}
+
+// The three trailer fields of a sealed frame (ADR-0071).
+struct Trailer {
+  std::size_t clear_len;
+  std::size_t header_len;
+  uint8_t version;
+};
+
+Trailer trailer_of(const std::vector<uint8_t>& wire) {
+  assert(wire.size() >= kTrailerBytes + 1 + kTagBytes);
+  return Trailer{wire[wire.size() - 3], wire[wire.size() - 2],
+                 wire[wire.size() - 1]};
+}
+
+// Read the KID and the counter out of a sealed frame's SFrame header, which
+// sits just before the trailer. The header decoder of the C ABI takes a
+// header-first byte string, so it is handed the tail of the frame.
+void header_of(const std::vector<uint8_t>& wire, uint32_t* kid,
+               uint64_t* counter) {
+  const Trailer t = trailer_of(wire);
+  assert(t.version == 0x01);
+  assert(t.header_len >= 1 && t.header_len <= 17);
+  assert(t.clear_len + kTagBytes + t.header_len + kTrailerBytes <= wire.size());
+  const uint8_t* header =
+      wire.data() + wire.size() - kTrailerBytes - t.header_len;
+  uint8_t* rest = nullptr;
+  std::size_t rest_len = 0;
+  lakko_sframe_status_t parse = lakko_sframe_unwrap_frame(
+      header, t.header_len + kTrailerBytes, kid, counter, &rest, &rest_len);
+  assert(parse == LAKKO_SFRAME_STATUS_T_OK &&
+         "the sealed frame's header did not parse");
+  assert(rest_len == kTrailerBytes &&
+         "the header is exactly as long as the trailer says");
+  lakko_sframe_buffer_free(rest, rest_len);
+}
+
+// A VP8 key frame: frame tag with the key-frame bit clear, the start code
+// 9d 01 2a, 640x480, then a body. The same bytes the ADR-0071 golden seals.
+std::vector<uint8_t> vp8_key_frame() {
+  std::vector<uint8_t> frame = {0x10, 0x02, 0x00, 0x9d, 0x01,
+                                0x2a, 0x80, 0x02, 0xe0, 0x01};
+  const char* body = "lakko media frame golden v1";
+  frame.insert(frame.end(), body, body + std::strlen(body));
+  return frame;
+}
+
+// A VP8 frame that is not a key frame: the low bit of the first byte is set.
+std::vector<uint8_t> vp8_delta_frame() {
+  std::vector<uint8_t> frame = {0x11, 0x02, 0x00};
+  const char* body = "a delta frame body, longer than a tag";
+  frame.insert(frame.end(), body, body + std::strlen(body));
+  return frame;
+}
+
 void test_round_trip_single_sender() {
   std::printf("test_round_trip_single_sender ... ");
 
@@ -71,6 +179,15 @@ void test_round_trip_single_sender() {
                                                  kTestSeed.size());
   assert(dec != nullptr && "Decryptor::Create returned nullptr");
   dec->AddRef();
+  // The decryptor is known as one of ours for exactly its lifetime, by the
+  // address the engine would hand back (`receiver-delay.h`); an encryptor,
+  // null and an unrelated address are not.
+  const void* dec_address =
+      static_cast<const webrtc::FrameDecryptorInterface*>(dec);
+  assert(lakko::sframe::LakkoFrameDecryptor::IsLive(dec_address));
+  assert(!lakko::sframe::LakkoFrameDecryptor::IsLive(enc));
+  assert(!lakko::sframe::LakkoFrameDecryptor::IsLive(nullptr));
+  assert(!lakko::sframe::LakkoFrameDecryptor::IsLive(&kAliceLeaf));
 
   const std::vector<uint8_t> plaintext = {
       'h', 'e', 'l', 'l', 'o', ' ', 'l', 'a', 'k', 'k', 'o',
@@ -89,6 +206,13 @@ void test_round_trip_single_sender() {
   assert(rc == 0 && "Encrypt failed");
   assert(ct_written > 0);
   assert(ct_written <= ciphertext.size());
+  assert(ciphertext.size() == plaintext.size() + 36 &&
+         "GetMaxCiphertextByteSize allows tag 16 + header 17 + trailer 3");
+  // Audio keeps nothing clear: the frame is ciphertext+tag, header, trailer.
+  assert(ciphertext[ct_written - 1] == 0x01 && "trailer version");
+  assert(ciphertext[ct_written - 3] == 0 && "audio keeps no clear prefix");
+  assert(ct_written ==
+         plaintext.size() + 16 + ciphertext[ct_written - 2] + 3);
 
   std::vector<uint8_t> recovered(dec->GetMaxPlaintextByteSize(
       cricket::MEDIA_TYPE_AUDIO, ct_written));
@@ -109,20 +233,22 @@ void test_round_trip_single_sender() {
          rtc::RefCountReleaseStatus::kDroppedLastRef);
   assert(dec->Release() ==
          rtc::RefCountReleaseStatus::kDroppedLastRef);
+  assert(!lakko::sframe::LakkoFrameDecryptor::IsLive(dec_address) &&
+         "a destroyed decryptor is no longer known");
   std::printf("ok\n");
 }
 
-// ADR-0013: the AEAD AAD is the SFrame wire header (KID + CTR), NOT
-// the host RTP `additional_data`. This test proves both halves of
-// that contract:
+// The host RTP `additional_data` is NOT part of the AEAD additional data
+// (ADR-0013, kept by ADR-0071); the frame's own SFrame header is. This test
+// proves both halves:
 //   (a) host `additional_data` is IGNORED — encrypt and decrypt with
-//       deliberately mismatched additional_data still round-trips.
-//       This is the property that lets a web RTCRtpScriptTransform
-//       frame decrypt verbatim on iOS/Android (and vice versa): the
-//       host RTP metadata is not reconstructible across platforms,
-//       so it cannot be part of the authenticated set.
-//   (b) the SFrame header IS bound — flipping a header byte makes the
-//       AEAD open fail (kFailedToDecrypt).
+//       deliberately mismatched additional_data still round-trips. This is
+//       the property that lets a web RTCRtpScriptTransform frame decrypt
+//       verbatim on iOS/Android (and vice versa): the host RTP metadata is
+//       not reconstructible across platforms, so it cannot be part of the
+//       authenticated set.
+//   (b) the SFrame header IS bound — flipping a header byte makes the open
+//       fail (kFailedToDecrypt).
 void test_additional_data_ignored_header_is_aad() {
   std::printf("test_additional_data_ignored_header_is_aad ... ");
 
@@ -169,14 +295,16 @@ void test_additional_data_ignored_header_is_aad() {
   assert(std::memcmp(recovered.data(), plaintext.data(),
                      plaintext.size()) == 0);
 
-  // (b) Flip the first header byte (the SFrame config octet — part of
-  //     the bound AAD) and decrypt — must fail. Either the header
-  //     decode rejects it or the AEAD tag check does; both surface as
-  //     kFailedToDecrypt.
+  // (b) Flip the first byte of the SFrame header (its config octet —
+  //     part of the bound additional data) and decrypt — must fail.
+  //     Either the header decode rejects it or the AEAD tag check does;
+  //     both surface as kFailedToDecrypt. The header sits just before
+  //     the 3-byte trailer, which states its length.
   std::vector<uint8_t> tampered_wire(ciphertext.begin(),
                                      ciphertext.begin() +
                                          static_cast<std::ptrdiff_t>(ct_written));
-  tampered_wire[0] ^= 0x01;
+  const std::size_t header_len = tampered_wire[tampered_wire.size() - 2];
+  tampered_wire[tampered_wire.size() - 3 - header_len] ^= 0x01;
   std::vector<uint8_t> recovered2(dec->GetMaxPlaintextByteSize(
       cricket::MEDIA_TYPE_VIDEO, tampered_wire.size()));
   auto result2 = dec->Decrypt(
@@ -188,7 +316,7 @@ void test_additional_data_ignored_header_is_aad() {
   assert(result2.status ==
              webrtc::FrameDecryptorInterface::Status::kFailedToDecrypt &&
          "header-tampered Decrypt unexpectedly returned kOk "
-         "(ADR-0013: header IS the bound AAD)");
+         "(the SFrame header IS in the bound additional data)");
 
   enc->Release();
   dec->Release();
@@ -294,10 +422,7 @@ void test_bad_seed_length() {
 }
 
 // Tampering inside the ciphertext body — flip a single bit in the
-// middle of the wire frame. AEAD tag verification must catch it.
-// Mirrors test_aad_binding but on the ciphertext slot rather than
-// the AAD slot, so both sides of the AEAD's authenticated set are
-// exercised.
+// middle of the ciphertext. AEAD tag verification must catch it.
 void test_ciphertext_tamper() {
   std::printf("test_ciphertext_tamper ... ");
 
@@ -337,13 +462,10 @@ void test_ciphertext_tamper() {
   constexpr std::size_t kAeadTagBytes = 16;
   assert(ct_written > kAeadTagBytes && "ct must be larger than AEAD tag");
 
-  // Pick a byte halfway between the wire-header end and the tag
-  // start — there must be plaintext bytes there because the
-  // plaintext is 32 bytes and the AEAD-tag is the trailing 16. The
-  // SFrame wire header is at most 17 bytes (see
-  // kMaxSframeHeaderBytes in sframe-bridge.cc); the midpoint of
-  // (header_max, ct_written - tag) is a safe body byte.
-  const std::size_t mid = (17 + (ct_written - kAeadTagBytes)) / 2;
+  // Audio keeps no clear prefix, so the sealed frame starts with the
+  // ciphertext of the 32 plaintext bytes; the tag, the header and the
+  // trailer follow. The middle of the plaintext's span is a body byte.
+  const std::size_t mid = plaintext.size() / 2;
   ciphertext[mid] ^= 0x40;  // single-bit flip is enough for AEAD
 
   std::vector<uint8_t> recovered(dec->GetMaxPlaintextByteSize(
@@ -567,82 +689,373 @@ void test_payload_size_extremes() {
   std::printf("ok\n");
 }
 
-// Cross-stack golden vector (ADR-0013 / C-55, the automatable slice of G-26).
-// The canonical wire (`seed = 0x42 x 32`, `leaf = 3`,
-// `"lakko sframe golden vector v1"`) is pinned byte-for-byte in the Rust core
-// (`lakko-calls`), web (`apps/web/.../sframe-golden.test.ts`), iOS
-// (`SFrameGoldenTests.swift`), Android (`SframeGoldenTest.kt`), and the
-// `lakko-sframe-native` C ABI golden tests. This asserts the C++ bridge — the
-// `LakkoFrameEncryptor` / `LakkoFrameDecryptor` that the iOS Obj-C++ shim +
-// Android JNI module actually wrap before handing bytes to libwebrtc —
-// produces and consumes the SAME wire. So a media frame sealed on the native
-// path is byte-identical to what every other stack opens (and vice versa).
-void test_cross_stack_golden_vector() {
-  std::printf("test_cross_stack_golden_vector ... ");
+// Cross-stack golden vector for the ADR-0071 layout. The canonical frame
+// (`seed = 0x42 x 32`, leaf 3, stream 1, counter 1, a VP8 key frame whose
+// body is "lakko media frame golden v1", 59 bytes sealed) is pinned
+// byte-for-byte in the Rust core (`lakko_calls::media_frame`), the wasm
+// surface, the web suite and the `lakko-sframe-native` C ABI test. This
+// asserts the C++ bridge — the `LakkoFrameEncryptor` / `LakkoFrameDecryptor`
+// the iOS Obj-C++ shim and the Android JNI module wrap before handing bytes
+// to libwebrtc — speaks the SAME wire:
+//   (1) the decryptor OPENS the golden frame to the golden VP8 key frame;
+//   (2) the encryptor, told the codec is VP8, seals the same input into a
+//       frame of the same shape (10 clear bytes, the composite KID, a
+//       64-bit counter) and the decryptor opens it.
+// Since ADR-0069 an encryptor starts at a random counter below 2^62 and
+// nothing on the C ABI sets a counter, so the encryptor cannot reproduce the
+// golden bytes; its seal is proved by opening what it sealed.
+void test_media_frame_golden_vector() {
+  std::printf("test_media_frame_golden_vector ... ");
 
   std::array<uint8_t, kSeedLen> golden_seed{};
   golden_seed.fill(0x42);
   constexpr uint32_t kGoldenLeaf = 3;
-  const char* kGoldenPlaintextStr = "lakko sframe golden vector v1";
-  const std::vector<uint8_t> golden_plaintext(
-      kGoldenPlaintextStr,
-      kGoldenPlaintextStr + std::strlen(kGoldenPlaintextStr));
-  // Stream 0 (audio) for leaf 3 → composite KID 0x0300 (ADR-0035); the header
-  // carries the extended 2-byte KID `0x03 0x00`, so the wire begins `910300…`.
+  constexpr uint8_t kGoldenStream = 1;  // the camera
+  const std::vector<uint8_t> golden_frame = vp8_key_frame();
   const std::vector<uint8_t> golden_wire = hex_decode(
-      "910300fe2c2af65799594a4c693ff4c9e0d49b0565756ddd7299b0945fc8adb1"
-      "c9c12fced57c6937f372e6b94bdae40a");
+      "1002009d012a8002e0012dc56b47f2bfd3ebf051d8893d6d2b2b355f29f3980b60"
+      "e19c2555c9ad3a6ca9e95f08b228768c0f59a6509103010a0301");
+  assert(golden_wire.size() == 59);
+  assert(golden_frame.size() == 37);
 
-  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
-      golden_seed.data(), golden_seed.size(), kGoldenLeaf, /*stream_index=*/0);
-  assert(enc != nullptr && "golden Encryptor::Create returned nullptr");
-  enc->AddRef();
-
-  // A non-empty host additional_data deliberately differs from the empty AAD
-  // the other stacks sealed the golden with — yet the produced wire MUST still
-  // equal the golden, because the host additional_data is not in the AEAD AAD
-  // (ADR-0013: the SFrame wire header is the only authenticated metadata).
-  const std::vector<uint8_t> host_aad = {0xDE, 0xAD, 0xBE, 0xEF};
-
-  std::vector<uint8_t> ciphertext(enc->GetMaxCiphertextByteSize(
-      cricket::MEDIA_TYPE_AUDIO, golden_plaintext.size()));
-  std::size_t ct_written = 0;
-  int rc = enc->Encrypt(
-      cricket::MEDIA_TYPE_AUDIO, /*ssrc=*/0,
-      rtc::MakeArrayView(host_aad.data(), host_aad.size()),
-      rtc::MakeArrayView(golden_plaintext.data(), golden_plaintext.size()),
-      rtc::MakeArrayView(ciphertext.data(), ciphertext.size()),
-      &ct_written);
-  assert(rc == 0 && "golden Encrypt failed");
-  assert(ct_written == golden_wire.size() &&
-         "the C++ bridge Encrypt produced a wire of the wrong length");
-  assert(std::memcmp(ciphertext.data(), golden_wire.data(),
-                     golden_wire.size()) == 0 &&
-         "the C++ bridge Encrypt MUST produce the canonical cross-stack "
-         "golden wire — a native-sealed frame must be byte-identical to "
-         "web / iOS / Android / the core (ADR-0013 / C-55)");
-
-  // The decryptor opens the canonical golden wire back to the golden plaintext
-  // — a frame any other stack seals opens on the native media path.
+  // (1) The decryptor opens the canonical golden frame — a frame any other
+  // stack seals opens on the native media path. A non-empty host
+  // additional_data is passed on purpose: it is not authenticated.
   auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(
-      golden_seed.data(), golden_seed.size());
+      golden_seed.data(), golden_seed.size(), "video");
   assert(dec != nullptr && "golden Decryptor::Create returned nullptr");
   dec->AddRef();
 
+  const std::vector<uint8_t> host_aad = {0xDE, 0xAD, 0xBE, 0xEF};
   std::vector<uint8_t> recovered(dec->GetMaxPlaintextByteSize(
-      cricket::MEDIA_TYPE_AUDIO, golden_wire.size()));
+      cricket::MEDIA_TYPE_VIDEO, golden_wire.size()));
   auto result = dec->Decrypt(
-      cricket::MEDIA_TYPE_AUDIO, std::vector<uint32_t>{},
+      cricket::MEDIA_TYPE_VIDEO, std::vector<uint32_t>{},
       rtc::MakeArrayView(host_aad.data(), host_aad.size()),
       rtc::MakeArrayView(golden_wire.data(), golden_wire.size()),
       rtc::MakeArrayView(recovered.data(), recovered.size()));
-  assert(result.status == webrtc::FrameDecryptorInterface::Status::kOk &&
-         "the C++ bridge Decrypt of the golden wire did not return kOk");
-  assert(result.bytes_written == golden_plaintext.size());
-  assert(std::memcmp(recovered.data(), golden_plaintext.data(),
-                     golden_plaintext.size()) == 0 &&
-         "the C++ bridge Decrypt of the golden wire returned the wrong "
-         "plaintext");
+  assert(result.status == DecryptStatus::kOk &&
+         "the C++ bridge Decrypt of the golden frame did not return kOk");
+  assert(result.bytes_written == golden_frame.size());
+  assert(std::memcmp(recovered.data(), golden_frame.data(),
+                     golden_frame.size()) == 0 &&
+         "the C++ bridge Decrypt of the golden frame returned the wrong bytes");
+
+  // The golden's own shape, read the way a receiver reads it.
+  const Trailer golden_trailer = trailer_of(golden_wire);
+  assert(golden_trailer.clear_len == 10);
+  assert(golden_trailer.header_len == 3);
+  assert(golden_trailer.version == 0x01);
+  uint32_t golden_kid = 0;
+  uint64_t golden_counter = 0;
+  header_of(golden_wire, &golden_kid, &golden_counter);
+  assert(golden_kid == 0x0301u && golden_counter == 1);
+
+  // (2) The encryptor seals two frames of the same input.
+  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
+      golden_seed.data(), golden_seed.size(), kGoldenLeaf, kGoldenStream);
+  assert(enc != nullptr && "golden Encryptor::Create returned nullptr");
+  enc->AddRef();
+  enc->SetCodec(LAKKO_SFRAME_MEDIA_CODEC_VP8);
+
+  uint64_t counters[2] = {0, 0};
+  for (int i = 0; i < 2; ++i) {
+    const std::vector<uint8_t> wire =
+        seal_frame(enc, cricket::MEDIA_TYPE_VIDEO, golden_frame);
+
+    // Same clear prefix as the golden, byte for byte.
+    const Trailer t = trailer_of(wire);
+    assert(t.clear_len == 10 && t.version == 0x01);
+    assert(std::memcmp(wire.data(), golden_wire.data(), 10) == 0 &&
+           "the first 10 bytes of a VP8 key frame stay as the encoder made them");
+    assert(wire.size() ==
+           golden_frame.size() + kTagBytes + t.header_len + kTrailerBytes);
+
+    // The whole KID (leaf 3 << 8 | stream 1) and the 64-bit counter.
+    uint32_t kid = 0;
+    uint64_t counter = 0;
+    header_of(wire, &kid, &counter);
+    assert(kid == 0x0301u && "the header KID must be (leaf 3 << 8) | stream 1");
+    // The start is uniform in [0, 2^62) and the first frame carries
+    // start + 1, so the counter lies in [1, 2^62].
+    assert(counter >= 1 && counter <= (uint64_t{1} << 62) &&
+           "the counter must be the 64-bit one from a random 62-bit start");
+    counters[i] = counter;
+
+    auto own = open_frame(dec, cricket::MEDIA_TYPE_VIDEO, wire);
+    assert(own.first == DecryptStatus::kOk &&
+           "the decryptor did not open the frame the encryptor sealed");
+    assert(own.second == golden_frame);
+  }
+  assert(counters[1] == counters[0] + 1 &&
+         "consecutive frames carry consecutive counters");
+
+  enc->Release();
+  dec->Release();
+  std::printf("ok\n");
+}
+
+// ADR-0071: the codec the shim names decides how much of each frame stays in
+// the clear, and nothing else about the frame.
+void test_codec_decides_the_clear_prefix() {
+  std::printf("test_codec_decides_the_clear_prefix ... ");
+
+  constexpr uint32_t kLeaf = 9;
+  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
+      kTestSeed.data(), kTestSeed.size(), kLeaf, /*stream_index=*/1);
+  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+                                                         kTestSeed.size());
+  assert(enc != nullptr && dec != nullptr);
+  enc->AddRef();
+  dec->AddRef();
+
+  const std::vector<uint8_t> key = vp8_key_frame();
+  const std::vector<uint8_t> delta = vp8_delta_frame();
+
+  // Seal `frame`, check the clear prefix is `expect` bytes of the frame
+  // itself, and that the frame opens back whole.
+  auto check = [&](cricket::MediaType media, const std::vector<uint8_t>& frame,
+                   std::size_t expect) {
+    const std::vector<uint8_t> wire = seal_frame(enc, media, frame);
+    const Trailer t = trailer_of(wire);
+    assert(t.version == 0x01);
+    assert(t.clear_len == expect && "wrong clear prefix length");
+    assert(wire.size() == frame.size() + kTagBytes + t.header_len + kTrailerBytes);
+    assert(std::memcmp(wire.data(), frame.data(), expect) == 0 &&
+           "the clear prefix is the frame's own leading bytes");
+    auto opened = open_frame(dec, media, wire);
+    assert(opened.first == DecryptStatus::kOk);
+    assert(opened.second == frame);
+  };
+
+  // Before the shim has named a codec a video encryptor seals as OTHER.
+  assert(enc->Codec() == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+  check(cricket::MEDIA_TYPE_VIDEO, key, 0);
+  check(cricket::MEDIA_TYPE_VIDEO, delta, 0);
+
+  // VP8: a key frame keeps its first 10 bytes, any other frame its first 3.
+  enc->SetCodec(LAKKO_SFRAME_MEDIA_CODEC_VP8);
+  assert(enc->Codec() == LAKKO_SFRAME_MEDIA_CODEC_VP8);
+  check(cricket::MEDIA_TYPE_VIDEO, key, 10);
+  check(cricket::MEDIA_TYPE_VIDEO, delta, 3);
+  // A frame shorter than its prefix is left clear whole.
+  check(cricket::MEDIA_TYPE_VIDEO, std::vector<uint8_t>{0x11, 0x02}, 2);
+  check(cricket::MEDIA_TYPE_VIDEO, std::vector<uint8_t>{0x10, 0x02, 0x00, 0x9d}, 4);
+
+  // A frame libwebrtc hands over as audio keeps nothing clear even on an
+  // encryptor told VP8: the media type wins.
+  check(cricket::MEDIA_TYPE_AUDIO, key, 0);
+
+  // Opus, OTHER and a value the C ABI does not know keep nothing clear.
+  enc->SetCodec(LAKKO_SFRAME_MEDIA_CODEC_OPUS);
+  check(cricket::MEDIA_TYPE_VIDEO, key, 0);
+  enc->SetCodec(LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+  check(cricket::MEDIA_TYPE_VIDEO, key, 0);
+  enc->SetCodec(200);
+  assert(enc->Codec() == 200);
+  check(cricket::MEDIA_TYPE_VIDEO, key, 0);
+  check(cricket::MEDIA_TYPE_VIDEO, delta, 0);
+
+  // The name mapping the platform shims use.
+  using Enc = lakko::sframe::LakkoFrameEncryptor;
+  assert(Enc::CodecFromName("VP8") == LAKKO_SFRAME_MEDIA_CODEC_VP8);
+  assert(Enc::CodecFromName("vp8") == LAKKO_SFRAME_MEDIA_CODEC_VP8);
+  assert(Enc::CodecFromName("video/VP8") == LAKKO_SFRAME_MEDIA_CODEC_VP8);
+  assert(Enc::CodecFromName("opus") == LAKKO_SFRAME_MEDIA_CODEC_OPUS);
+  assert(Enc::CodecFromName("audio/opus") == LAKKO_SFRAME_MEDIA_CODEC_OPUS);
+  assert(Enc::CodecFromName("H264") == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+  assert(Enc::CodecFromName("VP9") == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+  assert(Enc::CodecFromName("VP80") == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+  assert(Enc::CodecFromName("red") == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+  assert(Enc::CodecFromName("rtx") == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+  assert(Enc::CodecFromName("") == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+  assert(Enc::CodecFromName(nullptr) == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+
+  enc->Release();
+  dec->Release();
+  std::printf("ok\n");
+}
+
+// Every byte of a sealed frame is authenticated: the clear prefix, the
+// ciphertext, the tag, the SFrame header and the trailer. Flipping any one
+// byte of a sealed VP8 key frame and of a sealed VP8 delta frame must fail,
+// and so must cutting the frame short or adding to it.
+void test_every_byte_is_authenticated() {
+  std::printf("test_every_byte_is_authenticated ... ");
+
+  constexpr uint32_t kLeaf = 12;
+  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
+      kTestSeed.data(), kTestSeed.size(), kLeaf, /*stream_index=*/1);
+  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+                                                         kTestSeed.size());
+  assert(enc != nullptr && dec != nullptr);
+  enc->AddRef();
+  dec->AddRef();
+  enc->SetCodec(LAKKO_SFRAME_MEDIA_CODEC_VP8);
+
+  const std::vector<std::vector<uint8_t>> frames = {vp8_key_frame(),
+                                                    vp8_delta_frame()};
+  for (const auto& frame : frames) {
+    const std::vector<uint8_t> wire =
+        seal_frame(enc, cricket::MEDIA_TYPE_VIDEO, frame);
+    const Trailer t = trailer_of(wire);
+    assert(t.clear_len == ((frame[0] & 0x01) == 0 ? 10u : 3u));
+
+    // Untouched, it opens.
+    auto intact = open_frame(dec, cricket::MEDIA_TYPE_VIDEO, wire);
+    assert(intact.first == DecryptStatus::kOk && intact.second == frame);
+
+    // Flip each byte in turn, in two different bit positions.
+    for (std::size_t i = 0; i < wire.size(); ++i) {
+      for (uint8_t mask : {uint8_t{0x01}, uint8_t{0x80}}) {
+        std::vector<uint8_t> tampered = wire;
+        tampered[i] ^= mask;
+        auto opened = open_frame(dec, cricket::MEDIA_TYPE_VIDEO, tampered);
+        if (opened.first == DecryptStatus::kOk) {
+          std::printf("byte %zu of %zu (mask 0x%02x) opened after a flip\n", i,
+                      wire.size(), mask);
+        }
+        assert(opened.first == DecryptStatus::kFailedToDecrypt &&
+               "a sealed frame opened with one byte flipped");
+      }
+    }
+
+    // Cut short by one byte from either end, and extended by one byte.
+    std::vector<uint8_t> no_last(wire.begin(), wire.end() - 1);
+    assert(open_frame(dec, cricket::MEDIA_TYPE_VIDEO, no_last).first ==
+           DecryptStatus::kFailedToDecrypt);
+    std::vector<uint8_t> no_first(wire.begin() + 1, wire.end());
+    assert(open_frame(dec, cricket::MEDIA_TYPE_VIDEO, no_first).first ==
+           DecryptStatus::kFailedToDecrypt);
+    std::vector<uint8_t> longer = wire;
+    longer.insert(longer.begin(), 0x00);
+    assert(open_frame(dec, cricket::MEDIA_TYPE_VIDEO, longer).first ==
+           DecryptStatus::kFailedToDecrypt);
+  }
+
+  enc->Release();
+  dec->Release();
+  std::printf("ok\n");
+}
+
+// The header-first layout of ADR-0013 (`sframe_header || ciphertext`) is not
+// accepted on the media path any more: neither its pinned golden vector nor
+// a frame sealed in it just now under the right key opens. (The C ABI still
+// exports the header-first seal; the bridge does not call it.)
+void test_header_first_layout_is_refused() {
+  std::printf("test_header_first_layout_is_refused ... ");
+
+  std::array<uint8_t, kSeedLen> golden_seed{};
+  golden_seed.fill(0x42);
+  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(golden_seed.data(),
+                                                         golden_seed.size());
+  assert(dec != nullptr);
+  dec->AddRef();
+
+  // The ADR-0013 golden: seed 0x42 x 32, leaf 3, stream 0, counter 1.
+  const std::vector<uint8_t> old_golden = hex_decode(
+      "910300fe2c2af65799594a4c693ff4c9e0d49b0565756ddd7299b0945fc8adb1"
+      "c9c12fced57c6937f372e6b94bdae40a");
+  assert(open_frame(dec, cricket::MEDIA_TYPE_AUDIO, old_golden).first ==
+         DecryptStatus::kFailedToDecrypt &&
+         "the header-first golden vector opened on the media path");
+
+  // A header-first frame sealed now, under the key the decryptor would
+  // derive, for several body lengths (so that whatever the last three bytes
+  // of the ciphertext happen to be, none reads as a frame of this layout).
+  lakko_sframe_call_key_t* call_key = nullptr;
+  lakko_sframe_status_t status = lakko_sframe_call_key_new(
+      golden_seed.data(), golden_seed.size(), &call_key);
+  assert(status == LAKKO_SFRAME_STATUS_T_OK);
+  lakko_sframe_participant_key_t* pk = nullptr;
+  status = lakko_sframe_participant_key_new(call_key, 3, 1, &pk);
+  assert(status == LAKKO_SFRAME_STATUS_T_OK);
+  for (std::size_t body = 1; body <= 64; ++body) {
+    const std::vector<uint8_t> plaintext(body, 0x5A);
+    uint8_t* wire_ptr = nullptr;
+    std::size_t wire_len = 0;
+    status = lakko_sframe_seal_framed(pk, plaintext.data(), plaintext.size(),
+                                      &wire_ptr, &wire_len);
+    assert(status == LAKKO_SFRAME_STATUS_T_OK);
+    const std::vector<uint8_t> wire(wire_ptr, wire_ptr + wire_len);
+    lakko_sframe_buffer_free(wire_ptr, wire_len);
+    assert(open_frame(dec, cricket::MEDIA_TYPE_VIDEO, wire).first ==
+           DecryptStatus::kFailedToDecrypt &&
+           "a header-first frame opened on the media path");
+  }
+  lakko_sframe_participant_key_free(pk);
+  lakko_sframe_call_key_free(call_key);
+
+  dec->Release();
+  std::printf("ok\n");
+}
+
+// `SetCodec` is called from the signaling thread while the codec thread is
+// inside `Encrypt`. A smoke test of that race: one thread seals a stream of
+// VP8 key frames while another keeps changing the codec. Every frame must
+// come out sealed under one codec value or another (10 clear bytes or none)
+// and open back to the input; the counters must stay consecutive.
+void test_set_codec_races_encrypt() {
+  std::printf("test_set_codec_races_encrypt ... ");
+
+  constexpr uint32_t kLeaf = 17;
+  constexpr std::size_t kFrames = 20000;
+  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
+      kTestSeed.data(), kTestSeed.size(), kLeaf, /*stream_index=*/1);
+  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+                                                         kTestSeed.size());
+  assert(enc != nullptr && dec != nullptr);
+  enc->AddRef();
+  dec->AddRef();
+
+  const std::vector<uint8_t> frame = vp8_key_frame();
+  std::vector<std::vector<uint8_t>> sealed;
+  sealed.reserve(kFrames);
+  std::atomic<bool> done{false};
+
+  std::thread setter([&] {
+    const uint8_t values[] = {LAKKO_SFRAME_MEDIA_CODEC_VP8,
+                              LAKKO_SFRAME_MEDIA_CODEC_OTHER,
+                              LAKKO_SFRAME_MEDIA_CODEC_OPUS, 200};
+    std::size_t i = 0;
+    while (!done.load(std::memory_order_acquire)) {
+      enc->SetCodec(values[i++ % 4]);
+    }
+  });
+  std::thread sealer([&] {
+    for (std::size_t i = 0; i < kFrames; ++i) {
+      sealed.push_back(seal_frame(enc, cricket::MEDIA_TYPE_VIDEO, frame));
+    }
+    done.store(true, std::memory_order_release);
+  });
+  sealer.join();
+  setter.join();
+
+  assert(sealed.size() == kFrames);
+  std::size_t with_prefix = 0;
+  std::size_t without_prefix = 0;
+  uint64_t previous_counter = 0;
+  for (std::size_t i = 0; i < sealed.size(); ++i) {
+    const Trailer t = trailer_of(sealed[i]);
+    assert((t.clear_len == 10 || t.clear_len == 0) &&
+           "a frame was sealed under no codec value that was ever set");
+    if (t.clear_len == 10) {
+      ++with_prefix;
+    } else {
+      ++without_prefix;
+    }
+    uint32_t kid = 0;
+    uint64_t counter = 0;
+    header_of(sealed[i], &kid, &counter);
+    assert(kid == ((kLeaf << 8) | 1u));
+    assert((i == 0 || counter == previous_counter + 1) &&
+           "the counter skipped or repeated under the race");
+    previous_counter = counter;
+    auto opened = open_frame(dec, cricket::MEDIA_TYPE_VIDEO, sealed[i]);
+    assert(opened.first == DecryptStatus::kOk && opened.second == frame);
+  }
+  std::printf("(%zu with a clear prefix, %zu without) ", with_prefix,
+              without_prefix);
 
   enc->Release();
   dec->Release();
@@ -722,6 +1135,22 @@ void test_mid_call_rekey_overlap() {
          "new-epoch frame did not open under the current key");
   assert(new_opened.second == pt_new);
 
+  // The codec set before a rekey survives it: a VP8 key frame sealed under
+  // the new epoch still keeps its 10 clear bytes and opens.
+  enc->SetCodec(LAKKO_SFRAME_MEDIA_CODEC_VP8);
+  const bool rekeyed_again = enc->Rekey(seed_b.data(), seed_b.size());
+  assert(rekeyed_again);
+  assert(enc->Codec() == LAKKO_SFRAME_MEDIA_CODEC_VP8);
+  {
+    const std::vector<uint8_t> key = vp8_key_frame();
+    const std::vector<uint8_t> video_wire =
+        seal_frame(enc, cricket::MEDIA_TYPE_VIDEO, key);
+    assert(trailer_of(video_wire).clear_len == 10);
+    auto video_opened = open_frame(dec, cricket::MEDIA_TYPE_VIDEO, video_wire);
+    assert(video_opened.first == DecryptStatus::kOk &&
+           video_opened.second == key);
+  }
+
   // Prune past the window → the old frame no longer opens.
   dec->Prune(2000);
   auto old_after_prune = open(old_wire, old_len);
@@ -788,7 +1217,11 @@ int main() {
   test_counter_monotonicity_and_out_of_order();
   test_per_call_key_isolation();
   test_payload_size_extremes();
-  test_cross_stack_golden_vector();
+  test_media_frame_golden_vector();
+  test_codec_decides_the_clear_prefix();
+  test_every_byte_is_authenticated();
+  test_header_first_layout_is_refused();
+  test_set_codec_races_encrypt();
   test_mid_call_rekey_overlap();
   test_empty_frame_is_not_a_decrypt_failure();
   std::printf("all sframe-bridge tests passed\n");

@@ -202,6 +202,7 @@ import { ReceiveCoordinator } from "./receive-coordinator";
 import { runSupersededRerequests } from "./membership-retry";
 import { readIntentSnapshot, reissueOwnRequest } from "./rerequest-membership";
 import { membershipRefusalRetryMaySucceed } from "../../wasm/lakko_ffi_wasm";
+import { BindingEpoch, StaleBindingError } from "../auth/binding-epoch";
 import type { SweepOutcome } from "./sweep";
 
 export interface BackgroundReceiveApi {
@@ -339,6 +340,18 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   const resume = createWakeLatch();
   let loopAbort: AbortController | null = null;
   let activeAccount: string | null = null;
+  /**
+   * Advanced by `stop()` whenever a session this provider was bound to ends.
+   * A poll, a sweep or a device fan-out captures it when it starts. After
+   * that session is over, what such work still holds (`entry`, its secrets,
+   * the rows it decrypted) is the OLD account's, while everything this
+   * provider reaches - the coordinator's cursors, the profile store, the call
+   * host, the chat list - is the next account's or nobody's. So stale work
+   * touches none of that; the one thing it still does is file the rows it
+   * decrypted into the old account's own message log, which is durable,
+   * keyed by that account, and cannot be decrypted a second time.
+   */
+  const binding = new BindingEpoch();
   /** The journal cursors the message log holds, by group hex, read once per
    *  session. A group the coordinator has no cursor for yet starts from here —
    *  where the chat view last persisted it — rather than at 0, which would
@@ -371,10 +384,18 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
 
   /** The cursor a poll of `entry` starts from, seeding the coordinator from the
    *  log the first time. */
-  async function startCursor(accountIdB64: string, entry: ActiveGroup): Promise<number> {
+  async function startCursor(
+    accountIdB64: string,
+    entry: ActiveGroup,
+    current: () => boolean,
+  ): Promise<number> {
     const known = coordinator.cursor(entry.groupIdB64);
     if (known !== undefined) return known;
     const fromLog = (await loadLogCursors(accountIdB64)).get(hexOf(entry)) ?? 0;
+    // The coordinator was reset for another session while the log was being
+    // read: this account's position must not seed that session's cursor (two
+    // accounts on one browser can share a group).
+    if (!current()) return fromLog;
     // `noteCursor` keeps the maximum, so a chat view that noted a later
     // position while the log was being read still wins.
     return coordinator.noteCursor(entry.groupIdB64, fromLog);
@@ -460,18 +481,24 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       return { yieldedRows: false };
     }
     const account = s.account.accountId;
-    const start = await startCursor(account, entry);
+    const current = binding.capture();
+    const start = await startCursor(account, entry, current);
+    if (!current()) return { yieldedRows: false };
     let membersBefore = memberSignatureKeys(entry.group);
     let peopleBefore: string[] | null = personKeysOrNull(entry);
+    // Where this poll got to, kept apart from the coordinator: once the
+    // session is over the coordinator's cursors are another session's.
+    let reached = start;
     const result = await chat.pollMessages(
       secrets,
       entry.group,
       start,
       waitSecs,
       {
-        read: () => coordinator.cursor(groupIdB64) ?? start,
+        read: () => (current() ? (coordinator.cursor(groupIdB64) ?? start) : reached),
         advance: (to) => {
-          coordinator.noteCursor(groupIdB64, to);
+          reached = Math.max(reached, to);
+          if (current()) coordinator.noteCursor(groupIdB64, to);
         },
         beforeApply: () => {
           membersBefore = memberSignatureKeys(entry.group);
@@ -481,8 +508,30 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       signal,
     );
     if (result.outcome === "cursor-moved") return { yieldedRows: false };
+    if (!current()) {
+      // Signed out while the poll was out. Only the durable half.
+      await settle(
+        account,
+        entry,
+        result.events,
+        reached > start,
+        membersBefore,
+        { current, reached },
+        peopleBefore,
+      );
+      return { yieldedRows: false };
+    }
     const end = coordinator.cursor(groupIdB64) ?? start;
-    await settle(account, entry, result.events, end > start, membersBefore, peopleBefore);
+    await settle(
+      account,
+      entry,
+      result.events,
+      end > start,
+      membersBefore,
+      { current, reached },
+      peopleBefore,
+    );
+    if (!current()) return { yieldedRows: false };
     // ADR-0050 section 2.5a point 4 — re-request an own membership request
     // a commit this batch applied dropped, BEFORE the sweep so a committer
     // running here carries the re-request in the same breath. Decides nothing
@@ -1361,6 +1410,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     const s = auth.state();
     if (s.kind !== "session") return;
     const account = s.account.accountId;
+    const current = binding.capture();
     const own = ownPersonKeyB64(chats.identity());
     if (own === null) return;
     let leaves: RosterLeaf[];
@@ -1452,6 +1502,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       } catch {
         accounts.push({ personKeyB64: l.personKeyB64, devices: null });
       }
+      // The lookups are network round trips; `entry` and `secrets` are the
+      // session's that started them.
+      if (!current()) return;
     }
     // ADR-0074 section 2.3 — an own device is admitted only when the
     // account's DeviceGroup holds it.
@@ -1469,6 +1522,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     if (plan.admit.length === 0 && plan.retire.length === 0) return;
     let proposed = 0;
     for (const d of plan.admit) {
+      if (!current()) return;
       try {
         const outcome = await contacts.admitDeviceToGroup(
           secrets,
@@ -1476,6 +1530,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
           d.keyPackage,
           accountOfDevice.get(d.deviceKeyB64),
         );
+        if (!current()) return;
         if (outcome === null) continue;
         proposed += 1;
         if (outcome.kind === "proposed") {
@@ -1487,12 +1542,14 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       }
     }
     for (const leafKeyB64 of plan.retire) {
+      if (!current()) return;
       try {
         const outcome = await contacts.retireDeviceFromGroup(
           secrets,
           entry.group,
           base64Decode(leafKeyB64),
         );
+        if (!current()) return;
         if (outcome === null) continue;
         proposed += 1;
         if (outcome.kind === "proposed") {
@@ -1561,18 +1618,22 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     }
     if (readIsActive(entry.group) === false) return null;
     const account = s.account.accountId;
-    const start = await startCursor(account, entry);
+    const current = binding.capture();
+    const start = await startCursor(account, entry, current);
+    if (!current()) return null;
     const before = memberSignatureKeys(entry.group);
     const swept: IncomingChatEvent[] = [];
     let outcome: SweepOutcome | null = null;
+    let reached = start;
     try {
       outcome = await contacts.sweepIfCommitter(
         secrets,
         entry.group,
         {
-          read: () => coordinator.cursor(entry.groupIdB64) ?? start,
+          read: () => (current() ? (coordinator.cursor(entry.groupIdB64) ?? start) : reached),
           advance: (to) => {
-            coordinator.noteCursor(entry.groupIdB64, to);
+            reached = Math.max(reached, to);
+            if (current()) coordinator.noteCursor(entry.groupIdB64, to);
           },
         },
         // Named group, not a bare id: this one `ChatClient` polls every chat,
@@ -1585,8 +1646,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     } finally {
       // Applied and cursor-advanced whether or not our commit won: the only
       // question left is whether they reach the log and the view.
-      if (swept.length > 0) await settle(account, entry, swept, true, before);
+      if (swept.length > 0) await settle(account, entry, swept, true, before, { current, reached });
     }
+    if (!current()) return null;
     if (outcome?.kind === "committed") {
       // ADR-0043 — a removal this sweep committed owes the push-routing
       // rotation, as the chat view's sweep would.
@@ -1599,11 +1661,16 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   async function awaitDeviceKeyPackage(
     accountId: Uint8Array,
     deviceKey: Uint8Array,
+    current: () => boolean,
   ): Promise<Uint8Array> {
     const deadline = Date.now() + ADMIT_DEVICE_WAIT_MS;
     const wasm = await loadWasm();
     for (;;) {
       const list = await discovery.fetchKeyPackages(accountId);
+      // Up to three minutes of polling: the account that asked may have
+      // signed out, and the chats a hit would be admitted to are then
+      // nobody's, or another account's.
+      if (!current()) throw new StaleBindingError();
       const hit = list?.find((d) => bytesEqual(d.deviceId, deviceKey));
       // ADR-0074 — a KeyPackage the device published before the pairing
       // state bundle reached it names another of the account's keys; wait
@@ -1622,6 +1689,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         );
       }
       await sleepCancellable(ADMIT_DEVICE_POLL_MS, new AbortController().signal);
+      if (!current()) throw new StaleBindingError();
     }
   }
 
@@ -1644,7 +1712,8 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   async function admitDevice(deviceKey: Uint8Array): Promise<DeviceFanOut> {
     const secrets = auth.identitySecrets();
     if (secrets === null) throw new Error("admitDevice: no session");
-    const keyPackage = await awaitDeviceKeyPackage(secrets.accountId, deviceKey);
+    const current = binding.capture();
+    const keyPackage = await awaitDeviceKeyPackage(secrets.accountId, deviceKey, current);
     // ADR-0074 section 2.3 — only a device the account's DeviceGroup holds
     // is fanned into the chats. The pairing that calls this added it there
     // first; the sync runtime reloads its handle after that change, so the
@@ -1654,6 +1723,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     let skipped = 0;
     let failed = 0;
     for (const entry of chats.groups()) {
+      // Each admission awaits the network; the list was read under the
+      // session that asked, and its secrets are that session's.
+      if (!current()) throw new StaleBindingError();
       if (readIsActive(entry.group) === false) {
         skipped += 1;
         continue;
@@ -1688,10 +1760,14 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   async function retireDevice(deviceKey: Uint8Array): Promise<DeviceFanOut> {
     const secrets = auth.identitySecrets();
     if (secrets === null) throw new Error("retireDevice: no session");
+    const current = binding.capture();
     let offered = 0;
     let skipped = 0;
     let failed = 0;
     for (const entry of chats.groups()) {
+      // As in `admitDevice`. The directory row below is still deleted: it is
+      // this account's row, under this account's token.
+      if (!current()) break;
       if (readIsActive(entry.group) === false) {
         skipped += 1;
         continue;
@@ -1725,6 +1801,8 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     events: readonly IncomingChatEvent[],
     cursorMoved: boolean,
     membersBefore: string[] | null,
+    /** The binding the rows were received under, and how far that poll got. */
+    scope: { readonly current: () => boolean; readonly reached: number },
     /** The PERSON keys of the roster before the batch applied; `undefined`
      *  from a caller that did not capture them (nothing is suppressed). */
     peopleBefore?: string[] | null,
@@ -1788,6 +1866,24 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
           toView: planned.toView.filter((e) => !isCommitRow(e)),
         }
       : planned;
+
+    if (!scope.current()) {
+      // The session these rows were received for has ended. Everything below
+      // the log write addresses the session that is live NOW (ringing a call,
+      // filing profiles, delivering to an open view, re-sending names), so
+      // none of it runs. The rows themselves are filed for the account they
+      // belong to, at the position their own poll reached.
+      if (plan.timeline.length > 0 || plan.messageOps.length > 0 || cursorMoved) {
+        await fileIntoLog(
+          account,
+          entry,
+          plan.timeline.map((e) => eventToPersistedMessage(e)),
+          plan.messageOps,
+          scope,
+        );
+      }
+      return;
+    }
 
     // Call signaling first: an offer should start ringing before the log
     // write below spends its round trip.
@@ -1931,6 +2027,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         entry,
         plan.timeline.map((e) => eventToPersistedMessage(e)),
         plan.messageOps,
+        scope,
       );
     }
   }
@@ -1942,12 +2039,19 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     /** ADR-0023 — edit / delete / reaction, applied to the slot after the
      *  append so an op and the row it targets can arrive in one batch. */
     ops: readonly MessageOpEvent[],
+    scope: { readonly current: () => boolean; readonly reached: number },
   ): Promise<void> {
     try {
+      // Before the await: a group freed by a sign-out no longer answers.
+      const hex = hexOf(entry);
       const deviceKey = await getDeviceKey(account);
       if (deviceKey === null) return;
-      const hex = hexOf(entry);
-      const cursor = coordinator.cursor(entry.groupIdB64) ?? 0;
+      // The coordinator's cursor while the session lasts (a view may have
+      // noted a later position); the poll's own once it is over, when the
+      // coordinator holds another session's cursors or none.
+      const cursor = scope.current()
+        ? (coordinator.cursor(entry.groupIdB64) ?? 0)
+        : scope.reached;
       // ADR-0052 decision 3 — a message deleted while its chat was closed
       // takes its pin records with it (section 4.1). Which deletes the
       // author gate accepted is read off the fold's result, not off the ops.
@@ -1975,6 +2079,8 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
           },
         };
       });
+      // The pin store is the live session's.
+      if (!scope.current()) return;
       for (const id of newlyDeleted) {
         void pins.messageDeleted(entry.groupIdB64, id).catch((err) => {
           // eslint-disable-next-line no-console
@@ -2106,6 +2212,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     resetFeedRefresh();
     stopCallLane();
     resetHeldSends();
+    // Only when a session was bound: `start` calls `stop` first, and work
+    // begun just before the first `start` of a session is that session's.
+    if (activeAccount !== null) binding.advance();
     activeAccount = null;
     logCursors = null;
     backoff.clear();
@@ -2283,8 +2392,10 @@ function personKeysOrNull(entry: ActiveGroup): string[] | null {
 }
 
 function hexOf(entry: ActiveGroup): string {
+  // From the registry key, not the wasm handle: a row decrypted just before a
+  // sign-out is filed after it, when the handle has been freed.
   let out = "";
-  for (const b of entry.group.groupId) out += b.toString(16).padStart(2, "0");
+  for (const b of base64Decode(entry.groupIdB64)) out += b.toString(16).padStart(2, "0");
   return out;
 }
 

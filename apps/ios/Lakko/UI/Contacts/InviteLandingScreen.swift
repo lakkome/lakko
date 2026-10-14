@@ -252,7 +252,17 @@ public final class InviteLandingViewModel: ObservableObject {
     public func run() async {
         guard !didRun else { return }
         didRun = true
-        let result = await repository.acceptInviteLink(slug: slug)
+        // Accepting is several writes in a row (the link is consumed, the
+        // request is sent, the chat is created). This runs from the screen's
+        // `.task`, which is cancelled when the person leaves; stopped half
+        // way, the link would be spent with no request sent, and the next
+        // tap would read "already accepted". So the accept runs to its end
+        // whether or not the screen is still there.
+        let repository = self.repository
+        let slug = self.slug
+        let result = await Cancellation.shielded {
+            await repository.acceptInviteLink(slug: slug)
+        }
         Self.logFailure(result)
         state = .done(result)
     }

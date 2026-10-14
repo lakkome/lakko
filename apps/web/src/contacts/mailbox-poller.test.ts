@@ -182,4 +182,105 @@ describe("createMailboxPoller", () => {
     await expect(poller.poll(0)).resolves.toBe("dispatched");
     expect(cursor).toBe(1);
   });
+  // One poller serves every session of the page. Two accounts can sit at the
+  // same cursor, so the cursor check alone cannot keep A's mail out of B.
+  describe("across a change of account", () => {
+    interface Inbox {
+      readonly account: string;
+      cursor: number;
+      readonly requests: number[];
+    }
+
+    function harness() {
+      const state: { current: Inbox | null } = { current: null };
+      const gates: Array<ReturnType<typeof deferred<void>>> = [];
+      const journals: Record<string, readonly number[]> = { A: [8, 9], B: [8] };
+      const poller = createMailboxPoller<Row, Inbox | null>({
+        scope: () => state.current,
+        readCursor: (inbox) => inbox?.cursor ?? 0,
+        writeCursor: (c, inbox) => {
+          if (inbox === null) throw new Error("no inbox");
+          inbox.cursor = c;
+        },
+        fetch: async (after, _wait, _signal, inbox) => {
+          const gate = deferred<void>();
+          gates.push(gate);
+          await gate.promise;
+          return journal(journals[inbox?.account ?? ""] ?? [])(after);
+        },
+        dispatch: async (events, inbox) => {
+          if (inbox === null) throw new Error("no inbox");
+          for (const e of events) inbox.requests.push(e.id);
+        },
+      });
+      return { state, gates, poller };
+    }
+
+    it("drops A's batch when B signed in at the same cursor, and leaves B's cursor alone", async () => {
+      const { state, gates, poller } = harness();
+      const a: Inbox = { account: "A", cursor: 7, requests: [] };
+      const b: Inbox = { account: "B", cursor: 7, requests: [] };
+      state.current = a;
+      const stale = poller.poll(25);
+      // Sign out, sign in as B: same cursor value, different mailbox.
+      state.current = b;
+      gates[0]?.resolve();
+      await expect(stale).resolves.toBe("scope-changed");
+      expect(b.requests).toEqual([]);
+      expect(b.cursor).toBe(7);
+      expect(a.requests).toEqual([]);
+      expect(a.cursor).toBe(7);
+
+      // B's own poll still reads B's own mail from B's own cursor.
+      const own = poller.poll(0);
+      gates[1]?.resolve();
+      await expect(own).resolves.toBe("dispatched");
+      expect(b.requests).toEqual([8]);
+      expect(b.cursor).toBe(8);
+    });
+
+    it("drops the batch when the account signed out and nobody signed in", async () => {
+      const { state, gates, poller } = harness();
+      const a: Inbox = { account: "A", cursor: 7, requests: [] };
+      state.current = a;
+      const stale = poller.poll(25);
+      state.current = null;
+      gates[0]?.resolve();
+      await expect(stale).resolves.toBe("scope-changed");
+      expect(a.requests).toEqual([]);
+      expect(a.cursor).toBe(7);
+    });
+
+    it("writes the cursor of the mailbox the batch was dispatched for, not the current one", async () => {
+      const state: { current: Inbox | null } = { current: null };
+      const a: Inbox = { account: "A", cursor: 7, requests: [] };
+      const b: Inbox = { account: "B", cursor: 7, requests: [] };
+      const inDispatch = deferred<void>();
+      const finish = deferred<void>();
+      const poller = createMailboxPoller<Row, Inbox | null>({
+        scope: () => state.current,
+        readCursor: (inbox) => inbox?.cursor ?? 0,
+        writeCursor: (c, inbox) => {
+          if (inbox !== null) inbox.cursor = c;
+        },
+        fetch: async (after) => journal([8, 9])(after),
+        dispatch: async (events, inbox) => {
+          inDispatch.resolve();
+          await finish.promise;
+          for (const e of events) inbox?.requests.push(e.id);
+        },
+      });
+      state.current = a;
+      const run = poller.poll(0);
+      await inDispatch.promise;
+      // The account changes while A's dispatch is still running.
+      state.current = b;
+      finish.resolve();
+      await expect(run).resolves.toBe("dispatched");
+      expect(a.cursor).toBe(9);
+      expect(a.requests).toEqual([8, 9]);
+      expect(b.cursor).toBe(7);
+      expect(b.requests).toEqual([]);
+    });
+  });
 });

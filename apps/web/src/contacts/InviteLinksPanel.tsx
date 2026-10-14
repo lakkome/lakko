@@ -308,19 +308,6 @@ export function InviteLinksPanel(): JSX.Element {
     }
   }
 
-  async function onShare(row: LinkRow): Promise<void> {
-    if (row.url === null) return;
-    if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
-      try {
-        await navigator.share({ url: row.url });
-        return;
-      } catch {
-        // Cancelled or unsupported for this payload: fall through to Copy.
-      }
-    }
-    await onCopy(row);
-  }
-
   async function onRevoke(row: LinkRow): Promise<void> {
     if (row.blobIdSlug === null) return;
     setError(null);
@@ -465,15 +452,6 @@ export function InviteLinksPanel(): JSX.Element {
                             onClick={() => void onCopy(row)}
                           >
                             <Icon name={copiedKey() === row.key ? "check" : "copy"} size={16} />
-                          </button>
-                          <button
-                            type="button"
-                            class="lk-icon-button"
-                            title={t("chat.invite_link.share")}
-                            aria-label={t("chat.invite_link.share")}
-                            onClick={() => void onShare(row)}
-                          >
-                            <Icon name="share" size={16} />
                           </button>
                         </>
                       )}

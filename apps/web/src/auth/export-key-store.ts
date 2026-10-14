@@ -66,6 +66,7 @@
  * (`export-key-length.ts`), so a length-prefix is wasteful.
  */
 
+import { accountStoresWritable } from "./account-store-gate";
 import {
   assertExportKeyLength,
   EXPORT_KEY_ENVELOPE_LEN,
@@ -135,6 +136,7 @@ export async function putExportKey(
 
   const db = await openDb();
   try {
+    if (!accountStoresWritable(accountIdB64)) return;
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite");
       tx.oncomplete = (): void => resolve();

@@ -181,12 +181,8 @@ struct LinkActionsRow: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-
-                    ShareLink(item: url) {
-                        Label(l10n.t("chat.invite_link.share"), systemImage: "square.and.arrow.up")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    // Copy is the whole of it: a link is never handed to the
+                    // system's share sheet.
                 } else {
                     Text(InviteLinkRows.createdElsewhereCopy)
                         .font(.footnote)

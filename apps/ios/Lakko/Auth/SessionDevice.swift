@@ -186,6 +186,8 @@ public struct IdentityKeyRecordMarks {
     }
 
     public func markRecorded(pubkey: Data, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         defaults.set(pubkey.base64EncodedString(), forKey: Self.key(accountIdB64: accountIdB64))
     }
 

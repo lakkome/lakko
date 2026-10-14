@@ -255,7 +255,7 @@
       "status": "machine"
     },
     "backup.stale_restore.consequence": {
-      "text": "恢复它会让你的账号回到较旧的状态——消息会是旧的，你已移除的设备可能会重新出现。",
+      "text": "恢复它会带回较旧的联系人列表和较旧的设置。此后对它们所做的更改将会丢失。",
       "status": "machine"
     },
     "backup.stale_restore.reason.anchor_unreadable": {
@@ -447,7 +447,7 @@
       "status": "machine"
     },
     "call.control.mute": {
-      "text": "静音",
+      "text": "麦克风",
       "status": "machine"
     },
     "call.control.mute_a11y": {
@@ -462,12 +462,20 @@
       "text": "隐藏参与者",
       "status": "machine"
     },
+    "call.control.participants_menu_a11y": {
+      "text": "参与者与邀请",
+      "status": "machine"
+    },
     "call.control.participants_show_a11y": {
       "text": "显示参与者",
       "status": "machine"
     },
     "call.control.raise_hand": {
       "text": "举手",
+      "status": "machine"
+    },
+    "call.control.settings": {
+      "text": "设置",
       "status": "machine"
     },
     "call.control.share_screen": {
@@ -550,6 +558,26 @@
       "text": "此通话已加密",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "结束通话选项",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "为所有人结束通话",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "离开通话",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "通话已为所有人结束",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} 为所有人结束了通话",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "无法设置通话加密，因此通话未开始。",
       "status": "machine"
@@ -594,6 +622,18 @@
       "text": "{name} 的摄像头",
       "status": "machine"
     },
+    "call.grid.next_a11y": {
+      "text": "下一页",
+      "status": "machine"
+    },
+    "call.grid.page_a11y": {
+      "text": "第 {page} 页，共 {total} 页",
+      "status": "machine"
+    },
+    "call.grid.prev_a11y": {
+      "text": "上一页",
+      "status": "machine"
+    },
     "call.group_banner.join_video": {
       "text": "视频",
       "status": "machine"
@@ -608,6 +648,10 @@
     },
     "call.guest.default_name": {
       "text": "访客",
+      "status": "machine"
+    },
+    "call.guest.note": {
+      "text": "你将以访客身份加入，无需账号。",
       "status": "machine"
     },
     "call.guest.working.title": {
@@ -710,8 +754,28 @@
       "text": "通话链接",
       "status": "machine"
     },
+    "call.invite.menu_a11y": {
+      "text": "邀请加入此通话",
+      "status": "machine"
+    },
+    "call.invite.menu_contact": {
+      "text": "邀请联系人",
+      "status": "machine"
+    },
+    "call.invite.menu_copy": {
+      "text": "复制邀请链接",
+      "status": "machine"
+    },
     "call.invite.minting": {
       "text": "正在为此通话准备链接，需要几秒钟。",
+      "status": "machine"
+    },
+    "call.invite.picker_empty": {
+      "text": "还没有联系人。请复制邀请链接，用其他方式发送。",
+      "status": "machine"
+    },
+    "call.invite.picker_title": {
+      "text": "邀请加入通话",
       "status": "machine"
     },
     "call.invite.ready": {
@@ -720,6 +784,18 @@
     },
     "call.invite.retry_a11y": {
       "text": "重新尝试准备邀请链接",
+      "status": "machine"
+    },
+    "call.invite.row_invited": {
+      "text": "已邀请",
+      "status": "machine"
+    },
+    "call.invite.send_failed": {
+      "text": "邀请未发送。请重试。",
+      "status": "machine"
+    },
+    "call.invite.sent": {
+      "text": "已向{name}发送邀请。",
       "status": "machine"
     },
     "call.invite.share_a11y": {
@@ -752,6 +828,14 @@
     },
     "call.label.group": {
       "text": "群组通话",
+      "status": "machine"
+    },
+    "call.layout.focus_a11y": {
+      "text": "放大显示发言人",
+      "status": "machine"
+    },
+    "call.layout.grid_a11y": {
+      "text": "以相同大小显示所有人",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -914,6 +998,10 @@
       "text": "参与者 {number}",
       "status": "machine"
     },
+    "call.participant.pin_a11y": {
+      "text": "置顶 {name}",
+      "status": "machine"
+    },
     "call.participant.pinned": {
       "text": "已置顶",
       "status": "machine"
@@ -928,6 +1016,10 @@
     },
     "call.participant.unnamed": {
       "text": "参与者",
+      "status": "machine"
+    },
+    "call.participant.unpin_a11y": {
+      "text": "取消置顶 {name}",
       "status": "machine"
     },
     "call.participant.you": {
@@ -1068,6 +1160,14 @@
     },
     "call.settings.system_default": {
       "text": "系统默认",
+      "status": "machine"
+    },
+    "call.settings.title": {
+      "text": "通话设置",
+      "status": "machine"
+    },
+    "call.settings.unnamed_device": {
+      "text": "设备 {n}",
       "status": "machine"
     },
     "call.settings.video": {
@@ -1832,6 +1932,10 @@
     },
     "chat.call.voice": {
       "text": "通话",
+      "status": "machine"
+    },
+    "chat.call_invite.title": {
+      "text": "通话邀请",
       "status": "machine"
     },
     "chat.composer.attach": {
@@ -5702,6 +5806,58 @@
       "text": "两个步骤都没有时间限制。如果一直没有进展，你可以重新发送请求。",
       "status": "machine"
     },
+    "guest.claim.error.generic": {
+      "text": "无法创建账号。请重试。",
+      "status": "machine"
+    },
+    "guest.claim.error.phrase_missing": {
+      "text": "这个访客账号无法保留在此设备上。你可以在注册界面创建新账号。",
+      "status": "machine"
+    },
+    "guest.claim.username_taken_for_you": {
+      "text": "你的用户名是 @{username}。",
+      "status": "machine"
+    },
+    "guest.claim.working": {
+      "text": "正在创建你的账号...",
+      "status": "machine"
+    },
+    "guest.in_call.return": {
+      "text": "返回通话",
+      "status": "machine"
+    },
+    "guest.in_call.title": {
+      "text": "你正以访客身份参加通话。",
+      "status": "machine"
+    },
+    "guest.offer.body": {
+      "text": "你正以访客身份使用。创建账号即可保留你的名字，并再次给别人打电话或发消息。",
+      "status": "machine"
+    },
+    "guest.offer.decline": {
+      "text": "不用了，谢谢",
+      "status": "machine"
+    },
+    "guest.offer.decline_note": {
+      "text": "如果你拒绝，访客账号会立即删除。",
+      "status": "machine"
+    },
+    "guest.offer.delete_failed": {
+      "text": "现在无法删除访客账号。请重试；它也会在一天内自动删除。",
+      "status": "machine"
+    },
+    "guest.offer.deleted": {
+      "text": "访客账号已删除。",
+      "status": "machine"
+    },
+    "guest.offer.deleting": {
+      "text": "正在删除...",
+      "status": "machine"
+    },
+    "guest.offer.title": {
+      "text": "继续使用 Lakko？",
+      "status": "machine"
+    },
     "invite.contact.accept_failed": {
       "text": "无法接受邀请。请重试。",
       "status": "machine"
@@ -7072,6 +7228,10 @@
     },
     "restore_identity.lost.create": {
       "text": "重置账号密钥",
+      "status": "machine"
+    },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "无法在此设备上保存新的恢复短语。未作任何更改。",
       "status": "machine"
     },
     "restore_identity.lost.sub": {

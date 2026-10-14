@@ -21,7 +21,8 @@
 - **UX spec:** [`docs/ux/identity-recovery.md`](../ux/identity-recovery.md).
 
 Renumbered from 0064 on 2026-10-13: the main branch had taken 0064 to 0071 for
-other decisions. Commit messages before that date name this ADR as 0064.
+other decisions. Commit messages before that date name this ADR as 0064, and so do the
+migration files of this work, whose bytes are checksummed and were left as written.
 
 ## Context
 

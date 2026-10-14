@@ -1,3 +1,6 @@
+// LAKKO FORK: for `handle_recovered_rtp`.
+use std::time::Instant;
+
 use crate::Candidate;
 use crate::IceCreds;
 use crate::Rtc;
@@ -9,6 +12,8 @@ use crate::rtp_::MidRid;
 use crate::rtp_::{Mid, Rid, Ssrc};
 use crate::sctp::{ChannelConfig, SctpInitData};
 use crate::streams::{DEFAULT_RTX_CACHE_DURATION, DEFAULT_RTX_RATIO_CAP, StreamRx, StreamTx};
+// LAKKO FORK: for `handle_recovered_rtp`.
+use crate::streams::RtpPacket;
 
 /// Direct change strategy.
 ///
@@ -177,6 +182,27 @@ impl<'a> DirectApi<'a> {
         self.rtc.session.enable_twcc_feedback()
     }
 
+    // LAKKO FORK: transport-wide congestion control per direction.
+
+    /// Negotiate transport-wide congestion control only on the media lines
+    /// this side offers.
+    ///
+    /// Off (the default), the transport-wide sequence number header
+    /// extension and `a=rtcp-fb:<pt> transport-cc` are written on every media
+    /// line the session's extension map and codec configuration allow, as
+    /// upstream does. On, a media line the REMOTE side offered is answered
+    /// without either, whatever its offer carried, while a media line this
+    /// side offers still carries both. An endpoint that receives on the lines
+    /// the remote offers and sends on the lines it offers itself then runs
+    /// its own send-side bandwidth estimate over what it sends, and gives the
+    /// remote no transport-wide feedback about what the remote sends.
+    ///
+    /// Takes effect for media lines negotiated from then on; call it before
+    /// the first offer or answer.
+    pub fn set_twcc_on_local_media_only(&mut self, on: bool) {
+        self.rtc.session.twcc_on_local_media_only = on;
+    }
+
     /// Generate a ssrc that is not already used in session
     pub fn new_ssrc(&self) -> Ssrc {
         self.rtc.session.streams.new_ssrc()
@@ -264,6 +290,85 @@ impl<'a> DirectApi<'a> {
     /// The stream must first be declared using [`DirectApi::expect_stream_rx`].
     pub fn stream_rx(&mut self, ssrc: &Ssrc) -> Option<&mut StreamRx> {
         self.rtc.session.streams.stream_rx(ssrc)
+    }
+
+    // LAKKO FORK: the three methods below let a caller run forward error
+    // correction over a receive stream (the SFU, on a publisher's ULPFEC).
+
+    /// Keep every received RTP packet as it was on the wire after SRTP
+    /// decryption, for [`DirectApi::take_received_rtp`]. Off by default; on,
+    /// it costs one allocation and one copy of the packet per received packet.
+    pub fn keep_received_rtp(&mut self, keep: bool) {
+        self.rtc.session.keep_received_rtp = keep;
+        if !keep {
+            self.rtc.session.pending_packet_received = None;
+        }
+    }
+
+    /// The whole packet behind the [`Event::RtpPacket`][crate::Event::RtpPacket]
+    /// handed out last: fixed header, CSRC list, header extension block,
+    /// payload and padding, exactly as the sender wrote them.
+    ///
+    /// Call it right after that event and before the next input. `None` unless
+    /// [`DirectApi::keep_received_rtp`] is on, and for a packet that arrived
+    /// as a retransmission (RTX): its header extension block is the
+    /// retransmission's own and may differ from the original packet's.
+    pub fn take_received_rtp(&mut self) -> Option<Vec<u8>> {
+        self.rtc.session.pending_packet_received.take()
+    }
+
+    /// Hand over a packet of a receive stream that was recovered instead of
+    /// received. `packet` is the whole RTP packet in the clear.
+    ///
+    /// The packet is registered as received, so it is no longer asked for by
+    /// NACK and not counted lost in receiver reports, and is returned in the
+    /// form [`Event::RtpPacket`][crate::Event::RtpPacket] carries. `None`,
+    /// with nothing changed, when it does not parse, names no receive stream
+    /// by its main SSRC, has an unknown payload type, or carries a sequence
+    /// number that was already received.
+    pub fn handle_recovered_rtp(&mut self, now: Instant, packet: &[u8]) -> Option<RtpPacket> {
+        self.rtc.session.handle_recovered_rtp(now, packet)
+    }
+
+    // LAKKO FORK: the send-side counterpart of `take_received_rtp`, for
+    // forward error correction computed by the caller over a send stream.
+
+    /// The oldest packet not yet taken of the send streams that keep theirs
+    /// ([`StreamTx::keep_sent_rtp`]): fixed header, header extension block,
+    /// payload and padding exactly as serialized for the packet's first
+    /// transmission, before SRTP. `None` when there is none. At most 1024
+    /// are held; beyond that the oldest is dropped.
+    pub fn take_sent_rtp(&mut self) -> Option<Vec<u8>> {
+        self.rtc.session.sent_rtp.pop_front()
+    }
+
+    // LAKKO FORK: the receiver's transport-wide feedback, for a caller that
+    // runs a bandwidth estimate of its own over what it sends.
+
+    /// Keep what the receiver's transport-wide congestion control feedback
+    /// says of each packet sent, for [`DirectApi::take_twcc_feedback`]. Off
+    /// by default. It does not need [`RtcConfig::enable_bwe`][crate::RtcConfig::enable_bwe]
+    /// and does not change what str0m's own estimator, when enabled, is fed.
+    pub fn keep_twcc_feedback(&mut self, keep: bool) {
+        self.rtc.session.keep_twcc_feedback = keep;
+        if !keep {
+            self.rtc.session.twcc_feedback.clear();
+        }
+    }
+
+    /// The feedback records not yet taken, oldest first: for each packet a
+    /// feedback report covered, when it was sent (this side's clock), its
+    /// size in bytes as the send register counts it, and when the receiver
+    /// says it arrived, or `None` when the report says it did not.
+    ///
+    /// The arrival time is on a clock of its own: the receiver's, placed so
+    /// that its zero is the moment this side took the first report. Only
+    /// differences between arrival times mean anything. A packet reported
+    /// missing and received in a later report appears twice. At most 8192
+    /// records are held; beyond that the oldest is dropped. Empty unless
+    /// [`DirectApi::keep_twcc_feedback`] is on.
+    pub fn take_twcc_feedback(&mut self) -> Vec<(Instant, usize, Option<Instant>)> {
+        self.rtc.session.twcc_feedback.drain(..).collect()
     }
 
     /// Obtain a recv stream by looking it up via mid/rid.

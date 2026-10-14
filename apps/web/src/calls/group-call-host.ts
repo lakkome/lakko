@@ -229,3 +229,194 @@ export function chatCallAffordance(input: ChatCallAffordanceInput): ChatCallAffo
   if (input.liveCallInThisChat) return "join-group";
   return input.isGroup ? "start-group" : "start-one-to-one";
 }
+
+export interface GroupCallStartFailureInput {
+  /** The state of the SFU session the start built, or `null` when the start
+   *  stopped before there was one. */
+  readonly sessionState: "idle" | "connecting" | "connected" | "failed" | "closed" | null;
+  /** That session is still the one in the host's group slot. */
+  readonly stillInSlot: boolean;
+}
+
+/**
+ * Whether a group call start that did not end connected was abandoned by
+ * this device, as opposed to having failed.
+ *
+ * A session ends `closed` only by `hangUp()` (a failure ends `failed`), and
+ * it is out of the slot only once `releaseGroupSlot` took it: the person
+ * pressed End, signed out, or left the chat while the session was still
+ * connecting. The start's `connect()` then rejects, and that rejection is
+ * the person's own choice coming back, so the screens are told nothing: no
+ * "could not start the call" for a call they chose not to be in.
+ */
+export function groupCallStartAbandoned(input: GroupCallStartFailureInput): boolean {
+  return input.sessionState === "closed" && !input.stillInSlot;
+}
+
+// ----- a start the person left before its session existed --------------------
+
+/**
+ * Where a group call start stands when it looks up from an await.
+ *
+ * A start runs several awaits before there is an SFU session: a joiner's
+ * group sync, the call-admission JWT mint, the initiator's `GroupCallStart`
+ * publish. While they run, leaving has no session to hang up; all it can do
+ * is take the slot back and make this attempt no longer the current one. The
+ * start reads that here, after every await.
+ */
+export interface GroupCallStartCheckInput {
+  /** This attempt is still the one the group slot belongs to. `false` once
+   *  the person left, signed out, or a newer start took the slot. */
+  readonly current: boolean;
+  /** This attempt's `GroupCallStart` reached the group's journal. */
+  readonly announced: boolean;
+  /** The call was handed to the slot (the host's record of the call it is
+   *  in): from then on leaving is what tells the group. */
+  readonly handedOver: boolean;
+  /** A joiner: whether the call's record is still live. `null` for the
+   *  initiator, whose call is not on any record until it announces. */
+  readonly callStillLive: boolean | null;
+}
+
+export type GroupCallStartCheck =
+  | { readonly kind: "continue" }
+  | {
+      readonly kind: "stop";
+      /** `left`: the attempt is no longer current, and nothing is said.
+       *  `ended`: the call to join is over. */
+      readonly outcome: "left" | "ended";
+      /** Publish what leaving publishes for a call this device announced
+       *  and never handed to the slot (the `CallEnd` an initiator owes). */
+      readonly takeBackAnnouncement: boolean;
+      /** The slot is still this attempt's to free. Never for an attempt that
+       *  is no longer current: the slot is then free already, or a newer
+       *  call's. */
+      readonly releaseSlot: boolean;
+    };
+
+/**
+ * What a group call start does after an await returned.
+ *
+ * An attempt that is no longer current builds nothing and opens no device.
+ * It undoes the one thing it may have done to the outside world: a Start
+ * announcement nobody will follow into a call. It never touches the slot.
+ */
+export function groupCallStartCheck(input: GroupCallStartCheckInput): GroupCallStartCheck {
+  const takeBackAnnouncement = input.announced && !input.handedOver;
+  if (!input.current) {
+    return { kind: "stop", outcome: "left", takeBackAnnouncement, releaseSlot: false };
+  }
+  if (input.callStillLive === false) {
+    return { kind: "stop", outcome: "ended", takeBackAnnouncement, releaseSlot: true };
+  }
+  return { kind: "continue" };
+}
+
+/** What the host supplies to {@link runGroupCallStart}. `M` is whatever the
+ *  preparation produced (the call key, the leaf, the JWT); `R` is why the
+ *  preparation refused. */
+export interface GroupCallStartSteps<M, R> {
+  /** This device starts the call (announces it) rather than joins one. */
+  readonly initiator: boolean;
+  /** Whether this attempt is still the one the group slot belongs to. */
+  isCurrent(): boolean;
+  /** A joiner only: bring the group up to date. Publishes nothing. */
+  sync(): Promise<void>;
+  /** A joiner only: whether the call's record is still live. */
+  callStillLive(): boolean;
+  /** Derive the call key and mint the admission JWT. Publishes nothing. */
+  prepare(): Promise<
+    { readonly ok: true; readonly material: M } | { readonly ok: false; readonly reason: R }
+  >;
+  /** The initiator only: publish `GroupCallStart`. Resolves whether it
+   *  reached the journal; never rejects. */
+  announce(material: M): Promise<boolean>;
+  /** Publish what leaving publishes for a call that was announced and never
+   *  handed to the slot. `left`: the person chose it; `failed`: the start
+   *  broke. */
+  takeBackAnnouncement(material: M, why: "left" | "failed"): void;
+  /** Hand the call to the slot and build its session. Synchronous: between
+   *  the last check and the session there is no await. */
+  open(material: M): void;
+  /** Connect the session: this is where the microphone and camera open. */
+  connect(): Promise<void>;
+}
+
+export type GroupCallStartRun<R> =
+  | { readonly kind: "connected" }
+  /** No longer the current attempt. The slot is not this attempt's. */
+  | { readonly kind: "left" }
+  /** A joiner: the call is over. The slot is this attempt's to free. */
+  | { readonly kind: "ended" }
+  /** The preparation refused. The slot is this attempt's to free. */
+  | { readonly kind: "refused"; readonly reason: R }
+  /** The start broke while it was the current attempt. `handedOver` says
+   *  whether a call is in the slot for the caller to leave. */
+  | { readonly kind: "failed"; readonly error: unknown; readonly handedOver: boolean };
+
+/**
+ * Run a group call start through its awaits, checking after each one that
+ * the attempt is still current ({@link groupCallStartCheck}).
+ *
+ * Never rejects. An attempt that stopped being current returns `left`
+ * whether its awaits then succeeded or failed, so an older start finishing
+ * late changes nothing of a newer one.
+ */
+export async function runGroupCallStart<M, R>(
+  steps: GroupCallStartSteps<M, R>,
+): Promise<GroupCallStartRun<R>> {
+  let announced = false;
+  let handedOver = false;
+  let material: M | null = null;
+  let tookBack = false;
+  const takeBack = (why: "left" | "failed"): void => {
+    if (tookBack || material === null) return;
+    tookBack = true;
+    steps.takeBackAnnouncement(material, why);
+  };
+  /** The outcome to return now, or `null` to go on. */
+  const stopped = (callStillLive: boolean | null): GroupCallStartRun<R> | null => {
+    const check = groupCallStartCheck({
+      current: steps.isCurrent(),
+      announced,
+      handedOver,
+      callStillLive,
+    });
+    if (check.kind === "continue") return null;
+    if (check.takeBackAnnouncement) takeBack("left");
+    return { kind: check.outcome };
+  };
+  try {
+    if (!steps.initiator) {
+      await steps.sync();
+      const stop = stopped(steps.isCurrent() ? steps.callStillLive() : null);
+      if (stop !== null) return stop;
+    }
+    const prepared = await steps.prepare();
+    {
+      const stop = stopped(
+        !steps.initiator && prepared.ok && steps.isCurrent() ? steps.callStillLive() : null,
+      );
+      if (stop !== null) return stop;
+    }
+    if (!prepared.ok) return { kind: "refused", reason: prepared.reason };
+    material = prepared.material;
+    if (steps.initiator) {
+      announced = await steps.announce(material);
+      const stop = stopped(null);
+      if (stop !== null) return stop;
+      if (!announced) throw new Error("the call could not be announced to the group");
+    }
+    // Set first: `open` hands the call to the slot before anything else, so
+    // from here a failure is leaving's to tell the group about.
+    handedOver = true;
+    steps.open(material);
+    await steps.connect();
+    return stopped(null) ?? { kind: "connected" };
+  } catch (error) {
+    const current = steps.isCurrent();
+    if (announced && !handedOver) takeBack(current ? "failed" : "left");
+    if (!current) return { kind: "left" };
+    return { kind: "failed", error, handedOver };
+  }
+}

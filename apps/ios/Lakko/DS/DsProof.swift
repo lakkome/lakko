@@ -117,6 +117,12 @@ public struct DirectCommitSteps<Created, Prepared, Published> {
         self.publish = publish
     }
 
+    /// On the main actor: the steps are closures of main-actor owners (the
+    /// chat repository), and the synchronous ones (`create`, `prepare`,
+    /// `rollback`) read and write their state. Run from a non-isolated
+    /// executor they would do so beside the main actor, and a sign-out could
+    /// run between a step's binding check and its write.
+    @MainActor
     public func run() async throws -> Published {
         let signerN = try currentSigner()
         let created = try create()

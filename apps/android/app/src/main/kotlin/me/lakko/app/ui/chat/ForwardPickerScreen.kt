@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -15,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -83,7 +85,6 @@ import uniffi.lakko_ffi_uniffi.membershipRefusalRetryMaySucceed
  * The rows are built by the same function the Chats tab uses
  * ([threadConversationRows]), so the two lists cannot drift.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 public fun ForwardPickerScreen(
     viewModel: ForwardViewModel,
@@ -104,9 +105,63 @@ public fun ForwardPickerScreen(
         LaunchedEffect(Unit) { onBack() }
         return
     }
-    val state by repository.state.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
+    ConversationPicker(
+        // Section 5.1 — "the picker's title is 'Forward to'".
+        title = t(FORWARD_PICKER_TITLE),
+        repository = repository,
+        deviceGroupSync = deviceGroupSync,
+        busy = busy,
+        // The attachments are being re-encrypted and uploaded under fresh
+        // keys (ADR-0052 OQ1); the list waits for the send.
+        busyLabel = t(FORWARDING_LABEL),
+        error = error,
+        onBack = onBack,
+        onPick = { row ->
+            viewModel.forward(
+                // ADR-0073 R.5 - the conversation's current group (its head).
+                targetGroupIdHex = row.headId,
+                onDone = { onForwarded(row.headId) },
+                onReturnToSource = onReturnToSource,
+            )
+        },
+        modifier = modifier,
+    )
+}
+
+/**
+ * The list of conversations a message can be sent into: the body of the
+ * "Forward to" picker, and of the call screen's "Invite to call"
+ * (`docs/ux/call-links.md` section 3: "the same list `Forward to` shows").
+ *
+ * The same merged list the Chats tab shows, restricted to one-to-one chats
+ * and groups this device is a LIVE member of, pinned first, newest next, with
+ * the search field. The rows are built by the same function the Chats tab
+ * uses ([threadConversationRows]), so the lists cannot drift.
+ *
+ * While [busy] the list takes no pick and [busyLabel] names the wait to a
+ * screen reader; [error] is one sentence above the list. A row in [doneIds]
+ * has already been sent to: it shows a check and [doneLabel] and takes no
+ * second pick, which is how the call's picker lets a person invite several
+ * conversations one after another without leaving it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun ConversationPicker(
+    title: String,
+    repository: ChatRepository,
+    deviceGroupSync: DeviceGroupSyncRepository?,
+    busy: Boolean,
+    busyLabel: String,
+    error: UiText?,
+    onBack: () -> Unit,
+    onPick: (me.lakko.app.chat.ConversationListRow) -> Unit,
+    modifier: Modifier = Modifier,
+    doneIds: Set<String> = emptySet(),
+    doneLabel: String = "",
+) {
+    val state by repository.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val directory = remember(repository) { ProfileDirectory.get(repository.context) }
     val nameVersion by directory.version.collectAsStateWithLifecycle()
@@ -128,7 +183,7 @@ public fun ForwardPickerScreen(
                 context = context,
                 repository = repository,
                 directory = directory,
-                // Live memberships only: a forward is a send, and the core
+                // Live memberships only: a pick is a send, and the core
                 // refuses one into a group this device has left or been
                 // removed from.
                 threads = state.conversations.filter { !it.membershipEnded },
@@ -150,8 +205,7 @@ public fun ForwardPickerScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                // Section 5.1 — "the picker's title is 'Forward to'".
-                title = { Text(t(FORWARD_PICKER_TITLE)) },
+                title = { Text(title) },
                 navigationIcon = {
                     IconButton(onClick = onBack, enabled = !busy) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = t("common.back"))
@@ -166,14 +220,11 @@ public fun ForwardPickerScreen(
                 .padding(padding),
         ) {
             SearchField(query = query, onQueryChange = { query = it })
-            val forwardingLabel = t(FORWARDING_LABEL)
             if (busy) {
-                // The attachments are being re-encrypted and uploaded under
-                // fresh keys (ADR-0052 OQ1); the list waits for the send.
                 LinearProgressIndicator(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .semantics { contentDescription = forwardingLabel },
+                        .semantics { contentDescription = busyLabel },
                 )
             }
             error?.let { message ->
@@ -203,17 +254,34 @@ public fun ForwardPickerScreen(
                         // The list only ever holds chats and groups; the kind
                         // is checked so a channel row could never be picked
                         // as a send target even if one were mapped in later.
-                        val pickable = !busy && row.kind != ConversationRowKind.CHANNEL
-                        ConversationRowBody(
-                            row = row,
-                            modifier = Modifier.clickable(enabled = pickable) {
-                                viewModel.forward(
-                                    targetGroupIdHex = row.headId,
-                                    onDone = { onForwarded(row.headId) },
-                                    onReturnToSource = onReturnToSource,
-                                )
-                            },
-                        )
+                        val done = row.id in doneIds
+                        val pickable = !busy && !done && row.kind != ConversationRowKind.CHANNEL
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.clickable(enabled = pickable) { onPick(row) },
+                        ) {
+                            ConversationRowBody(row = row, modifier = Modifier.weight(1f))
+                            if (done) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .padding(end = 16.dp)
+                                        .semantics(mergeDescendants = true) { contentDescription = doneLabel },
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Check,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                    Text(
+                                        text = doneLabel,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(start = 4.dp),
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -234,7 +234,9 @@ public class RecoverViewModel(
                 // Signed in: the app root shows "Choose a new password" next.
                 mutableState.update { it.copy(busy = false, error = null, words = null) }
             } catch (err: Throwable) {
-                if (err is kotlinx.coroutines.CancellationException) throw err
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 val failure = me.lakko.app.auth.threeWordsFailureOf(err)
                 mutableState.update { state ->
                     val w = state.words ?: words
@@ -300,7 +302,9 @@ public class RecoverViewModel(
                     )
                 }
             } catch (err: Throwable) {
-                if (err is kotlinx.coroutines.CancellationException) throw err
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update { it.copy(busy = false, error = UiText("auth.passkey.error.generic")) }
             }
         }
@@ -458,6 +462,9 @@ public class RecoverViewModel(
                     )
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(busy = false, error = UiText("recovery.error.generic"))
                 }
@@ -492,7 +499,9 @@ public class RecoverViewModel(
                     it.copy(busy = false, phraseRecall = null, phrase = "", password = "", confirm = "", username = "")
                 }
             } catch (err: Throwable) {
-                if (err is kotlinx.coroutines.CancellationException) throw err
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 val line = when (val failure = me.lakko.app.auth.recallFailureOf(err)) {
                     me.lakko.app.auth.RecallFailure.Refused -> UiText("devices.recall.error.closed")
                     me.lakko.app.auth.RecallFailure.WrongPassword -> UiText("recall.phrase.wrong")
@@ -590,7 +599,9 @@ public class RecoverViewModel(
                     )
                 }
             } catch (err: Throwable) {
-                if (err is kotlinx.coroutines.CancellationException) throw err
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(email = it.email.copy(busy = false)) }
+                }
                 emailFailed(me.lakko.app.auth.EmailRecoverCall.Start, err)
             }
         }
@@ -670,7 +681,9 @@ public class RecoverViewModel(
                 }
                 closeEmail(next)
             } catch (err: Throwable) {
-                if (err is kotlinx.coroutines.CancellationException) throw err
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(email = it.email.copy(busy = false)) }
+                }
                 // The ticket may be spent: the flow ends on the list with
                 // the reason, never half-way.
                 val failure = me.lakko.app.auth.emailRecoverFailureOf(me.lakko.app.auth.EmailRecoverCall.Open, err)
@@ -757,6 +770,9 @@ public class RecoverViewModel(
                     )
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(busy = false, error = UiText("recovery.totp.error.generic"))
                 }

@@ -15,10 +15,24 @@
 //!         ▼        where KID = (sender_leaf << 8) | stream_index  (ADR-0035)
 //!   ParticipantKey
 //!         │
-//!         │  per-frame: nonce = nonce_salt XOR (frame_counter as BE u32 low 4 bytes)
-//!         ▼  (counter increments 1-per-sealed-frame, monotonic per epoch)
+//!         │  per-frame: nonce = nonce_salt XOR (frame_counter as 8 big-endian
+//!         │             bytes in the low 8 bytes of the 12-byte nonce)
+//!         ▼  (64-bit counter, random start, +1 per sealed frame — ADR-0069)
 //!   AEAD seal / open
 //! ```
+//!
+//! ## The frame counter (ADR-0069)
+//!
+//! The AEAD `(key, nonce_salt)` is a pure function of `(seed, KID)`, so the
+//! only thing that separates two frames under one key is the counter. A
+//! sender cannot remember across a reload, a rejoin or a republished track
+//! what it already sealed, so a fresh [`ParticipantKey`] does **not** start
+//! at a fixed value: it starts at a uniformly random counter in `[0, 2^62)`
+//! drawn from the system CSPRNG and counts up. Two keys derived under one
+//! `(seed, KID)` reuse a nonce only if their counter ranges overlap; with
+//! `L1` and `L2` frames sealed that happens with probability at most
+//! `(L1 + L2) / 2^62`. Receivers keep no counter: they take the 64-bit value
+//! from the SFrame header.
 //!
 //! The per-`(participant, stream)` split lets the SFU forward
 //! each stream without ever decrypting; the receiver
@@ -53,6 +67,10 @@ use lakko_mls::Group;
 
 use crate::error::{Error, Result};
 use crate::header::SframeHeader;
+use crate::media_frame::{
+    clear_prefix_len, media_frame_aad, media_frame_trailer, MediaCodec, MediaFrameError,
+    MediaFrameParts, MAX_CLEAR_PREFIX_LEN, MAX_MEDIA_FRAME_OVERHEAD,
+};
 
 /// MLS exporter label for SFrame call keying. Pinned ASCII;
 /// any change is a breaking protocol change to every
@@ -79,11 +97,24 @@ const PARTICIPANT_KEY_INFO: &[u8] = b"lakko/sframe/v1/key";
 /// HKDF info string for the per-frame nonce derivation.
 const FRAME_NONCE_INFO: &[u8] = b"lakko/sframe/v1/nonce";
 
-/// 32-bit per-participant frame counter limit. RFC 9605 §4.4
-/// pins the counter to 32 bits; the producer rolls over via
-/// an MLS commit (fresh epoch → fresh CallKey → fresh
-/// ParticipantKey → counter resets to 0).
-const MAX_FRAME_COUNTER: u32 = u32::MAX;
+/// Last counter value a key may reach (ADR-0069: the counter is 64 bits, the
+/// width RFC 9605 §4.3 encodes). A key whose counter stands here refuses to
+/// seal ([`Error::CounterExhausted`]) and never wraps.
+const MAX_FRAME_COUNTER: u64 = u64::MAX;
+
+/// Exclusive upper bound of the random start of a fresh key's counter
+/// (ADR-0069): the start is uniform in `[0, 2^62)`, which leaves at least
+/// `3 * 2^62` values before [`MAX_FRAME_COUNTER`] from the highest start.
+pub const COUNTER_START_BOUND: u64 = 1 << 62;
+
+/// Draw the start of a fresh key's frame counter: uniform in
+/// `[0, COUNTER_START_BOUND)` from the system CSPRNG (ADR-0069). Eight random
+/// bytes with the top two bits cleared are exactly uniform over that range.
+fn random_counter_start() -> u64 {
+    let mut bytes = [0u8; 8];
+    lakko_crypto::random::fill(&mut bytes);
+    u64::from_be_bytes(bytes) & (COUNTER_START_BOUND - 1)
+}
 
 // =============================================================================
 // CallKey
@@ -123,15 +154,13 @@ impl CallKey {
     /// Test-only and FFI-only — production callers go through
     /// [`Self::derive`].
     ///
-    /// # Invariant — counter-0 ⟺ fresh seed
+    /// # The same seed may be used again (ADR-0069)
     ///
-    /// Every [`ParticipantKey`] derived from this seed starts at frame
-    /// counter 0, so a given `seed` MUST be used to seal at a given KID under
-    /// exactly ONE key lifetime. Constructing a second [`CallKey`] from the same
-    /// seed and re-deriving the same KID's [`ParticipantKey`] restarts the
-    /// counter at 0 → identical `(key, nonce)` at every counter → catastrophic
-    /// AEAD nonce reuse. Pair every counter reset with a **fresh** seed (a fresh
-    /// `call_id` / MLS epoch); see [`Self::participant_key`].
+    /// A second [`CallKey`] built from a seed already used for sealing, and a
+    /// second [`ParticipantKey`] derived from it for the same KID, hold the
+    /// same AEAD key and nonce salt as the first. That is safe because each
+    /// derived key starts its counter at an independent random value in
+    /// `[0, 2^62)`; see [`Self::participant_key`] for the bound.
     #[must_use]
     pub fn from_seed(seed: [u8; CALL_KEY_LEN]) -> Self {
         Self {
@@ -151,8 +180,9 @@ impl CallKey {
     /// The rotation path ([`crate::CallKeyRing::rekey`],
     /// [`crate::GroupCallSession::refresh_call_key`]) uses this to detect a
     /// spurious **same-seed** refresh: a rotation to an unchanged seed is a
-    /// no-op (S2 defense-in-depth), so a later [`Self::participant_key`] never
-    /// hands back a fresh counter-0 key under a seed already used for sealing.
+    /// no-op (defence in depth; since ADR-0069 a key freshly derived under an
+    /// already-used seed is safe by its random counter start, and the guard is
+    /// no longer the only thing between a caller and a reused nonce).
     /// Constant-time (via the inner [`SecretBytes`] comparison) so the check
     /// never leaks the seed through a variable-time byte compare of live key
     /// material.
@@ -183,22 +213,30 @@ impl CallKey {
     /// `(key, nonce_salt)` spaces, so their independent counters cannot reuse a
     /// `(key, nonce)` pair.
     ///
-    /// # Invariant — counter-0 ⟺ fresh seed (caller-enforced)
+    /// # The counter starts at a random value (ADR-0069)
     ///
-    /// The returned [`ParticipantKey`] starts at frame counter 0, and its AEAD
-    /// `(key, nonce_salt)` is a pure function of `(seed, kid)`. A fresh
-    /// counter-0 key is safe to seal with **ONLY** when its seed has never
-    /// before been used to seal at this KID. The AEAD nonce is
-    /// `nonce_salt XOR counter`, so any two keys sharing a `(seed, kid)` reuse
-    /// the identical `(key, nonce)` at every counter — a catastrophic AEAD
-    /// violation (ChaCha20 keystream reuse + Poly1305 forgery). The caller MUST
-    /// ensure a counter reset co-occurs with a **fresh seed** (a fresh
-    /// `call_id` / MLS epoch); the core **cannot** enforce this across
-    /// [`ParticipantKey`] lifetimes, because a legitimately fresh seed also
-    /// yields a counter-0 key and is indistinguishable here. The companion guard
-    /// on the rotation path ([`crate::CallKeyRing::rekey`]) makes a refresh to an
-    /// **unchanged** seed a no-op, so a spurious refresh can never reset the seal
-    /// counter under a live key.
+    /// The AEAD `(key, nonce_salt)` is a pure function of `(seed, kid)` and the
+    /// nonce is `nonce_salt XOR counter`, so two keys derived under one
+    /// `(seed, kid)` would reuse a `(key, nonce)` pair — ChaCha20 keystream
+    /// reuse and a forgeable Poly1305 tag — at every counter value they both
+    /// seal. Callers do derive such keys: rejoining a call in the same MLS
+    /// epoch, reloading a tab, and publishing a camera track again all build a
+    /// new key under an unchanged seed and KID, and a client that reloaded has
+    /// no memory of what it sealed. So the returned key does not start at a
+    /// fixed counter: it starts at a uniformly random value in `[0, 2^62)`
+    /// drawn from the system CSPRNG, and the first frame it seals carries
+    /// `start + 1` ([`ParticipantKey::seal`] increments before use).
+    ///
+    /// Two keys under one `(seed, kid)` reuse a nonce only if the ranges of
+    /// counters they seal overlap. If one seals `L1` frames and the other `L2`,
+    /// that happens with probability at most `(L1 + L2) / 2^62`; at a hundred
+    /// million frames each it is below `2^-34`. The bound is per pair of keys.
+    ///
+    /// The same-seed guard on the rotation path
+    /// ([`crate::CallKeyRing::rekey`]) stays, as defence in depth.
+    ///
+    /// Receivers use a key from this function only to open; opening takes the
+    /// counter from the frame header and never reads the key's own.
     ///
     /// # Errors
     ///
@@ -224,7 +262,7 @@ impl CallKey {
             kid,
             key: SecretBytes::new(*key_secret.as_bytes()),
             nonce_salt,
-            counter: 0,
+            counter: random_counter_start(),
         })
     }
 
@@ -233,9 +271,8 @@ impl CallKey {
     /// that assign a stream ordinal reach for this; receivers that already hold
     /// the KID from the SFrame header use [`Self::participant_key`] directly.
     ///
-    /// The counter-0 ⟺ fresh-seed invariant documented on
-    /// [`Self::participant_key`] applies verbatim: a counter reset here MUST
-    /// co-occur with a fresh seed.
+    /// The key starts at a random counter, as documented on
+    /// [`Self::participant_key`] (ADR-0069).
     ///
     /// # Errors
     ///
@@ -272,11 +309,13 @@ pub struct ParticipantKey {
     kid: u64,
     key: SecretBytes<CALL_KEY_LEN>,
     /// 12-byte nonce salt derived from the call key. Per-
-    /// frame nonce is `salt XOR (counter as u32 BE in the
-    /// low 4 bytes)` — same construction as RFC 8439 §2.4 +
-    /// RFC 9605 §4.4.
+    /// frame nonce is `salt XOR (counter as 8 big-endian
+    /// bytes in the low 8 bytes)` (ADR-0069).
     nonce_salt: [u8; NONCE_LEN],
-    counter: u32,
+    /// Counter of the last frame sealed; the next frame carries `counter + 1`.
+    /// Starts at a random value in `[0, 2^62)` (ADR-0069). Only sealing reads
+    /// or advances it.
+    counter: u64,
 }
 
 impl ParticipantKey {
@@ -316,10 +355,11 @@ impl ParticipantKey {
         &self.nonce_salt
     }
 
-    /// Current counter value — exposed for diagnostics. The
-    /// canonical increment happens inside [`Self::seal`].
+    /// Current counter value — exposed for diagnostics: the counter of the
+    /// last frame this key sealed, or its random start (ADR-0069) when it has
+    /// sealed none. The canonical increment happens inside [`Self::seal`].
     #[must_use]
-    pub fn counter(&self) -> u32 {
+    pub fn counter(&self) -> u64 {
         self.counter
     }
 
@@ -330,12 +370,12 @@ impl ParticipantKey {
     ///
     /// # Errors
     ///
-    /// - [`Error::CounterExhausted`] when the 32-bit counter
-    ///   rolls over. Caller MUST trigger a fresh MLS commit
-    ///   and re-derive the [`CallKey`].
+    /// - [`Error::CounterExhausted`] when the 64-bit counter
+    ///   stands at its last value. Nothing is sealed and the
+    ///   counter does not move; the caller derives a new key.
     /// - [`Error::Crypto`] on AEAD failure (practically
     ///   unreachable).
-    pub fn seal(&mut self, aad: &[u8], plaintext: &[u8]) -> Result<(u32, Vec<u8>)> {
+    pub fn seal(&mut self, aad: &[u8], plaintext: &[u8]) -> Result<(u64, Vec<u8>)> {
         if self.counter == MAX_FRAME_COUNTER {
             return Err(Error::CounterExhausted);
         }
@@ -356,7 +396,7 @@ impl ParticipantKey {
     /// - [`Error::Crypto`] on AEAD authentication failure
     ///   (wrong key / wrong AAD / tampered ciphertext /
     ///   wrong counter).
-    pub fn open(&self, aad: &[u8], ciphertext: &[u8], frame_counter: u32) -> Result<Vec<u8>> {
+    pub fn open(&self, aad: &[u8], ciphertext: &[u8], frame_counter: u64) -> Result<Vec<u8>> {
         let nonce = self.compose_nonce(frame_counter);
         let key = AeadKey::new(*self.key.as_bytes());
         aead::open(Algorithm::ChaCha20Poly1305, &key, &nonce, aad, ciphertext)
@@ -382,9 +422,9 @@ impl ParticipantKey {
     ///
     /// # Errors
     ///
-    /// - [`Error::CounterExhausted`] when the 32-bit counter would
-    ///   roll over (checked before any state mutation, so the key
-    ///   is left usable for a re-keyed retry).
+    /// - [`Error::CounterExhausted`] when the 64-bit counter stands at
+    ///   its last value (checked before any state mutation; nothing
+    ///   is sealed).
     /// - [`Error::Crypto`] on AEAD failure (practically unreachable).
     pub fn seal_framed(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         // Peek the counter `seal` will use (it pre-increments) so
@@ -397,7 +437,7 @@ impl ParticipantKey {
         let next_ctr = self.counter + 1;
         let mut wire = SframeHeader {
             kid: self.kid,
-            ctr: u64::from(next_ctr),
+            ctr: next_ctr,
         }
         .encode();
         let (frame_counter, ciphertext) = self.seal(&wire, plaintext)?;
@@ -428,9 +468,10 @@ impl ParticipantKey {
     /// # Errors
     ///
     /// - [`Error::Crypto`] on a malformed header, a KID that doesn't
-    ///   match this key's `(leaf, stream)`, a counter that exceeds the 32-bit
-    ///   keying range, or an AEAD authentication failure (wrong key /
-    ///   wrong AAD / tampered header or ciphertext / wrong counter).
+    ///   match this key's `(leaf, stream)`, or an AEAD authentication failure
+    ///   (wrong key / wrong AAD / tampered header or ciphertext / wrong
+    ///   counter). Any 64-bit counter the header carries is accepted
+    ///   (ADR-0069); this key's own counter is not consulted.
     pub fn open_framed(&self, wire: &[u8]) -> Result<Vec<u8>> {
         let (header, consumed) = SframeHeader::decode(wire)
             .map_err(|e| Error::Crypto(format!("sframe header decode: {e}")))?;
@@ -440,41 +481,151 @@ impl ParticipantKey {
                 header.kid, self.kid
             )));
         }
-        let frame_counter = u32::try_from(header.ctr)
-            .map_err(|_| Error::Crypto("sframe counter exceeds 32-bit keying range".into()))?;
         // AAD = the literal header bytes the sender authenticated.
         let aad = &wire[..consumed];
         let ciphertext = &wire[consumed..];
-        self.open(aad, ciphertext, frame_counter)
+        self.open(aad, ciphertext, header.ctr)
     }
 
-    /// Test-only — force the internal counter to a given
-    /// value so the exhaustion-edge tests can land on
-    /// `u32::MAX - 1` without running 4 billion seals.
-    /// Compiled out of the release crate via `cfg(test)` so
-    /// no production caller can reset the counter (which
-    /// would re-use a nonce under the same key — a critical
-    /// AEAD violation).
+    /// Seal an encoded media frame into the ADR-0071 layout,
+    /// `clear_prefix || ciphertext_and_tag || sframe_header || trailer`,
+    /// leaving the first `clear_prefix_len` bytes of `frame` in the clear.
+    ///
+    /// The key, the nonce and the counter are exactly those of
+    /// [`Self::seal`] (ADR-0035, ADR-0069): one counter value is consumed.
+    /// The AEAD additional data is `sframe_header || clear_prefix || trailer`,
+    /// so the clear bytes, the header and the trailer are all authenticated;
+    /// the plaintext is the frame after the clear prefix. See
+    /// [`crate::media_frame`] for the layout.
+    ///
+    /// A `clear_prefix_len` beyond the frame's length is cut to the frame's
+    /// length: such a frame is left clear whole and its ciphertext is the tag
+    /// over an empty plaintext. Callers normally do not choose the length
+    /// themselves; see [`Self::seal_media_frame_for_codec`].
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Crypto`] when `clear_prefix_len` exceeds
+    ///   [`MAX_CLEAR_PREFIX_LEN`]. Nothing is sealed and the counter does not
+    ///   move.
+    /// - [`Error::CounterExhausted`] when the 64-bit counter stands at its
+    ///   last value. Nothing is sealed.
+    /// - [`Error::Crypto`] on AEAD failure (practically unreachable).
+    pub fn seal_media_frame(&mut self, frame: &[u8], clear_prefix_len: usize) -> Result<Vec<u8>> {
+        if clear_prefix_len > MAX_CLEAR_PREFIX_LEN {
+            return Err(media_frame_refusal(&MediaFrameError::ClearPrefixTooLong {
+                len: clear_prefix_len,
+                max: MAX_CLEAR_PREFIX_LEN,
+            }));
+        }
+        if self.counter == MAX_FRAME_COUNTER {
+            return Err(Error::CounterExhausted);
+        }
+        let (clear, body) = frame.split_at(clear_prefix_len.min(frame.len()));
+        let header = SframeHeader {
+            kid: self.kid,
+            ctr: self.counter + 1,
+        }
+        .encode();
+        let trailer =
+            media_frame_trailer(clear.len(), header.len()).map_err(|e| media_frame_refusal(&e))?;
+        let aad = media_frame_aad(&header, clear, &trailer);
+        let (_, ciphertext) = self.seal(&aad, body)?;
+        let mut wire = Vec::with_capacity(frame.len() + MAX_MEDIA_FRAME_OVERHEAD);
+        wire.extend_from_slice(clear);
+        wire.extend_from_slice(&ciphertext);
+        wire.extend_from_slice(&header);
+        wire.extend_from_slice(&trailer);
+        Ok(wire)
+    }
+
+    /// [`Self::seal_media_frame`] with the clear prefix the sender's rule
+    /// gives `codec` for this frame ([`clear_prefix_len`]): 10 bytes of a VP8
+    /// key frame, 3 of any other VP8 frame, none for Opus or an unknown
+    /// codec.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::seal_media_frame`]; the rule never asks for more than
+    /// [`MAX_CLEAR_PREFIX_LEN`].
+    pub fn seal_media_frame_for_codec(
+        &mut self,
+        frame: &[u8],
+        codec: MediaCodec,
+    ) -> Result<Vec<u8>> {
+        self.seal_media_frame(frame, clear_prefix_len(codec, frame))
+    }
+
+    /// Open a frame sealed by [`Self::seal_media_frame`] and return the
+    /// encoded frame as the sender's encoder produced it:
+    /// `clear_prefix || plaintext`.
+    ///
+    /// The trailer is read and every length checked against the input before
+    /// any slice is taken; the wire bytes of the header, the clear prefix and
+    /// the trailer are bound as additional data. This key must be the one
+    /// derived for the frame's KID. A frame in the ADR-0013 header-first
+    /// layout is refused. Opening keeps no state and accepts any 64-bit
+    /// counter (ADR-0069).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Crypto`] on a malformed frame, a KID that is not this key's,
+    /// or an AEAD authentication failure. Nothing of the input is returned on
+    /// any of them (security invariant #4).
+    pub fn open_media_frame(&self, wire: &[u8]) -> Result<Vec<u8>> {
+        let parts = MediaFrameParts::split(wire).map_err(|e| media_frame_refusal(&e))?;
+        self.open_media_parts(&parts)
+    }
+
+    /// Open an already-split media frame. The key ring splits once and tries
+    /// its current and previous keys over the same parts.
+    pub(crate) fn open_media_parts(&self, parts: &MediaFrameParts<'_>) -> Result<Vec<u8>> {
+        if parts.header.kid != self.kid {
+            return Err(Error::Crypto(format!(
+                "media frame kid {} does not match participant kid {}",
+                parts.header.kid, self.kid
+            )));
+        }
+        let plaintext = self.open(&parts.aad(), parts.ciphertext, parts.header.ctr)?;
+        let mut frame = Vec::with_capacity(parts.clear_prefix.len() + plaintext.len());
+        frame.extend_from_slice(parts.clear_prefix);
+        frame.extend_from_slice(&plaintext);
+        Ok(frame)
+    }
+
+    /// Test-only — force the internal counter to a given value: the only
+    /// deterministic start there is (ADR-0069). The exhaustion-edge tests use
+    /// it to land near `u64::MAX`, and the tests that pin exact wire bytes use
+    /// it to seal a known counter. Compiled out of the release crate via
+    /// `cfg(test)`, so no production caller and no FFI surface can set or
+    /// reset a counter (which could reuse a nonce under the same key — a
+    /// critical AEAD violation).
     #[cfg(test)]
-    fn set_counter_for_test(&mut self, c: u32) {
+    pub(crate) fn set_counter_for_test(&mut self, c: u64) {
         self.counter = c;
     }
 
-    /// RFC 9605 §4.4 nonce composition. `nonce = salt XOR
-    /// (frame_counter as u32 BE in the low 4 bytes)`. The
-    /// high 8 bytes of the salt stay; the low 4 bytes XOR in
-    /// the counter. Stable across implementations.
-    fn compose_nonce(&self, frame_counter: u32) -> Nonce {
+    /// Nonce composition (ADR-0069): `nonce = salt XOR (frame_counter as 8
+    /// big-endian bytes in the low 8 bytes of the 12-byte nonce)`. The high 4
+    /// bytes of the salt stay. Injective in the counter for a fixed salt, and
+    /// for a counter below `2^32` equal to the earlier 32-bit composition
+    /// (the four added bytes XOR in zero). Stable across implementations.
+    fn compose_nonce(&self, frame_counter: u64) -> Nonce {
+        const COUNTER_LEN: usize = 8;
         let mut nonce: Nonce = self.nonce_salt;
-        let ctr = frame_counter.to_be_bytes();
-        // XOR the counter into the trailing 4 bytes of the
-        // nonce. Salt provides the entropy in the leading
-        // 8 bytes; counter provides the per-frame variance.
-        for i in 0..4 {
-            nonce[NONCE_LEN - 4 + i] ^= ctr[i];
+        for (byte, ctr) in nonce[NONCE_LEN - COUNTER_LEN..]
+            .iter_mut()
+            .zip(frame_counter.to_be_bytes())
+        {
+            *byte ^= ctr;
         }
         nonce
     }
+}
+
+/// A malformed sealed media frame, as this crate's error.
+pub(crate) fn media_frame_refusal(err: &MediaFrameError) -> Error {
+    Error::Crypto(format!("media frame: {err}"))
 }
 
 // =============================================================================
@@ -538,8 +689,9 @@ mod tests {
 
         let aad = b"sframe-header-bytes";
         let pt = b"hello, p2p audio frame";
+        let start = sender.counter();
         let (ctr, ct) = sender.seal(aad, pt).unwrap();
-        assert_eq!(ctr, 1, "first sealed frame has counter == 1");
+        assert_eq!(ctr, start + 1, "first sealed frame carries start + 1");
 
         let opened = receiver.open(aad, &ct, ctr).unwrap();
         assert_eq!(opened.as_slice(), pt.as_ref());
@@ -591,12 +743,15 @@ mod tests {
         );
 
         // (c) the whole point: sealing the SAME plaintext at the SAME counter
-        // (all at counter 1 — the first frame on each fresh key) yields THREE
-        // pairwise-different ciphertexts, proving no two streams share a
+        // (each key forced to counter 0, so all three seal counter 1) yields
+        // THREE pairwise-different ciphertexts, proving no two streams share a
         // `(key, nonce)` pair.
         let mut audio = key.participant_key_for(leaf, 0).unwrap();
         let mut cam = key.participant_key_for(leaf, 1).unwrap();
         let mut screen = key.participant_key_for(leaf, 2).unwrap();
+        audio.set_counter_for_test(0);
+        cam.set_counter_for_test(0);
+        screen.set_counter_for_test(0);
         let aad = b"same-header";
         let pt = b"identical media plaintext";
         let (audio_counter, audio_cipher) = audio.seal(aad, pt).unwrap();
@@ -645,69 +800,250 @@ mod tests {
         assert_ne!(boundary_a.key_bytes(), boundary_b.key_bytes());
     }
 
-    /// S1 hazard, made explicit + regression-caught (crypto audit): two FRESH
-    /// [`ParticipantKey`]s derived from the SAME seed and the SAME KID BOTH
-    /// start at counter 0, so sealing the same plaintext on each reuses the
-    /// identical `(key, nonce)` at counter 1 — catastrophic AEAD nonce reuse.
-    /// The core cannot prevent a caller from re-deriving a key across
-    /// [`ParticipantKey`] lifetimes (each derivation is legitimately counter-0
-    /// for a FRESH seed); the invariant on [`CallKey::participant_key`] states
-    /// the contract the caller MUST uphold — a counter reset co-occurs with a
-    /// fresh seed. This test pins WHY: it demonstrates the reuse that WOULD occur
-    /// if a caller wrongly re-derived under an unchanged seed (the exact
-    /// regression the S2 same-seed-refresh no-op defends against upstream).
+    /// Why the counter start is random (ADR-0069). Two keys derived from the
+    /// SAME seed and the SAME KID hold the identical AEAD key and nonce salt.
+    /// Forced to the SAME counter (test-only), sealing on each reuses the
+    /// identical `(key, nonce)`: the same plaintext seals to the same
+    /// ciphertext, which is the keystream reuse a fixed start produced on
+    /// every rejoin. Nothing outside tests can put two keys on one counter.
     #[test]
-    fn two_participant_keys_from_the_same_seed_and_kid_start_at_the_same_counter_0() {
+    fn two_keys_of_one_seed_and_kid_forced_to_one_counter_reuse_the_nonce() {
         let seed = [0x77; CALL_KEY_LEN];
         let key = CallKey::from_seed(seed);
         let kid = SframeHeader::kid_for(2, 0).unwrap();
 
-        // Two independently-derived keys from the same (seed, kid).
         let mut first = key.participant_key(kid).unwrap();
         let mut second = key.participant_key(kid).unwrap();
-
-        // Both hold the identical AEAD key + nonce salt + a counter starting at 0.
         assert_eq!(first.key_bytes(), second.key_bytes());
         assert_eq!(first.nonce_salt(), second.nonce_salt());
-        assert_eq!(first.counter(), 0);
-        assert_eq!(second.counter(), 0);
 
-        // Sealing the SAME plaintext under the SAME AAD on each → both consume
-        // counter 1 → identical (key, nonce) → identical ciphertext. THIS is the
-        // catastrophic reuse the counter-0 ⟺ fresh-seed invariant forbids.
+        first.set_counter_for_test(41);
+        second.set_counter_for_test(41);
         let aad = b"same-header";
         let pt = b"same media plaintext";
         let (c1, ct1) = first.seal(aad, pt).unwrap();
         let (c2, ct2) = second.seal(aad, pt).unwrap();
-        assert_eq!(c1, 1);
-        assert_eq!(c2, 1);
+        assert_eq!(c1, 42);
+        assert_eq!(c2, 42);
         assert_eq!(
             ct1, ct2,
-            "two counter-0 keys off one (seed, kid) reuse (key, nonce) — the hazard \
-             the caller MUST avoid by pairing every counter reset with a fresh seed"
+            "two keys off one (seed, kid) at one counter reuse (key, nonce)"
         );
 
-        // Contrast: a DIFFERENT seed at the same kid is safe — a disjoint key
-        // space, so the same plaintext at counter 1 seals differently (no reuse).
+        // Contrast: a DIFFERENT seed at the same kid and counter is a disjoint
+        // key space.
         let other = CallKey::from_seed([0x88; CALL_KEY_LEN]);
         let mut safe = other.participant_key(kid).unwrap();
+        safe.set_counter_for_test(41);
         let (_c, ct_safe) = safe.seal(aad, pt).unwrap();
-        assert_ne!(
-            ct1, ct_safe,
-            "a fresh seed gives a disjoint key space — counter-0 across seeds is safe"
-        );
+        assert_ne!(ct1, ct_safe);
+    }
+
+    // -----------------------------------------------------
+    // ADR-0069 — 64-bit counter, random start.
+    // -----------------------------------------------------
+
+    /// The 32-bit nonce composition this crate used before ADR-0069, kept
+    /// here only to compare against.
+    fn legacy_nonce(salt: &[u8; NONCE_LEN], frame_counter: u32) -> Nonce {
+        let mut nonce: Nonce = *salt;
+        let ctr = frame_counter.to_be_bytes();
+        for i in 0..4 {
+            nonce[NONCE_LEN - 4 + i] ^= ctr[i];
+        }
+        nonce
+    }
+
+    /// For every counter below `2^32` the 64-bit composition is the nonce the
+    /// 32-bit code produced, so frames sealed before ADR-0069 still open.
+    ///
+    /// Both compositions XOR the salt bytewise with the counter's big-endian
+    /// bytes and have no carry between positions, so they agree on all of
+    /// `[0, 2^32)` exactly when (1) the four added high bytes XOR in zero and
+    /// (2) each of the low four positions agrees for each of its 256 byte
+    /// values. The test checks both exhaustively (4 x 256 single-byte
+    /// counters), then the edges, then a strided sweep of the whole range
+    /// (step 65_521, about 65 thousand values) as a check on that argument.
+    #[test]
+    fn nonce_below_2_pow_32_equals_the_32_bit_composition() {
+        let pk = CallKey::from_seed([0x42; CALL_KEY_LEN])
+            .participant_key_for(3, 0)
+            .unwrap();
+        let salt = *pk.nonce_salt();
+        let check = |c: u32| {
+            assert_eq!(
+                pk.compose_nonce(u64::from(c)),
+                legacy_nonce(&salt, c),
+                "counter {c:#x}"
+            );
+        };
+        for position in 0..4u32 {
+            for byte in 0..=255u32 {
+                check(byte << (8 * position));
+            }
+        }
+        for c in [0, 1, 0xFFFF, 0x0001_0000, u32::MAX - 1, u32::MAX] {
+            check(c);
+        }
+        let mut c: u32 = 0;
+        loop {
+            check(c);
+            match c.checked_add(65_521) {
+                Some(next) => c = next,
+                None => break,
+            }
+        }
+        // One past the 32-bit range: the high bytes now carry the counter.
+        let over = pk.compose_nonce(1u64 << 32);
+        assert_ne!(over, pk.compose_nonce(0));
+        assert_eq!(over[..4], salt[..4], "the high 4 nonce bytes stay the salt");
+    }
+
+    /// (a) The nonce is injective in the counter: `nonce XOR salt` gives the
+    /// counter back (its 8 big-endian bytes in the low 8 nonce bytes, the high
+    /// 4 untouched), so two different counters cannot share a nonce. Checked
+    /// on every single-bit counter, the edges, and random counters; flipping
+    /// any one counter bit changes the nonce.
+    #[test]
+    fn nonce_is_injective_in_the_counter() {
+        let pk = CallKey::from_seed([0x5A; CALL_KEY_LEN])
+            .participant_key_for(9, 1)
+            .unwrap();
+        let salt = *pk.nonce_salt();
+        let recover = |nonce: &Nonce| -> u64 {
+            assert_eq!(nonce[..4], salt[..4], "high 4 bytes are the salt");
+            let mut ctr = [0u8; 8];
+            for (i, byte) in ctr.iter_mut().enumerate() {
+                *byte = nonce[4 + i] ^ salt[4 + i];
+            }
+            u64::from_be_bytes(ctr)
+        };
+        let mut counters: Vec<u64> = vec![0, 1, u64::from(u32::MAX), 1 << 32, u64::MAX];
+        counters.extend((0..64).map(|bit| 1u64 << bit));
+        for _ in 0..4096 {
+            let mut bytes = [0u8; 8];
+            lakko_crypto::random::fill(&mut bytes);
+            counters.push(u64::from_be_bytes(bytes));
+        }
+        for &c in &counters {
+            let nonce = pk.compose_nonce(c);
+            assert_eq!(recover(&nonce), c, "the counter is recoverable");
+            for bit in 0..64 {
+                assert_ne!(nonce, pk.compose_nonce(c ^ (1u64 << bit)));
+            }
+        }
+    }
+
+    /// A fresh key's counter start is below `2^62`, and starts differ.
+    #[test]
+    fn fresh_keys_start_below_2_pow_62() {
+        let key = CallKey::from_seed([0x31; CALL_KEY_LEN]);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..2048 {
+            let start = key.participant_key_for(1, 0).unwrap().counter();
+            assert!(start < COUNTER_START_BOUND);
+            seen.insert(start);
+        }
+        // 2048 draws from 2^62 values collide with probability about 2^-41.
+        assert_eq!(seen.len(), 2048, "random starts repeated");
+    }
+
+    /// (b) Two keys derived from one `(seed, kid)` start at different counters
+    /// and, sealing 4096 frames each, never seal the same counter — so they
+    /// never share a `(key, nonce)` pair although they share the key.
+    ///
+    /// This is probabilistic: the two ranges overlap with probability at most
+    /// `(4096 + 4096) / 2^62 = 2^-49`. A failure here therefore means the
+    /// counter start is not coming from a working CSPRNG, not bad luck.
+    #[test]
+    fn two_keys_of_one_seed_and_kid_never_seal_the_same_counter() {
+        const FRAMES: usize = 4096;
+        let key = CallKey::from_seed([0x77; CALL_KEY_LEN]);
+        let kid = SframeHeader::kid_for(2, 0).unwrap();
+        let mut first = key.participant_key(kid).unwrap();
+        let mut second = key.participant_key(kid).unwrap();
+        assert_eq!(first.key_bytes(), second.key_bytes());
+        assert_eq!(first.nonce_salt(), second.nonce_salt());
+        assert_ne!(first.counter(), second.counter(), "starts must differ");
+
+        let mut counters = std::collections::BTreeSet::new();
+        let mut nonces = std::collections::BTreeSet::new();
+        for pk in [&mut first, &mut second] {
+            for _ in 0..FRAMES {
+                let (ctr, _ct) = pk.seal(b"aad", b"frame").unwrap();
+                assert!(counters.insert(ctr), "counter {ctr} sealed twice");
+                assert!(nonces.insert(pk.compose_nonce(ctr)), "nonce reused");
+            }
+        }
+        assert_eq!(counters.len(), 2 * FRAMES);
+    }
+
+    /// (c) Receivers hold no counter: a frame sealed by one key opens under a
+    /// second key derived independently from the same `(seed, kid)`, whose own
+    /// counter is some other random value, and opening does not move it.
+    #[test]
+    fn a_frame_opens_under_an_independently_derived_key() {
+        let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
+        let mut sender = key.participant_key_for(5, 1).unwrap();
+        let receiver = CallKey::from_seed([0x13; CALL_KEY_LEN])
+            .participant_key_for(5, 1)
+            .unwrap();
+        assert_ne!(sender.counter(), receiver.counter());
+        let before = receiver.counter();
+        for i in 0..8u8 {
+            let wire = sender.seal_framed(&[i; 32]).unwrap();
+            assert_eq!(receiver.open_framed(&wire).unwrap(), vec![i; 32]);
+        }
+        let (ctr, ct) = sender.seal(b"aad", b"raw").unwrap();
+        assert_eq!(receiver.open(b"aad", &ct, ctr).unwrap(), b"raw");
+        assert_eq!(receiver.counter(), before, "opening keeps no state");
+    }
+
+    /// (f) A header with an 8-byte counter round-trips: a frame sealed at a
+    /// counter above `2^56` carries a header whose CTR field is 8 bytes, the
+    /// header decodes to the same counter, and the frame opens. Also at
+    /// `2^32`, the first counter the 32-bit code refused.
+    #[test]
+    fn a_frame_with_an_8_byte_counter_round_trips() {
+        let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
+        let receiver = key.participant_key_for(5, 0).unwrap();
+        for start in [
+            (1u64 << 32) - 1,
+            1u64 << 56,
+            COUNTER_START_BOUND - 1,
+            u64::MAX - 1,
+        ] {
+            let mut sender = key.participant_key_for(5, 0).unwrap();
+            sender.set_counter_for_test(start);
+            let wire = sender.seal_framed(b"wide counter").unwrap();
+            let (header, consumed) = SframeHeader::decode(&wire).unwrap();
+            assert_eq!(header.ctr, start + 1);
+            assert_eq!(header.kid, SframeHeader::kid_for(5, 0).unwrap());
+            if start >= 1u64 << 56 {
+                // config byte + 2 KID bytes (0x0500) + 8 CTR bytes.
+                assert_eq!(consumed, 1 + 2 + 8);
+                assert_eq!(wire[0] & 0x0F, 0x0F, "Y=1, CCC=7: an 8-byte CTR");
+            }
+            assert_eq!(
+                SframeHeader::decode(&header.encode()).unwrap(),
+                (header, consumed)
+            );
+            assert_eq!(receiver.open_framed(&wire).unwrap(), b"wide counter");
+        }
     }
 
     #[test]
     fn counter_increments_strictly() {
         let key = CallKey::from_seed([0x42; CALL_KEY_LEN]);
         let mut p = key.participant_key_for(0, 0).unwrap();
+        let start = p.counter();
         let (c1, _) = p.seal(b"aad", b"f1").unwrap();
         let (c2, _) = p.seal(b"aad", b"f2").unwrap();
         let (c3, _) = p.seal(b"aad", b"f3").unwrap();
-        assert_eq!(c1, 1);
-        assert_eq!(c2, 2);
-        assert_eq!(c3, 3);
+        assert_eq!(c1, start + 1);
+        assert_eq!(c2, start + 2);
+        assert_eq!(c3, start + 3);
+        assert_eq!(p.counter(), start + 3);
     }
 
     #[test]
@@ -748,57 +1084,54 @@ mod tests {
     // -----------------------------------------------------
     // G-17 — frame-counter exhaustion edge.
     //
-    // Per RFC 9605 §4.4 the SFrame counter is 32-bit. After
-    // u32::MAX successful seals the producer MUST refuse to
-    // emit another frame (a 33rd-bit overflow would re-use
-    // the AEAD nonce and break confidentiality). The
-    // production rotation path is an MLS commit — fresh
-    // epoch → fresh CallKey → fresh ParticipantKey → counter
-    // resets to 0. These tests use the test-only counter
-    // accessor to land near the edge in O(1) rather than
-    // grinding 4 billion seals.
+    // The counter is 64 bits (ADR-0069). A key whose counter
+    // stands at u64::MAX MUST refuse to seal another frame (a
+    // wrap would reuse a nonce), and must seal nothing. From
+    // the highest random start (2^62 - 1) that is 3 * 2^62
+    // frames away, so the edge is reached only through the
+    // test-only counter accessor.
     // -----------------------------------------------------
 
     #[test]
     fn counter_exhaustion_returns_typed_error() {
         let key = CallKey::from_seed([0xCC; CALL_KEY_LEN]);
         let mut p = key.participant_key_for(0, 0).unwrap();
-        // Land at u32::MAX - 2 — two seals must still
+        // (d) Land at u64::MAX - 2 — two seals must still
         // succeed (counter increments to MAX - 1 then MAX),
-        // the third must refuse.
-        p.set_counter_for_test(u32::MAX - 2);
+        // the third must refuse and seal nothing.
+        p.set_counter_for_test(u64::MAX - 2);
         let (c1, _) = p.seal(b"aad", b"frame-A").expect("seal at MAX-2");
         let (c2, _) = p.seal(b"aad", b"frame-B").expect("seal at MAX-1");
-        assert_eq!(c1, u32::MAX - 1);
-        assert_eq!(c2, u32::MAX);
-        // Counter is now at u32::MAX. Third attempt MUST
+        assert_eq!(c1, u64::MAX - 1);
+        assert_eq!(c2, u64::MAX);
+        // Counter is now at u64::MAX. Third attempt MUST
         // refuse with the typed variant — no panic, no
         // silent wrap, no nonce reuse.
         match p.seal(b"aad", b"frame-C") {
             Err(Error::CounterExhausted) => {},
-            Ok((ctr, _)) => panic!("must refuse 33rd-bit roll, got counter={ctr}"),
+            Ok((ctr, _)) => panic!("must refuse to wrap, got counter={ctr}"),
             Err(other) => panic!("expected CounterExhausted, got {other:?}"),
         }
         // Counter accessor reflects the saturated state so
         // a UI / metrics surface can see the exhaustion.
-        assert_eq!(p.counter(), u32::MAX);
+        assert_eq!(p.counter(), u64::MAX);
     }
 
     #[test]
     fn counter_max_frame_still_opens_on_receiver() {
         // The last legal seal lands at frame_counter =
-        // u32::MAX. A receiver re-deriving the same
+        // u64::MAX. A receiver re-deriving the same
         // ParticipantKey at the same epoch MUST authenticate
         // it — no off-by-one at the nonce-composition
         // boundary.
         let key = CallKey::from_seed([0xCD; CALL_KEY_LEN]);
         let mut sender = key.participant_key_for(0, 0).unwrap();
         let receiver = key.participant_key_for(0, 0).unwrap();
-        sender.set_counter_for_test(u32::MAX - 1);
+        sender.set_counter_for_test(u64::MAX - 1);
         let (ctr, ct) = sender
             .seal(b"aad-edge", b"last-frame")
             .expect("seal at MAX-1");
-        assert_eq!(ctr, u32::MAX);
+        assert_eq!(ctr, u64::MAX);
         let opened = receiver
             .open(b"aad-edge", &ct, ctr)
             .expect("open at MAX must authenticate");
@@ -814,14 +1147,14 @@ mod tests {
         // the very first seal in this key's lifetime).
         let key = CallKey::from_seed([0xCE; CALL_KEY_LEN]);
         let mut p = key.participant_key_for(0, 0).unwrap();
-        p.set_counter_for_test(u32::MAX);
+        p.set_counter_for_test(u64::MAX);
         for attempt in 0..16 {
             match p.seal(b"aad", b"junk") {
                 Err(Error::CounterExhausted) => {},
                 Ok(_) => panic!("attempt {attempt} unexpectedly succeeded"),
                 Err(other) => panic!("attempt {attempt}: expected CounterExhausted, got {other:?}"),
             }
-            assert_eq!(p.counter(), u32::MAX, "counter must not wrap");
+            assert_eq!(p.counter(), u64::MAX, "counter must not wrap");
         }
     }
 
@@ -844,9 +1177,14 @@ mod tests {
     /// `0x0300` and the header carries the extended 2-byte KID `0x03 0x00`). Any
     /// other stream index differs.
     ///
+    /// Since ADR-0069 a fresh key starts at a random counter, so only this
+    /// crate (through the test-only counter accessor) still SEALS the golden;
+    /// every other stack proves its seal by opening what it sealed and proves
+    /// the wire by OPENING this vector, a frame at counter 1.
+    ///
     /// To regenerate after an intentional wire change: seal `(seed=[0x42;32],
     /// leaf=3, stream_index=0, plaintext=b"lakko sframe golden vector v1")` on a
-    /// fresh `ParticipantKey` (counter 0) and update the hex on all five stacks.
+    /// `ParticipantKey` forced to counter 0 and update the hex on all five stacks.
     const GOLDEN_SEED: [u8; CALL_KEY_LEN] = [0x42; CALL_KEY_LEN];
     const GOLDEN_LEAF: u32 = 3;
     const GOLDEN_STREAM: u32 = 0;
@@ -866,6 +1204,8 @@ mod tests {
             // ADR-0035: keyed on the full KID (leaf 3, stream 0 → KID 0x0300).
             .participant_key_for(GOLDEN_LEAF, GOLDEN_STREAM)
             .unwrap();
+        // The golden is the frame at counter 1: force the start to 0.
+        sender.set_counter_for_test(0);
         let wire = sender.seal_framed(GOLDEN_PLAINTEXT).expect("seal_framed");
         assert_eq!(
             wire,
@@ -882,8 +1222,12 @@ mod tests {
             // ADR-0035: keyed on the full KID (leaf 3, stream 0 → KID 0x0300).
             .participant_key_for(GOLDEN_LEAF, GOLDEN_STREAM)
             .unwrap();
+        // (e) The receiver's own counter is random; the golden still opens.
         let opened = receiver.open_framed(&golden_wire()).expect("open_framed");
         assert_eq!(opened.as_slice(), GOLDEN_PLAINTEXT);
+        let (header, _) = SframeHeader::decode(&golden_wire()).unwrap();
+        assert_eq!(header.kid, 0x0300);
+        assert_eq!(header.ctr, 1);
     }
 
     #[test]
@@ -905,9 +1249,10 @@ mod tests {
         // leaf 5, stream 0 → composite KID 5<<8 = 0x0500 (ADR-0035).
         let expected_kid = SframeHeader::kid_for(5, 0).unwrap();
         let mut sender = key.participant_key_for(5, 0).unwrap();
+        sender.set_counter_for_test(0);
         let wire = sender.seal_framed(b"x").expect("seal_framed");
-        // First frame → counter 1; header decodes to (kid=0x0500, ctr=1)
-        // and is the minimal canonical encoding.
+        // Counter forced to 0 → the frame carries counter 1; header decodes
+        // to (kid=0x0500, ctr=1) and is the minimal canonical encoding.
         let (header, consumed) = SframeHeader::decode(&wire).expect("decode");
         assert_eq!(header.kid, expected_kid);
         assert_eq!(SframeHeader::leaf_of(header.kid), 5);
@@ -929,7 +1274,8 @@ mod tests {
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
         let mut sender = key.participant_key_for(0, 0).unwrap();
         let receiver = key.participant_key_for(0, 0).unwrap();
-        for expected_ctr in 1..=4u64 {
+        let start = sender.counter();
+        for expected_ctr in start + 1..=start + 4 {
             let wire = sender.seal_framed(b"frame").expect("seal_framed");
             let (header, _) = SframeHeader::decode(&wire).expect("decode");
             assert_eq!(header.ctr, expected_ctr);
@@ -961,9 +1307,12 @@ mod tests {
         let mut sender = key.participant_key_for(0, 0).unwrap();
         let receiver = key.participant_key_for(0, 0).unwrap();
         let mut wire = sender.seal_framed(b"frame").expect("seal_framed");
-        // Flip the counter byte in the header (kid=0,ctr=1 → header
-        // is [0x00, 0x01]; bump ctr to 2). The AEAD AAD no longer
-        // matches what was sealed AND the nonce changes → open fails.
+        // Change the first counter byte in the header (kid=0 is inline and
+        // the random counter is above 7, so the header is the config byte
+        // followed by the CTR bytes). The AEAD AAD no longer matches what
+        // was sealed AND the nonce changes → open fails.
+        let (header, _) = SframeHeader::decode(&wire).unwrap();
+        assert!(header.ctr > 7, "an extended CTR field follows the config");
         wire[1] = wire[1].wrapping_add(1);
         assert!(receiver.open_framed(&wire).is_err());
     }
@@ -996,14 +1345,14 @@ mod tests {
     fn seal_framed_honours_counter_exhaustion() {
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
         let mut p = key.participant_key_for(0, 0).unwrap();
-        p.set_counter_for_test(u32::MAX);
+        p.set_counter_for_test(u64::MAX);
         match p.seal_framed(b"junk") {
             Err(Error::CounterExhausted) => {},
             other => panic!("expected CounterExhausted, got {other:?}"),
         }
         assert_eq!(
             p.counter(),
-            u32::MAX,
+            u64::MAX,
             "counter must not advance on exhaustion"
         );
     }
@@ -1024,7 +1373,7 @@ mod tests {
         let wire2 = sender.seal_framed(b"frame body B").expect("seal_framed B");
         let (_h1, consumed1) = SframeHeader::decode(&wire1).expect("decode A");
         let (_h2, consumed2) = SframeHeader::decode(&wire2).expect("decode B");
-        // B's header (counter 2) onto A's ciphertext body.
+        // B's header (the next counter) onto A's ciphertext body.
         let mut spliced = wire2[..consumed2].to_vec();
         spliced.extend_from_slice(&wire1[consumed1..]);
         assert!(

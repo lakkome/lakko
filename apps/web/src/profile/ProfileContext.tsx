@@ -71,6 +71,7 @@ import {
   type ResendConversation,
 } from "./rotation-resend";
 import { resolveAccountKeyHex } from "../contacts/address-resolver";
+import { AccountSlot } from "./account-slot";
 import { ScopedDiscoveryClient, usernameCertKey } from "../reach/scoped-discovery";
 import { visibilitySetting } from "../reach/visibility-store";
 import { grantSignatureOf, recordGrantSignature } from "./grant-signatures";
@@ -101,6 +102,11 @@ export interface ProfileApi {
   usernameClaimed(certificate: Uint8Array | null): Promise<void>;
   /** Resolve a person — a 32-byte key or its base64. Reactive. */
   resolve(key: Uint8Array | string): ResolvedName;
+  /** The username the stored profile of `keyB64` CLAIMS, verified or not,
+   *  or `null`. Never shown with `@` unless `resolve` says it is verified; a
+   *  call tile shows it as plain text while verification is still running
+   *  (`calls/tile-name.ts`). Reactive. */
+  claimedUsernameOf(keyB64: string): string | null;
   /** File a received profile under its AUTHENTICATED sender key. With a
    *  `context`, the reach grants it carried are kept under the ADR-0060 rules
    *  for that conversation. */
@@ -220,26 +226,20 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
 
   const scoped = new ScopedDiscoveryClient(() => auth.identitySecrets()?.sessionToken ?? null);
   const [ownCert, setOwnCert] = createSignal<Uint8Array | null>(null);
-  let certFetch: Promise<void> | null = null;
+  // The certificate is ONE account's: it binds that account's username to
+  // that account's id. The slot is emptied on every change of account (the
+  // account-bind effect below), and a fetch that returns after the change
+  // fills nothing - otherwise the next account's profile envelopes would
+  // carry the previous account's certificate.
+  const ownCertSlot = new AccountSlot<Uint8Array>((value) => setOwnCert(value));
   /** Fetch this account's username certificate once (retried on the next
    *  publish when it failed). */
   function ensureOwnCertificate(): Promise<void> {
-    if (ownCert() !== null || ownUsername() === null) return Promise.resolve();
-    if (certFetch === null) {
-      certFetch = scoped
-        .usernameCertificate()
-        .then((c) => {
-          if (c !== null) setOwnCert(c);
-        })
-        .catch((err: unknown) => {
-          // eslint-disable-next-line no-console
-          console.warn("[profile] username certificate not fetched; retried later", err);
-        })
-        .finally(() => {
-          certFetch = null;
-        });
-    }
-    return certFetch;
+    if (ownUsername() === null) return Promise.resolve();
+    return ownCertSlot.ensure(accountId(), () => scoped.usernameCertificate()).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn("[profile] username certificate not fetched; retried later", err);
+    });
   }
   // ADR-0076: the name changed under this session (a rename here, or one
   // adopted from the own-username register): the cached certificate is the
@@ -251,8 +251,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     const previous = certUsername;
     certUsername = username;
     if (previous === undefined || previous === username) return;
-    setOwnCert(null);
-    certFetch = null;
+    ownCertSlot.reset();
     if (username === null) return;
     void ensureOwnCertificate().then(() => {
       bump();
@@ -472,6 +471,8 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     untrack(() => {
       if (account === boundAccount) return;
       boundAccount = account;
+      // The previous account's username certificate, held or on its way.
+      ownCertSlot.rebind(account);
       if (account === null) {
         unbindOwnProfileSync();
         scheduler.stop();
@@ -572,7 +573,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       await scheduler.profileChanged(chats.groups().map((g) => g.groupIdB64));
     },
     async usernameClaimed(certificate) {
-      if (certificate !== null) setOwnCert(certificate);
+      if (certificate !== null) ownCertSlot.put(accountId(), certificate);
       else await ensureOwnCertificate();
       bump();
       ownProfileChanged();
@@ -625,6 +626,11 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
             ? verifier.state(profileKeyB64, profile.username)
             : undefined,
       });
+    },
+    claimedUsernameOf(keyB64) {
+      version();
+      const username = store.get(keyB64)?.username ?? null;
+      return username !== null && username.length > 0 ? username : null;
     },
     ingest(senderKeyB64, profile, context) {
       const account = accountId();

@@ -14,6 +14,7 @@
  * which does what the old device's form does (section 18.4) with the phrase
  * as the proof and the new password already typed here.
  */
+import { isAbandoned } from "../binding-epoch";
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { AuthHttpError, AuthNetworkError } from "../client";
@@ -117,6 +118,8 @@ export function PhraseRecover(props: {
       setConfirm("");
       props.onDone();
     } catch (err) {
+      // Overtaken by another session on this device: nothing to report.
+      if (isAbandoned(err)) return;
       const secs = attemptsRetryAfterSecs(err);
       if (secs !== null) {
         wait.startFor(secs);

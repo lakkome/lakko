@@ -398,6 +398,11 @@ public class CallSession(
         // initial configuration (same rationale as iOS).
         scope.launch {
             val iceServers = resolveIceServers()
+            // The credential fetch can take seconds, and the person may have
+            // pressed End meanwhile. Nothing may start for a call that is no
+            // longer being placed: the camera opened below would have nobody
+            // left to close it.
+            if (mutableState.value != WebCallState.Outgoing) return@launch
             val rtc = WebRtcPeerConnection(applicationContext, iceServers = iceServers)
             if (!rtc.isReady) {
                 android.util.Log.w("CallSession", "dial: PeerConnection allocation failed")
@@ -422,6 +427,9 @@ public class CallSession(
                     "CallSession",
                     "dial: SFrame attach failed — refusing per security invariant #4",
                 )
+                // Not this session's connection yet, so the teardown below
+                // would not find it: close it here.
+                rtc.close()
                 endLocal(WebCallEndReason.Error)
                 return@launch
             }
@@ -531,6 +539,30 @@ public class CallSession(
         }
     }
 
+    /** The camera chosen in the call's Settings sheet, or `null` for the
+     *  default. Held for the call, so a camera started later opens on it. */
+    private var preferredCamera: String? = null
+
+    /**
+     * Use the camera named [cameraName] for this call, or the default one for
+     * `null` (`docs/ux/calls.md` section 4.1, the Settings sheet).
+     *
+     * Applies at once when the camera is being captured, by the same swap as
+     * [switchCamera]: the track and the sender stay, so nothing is
+     * renegotiated and the SFrame encryptor stays armed. Otherwise it is kept
+     * for when the camera is turned on.
+     */
+    public fun selectCamera(cameraName: String?) {
+        preferredCamera = cameraName
+        val capture = localCameraCapture ?: return
+        val target = cameraName ?: CameraVideoCapture.defaultCameraName(applicationContext) ?: return
+        capture.switchTo(target) { switched, isFrontFacing ->
+            if (switched) {
+                mutableCameraIsFrontFacing.value = isFrontFacing
+            }
+        }
+    }
+
     private val mutableCameraIsFrontFacing: MutableStateFlow<Boolean> = MutableStateFlow(true)
 
     /**
@@ -624,6 +656,16 @@ public class CallSession(
         // "Starting camera…" hint until this resolves to Live / Failed.
         mutableVideoPublishState.value = VideoPublishState.Starting
         try {
+            // A sealed video sender whose track ended by itself: its capture
+            // is dead. Release it before acquiring the camera again; the
+            // sender itself is kept and reused in step 5.
+            if (connection.hasSealedLocalVideoSender()) {
+                localCameraCapture?.let { stale ->
+                    stale.stop()
+                    stale.dispose()
+                }
+                localCameraCapture = null
+            }
             // 3. Capture the camera. On any failure -> throw; no sender has
             //    been added yet, so there is nothing half-added to clean up.
             if (!CameraVideoCapture.hasUsableCamera(applicationContext)) {
@@ -634,8 +676,9 @@ public class CallSession(
             if (source == null || eglContext == null) {
                 throw WebRtcException("could not create a video source")
             }
-            val capture = CameraVideoCapture.create(applicationContext, source, eglContext)
+            val capture = CameraVideoCapture.create(applicationContext, source, eglContext, preferredCamera)
                 ?: throw WebRtcException("could not create the camera capture")
+            mutableCameraIsFrontFacing.value = capture.startsFrontFacing
             try {
                 capture.start()
             } catch (cause: CameraVideoCapture.CaptureError) {
@@ -653,6 +696,33 @@ public class CallSession(
                 // The call went away mid-acquire — teardown already reset (or
                 // is about to reset) the state; do not surface a failure.
                 mutableVideoPublishState.value = VideoPublishState.Off
+                return
+            }
+
+            // A sealed video sender whose track ended by itself is still on
+            // the connection. One sender per stream: put the fresh track on
+            // THAT sender, keeping its SFrame encryptor and counter. A second
+            // sender would seal the same (leaf, stream) KID under a second
+            // encryptor (ADR-0035, ADR-0069).
+            if (connection2.hasSealedLocalVideoSender()) {
+                if (!connection2.replaceLocalVideoTrack(source)) {
+                    capture.stop()
+                    capture.dispose()
+                    throw WebRtcException("could not put the camera on the existing video sender")
+                }
+                localCameraCapture = capture
+                mutableLocalVideoTrack.value = connection2.currentLocalVideoTrack()
+                mutableCameraEnabled.value = true
+                mutableVideoPublishState.value = VideoPublishState.Live
+                // The sender may be parked at `recvOnly` by an earlier
+                // camera-off; say that video flows again, as the re-enable
+                // path above does.
+                if (connection2.setLocalVideoSending(true)) {
+                    driveRenegotiationOffer(video = true)
+                } else {
+                    startKeyframeWatchdog()
+                    diagnoseMidCallVideo("camera track replaced")
+                }
                 return
             }
 
@@ -755,15 +825,24 @@ public class CallSession(
      *  through to here. */
     override fun acceptCall(withVideo: Boolean) {
         if (mutableState.value != WebCallState.Ringing || isOfferer) return
+        // One answer per call: the state stays Ringing while the credential is
+        // fetched, and a second accept in that time would build a second peer
+        // connection and open the camera twice.
+        if (accepting) return
         val offerSdp = pendingRemoteOfferSdp
         if (offerSdp == null) {
             android.util.Log.w("CallSession", "acceptCall: pendingRemoteOfferSdp missing — race?")
             endLocal(WebCallEndReason.Error)
             return
         }
+        accepting = true
 
         scope.launch {
             val iceServers = resolveIceServers()
+            // The caller may have hung up, or the ring run out, while the
+            // credential was fetched: the call is then over and must neither
+            // open the camera nor come back as connecting.
+            if (mutableState.value != WebCallState.Ringing) return@launch
             val rtc = WebRtcPeerConnection(applicationContext, iceServers = iceServers)
             if (!rtc.isReady) {
                 android.util.Log.w("CallSession", "acceptCall: PeerConnection allocation failed")
@@ -785,6 +864,9 @@ public class CallSession(
                     "CallSession",
                     "acceptCall: SFrame attach failed — refusing per security invariant #4",
                 )
+                // Not this session's connection yet, so the teardown below
+                // would not find it: close it here.
+                rtc.close()
                 endLocal(WebCallEndReason.Error)
                 return@launch
             }
@@ -794,6 +876,10 @@ public class CallSession(
 
             try {
                 val answerSdp = rtc.createAnswer(remoteOfferSdp = offerSdp)
+                // The answer fixed each sender's codec: tell the video
+                // encryptor, so it leaves that codec's frame header clear
+                // (ADR-0071). See [syncSenderCodecsAfterNegotiation].
+                syncSenderCodecsAfterNegotiation(rtc)
                 // The remote offer is now the remote description: the
                 // candidates the caller trickled while this call rang can go in.
                 applyBufferedRemoteCandidates(rtc)
@@ -818,6 +904,9 @@ public class CallSession(
             }
         }
     }
+
+    /** [acceptCall] has been taken for this call. Main thread only. */
+    private var accepting = false
 
     /** Inbound side: decline. */
     override fun declineCall() {
@@ -858,6 +947,7 @@ public class CallSession(
                     scope.launch {
                         try {
                             rtc.applyRemoteAnswer(body.sdp)
+                            syncSenderCodecsAfterNegotiation(rtc)
                             applyBufferedRemoteCandidates(rtc)
                             // ADR-0032 piece B2b — arm renegotiation for future
                             // local track changes; drive a camera-on that was
@@ -1092,6 +1182,30 @@ public class CallSession(
     // ----------------------------------------------------------------
 
     /**
+     * Tell the video sender's SFrame encryptor the codec the negotiation that
+     * has just completed gave its sender (ADR-0071), so the encryptor leaves
+     * that codec's frame header in the clear. Without it the encryptor of a
+     * one-to-one call stays at "no codec" and keeps nothing clear.
+     *
+     * Called after every completed offer / answer exchange of this call: the
+     * first one in either role, and each renegotiation in either role (a
+     * camera turned on mid-call gets its media line, and so its codec, with
+     * that exchange's answer). The sender armed mid-call before its answer is
+     * told again here; a sender that is not there yet is skipped.
+     *
+     * Best effort and never a reason to end the call: an encryptor told
+     * nothing seals the whole frame, which costs the peer its key-frame
+     * detection and never the confidentiality of the media.
+     */
+    private fun syncSenderCodecsAfterNegotiation(connection: WebRtcPeerConnection) {
+        try {
+            connection.syncSenderCodecs()
+        } catch (cause: RuntimeException) {
+            android.util.Log.w("CallSession", "could not tell the video encryptor its codec", cause)
+        }
+    }
+
+    /**
      * Drive a mid-call renegotiation offer (the offerer role of perfect
      * negotiation). Mirror of the web `onNegotiationNeeded`. Gated so it only
      * fires once the initial exchange has landed ([negotiationReady]), never
@@ -1171,6 +1285,7 @@ public class CallSession(
             }
             // createAnswer sets the remote offer, builds + sets the answer.
             val answerSdp = connection.createAnswer(sdp)
+            syncSenderCodecsAfterNegotiation(connection)
             val bytes = composeCallSignaling(
                 FfiCallSignalingBody.Answer(callId = callId, sdp = answerSdp),
             )
@@ -1197,6 +1312,7 @@ public class CallSession(
             isSettingRemoteAnswerPending = true
             connection.applyRemoteAnswer(sdp)
             isSettingRemoteAnswerPending = false
+            syncSenderCodecsAfterNegotiation(connection)
         } catch (cause: Throwable) {
             isSettingRemoteAnswerPending = false
             android.util.Log.w("CallSession", "renegotiation answer apply failed", cause)
@@ -1512,11 +1628,12 @@ public class CallSession(
             )
             return
         }
-        val capture = CameraVideoCapture.create(applicationContext, source, eglContext)
+        val capture = CameraVideoCapture.create(applicationContext, source, eglContext, preferredCamera)
         if (capture == null) {
             android.util.Log.w("CallSession", "CameraVideoCapture.create returned null")
             return
         }
+        mutableCameraIsFrontFacing.value = capture.startsFrontFacing
         rtc.addLocalVideoTrack(source)
         this.localCameraCapture = capture
         mutableLocalVideoTrack.value = rtc.currentLocalVideoTrack()
@@ -1545,6 +1662,9 @@ public class CallSession(
         FfiCallEndReason.DECLINED -> WebCallEndReason.Declined
         FfiCallEndReason.TIMED_OUT -> WebCallEndReason.TimedOut
         FfiCallEndReason.ERROR -> WebCallEndReason.Error
+        // A group / link call reason. In a one-to-one call any End ends it for
+        // both, so it reads as the hang-up it is.
+        FfiCallEndReason.ENDED_FOR_ALL -> WebCallEndReason.HungUp
     }
 
     private fun fromReason(r: WebCallEndReason): FfiCallEndReason = when (r) {

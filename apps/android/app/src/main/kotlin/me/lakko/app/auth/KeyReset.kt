@@ -199,7 +199,7 @@ public class KeyResetOwedStore(private val storage: MarkerStorage) {
 
     public fun save(accountIdB64: String, owed: KeyResetOwed) {
         try {
-            storage.set(KEY_PREFIX + accountIdB64, json.encodeToString(KeyResetOwed.serializer(), owed))
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.set(KEY_PREFIX + accountIdB64, json.encodeToString(KeyResetOwed.serializer(), owed)) }
         } catch (_: Throwable) {
             // The debt then lives for this process only.
         }

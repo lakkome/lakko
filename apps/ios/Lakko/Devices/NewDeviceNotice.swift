@@ -173,6 +173,8 @@ struct NewDeviceNoticeStore {
     }
 
     func save(_ record: NewDeviceNoticeRecord, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         guard let data = try? JSONEncoder().encode(record) else { return }
         defaults.set(data, forKey: Self.key(accountIdB64: accountIdB64))
     }

@@ -177,7 +177,8 @@ public fun FeedImportScreen(
                 } else {
                     error = UiText("feed.error.save")
                 }
-            } catch (_: Throwable) {
+            } catch (cause: Throwable) {
+                me.lakko.app.rethrowIfCancelled(cause)
                 error = UiText("feed.error.save")
             } finally {
                 busy = false

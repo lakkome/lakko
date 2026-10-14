@@ -157,7 +157,7 @@ public enum DeviceRemoval {
             // published, so nothing that reads the snapshot (the sync
             // runtime's reload, the next add) can see the pre-removal epoch.
             prepare: { commitBytes in
-                DeviceGroupLifecycle.persistSnapshot(
+                try DeviceGroupLifecycle.persistSnapshotOrThrow(
                     identity: ensured.identity,
                     accountIdB64: accountIdB64
                 )
@@ -251,7 +251,7 @@ public enum DeviceRemoval {
             create: { try ensured.group.setRequireAttestedRemovals(identity: ensured.identity) },
             // G-7 — on disk before the publish (see `removeDeviceAt`).
             prepare: { commit in
-                DeviceGroupLifecycle.persistSnapshot(
+                try DeviceGroupLifecycle.persistSnapshotOrThrow(
                     identity: ensured.identity,
                     accountIdB64: accountIdB64
                 )

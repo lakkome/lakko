@@ -93,19 +93,23 @@ public open class SharedPrefsInviteLinkSecretStore(
     }
 
     override fun put(accountIdB64: String, slug: String, secret: String) {
-        try {
-            prefs.edit().putString(rowKey(accountIdB64, slug), secret).apply()
-        } catch (_: Throwable) {
-            // Best effort: a lost secret costs re-sharing from this device,
-            // never the link itself.
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                prefs.edit().putString(rowKey(accountIdB64, slug), secret).apply()
+            } catch (_: Throwable) {
+                // Best effort: a lost secret costs re-sharing from this device,
+                // never the link itself.
+            }
         }
     }
 
     override fun remove(accountIdB64: String, slug: String) {
-        try {
-            prefs.edit().remove(rowKey(accountIdB64, slug)).apply()
-        } catch (_: Throwable) {
-            // best effort
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                prefs.edit().remove(rowKey(accountIdB64, slug)).apply()
+            } catch (_: Throwable) {
+                // best effort
+            }
         }
     }
 

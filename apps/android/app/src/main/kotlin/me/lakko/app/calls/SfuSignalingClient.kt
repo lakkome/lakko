@@ -22,12 +22,15 @@ import uniffi.lakko_ffi_uniffi.FfiWsMessage
 import uniffi.lakko_ffi_uniffi.SfuErrorCode
 import uniffi.lakko_ffi_uniffi.SfuPeerSnapshot
 import uniffi.lakko_ffi_uniffi.SfuServerFrame
+import uniffi.lakko_ffi_uniffi.SfuVideoGiven
+import uniffi.lakko_ffi_uniffi.SfuVideoWant
 import uniffi.lakko_ffi_uniffi.composeSfuIceCandidate
 import uniffi.lakko_ffi_uniffi.composeSfuPing
 import uniffi.lakko_ffi_uniffi.composeSfuSdpAnswer
-import uniffi.lakko_ffi_uniffi.composeSfuSdpOffer
+import uniffi.lakko_ffi_uniffi.composeSfuSdpOfferWithMiddle
 import uniffi.lakko_ffi_uniffi.composeSfuSignalRelayToCall
 import uniffi.lakko_ffi_uniffi.composeSfuSignalRelayToPeer
+import uniffi.lakko_ffi_uniffi.composeSfuVideoWants
 import uniffi.lakko_ffi_uniffi.openTunneledWebsocket
 import uniffi.lakko_ffi_uniffi.parseSfuServerFrame
 import uniffi.lakko_ffi_uniffi.TunneledWsConnection
@@ -63,6 +66,20 @@ interface SfuSignalingCallbacks {
 
     /** Application-layer pong reply. */
     fun onPong(nonce: ULong) {}
+
+    /** What the SFU gives this device of each publisher's video (ADR-0070
+     *  step 6): the whole set, one entry per publisher it sends video of. */
+    fun onVideoGiven(given: List<SfuVideoGiven>) {}
+
+    /** Which of this device's own camera senders somebody is being sent
+     *  (ADR-0070, "senders nobody watches"): the whole state each time. */
+    fun onVideoNeeded(main: Boolean, middle: Boolean) {}
+
+    /** The ceiling of this device's main and middle camera sender, kbit/s
+     *  (ADR-0068, the publish budget): the whole state each time, the last
+     *  frame wins. As the shared parser read them; `PublishBudget.kt` checks
+     *  the bounds again. */
+    fun onPublishBudget(mainKbps: Long, middleKbps: Long) {}
 
     /** Server reported a protocol-level error. */
     fun onServerError(code: SfuErrorCode, detail: String) {}
@@ -121,6 +138,16 @@ class SfuSignalingClient(
     private var tunnelSendJob: Job? = null
     private val tunnelOutbound = Channel<String>(Channel.UNLIMITED)
 
+    /**
+     * Set by [close]. A socket that finishes opening after it is shut again
+     * at once and never becomes this client's session: [connect] suspends on
+     * the upgrade (and the tunneled dial blocks), and the call may be left
+     * meanwhile. Without it the late socket stayed open with nobody to close
+     * it, and the SFU went on counting this device as a peer of the call.
+     */
+    @Volatile
+    private var closed = false
+
     /** True once the WebSocket session (direct or tunneled) is open. */
     val isOpen: Boolean
         get() = session != null || tunneledConn != null
@@ -129,10 +156,13 @@ class SfuSignalingClient(
      * Open the WebSocket and start dispatching frames. Suspends until
      * the session is established (the SFU's Welcome frame then follows
      * on [SfuSignalingCallbacks.onWelcome]); throws if the upgrade
-     * fails. Idempotent-guarded: throws if already connected.
+     * fails, and if [close] ran before the upgrade finished (the socket is
+     * then closed again and nothing is dispatched). Idempotent-guarded:
+     * throws if already connected.
      */
     suspend fun connect() {
         check(session == null && tunneledConn == null) { "connect() called twice" }
+        check(!closed) { CLOSED_WHILE_CONNECTING }
         // ADR-0026 — armed: route the signaling WebSocket through the tunnel.
         val antiCensorship = AntiCensorshipConfig.current
         if (antiCensorship.armed) {
@@ -149,8 +179,25 @@ class SfuSignalingClient(
             // The SFU refuses upgrades without this subprotocol header.
             header("Sec-WebSocket-Protocol", SFU_SUBPROTOCOL)
         }
+        if (closed) {
+            // Closed while the upgrade was in flight: this socket belongs to
+            // no call. Shut it and say so, rather than keep it as the session.
+            discard(s)
+            throw IllegalStateException(CLOSED_WHILE_CONNECTING)
+        }
         session = s
         receiveJob = scope.launch { receiveLoop(s) }
+    }
+
+    /** Close a socket that opened after [close]. Best effort, off the caller. */
+    private fun discard(s: DefaultClientWebSocketSession) {
+        scope.launch {
+            try {
+                s.close()
+            } catch (_: Throwable) {
+                // best-effort
+            }
+        }
     }
 
     private suspend fun receiveLoop(s: DefaultClientWebSocketSession) {
@@ -224,7 +271,20 @@ class SfuSignalingClient(
                 callbacks.onClosed()
                 return@launch
             }
+            if (closed) {
+                // The dial blocks and cannot be cancelled; the client was
+                // closed while it ran. Shut the tunnel rather than keep it.
+                runCatching { conn.shutdown() }
+                return@launch
+            }
             tunneledConn = conn
+            if (closed) {
+                // [close] ran between the check and the assignment (it is on
+                // another thread): it saw no connection to shut.
+                tunneledConn = null
+                runCatching { conn.shutdown() }
+                return@launch
+            }
 
             // Ordered outbound sender on its own IO coroutine.
             tunnelSendJob = scope.launch(Dispatchers.IO) {
@@ -271,13 +331,41 @@ class SfuSignalingClient(
             is SfuServerFrame.SdpOffer -> callbacks.onSdpOffer(frame.sdp)
             is SfuServerFrame.Pong -> callbacks.onPong(frame.nonce)
             is SfuServerFrame.Error -> callbacks.onServerError(frame.code, frame.detail)
+            is SfuServerFrame.VideoGiven -> callbacks.onVideoGiven(frame.given)
+            is SfuServerFrame.VideoNeeded -> callbacks.onVideoNeeded(frame.main, frame.middle)
+            is SfuServerFrame.PublishBudget ->
+                callbacks.onPublishBudget(frame.mainKbps.toLong(), frame.middleKbps.toLong())
         }
     }
 
     // ---- Send (client -> SFU) ---------------------------------------
 
-    /** Send a client -> SFU SDP offer (publish path). */
-    fun sendSdpOffer(sdp: String) = enqueue(composeSfuSdpOffer(sdp))
+    /**
+     * Send a client -> SFU SDP offer (publish path). [lightMids] and
+     * [middleMids] name the offer's media lines that carry the light and the
+     * middle copy of the camera (ADR-0070 steps 1 and 5), so the SFU forwards
+     * them as the camera's light companion and its middle track.
+     */
+    fun sendSdpOffer(sdp: String, lightMids: List<String>, middleMids: List<String>) =
+        enqueue(composeSfuSdpOfferWithMiddle(sdp, lightMids, middleMids))
+
+    /**
+     * Tell the SFU which picture of each publisher this device shows
+     * (ADR-0070 step 5): the whole set each time. `false` when the frame
+     * could not be composed or the socket is not open.
+     */
+    fun sendVideoWants(wants: List<SfuVideoWant>): Boolean {
+        if (!isOpen) return false
+        val json = try {
+            composeSfuVideoWants(wants)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            return false
+        }
+        enqueue(json)
+        return true
+    }
 
     /** Send a client -> SFU SDP answer (responds to a SFU-initiated
      *  offer). */
@@ -315,6 +403,7 @@ class SfuSignalingClient(
     /** Close the socket + cancel the receive loop. Idempotent. Closing the
      *  tunneled connection unblocks its receive loop (`recv()` returns Closed). */
     fun close() {
+        closed = true
         receiveJob?.cancel()
         receiveJob = null
         tunnelSendJob?.cancel()
@@ -342,6 +431,8 @@ class SfuSignalingClient(
         runCatching { engine.close() }
     }
 }
+
+private const val CLOSED_WHILE_CONNECTING = "the signaling client was closed"
 
 /** Where the tunneled signaling socket dials and which request it sends. */
 internal data class TunneledSignalingTarget(

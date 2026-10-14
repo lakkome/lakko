@@ -17,6 +17,7 @@
  * `group-closed-store.ts`'s {@link encodeGroupClosedRow}.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import {
   decodeGroupClosedRow,
   encodeGroupClosedRow,
@@ -135,6 +136,8 @@ export class IdbGroupClosedBackend implements GroupClosedBackend {
     const ciphertext = await encryptBlob(deviceKey, new TextEncoder().encode(json));
     const db = await openDb();
     try {
+      // A wiped account takes no late write (`auth/account-store-gate.ts`).
+      if (!accountStoresWritable(accountId)) return;
       const tx = db.transaction(STORE, "readwrite");
       tx.objectStore(STORE).put({ accountId, ciphertext } satisfies PersistedRow);
       await awaitTx(tx);

@@ -54,6 +54,8 @@ public final class GroupNameStore {
     /// caller decides whether the write is allowed (``GroupNameGate``); the
     /// store itself is a plain last-writer-wins map.
     public func record(accountIdB64: String, groupIdHex: String, value: StoredGroupName) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var current = map(accountIdB64: accountIdB64)
         current[groupIdHex] = [
             "name": value.name,
@@ -64,6 +66,8 @@ public final class GroupNameStore {
 
     /// Forget one group's name (the group was deleted locally).
     public func remove(accountIdB64: String, groupIdHex: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var current = map(accountIdB64: accountIdB64)
         current[groupIdHex] = nil
         defaults.set(current, forKey: Self.key(accountIdB64))

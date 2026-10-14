@@ -25,6 +25,8 @@ public struct SnapshotLeafKeyStore {
     }
 
     public func save(accountIdB64: String, leafKeyB64: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         defaults.set(leafKeyB64, forKey: Self.key(accountIdB64))
     }
 

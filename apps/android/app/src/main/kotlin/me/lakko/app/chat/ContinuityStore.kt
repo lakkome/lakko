@@ -131,7 +131,7 @@ public class SharedPrefsContinuityBackend(context: Context) : ContinuityBackend 
 
     override fun save(accountIdB64: String, row: ContinuityRow) {
         try {
-            prefs().edit().putString(KEY_PREFIX + accountIdB64, encodeContinuityRow(row)).apply()
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { prefs().edit().putString(KEY_PREFIX + accountIdB64, encodeContinuityRow(row)).apply() }
         } catch (_: Throwable) {
             // storage unavailable: the facts are per session then
         }

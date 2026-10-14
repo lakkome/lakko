@@ -44,7 +44,7 @@
 //!
 //! # A session is not enough: the password or a passkey, proven just now
 //!
-//! Amended 2026-10-04 (closes the main part of G-45) and 2026-10-06. A bearer
+//! Amended 2026-10-04 (closes the main part of G-46) and 2026-10-06. A bearer
 //! alone used to be sufficient, so a stolen session token, or a device left
 //! unlocked, could reset the keys: sign out and wipe every other device,
 //! delete the passkeys, and become the account toward every contact. Both

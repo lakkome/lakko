@@ -285,6 +285,26 @@ public final class ProfileDirectory: ObservableObject {
         }
     }
 
+    /// The own profile as the envelope announced inside a link call
+    /// (`docs/ux/calls.md`, "Every tile carries the person's name"), or `nil`
+    /// without an active account.
+    ///
+    /// ``ownProfileForRequest()`` with one difference: the username travels
+    /// even while this device holds no certificate for it. A call tile shows
+    /// an uncertified username as plain text, which is still the person's
+    /// name, and an account that set no display name would otherwise announce
+    /// nothing to name its tile by. No grants: a call is not a conversation.
+    func ownProfileEnvelopeForCall() -> Data? {
+        guard var profile = ownProfileForRequest() else { return nil }
+        if profile.username == nil { profile.username = ownUsername }
+        do {
+            return try composeProfileEnvelope(profile: profile)
+        } catch {
+            NSLog("ADR-0048 own profile call envelope refused: \(error)")
+            return nil
+        }
+    }
+
     /// The own profile for a contact request, or `nil` without an account.
     ///
     /// Carries the account's 16 raw bytes (profile envelope v2) so a receiver

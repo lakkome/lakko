@@ -3,11 +3,11 @@
 
 package me.lakko.app.calls
 
+import me.lakko.app.l10n.EnglishForTests
 import me.lakko.app.l10n.en
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -17,21 +17,24 @@ import org.junit.Test
  * drift back into the shape the maintainer rejected.
  */
 class CallControlsTest {
+    init {
+        EnglishForTests.install()
+    }
 
     private fun row(
-        group: Boolean = false,
         micOn: Boolean = true,
         cameraOn: Boolean = false,
-        speakerOn: Boolean = false,
         cameraBusy: Boolean = false,
         ringing: Boolean = false,
+        participants: ParticipantsControl = ParticipantsControl.ABSENT,
+        participantsOpen: Boolean = false,
     ) = callControlRow(
-        group = group,
         micOn = micOn,
         cameraOn = cameraOn,
-        speakerOn = speakerOn,
         cameraBusy = cameraBusy,
         ringing = ringing,
+        participants = participants,
+        participantsOpen = participantsOpen,
     )
 
     private fun List<CallControl>.kinds() = map { it.kind }
@@ -41,15 +44,45 @@ class CallControlsTest {
     // ---- Which controls exist ------------------------------------------------
 
     @Test
-    fun `the row is the same four buttons whatever the call started as`() {
+    fun `a one-to-one row is microphone, camera, settings, end, whatever the call started as`() {
         val expected = listOf(
-            CallControlKind.SPEAKER,
             CallControlKind.MICROPHONE,
             CallControlKind.CAMERA,
+            CallControlKind.SETTINGS,
             CallControlKind.END,
         )
         assertEquals(expected, row(cameraOn = false).kinds())
         assertEquals(expected, row(cameraOn = true).kinds())
+    }
+
+    @Test
+    fun `a group row adds participants before settings and nothing else`() {
+        assertEquals(
+            listOf(
+                CallControlKind.MICROPHONE,
+                CallControlKind.CAMERA,
+                CallControlKind.PARTICIPANTS,
+                CallControlKind.SETTINGS,
+                CallControlKind.END,
+            ),
+            row(participants = ParticipantsControl.MENU).kinds(),
+        )
+        assertEquals(
+            row(participants = ParticipantsControl.MENU).kinds(),
+            row(participants = ParticipantsControl.LIST).kinds(),
+        )
+    }
+
+    @Test
+    fun `the row has no chat, no speaker and no overflow menu`() {
+        // The chat control sent nothing anywhere; raise hand and share screen
+        // changed a flag nothing read; the overflow menu held only those. The
+        // sound's route is a rule and a Settings choice, not a button.
+        val names = CallControlKind.entries.map { it.name }
+        for (gone in listOf("CHAT", "MORE", "SPEAKER", "INVITE", "HAND", "SHARE")) {
+            assertFalse(gone, names.any { it.contains(gone) })
+        }
+        assertEquals(5, CallControlKind.entries.size)
     }
 
     @Test
@@ -73,45 +106,11 @@ class CallControlsTest {
     }
 
     @Test
-    fun `speaker is on every call`() {
-        // It was on none of them: the control did not exist anywhere in the app,
-        // although it is the one people reach for most on a voice call.
-        listOf(
-            row(cameraOn = false),
-            row(cameraOn = true),
-            row(group = true, cameraOn = true),
-        ).forEach { assertNotNull(it.firstOrNull { c -> c.kind == CallControlKind.SPEAKER }) }
-    }
-
-    @Test
-    fun `a one to one call has no more menu`() {
-        listOf(row(cameraOn = false), row(cameraOn = true)).forEach { controls ->
-            assertNull(
-                "a 1x1 call hides nothing behind an ellipsis",
-                controls.firstOrNull { it.kind == CallControlKind.MORE },
-            )
-        }
-    }
-
-    @Test
-    fun `a group call keeps the overflow but not at the expense of the row`() {
-        val controls = row(group = true, cameraOn = true)
-        assertTrue(controls.kinds().contains(CallControlKind.MORE))
-        // "but mute, camera, speaker and end stay in the row"
-        listOf(
-            CallControlKind.SPEAKER,
-            CallControlKind.MICROPHONE,
-            CallControlKind.CAMERA,
-            CallControlKind.END,
-        ).forEach { assertTrue(it.name, controls.kinds().contains(it)) }
-    }
-
-    @Test
     fun `end is always last`() {
         listOf(
             row(cameraOn = false),
             row(cameraOn = true),
-            row(group = true),
+            row(participants = ParticipantsControl.MENU),
         ).forEach { assertEquals(CallControlKind.END, it.last().kind) }
     }
 
@@ -119,7 +118,89 @@ class CallControlsTest {
     fun `flip camera is never in the row`() {
         // Section 4.1 puts it on the self-view, "where the thing it changes is
         // visible". There is deliberately no kind for it here.
-        assertFalse(CallControlKind.values().any { it.name.contains("FLIP") })
+        assertFalse(CallControlKind.entries.any { it.name.contains("FLIP") })
+    }
+
+    // ---- What Participants does ----------------------------------------------
+
+    @Test
+    fun `a one-to-one call has no participants control`() {
+        assertEquals(
+            ParticipantsControl.ABSENT,
+            participantsControl(group = false, canInvite = false, othersPresent = true),
+        )
+    }
+
+    @Test
+    fun `a call that can hand out a link opens the menu, alone or not`() {
+        assertEquals(
+            ParticipantsControl.MENU,
+            participantsControl(group = true, canInvite = true, othersPresent = false),
+        )
+        assertEquals(
+            ParticipantsControl.MENU,
+            participantsControl(group = true, canInvite = true, othersPresent = true),
+        )
+    }
+
+    @Test
+    fun `a call in a conversation opens the list directly, and has no control while alone`() {
+        // A menu holding one item would be a second step for nothing; and
+        // alone, the list would hold one name, the person's own.
+        assertEquals(
+            ParticipantsControl.LIST,
+            participantsControl(group = true, canInvite = false, othersPresent = true),
+        )
+        assertEquals(
+            ParticipantsControl.ABSENT,
+            participantsControl(group = true, canInvite = false, othersPresent = false),
+        )
+    }
+
+    @Test
+    fun `the menu is participants, copy invite link, invite contacts, in that order`() {
+        assertEquals(
+            listOf(
+                ParticipantsMenuItem.PARTICIPANTS,
+                ParticipantsMenuItem.COPY_LINK,
+                ParticipantsMenuItem.INVITE_CONTACTS,
+            ),
+            participantsMenuItems(othersPresent = true, guest = false),
+        )
+    }
+
+    @Test
+    fun `alone in the call the menu is the two invite items`() {
+        assertEquals(
+            listOf(ParticipantsMenuItem.COPY_LINK, ParticipantsMenuItem.INVITE_CONTACTS),
+            participantsMenuItems(othersPresent = false, guest = false),
+        )
+    }
+
+    @Test
+    fun `an account with no contacts or conversations still has the invite contacts item`() {
+        // The rule takes no "has someone to invite" input at all: an item that
+        // comes and goes with a list reads as a missing feature (found live
+        // on web, 2026-10-02). The list it opens says when it is empty
+        // (`inviteContactsEmptyKey`).
+        assertEquals(
+            listOf(ParticipantsMenuItem.COPY_LINK, ParticipantsMenuItem.INVITE_CONTACTS),
+            participantsMenuItems(othersPresent = false, guest = false),
+        )
+    }
+
+    @Test
+    fun `a guest account has no invite contacts item`() {
+        // A guest (docs/ux/call-links.md section 9) never has conversations:
+        // for them the menu is the link alone.
+        assertEquals(
+            listOf(ParticipantsMenuItem.COPY_LINK),
+            participantsMenuItems(othersPresent = false, guest = true),
+        )
+        assertEquals(
+            listOf(ParticipantsMenuItem.PARTICIPANTS, ParticipantsMenuItem.COPY_LINK),
+            participantsMenuItems(othersPresent = true, guest = true),
+        )
     }
 
     // ---- How each one reads --------------------------------------------------
@@ -151,22 +232,15 @@ class CallControlsTest {
     }
 
     @Test
-    fun `speaker is loud when it is engaged`() {
-        // The deviation from the default route is what everyone nearby can
-        // hear, so it is the state worth seeing at a glance.
-        assertEquals(
-            CallControlEmphasis.SOLID,
-            row(speakerOn = true).of(CallControlKind.SPEAKER).emphasis,
-        )
-        assertEquals(
-            CallControlEmphasis.OUTLINE,
-            row(speakerOn = false).of(CallControlKind.SPEAKER).emphasis,
-        )
+    fun `participants and settings open something and are never left switched on`() {
+        val controls = row(participants = ParticipantsControl.LIST, participantsOpen = true)
+        assertEquals(CallControlEmphasis.OUTLINE, controls.of(CallControlKind.PARTICIPANTS).emphasis)
+        assertEquals(CallControlEmphasis.OUTLINE, controls.of(CallControlKind.SETTINGS).emphasis)
     }
 
     @Test
     fun `only end is red`() {
-        val controls = row(group = true, cameraOn = true, micOn = false, speakerOn = true)
+        val controls = row(participants = ParticipantsControl.MENU, cameraOn = true, micOn = false)
         assertEquals(
             listOf(CallControlKind.END),
             controls.filter { it.emphasis == CallControlEmphasis.DANGER }.kinds(),
@@ -174,16 +248,19 @@ class CallControlsTest {
     }
 
     @Test
-    fun `labels name the action and never the state`() {
-        assertEquals("Speaker", row().of(CallControlKind.SPEAKER).label.en)
+    fun `labels name the thing and never the state`() {
         assertEquals("End", row().of(CallControlKind.END).label.en)
-        // "The label ... says what the button does, not what the state is": the
-        // same word whichever way the state is.
+        assertEquals("Settings", row().of(CallControlKind.SETTINGS).label.en)
+        assertEquals(
+            "Participants",
+            row(participants = ParticipantsControl.MENU).of(CallControlKind.PARTICIPANTS).label.en,
+        )
+        // The same word whichever way the state is.
         assertEquals(
             row(micOn = true).of(CallControlKind.MICROPHONE).label.en,
             row(micOn = false).of(CallControlKind.MICROPHONE).label.en,
         )
-        assertEquals("Mute", row(micOn = false).of(CallControlKind.MICROPHONE).label.en)
+        assertEquals("Microphone", row(micOn = false).of(CallControlKind.MICROPHONE).label.en)
         assertEquals(
             row(cameraOn = true).of(CallControlKind.CAMERA).label.en,
             row(cameraOn = false).of(CallControlKind.CAMERA).label.en,
@@ -193,30 +270,44 @@ class CallControlsTest {
 
     @Test
     fun `every control carries a spoken label naming the resulting state`() {
-        val controls = row(group = true, cameraOn = true)
+        val controls = row(participants = ParticipantsControl.MENU, cameraOn = true)
         controls.forEach { assertTrue(it.kind.name, it.spokenLabel.en.isNotBlank()) }
         assertEquals("Mute microphone", row(micOn = true).of(CallControlKind.MICROPHONE).spokenLabel.en)
         assertEquals(
             "Unmute microphone",
             row(micOn = false).of(CallControlKind.MICROPHONE).spokenLabel.en,
         )
-        assertEquals("Turn on speaker", row(speakerOn = false).of(CallControlKind.SPEAKER).spokenLabel.en)
-        assertEquals("Turn off speaker", row(speakerOn = true).of(CallControlKind.SPEAKER).spokenLabel.en)
+        assertEquals("Call settings", row().of(CallControlKind.SETTINGS).spokenLabel.en)
         assertEquals("End call", row().of(CallControlKind.END).spokenLabel.en)
+    }
+
+    @Test
+    fun `participants says what a press does, the menu or showing and hiding the list`() {
+        assertEquals(
+            "Participants and invitations",
+            row(participants = ParticipantsControl.MENU).of(CallControlKind.PARTICIPANTS).spokenLabel.en,
+        )
+        assertEquals(
+            "Show participants",
+            row(participants = ParticipantsControl.LIST).of(CallControlKind.PARTICIPANTS).spokenLabel.en,
+        )
+        assertEquals(
+            "Hide participants",
+            row(participants = ParticipantsControl.LIST, participantsOpen = true)
+                .of(CallControlKind.PARTICIPANTS).spokenLabel.en,
+        )
     }
 
     // ---- State ---------------------------------------------------------------
 
     @Test
-    fun `while calling only end is active`() {
-        val controls = row(group = true, cameraOn = true, ringing = true)
-        controls.forEach {
-            if (it.kind == CallControlKind.END) {
-                assertTrue("end must always work", it.enabled)
-            } else {
-                assertFalse(it.kind.name, it.enabled)
-            }
-        }
+    fun `while calling the microphone and the camera wait, and the rest is live`() {
+        val controls = row(cameraOn = true, ringing = true)
+        assertFalse(controls.of(CallControlKind.MICROPHONE).enabled)
+        assertFalse(controls.of(CallControlKind.CAMERA).enabled)
+        assertTrue("end must always work", controls.of(CallControlKind.END).enabled)
+        // Settings is active from the first second of a call.
+        assertTrue(controls.of(CallControlKind.SETTINGS).enabled)
     }
 
     @Test
@@ -227,7 +318,7 @@ class CallControlsTest {
 
     @Test
     fun `once the call is up every control is active`() {
-        row(group = true, cameraOn = true, ringing = false).forEach {
+        row(participants = ParticipantsControl.MENU, cameraOn = true, ringing = false).forEach {
             assertTrue(it.kind.name, it.enabled)
         }
     }
@@ -245,7 +336,7 @@ class CallControlsTest {
 
     @Test
     fun `nothing but the camera is ever busy`() {
-        row(group = true, cameraBusy = true)
+        row(participants = ParticipantsControl.MENU, cameraBusy = true)
             .filter { it.kind != CallControlKind.CAMERA }
             .forEach { assertFalse(it.kind.name, it.busy) }
     }
@@ -284,5 +375,65 @@ class CallControlsTest {
         val fit = fitCallControlBar(availableWidthDp = 411f - 24f, count = 4)
         assertEquals(CALL_CONTROL_DIAMETER_DP, fit.diameterDp, 0.001f)
         assertEquals(CALL_CONTROL_END_DIAMETER_DP, fit.endDiameterDp, 0.001f)
+    }
+
+    // ---- The group row -------------------------------------------------------
+
+    @Test
+    fun `a group row on a phone has no words and always fits in one line`() {
+        // A row that wrapped into two lines of labelled circles took half a
+        // phone screen (found live 2026-10-02).
+        for (screenWidth in 300..599) {
+            for (count in 4..6) {
+                val available = screenWidth - 2 * GROUP_CONTROL_SIDE_MARGIN_DP
+                val fit = fitGroupControlBar(available, screenHeightDp = 800f, count = count)
+                assertFalse("$screenWidth/$count", fit.showLabels)
+                assertTrue(
+                    "$screenWidth dp, $count controls: ${fit.widthDp(count)} > $available",
+                    fit.widthDp(count) <= available + 0.01f,
+                )
+                assertTrue(fit.diameterDp in 38f..52f)
+                assertEquals(fit.diameterDp + 6f, fit.endDiameterDp, 0.001f)
+            }
+        }
+    }
+
+    @Test
+    fun `the circles are sized from the width and the number of controls`() {
+        // A 411 dp phone, five controls: the web client's own arithmetic,
+        // (411 - 50 - 5 * 8) / 5.
+        val five = fitGroupControlBar(411f - 24f, screenHeightDp = 800f, count = 5)
+        assertEquals(52f, five.diameterDp, 0.001f)
+        // A 360 dp phone, six controls: (360 - 50 - 48) / 6.
+        val six = fitGroupControlBar(360f - 24f, screenHeightDp = 800f, count = 6)
+        assertEquals((360f - 50f - 48f) / 6f, six.diameterDp, 0.001f)
+        assertEquals(8f, six.gapDp, 0.001f)
+        // Fewer controls on the same width are larger, up to the cap.
+        val four = fitGroupControlBar(320f - 24f, screenHeightDp = 800f, count = 4)
+        val fiveNarrow = fitGroupControlBar(320f - 24f, screenHeightDp = 800f, count = 5)
+        assertTrue(four.diameterDp > fiveNarrow.diameterDp)
+    }
+
+    @Test
+    fun `on a width too narrow for the smallest circles the gaps close up, not the row`() {
+        val fit = fitGroupControlBar(300f - 24f, screenHeightDp = 800f, count = 6)
+        assertEquals(38f, fit.diameterDp, 0.001f)
+        assertTrue(fit.gapDp < 8f)
+        assertTrue(fit.widthDp(6) <= 300f - 24f + 0.01f)
+    }
+
+    @Test
+    fun `a phone on its side has the compact row too`() {
+        val fit = fitGroupControlBar(800f - 24f, screenHeightDp = 400f, count = 5)
+        assertFalse(fit.showLabels)
+        assertEquals(52f, fit.diameterDp, 0.001f)
+    }
+
+    @Test
+    fun `with room the group row keeps its words and its spec sizes`() {
+        val fit = fitGroupControlBar(800f - 24f, screenHeightDp = 900f, count = 5)
+        assertTrue(fit.showLabels)
+        assertEquals(56f, fit.diameterDp, 0.001f)
+        assertEquals(64f, fit.endDiameterDp, 0.001f)
     }
 }

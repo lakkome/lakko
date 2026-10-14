@@ -385,7 +385,7 @@ public class UsernameRenameStore(private val storage: MarkerStorage) {
 
     public fun save(accountIdB64: String, owed: UsernameRenameOwed) {
         try {
-            storage.set(OWED_PREFIX + accountIdB64, json.encodeToString(UsernameRenameOwed.serializer(), owed))
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.set(OWED_PREFIX + accountIdB64, json.encodeToString(UsernameRenameOwed.serializer(), owed)) }
         } catch (_: Throwable) {
             // The record then lives for this run only.
         }
@@ -407,7 +407,7 @@ public class UsernameRenameStore(private val storage: MarkerStorage) {
 
     public fun markChanged(accountIdB64: String, atMs: Long) {
         try {
-            storage.set(STAMP_PREFIX + accountIdB64, atMs.toString())
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.set(STAMP_PREFIX + accountIdB64, atMs.toString()) }
         } catch (_: Throwable) {
             // The form then opens and the server answers.
         }

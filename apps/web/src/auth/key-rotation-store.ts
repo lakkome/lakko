@@ -19,6 +19,7 @@
  * One AES-GCM row per account in its own IndexedDB database. Never in the
  * recall record's keep-list: both wipes delete it.
  */
+import { accountStoresWritable } from "./account-store-gate";
 import type { PendingRotation } from "../devices/key-rotation";
 import { base64Decode, base64Encode } from "./account-id";
 
@@ -203,6 +204,8 @@ export async function putKeyRotationState(
   envelope.set(ct, iv.length);
   const db = await openDb();
   try {
+    // A wiped account takes no late write (`account-store-gate.ts`).
+    if (!accountStoresWritable(accountIdB64)) return;
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite");
       tx.oncomplete = (): void => resolve();

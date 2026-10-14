@@ -286,6 +286,14 @@ a:focus-visible {
   font-size: 13px;
 }
 
+/* The guest question (auth/GuestAccountOffer.tsx) where it follows the
+   call-link page's own content: set apart by a rule and its own spacing. */
+.lk-guest-offer-after {
+  border-top: 1px solid var(--surface-border);
+  margin-top: 16px;
+  padding-top: 16px;
+}
+
 /* ----------------------------------------------------------- app shell */
 
 /* Rail + main. The rail is icon-first with an 11px label; on a narrow screen
@@ -4427,71 +4435,349 @@ button.lk-call-chip:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-/* The group roster: the stage and the gallery. Unchanged by the section 4
-   redesign (section 9 keeps a group redesign out of scope) beyond being
-   positioned under the status line and above the control bar rather than
-   flexed between them. */
+/* The tiles of a group call (docs/ux/group-call-grid.md sections 3 to 6).
+   The area sits between the status line and the control bar and never
+   scrolls: the grid is sized to fit it, and more people than fit means pages.
+   The sizes are computed by the shared rule and set inline; these rules only
+   place what it computed. */
 .lk-call-main {
   position: absolute;
-  inset: 0;
+  top: var(--call-top);
+  bottom: calc(var(--call-bar-bottom) + var(--call-bar-h) + 22px);
+  left: 16px;
+  right: 16px;
   z-index: 2;
   display: flex;
   flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  transition: top 160ms ease;
+}
+.lk-call-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-content: center;
+  max-width: 100%;
+}
+.lk-call-cell {
+  flex: 0 0 auto;
+  min-width: 0;
+  /* The initials of a tile without a picture scale with the tile, so a strip
+     tile and a full-screen tile both read. */
+  container-type: size;
+}
+/* Focus: everyone else in one row above, the stage in the middle. The strip
+   is the one place scrolling is allowed; the stage never moves with it. */
+.lk-call-strip {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: safe center;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.lk-call-strip::-webkit-scrollbar {
+  display: none;
+}
+/* The pages of the grid: one dot per page under the tiles, and an arrow at
+   each side. */
+.lk-call-pages {
+  position: absolute;
+  left: 50%;
+  bottom: -16px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+}
+.lk-call-page-dot {
+  width: 8px;
+  height: 8px;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--call-ctl-on-bg);
+  cursor: pointer;
+}
+.lk-call-page-dot[aria-selected="true"] {
+  background: var(--call-ctl-on-fg);
+}
+.lk-call-page-arrow {
+  position: absolute;
+  top: 50%;
+  z-index: 3;
+  width: 40px;
+  height: 40px;
+  min-height: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--call-bar-bg);
+  color: var(--call-ctl-on-fg);
+  cursor: pointer;
+}
+.lk-call-page-arrow.prev {
+  left: 0;
+  transform: translateY(-50%) rotate(180deg);
+}
+.lk-call-page-arrow.next {
+  right: 0;
+  transform: translateY(-50%);
+}
+.lk-call-page-arrow:disabled {
+  opacity: var(--call-ctl-disabled-opacity);
+  cursor: default;
+}
+/* With a mouse the arrows appear when the pointer is over the tiles; on a
+   touch screen the page is turned by a swipe and the arrows are not drawn
+   over anyone's face. */
+@media (hover: hover) {
+  .lk-call-page-arrow {
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+  .lk-call-main:hover .lk-call-page-arrow:not(:disabled),
+  .lk-call-page-arrow:focus-visible {
+    opacity: 1;
+  }
+}
+@media (hover: none) {
+  .lk-call-page-arrow {
+    display: none;
+  }
+}
+/* The tiles are dragged sideways to turn the page, not selected or scrolled. */
+.lk-call-main {
+  touch-action: pan-y;
+  user-select: none;
+}
+/* Switch between the two layouts, top right; the twin of the collapse
+   chevron at the top left. */
+.lk-call-layout {
+  position: absolute;
+  top: calc(14px + env(safe-area-inset-top));
+  right: 14px;
+  z-index: 7;
+  width: 40px;
+  height: 40px;
+  min-height: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--call-bar-bg);
+  color: var(--call-ctl-on-fg);
+  cursor: pointer;
+}
+.lk-call-layout:hover {
+  background: color-mix(in srgb, var(--call-bar-bg) 60%, var(--surface-fg));
+}
+.lk-call-layout:focus-visible {
+  outline: 2px solid var(--call-ctl-on-fg);
+  outline-offset: 2px;
+}
+
+/* The call settings sheet: three lists of devices, the app's own. */
+.lk-call-settings {
+  display: flex;
+  flex-direction: column;
   gap: 12px;
-  padding: 96px 16px 168px;
+  max-height: min(80dvh, 640px);
+}
+.lk-call-settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
   overflow-y: auto;
-  transition: padding-top 160ms ease;
+  min-height: 0;
 }
-/* Section 4.4: while a notice line sits under the status row, the tiles
-   start below it instead of under it. */
-.lk-call[data-notice] .lk-call-main {
-  padding-top: 128px;
+.lk-call-settings h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--surface-muted);
 }
-.lk-call-stage,
-.lk-call-gallery {
-  width: 100%;
-  max-width: 1080px;
-  margin: 0 auto;
+.lk-call-menu-item.lk-call-settings-option {
+  justify-content: space-between;
 }
-/* Section 4.4: the featured tile is sized so that it AND one row of the grid
-   fit between the status line and the control bar. Its width follows the
-   height left over (viewport minus the 96px top and 168px bottom insets, the
-   12px gap and one 156px grid row) at 16:9, capped at the roster width. Before
-   this the tile took the full 1080px on a laptop and pushed the grid row under
-   the bar, where it was legible only after a scroll nobody knew to make. */
-.lk-call-stage {
-  max-width: clamp(280px, calc((100dvh - 432px) * 16 / 9), 1080px);
+.lk-call-settings-empty {
+  margin: 0;
+  color: var(--surface-muted);
 }
-.lk-call-gallery {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+
+/* A call invitation in a conversation (docs/ux/call-links.md section 3). */
+.lk-bubble-call-invite {
+  display: flex;
+  align-items: center;
   gap: 10px;
+  min-width: 220px;
 }
-/* Section 4.4: with nobody else sending video there is no featured tile and
-   everyone sits in the grid at the same, larger size. */
-.lk-call-gallery.equal {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+.lk-bubble-call-invite-icon {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+.lk-bubble-call-invite-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+}
+
+/* The menu a call control opens (Invite): the app's own, above the bar. */
+.lk-call-menu-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+}
+.lk-call-menu {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--call-bar-bottom) + var(--call-bar-h) + 10px);
+  transform: translateX(-50%);
+  z-index: 13;
+  min-width: 240px;
+  max-width: calc(100% - 24px);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-2);
+}
+.lk-call-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--surface-fg);
+  font: inherit;
+  text-align: start;
+  justify-content: flex-start;
+  cursor: pointer;
+}
+.lk-call-menu-item:hover,
+.lk-call-menu-item:focus-visible {
+  background: color-mix(in srgb, var(--surface-fg) 8%, transparent);
+  outline: none;
+}
+/* The End menu (docs/ux/calls.md section 4.1.2): the destructive row in the
+   end button's red, the only other red on the call screen. */
+.lk-call-menu-item-danger {
+  color: var(--danger);
 }
 
 /* A participant tile. */
 .lk-call-tile {
   position: relative;
+  /* The cell it sits in has the size; the tile fills it. */
+  width: 100%;
+  height: 100%;
   background: var(--surface-elevated);
   border: 1px solid var(--surface-border);
   border-radius: var(--radius-md);
   overflow: hidden;
-  aspect-ratio: 4 / 3;
-  transition: box-shadow 120ms ease;
 }
-.lk-call-tile.large {
-  aspect-ratio: 16 / 9;
+.lk-call-tile.pinned {
+  border-color: var(--accent);
 }
-.lk-call-tile.pinnable {
+/* The pin button of someone else's tile, top right (section 6.2); the same
+   round overlay button as the camera flip of the self view. It is the only
+   way to pin and to unpin: the tile itself is never the control. Out of
+   sight until the keyboard focus is on the tile or a tap on the tile brought
+   its controls up, and always there on the pinned tile, filled, so there is
+   always a visible way to unpin. */
+.lk-call-tile-pin-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  width: 32px;
+  height: 32px;
+  min-height: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--call-bar-bg);
+  color: var(--call-ctl-on-fg);
   cursor: pointer;
+  opacity: 0;
 }
+/* A strip tile is small: a smaller button with a pointer, never under 24px. */
+.lk-call-tile-pin-btn.compact {
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+}
+.lk-call-tile.controls-shown .lk-call-tile-pin-btn,
+.lk-call-tile:focus-within .lk-call-tile-pin-btn,
+.lk-call-tile-pin-btn:focus-visible,
+.lk-call-tile-pin-btn[aria-pressed="true"] {
+  opacity: 1;
+}
+/* Hover only where there is one: on a touch screen it sticks after a tap. */
+@media (hover: hover) {
+  .lk-call-tile:hover .lk-call-tile-pin-btn {
+    opacity: 1;
+  }
+  .lk-call-tile-pin-btn:hover {
+    background: color-mix(in srgb, var(--call-bar-bg) 60%, var(--surface-fg));
+  }
+}
+.lk-call-tile-pin-btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.lk-call-tile-pin-btn:focus-visible {
+  outline: 2px solid var(--call-ctl-on-fg);
+  outline-offset: 2px;
+}
+/* A touch screen: the touch target size on every tile, and a button that is
+   not drawn takes no tap, so the first tap on a tile reaches the tile and
+   only brings the button up. */
+@media (hover: none) {
+  .lk-call-tile-pin-btn,
+  .lk-call-tile-pin-btn.compact {
+    width: 44px;
+    height: 44px;
+    pointer-events: none;
+  }
+  .lk-call-tile.controls-shown .lk-call-tile-pin-btn,
+  .lk-call-tile:focus-within .lk-call-tile-pin-btn,
+  .lk-call-tile-pin-btn:focus-visible,
+  .lk-call-tile-pin-btn[aria-pressed="true"] {
+    pointer-events: auto;
+  }
+}
+/* Section 7.3: the ring is drawn inside the tile edge, so a tile does not
+   change size when someone starts to speak. An outline, because it paints
+   over the picture. */
 .lk-call-tile.speaking {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent);
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
 }
 .lk-call-tile-avatar,
 .lk-call-tile-blank,
@@ -4505,17 +4791,23 @@ button.lk-call-chip:focus-visible {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 2.5rem;
+  font-size: clamp(18px, 26cqmin, 72px);
   font-weight: 600;
   background: var(--av-1-bg);
   color: var(--av-1-fg);
 }
+/* A strip tile is short: its initials sit above the name line instead of
+   under it. */
+@container (max-height: 110px) {
+  .lk-call-tile-avatar {
+    align-items: flex-start;
+    padding-top: 10px;
+    font-size: 22px;
+  }
+}
 .lk-call-tile[data-tone="2"] .lk-call-tile-avatar { background: var(--av-2-bg); color: var(--av-2-fg); }
 .lk-call-tile[data-tone="3"] .lk-call-tile-avatar { background: var(--av-3-bg); color: var(--av-3-fg); }
 .lk-call-tile[data-tone="4"] .lk-call-tile-avatar { background: var(--av-4-bg); color: var(--av-4-fg); }
-.lk-call-tile.large .lk-call-tile-avatar {
-  font-size: 5rem;
-}
 .lk-call-tile-blank {
   display: flex;
   align-items: center;
@@ -4525,6 +4817,33 @@ button.lk-call-chip:focus-visible {
 }
 .lk-call-tile-video {
   object-fit: cover;
+}
+/* A remote picture with a light companion (calls/layer-display.ts): two
+   videos stacked in the same box, both always in layout and playing so both
+   keep decoding. The one being shown is opaque and on top; the other is
+   transparent underneath. Never display:none or visibility:hidden (a browser
+   stops presenting frames for those), and no transition: the switch is a cut.
+   The name strip stays above both. */
+.lk-call-layer {
+  transition: none;
+}
+.lk-call-layer[data-shown="true"] {
+  opacity: 1;
+}
+.lk-call-layer[data-shown="false"] {
+  opacity: 0;
+}
+.lk-call-tile-video.lk-call-layer[data-shown="true"] {
+  z-index: 1;
+}
+.lk-call-tile-video.lk-call-layer[data-shown="false"] {
+  z-index: 0;
+}
+.lk-call-tile-strip {
+  z-index: 2;
+}
+.lk-call-fill.lk-call-layer[data-shown="false"] {
+  z-index: 0;
 }
 /* The self-preview is mirrored (front-camera convention); a remote tile is
    never mirrored. */
@@ -4542,25 +4861,6 @@ button.lk-call-chip:focus-visible {
   background: var(--call-scrim);
   font-size: 14px;
   z-index: 2;
-}
-.lk-call-tile-mute {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 44px;
-  height: 44px;
-  transform: translate(-50%, -50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--call-scrim);
-  color: var(--danger);
-  pointer-events: none;
-}
-.lk-call-tile.large .lk-call-tile-mute {
-  width: 56px;
-  height: 56px;
 }
 .lk-call-badge {
   position: absolute;
@@ -4797,22 +5097,31 @@ button.lk-call-chip:focus-visible {
    margin, never welded to the edge — and on a voice call placed in the lower
    third under the portrait rather than at the very bottom of an empty surface.
 --------------------------------------------------------------------------- */
+.lk-call {
+  /* Where the bar sits and how tall it is. The group area and the menus
+     above the bar are placed from these, so nothing is ever drawn under the
+     bar: a tile, a page dot or a menu. */
+  --call-bar-bottom: calc(28px + env(safe-area-inset-bottom));
+  --call-bar-h: 127px;
+  --call-top: 96px;
+}
+.lk-call[data-notice] {
+  --call-top: 128px;
+}
 .lk-call-bar {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(28px + env(safe-area-inset-bottom));
+  bottom: var(--call-bar-bottom);
   z-index: 6;
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  /* The widest row is a group call that can also hand out a link to itself
-     (docs/ux/call-links.md section 3): seven circles, which do not fit a phone
-     width even at the 44 pt touch-target floor. Wrapping is the floor under
-     that, and it never triggers for a row that fits. */
-  flex-wrap: wrap;
+  /* One row, always. A row that wrapped took half a phone screen (found live
+     2026-10-02): the circles shrink to fit instead, see the narrow rule
+     below. */
+  flex-wrap: nowrap;
   gap: var(--call-ctl-gap);
-  row-gap: 10px;
   max-width: calc(100% - 24px);
   padding: 14px 20px 10px;
   border-radius: 28px;
@@ -4914,12 +5223,13 @@ button.lk-call-chip:focus-visible {
   white-space: nowrap;
 }
 
-/* Section 4.1: a group call's row carries participants and chat as well, so
-   its circles are a step smaller to keep the whole set on one row. */
+/* Section 4.1: a group call's row carries one or two entries more, so its
+   circles are a step smaller to keep the whole set on one row. */
 .lk-call[data-surface="group"] {
   --call-ctl-size: 56px;
   --call-ctl-end-size: 64px;
   --call-ctl-gap: 14px;
+  --call-bar-h: 111px;
 }
 /* Narrow windows: the circles shrink but never below the 44 pt touch target
    section 4.1.1 sets as the floor. */
@@ -4930,15 +5240,33 @@ button.lk-call-chip:focus-visible {
     --call-ctl-gap: 12px;
   }
 }
-@media (max-width: 480px) {
+/* A group call on a phone, upright or on its side: the bar is one compact
+   row of circles without the words under them (each keeps its spoken name),
+   sized from the width and the number of controls so the row always fits.
+   The picture gets the space the labels and the wrapped second row took. */
+@media (max-width: 600px), (max-height: 520px) {
   .lk-call[data-surface="group"] {
-    --call-ctl-size: 46px;
-    --call-ctl-end-size: 54px;
-    --call-ctl-gap: 8px;
+    --call-bar-bottom: calc(12px + env(safe-area-inset-bottom));
+    --call-bar-h: 74px;
   }
   .lk-call-bar[data-surface="group"] {
-    padding-left: 12px;
-    padding-right: 12px;
+    --call-ctl-gap: 8px;
+    --call-ctl-size: clamp(
+      38px,
+      calc((100vw - 50px - var(--call-ctl-count, 6) * 8px) / var(--call-ctl-count, 6)),
+      52px
+    );
+    --call-ctl-end-size: calc(var(--call-ctl-size) + 6px);
+    padding: 8px 10px;
+    align-items: center;
+  }
+  .lk-call-bar[data-surface="group"] .lk-call-ctl-label {
+    display: none;
+  }
+}
+@media (max-height: 520px) {
+  .lk-call[data-surface="group"] {
+    --call-top: 64px;
   }
 }
 /* Short windows: the portrait figure gives up height before the controls do —
@@ -5054,6 +5382,7 @@ button.lk-call-chip:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+
 /* The modal layer: the encryption sheet (section 5). The in-call settings
    sheet that used to share it is gone — section 4.1 forbids a settings list
    inside a call, and none of its toggles was read by any code. */
@@ -5144,57 +5473,6 @@ button.lk-call-chip:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.lk-call-chat-log {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 12px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.lk-call-chat-empty {
-  margin-top: 32px;
-  text-align: center;
-  font-size: 13px;
-  line-height: 18px;
-  color: var(--surface-muted);
-}
-.lk-call-chat-form {
-  padding: 10px 12px;
-}
-.lk-call-chat-form .lk-composer-input {
-  min-height: 40px;
-  height: 40px;
-  padding: 9px 14px;
-}
-.lk-call-msg {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.lk-call-msg-meta {
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
-  font-size: 12px;
-  color: var(--surface-muted);
-}
-.lk-call-msg-sender {
-  color: var(--accent);
-  font-weight: 600;
-}
-.lk-call-msg-text {
-  font-size: 14px;
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-}
-.lk-call-msg-sys {
-  font-size: 12px;
-  text-align: center;
-  font-style: italic;
-  color: var(--surface-muted);
 }
 
 /* Phase banner and the ended overlay. */

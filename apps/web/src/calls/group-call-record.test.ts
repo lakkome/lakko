@@ -32,12 +32,15 @@ import { resolveLeafSignatureKey, type RosterMember } from "../chat/author-ident
 const T0 = Date.parse("2026-09-13T12:00:00.000Z");
 const A = "aa".repeat(16);
 const B = "bb".repeat(16);
+/** The person whose device announces the calls in these tests. */
+const STARTER = "c3RhcnRlci1wZXJzb24ta2V5";
 
 function start(callIdHex: string, at = T0, createdAtMs = at): GroupCallEvent {
   return {
     kind: "start",
     callIdHex,
     initiatorLeaf: 1,
+    initiatorPersonKey: STARTER,
     createdAtMs,
     mediaAudio: true,
     mediaVideo: false,
@@ -370,5 +373,21 @@ describe("this device's own entry", () => {
     expect(freshMemberKeys(r, T0 + 90_000, notInCall)).toEqual(new Set(["my-laptop"]));
     expect(freshParticipantCount(r, T0 + 90_000, notInCall)).toBe(1);
     expect(isGroupCallLive(r, T0 + 90_000, notInCall)).toBe(true);
+  });
+});
+
+describe("who started the call", () => {
+  it("is kept on the record and survives the tab-scoped storage round trip", () => {
+    const records = reduceGroupCalls(NO_GROUP_CALLS, start(A));
+    expect(records.get(A)?.initiatorPersonKey).toBe(STARTER);
+    const back = deserializeGroupCalls(serializeGroupCalls(records));
+    expect(back.get(A)?.initiatorPersonKey).toBe(STARTER);
+  });
+
+  it("reads as unknown from a stored record that has no starter", () => {
+    const records = reduceGroupCalls(NO_GROUP_CALLS, start(A));
+    const stored = JSON.parse(serializeGroupCalls(records)) as Record<string, unknown>[];
+    for (const r of stored) delete r["initiatorPersonKey"];
+    expect(deserializeGroupCalls(JSON.stringify(stored)).get(A)?.initiatorPersonKey).toBeNull();
   });
 });

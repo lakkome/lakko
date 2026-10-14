@@ -264,6 +264,82 @@ describe("picking a GIF", () => {
   });
 });
 
+describe("paging GIF results across a new search", () => {
+  it("still loads a second page of the new results after an abandoned load-more", async () => {
+    // The sentinel at the foot of the grid is watched by an
+    // IntersectionObserver, which jsdom does not have: stand one in and fire
+    // it by hand.
+    const observers: Array<{ fire: () => void; targets: Element[] }> = [];
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        private readonly targets: Element[] = [];
+        constructor(private readonly cb: (entries: unknown[]) => void) {
+          observers.push({
+            targets: this.targets,
+            fire: () => this.cb(this.targets.map((target) => ({ isIntersecting: true, target }))),
+          });
+        }
+        observe(el: Element): void {
+          this.targets.push(el);
+        }
+        unobserve(): void {}
+        disconnect(): void {}
+      },
+    );
+    // List requests answer when the test says so; previews fail fast.
+    const lists: Array<{ url: string; answer: () => void }> = [];
+    vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/gifs/media/")) return Promise.resolve(new Response("", { status: 404 }));
+      return new Promise<Response>((resolve) => {
+        lists.push({
+          url,
+          answer: () =>
+            resolve(
+              new Response(JSON.stringify(TRENDING), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              }),
+            ),
+        });
+      });
+    });
+    const scrollToFoot = (): void => {
+      for (const o of observers) {
+        if (o.targets.some((el) => (el as HTMLElement).dataset.gifId === undefined)) o.fire();
+      }
+    };
+
+    mountPicker();
+    tab("GIF").click();
+    await vi.waitFor(() => expect(lists).toHaveLength(1));
+    lists[0]?.answer();
+    await vi.waitFor(() => expect(all(".lakko-gif-grid button").length).toBeGreaterThan(0));
+
+    // Scroll to the foot: the second page of Trending is asked for and hangs.
+    scrollToFoot();
+    await vi.waitFor(() => expect(lists).toHaveLength(2));
+    expect(lists[1]?.url).toContain("trending?offset=24");
+
+    // Meanwhile the person searches.
+    const input = one<HTMLInputElement>(".lakko-picker-search input");
+    input.value = "cat";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    await vi.waitFor(() => expect(lists).toHaveLength(3), { timeout: 2000 });
+    expect(lists[2]?.url).toContain("search?q=cat&offset=0");
+    lists[2]?.answer();
+    // The abandoned Trending page answers late, and is dropped.
+    lists[1]?.answer();
+    await vi.waitFor(() => expect(all(".lakko-gif-grid button").length).toBeGreaterThan(0));
+
+    // The new results must still be able to load their own second page.
+    scrollToFoot();
+    await vi.waitFor(() => expect(lists).toHaveLength(4));
+    expect(lists[3]?.url).toContain("search?q=cat&offset=24");
+  });
+});
+
 /**
  * ## Not covered here
  *

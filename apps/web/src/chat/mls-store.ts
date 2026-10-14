@@ -57,6 +57,7 @@
  * little code.
  */
 
+import { requireAccountStoresWritable } from "../auth/account-store-gate";
 import type { PendingCommitEntry } from "./commit-outbox";
 
 const DB_NAME = "lakko-mls";
@@ -219,6 +220,7 @@ export async function saveMlsSnapshot(
   };
   const db = await openMlsDb();
   try {
+    requireAccountStoresWritable(accountIdB64);
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put(row);
     await awaitTx(tx, undefined);
@@ -268,6 +270,7 @@ export async function saveSnapshotWithCommitEntry(
   try {
     // ONE transaction over BOTH stores — atomic: both puts land on
     // `tx.oncomplete`, or neither does on any abort/error.
+    requireAccountStoresWritable(accountIdB64);
     const tx = db.transaction([STORE, OUTBOX_STORE], "readwrite");
     tx.objectStore(STORE).put(snapshotRow);
     tx.objectStore(OUTBOX_STORE).put(entry);

@@ -15,7 +15,6 @@ import {
   clearFirstPasswordOwed,
   isFirstPasswordOwed,
   markFirstPasswordOwed,
-  usernameClaimEntry,
   usernameClaimOffered,
   type ClaimEvent,
   type ClaimState,
@@ -34,11 +33,6 @@ describe("where Choose a username is offered", () => {
     expect(usernameClaimOffered("alice")).toBe(false);
   });
 
-  it("an account whose name is saved and whose first password is owed finishes there", () => {
-    expect(usernameClaimEntry("", false)).toBe("choose");
-    expect(usernameClaimEntry("alice", true)).toBe("finish");
-    expect(usernameClaimEntry("alice", false)).toBe("none");
-  });
 });
 
 describe("the claim", () => {

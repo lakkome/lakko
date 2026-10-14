@@ -32,6 +32,24 @@
  */
 
 import { loadWasm } from "../wasm";
+import {
+  claimsVideoGiven,
+  readVideoGivenFrame,
+  VIDEO_GIVEN_MALFORMED_WARNING,
+  type VideoGivenEntry,
+} from "./video-given";
+import {
+  claimsVideoNeeded,
+  readVideoNeededFrame,
+  VIDEO_NEEDED_MALFORMED_WARNING,
+  type VideoNeeded,
+} from "./sender-activity";
+import {
+  claimsPublishBudget,
+  PUBLISH_BUDGET_MALFORMED_WARNING,
+  readPublishBudgetFrame,
+  type PublishBudget,
+} from "./publish-budget";
 
 // ---- Typed server frames ------------------------------------------
 
@@ -123,6 +141,29 @@ export interface SfuSignalingCallbacks {
   onSignalRelay?(frame: SfuSignalRelay): void;
   onSdpAnswer?(frame: SfuSdpAnswer): void;
   onSdpOffer?(frame: SfuSdpOffer): void;
+  /**
+   * What the SFU gives this device of each person's video (ADR-0070 step 6,
+   * `video-given.ts`): the whole set, in the frame's order. Sent only by an
+   * SFU with downlink control on, when the set changes and after a
+   * `video-wants`. A malformed frame never reaches this.
+   */
+  onVideoGiven?(given: readonly VideoGivenEntry[]): void;
+  /**
+   * Which of this device's own camera senders somebody is being sent
+   * (`sender-activity.ts`): the whole state each time, the last frame wins.
+   * `false` for a sender: stop encoding and sending on it; `true`: send it.
+   * The light sender is always needed and is not named. Sent only to a
+   * publisher that declared a light sender. A malformed frame never reaches
+   * this.
+   */
+  onVideoNeeded?(needed: VideoNeeded): void;
+  /**
+   * How much this device's own main and middle camera senders may send
+   * (`publish-budget.ts`; ADR-0068, amendment of 2026-10-11): the whole
+   * state each time, the last frame wins. Sent only by an SFU that decides
+   * publishers' bitrate. A malformed frame never reaches this.
+   */
+  onPublishBudget?(budget: PublishBudget): void;
   onPong?(frame: SfuPong): void;
   onServerError?(frame: SfuErrorFrame): void;
   /** A malformed / unknown-kind frame the shared validator rejected.
@@ -145,6 +186,18 @@ export class SfuSignalingArgError extends Error {
   }
 }
 
+/**
+ * `connect()` was still pending when this client was closed. Not a failure
+ * of the socket: the caller closed it (the person left, or the session was
+ * torn down), so whoever awaited the connect is told so and reports nothing.
+ */
+export class SfuSignalingClosedError extends Error {
+  constructor() {
+    super("SFU signaling was closed before it connected");
+    this.name = "SfuSignalingClosedError";
+  }
+}
+
 // ---- Client --------------------------------------------------------
 
 /** The WebSocket subprotocol the SFU requires. */
@@ -159,6 +212,12 @@ export const SFU_SUBPROTOCOL = "lakko-sfu-v1";
 export class SfuSignalingClient {
   private socket: WebSocket | null = null;
   private wasm: Awaited<ReturnType<typeof loadWasm>> | null = null;
+  /** `close()` was called. Sticky: a closed client never opens a socket. */
+  private closed = false;
+  /** Settles a `connect()` that is still waiting for the socket to open;
+   *  `null` once it has settled. `close()` uses it, because it also removes
+   *  the socket's own handlers and nothing else would settle the promise. */
+  private rejectPendingConnect: ((err: Error) => void) | null = null;
 
   constructor(
     /** SFU origin, e.g. `wss://sfu.lakko.me`. No trailing path. */
@@ -184,7 +243,8 @@ export class SfuSignalingClient {
    * Open the WebSocket and start dispatching frames. Resolves when
    * the socket reaches OPEN (the SFU's `Welcome` frame follows on the
    * `onWelcome` callback); rejects if the socket errors / closes
-   * before opening. Idempotent-guarded: throws if already connected.
+   * before opening, and with {@link SfuSignalingClosedError} if `close()` is
+   * called first. Idempotent-guarded: throws if already connected.
    */
   async connect(): Promise<void> {
     if (this.socket !== null) {
@@ -192,15 +252,25 @@ export class SfuSignalingClient {
     }
     // Pre-load wasm so the synchronous message handler can call the
     // shared validator without an await per frame.
+    if (this.closed) throw new SfuSignalingClosedError();
     this.wasm = await loadWasm();
+    // Closed while the module loaded: no socket is opened for a client
+    // nobody holds any more.
+    if (this.closed) throw new SfuSignalingClosedError();
     const url = `${this.baseUrl}/v1/connect?token=${encodeURIComponent(this.jwt)}`;
     const socket = new WebSocket(url, SFU_SUBPROTOCOL);
     this.socket = socket;
 
     return new Promise<void>((resolve, reject) => {
       let settled = false;
+      this.rejectPendingConnect = (err: Error): void => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      };
       socket.onopen = (): void => {
         settled = true;
+        this.rejectPendingConnect = null;
         resolve();
       };
       socket.onmessage = (ev: MessageEvent): void => {
@@ -214,6 +284,7 @@ export class SfuSignalingClient {
         this.callbacks.onSocketError?.();
         if (!settled) {
           settled = true;
+          this.rejectPendingConnect = null;
           reject(new Error("SFU WebSocket errored before opening"));
         }
       };
@@ -221,6 +292,7 @@ export class SfuSignalingClient {
         this.callbacks.onClose?.(ev.code, ev.reason);
         if (!settled) {
           settled = true;
+          this.rejectPendingConnect = null;
           reject(
             new Error(`SFU WebSocket closed before opening (code ${ev.code})`),
           );
@@ -229,8 +301,16 @@ export class SfuSignalingClient {
     });
   }
 
-  /** Close the socket. Idempotent. */
+  /**
+   * Close the socket. Idempotent. A `connect()` still waiting for the socket
+   * to open is rejected with {@link SfuSignalingClosedError}: the socket's
+   * handlers are removed below, so nothing else would ever settle it.
+   */
   close(code = 1000, reason = "client closed"): void {
+    this.closed = true;
+    const rejectPending = this.rejectPendingConnect;
+    this.rejectPendingConnect = null;
+    rejectPending?.(new SfuSignalingClosedError());
     const socket = this.socket;
     this.socket = null;
     if (socket !== null) {
@@ -248,9 +328,28 @@ export class SfuSignalingClient {
 
   // ---- Send (client → SFU) ----------------------------------------
 
-  /** Send a client → SFU SDP offer (publish path). */
-  sendSdpOffer(sdp: string): void {
-    this.sendRaw(this.requireWasm().composeSfuSdpOffer(sdp));
+  /**
+   * Send a client → SFU SDP offer (publish path). `lightMids` names the
+   * `mid` of every video m-line of this offer that carries the light sender
+   * of this client's camera (ADR-0070 step 1), so the SFU forwards it as the
+   * camera's light companion; `middleMids` those that carry its middle sender
+   * (step 5), which the SFU forwards only to a viewer that asks for it. Each
+   * is empty when there is none.
+   */
+  sendSdpOffer(sdp: string, lightMids: readonly string[], middleMids: readonly string[] = []): void {
+    this.sendRaw(
+      this.requireWasm().composeSfuSdpOfferWithMiddle(sdp, [...lightMids], [...middleMids]),
+    );
+  }
+
+  /**
+   * Tell the SFU which picture of each publisher this client shows (ADR-0070
+   * step 5): `qualities[i]` is `main`, `middle` or `light` for `peers[i]`.
+   * The frame replaces the whole set; a publisher it leaves out is `main`.
+   * Throws when the lists are outside the protocol's bounds.
+   */
+  sendVideoWants(peers: readonly string[], qualities: readonly string[]): void {
+    this.sendRaw(this.requireWasm().composeSfuVideoWants([...peers], [...qualities]));
   }
 
   /** Send a client → SFU SDP answer (responds to a SFU-initiated
@@ -308,7 +407,70 @@ export class SfuSignalingClient {
       // Shared validator: size cap + fail-fast on unknown kind.
       kind = wasm.validateSfuServerFrame(raw);
     } catch (err) {
+      // A `video-given` frame outside the protocol's bounds (an unknown
+      // quality, an empty peer) is refused here: ignored, with one warning.
+      if (claimsVideoGiven(raw)) {
+        // eslint-disable-next-line no-console
+        console.warn(VIDEO_GIVEN_MALFORMED_WARNING);
+      } else if (claimsVideoNeeded(raw)) {
+        // A `video-needed` frame without both booleans: ignored, with one
+        // warning. The senders stay as the last good frame left them.
+        // eslint-disable-next-line no-console
+        console.warn(VIDEO_NEEDED_MALFORMED_WARNING);
+      } else if (claimsPublishBudget(raw)) {
+        // A `publish-budget` frame without both ceilings, or with one out
+        // of bounds: ignored, with one warning. The senders keep the
+        // ceilings the last good frame gave them.
+        // eslint-disable-next-line no-console
+        console.warn(PUBLISH_BUDGET_MALFORMED_WARNING);
+      }
       this.callbacks.onParseError?.(raw, err);
+      return;
+    }
+    if (kind === "video-given") {
+      // Read through the shared helper (bounds and quality names are the
+      // protocol crate's), not from the untrusted `JSON.parse`.
+      const given = readVideoGivenFrame(wasm, raw);
+      if (given === null) {
+        // eslint-disable-next-line no-console
+        console.warn(VIDEO_GIVEN_MALFORMED_WARNING);
+        return;
+      }
+      try {
+        this.callbacks.onVideoGiven?.(given);
+      } catch {
+        // A handler's failure never reaches the socket's message handler.
+      }
+      return;
+    }
+    if (kind === "video-needed") {
+      // Read through the shared helper, not from the untrusted `JSON.parse`.
+      const needed = readVideoNeededFrame(wasm, raw);
+      if (needed === null) {
+        // eslint-disable-next-line no-console
+        console.warn(VIDEO_NEEDED_MALFORMED_WARNING);
+        return;
+      }
+      try {
+        this.callbacks.onVideoNeeded?.(needed);
+      } catch {
+        // A handler's failure never reaches the socket's message handler.
+      }
+      return;
+    }
+    if (kind === "publish-budget") {
+      // Read through the shared helper, not from the untrusted `JSON.parse`.
+      const budget = readPublishBudgetFrame(wasm, raw);
+      if (budget === null) {
+        // eslint-disable-next-line no-console
+        console.warn(PUBLISH_BUDGET_MALFORMED_WARNING);
+        return;
+      }
+      try {
+        this.callbacks.onPublishBudget?.(budget);
+      } catch {
+        // A handler's failure never reaches the socket's message handler.
+      }
       return;
     }
     let frame: SfuServerFrame;

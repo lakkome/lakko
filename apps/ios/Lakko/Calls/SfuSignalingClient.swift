@@ -24,6 +24,17 @@ struct SfuSignalingCallbacks {
     var onSdpAnswer: ((_ sdp: String) -> Void)?
     var onSdpOffer: ((_ sdp: String) -> Void)?
     var onPong: ((_ nonce: UInt64) -> Void)?
+    /// What the SFU gives this device of each publisher's video (ADR-0070
+    /// step 6): the whole set, replacing the last one.
+    var onVideoGiven: ((_ given: [SfuVideoGiven]) -> Void)?
+    /// Which of this device's own camera senders somebody is being sent
+    /// (ADR-0070, "senders nobody watches"): the whole state, the last
+    /// frame wins. The light sender is always needed and is not named.
+    var onVideoNeeded: ((_ main: Bool, _ middle: Bool) -> Void)?
+    /// How much this device's main and middle camera sender may send, in
+    /// kbit/s (ADR-0068, amendment of 2026-10-11): the whole state, the last
+    /// frame wins. The light sender is not named.
+    var onPublishBudget: ((_ mainKbps: UInt32, _ middleKbps: UInt32) -> Void)?
     var onServerError: ((_ code: SfuErrorCode, _ detail: String) -> Void)?
     /// A frame the shared parser rejected. The connection is NOT closed
     /// automatically — the caller decides.
@@ -68,6 +79,16 @@ final class SfuSignalingClient {
     // FFI splits the sink + stream, so concurrent send / recv is safe).
     private let stateLock = NSLock()
     private var tunneledConn: TunneledWsConnection?
+    /// `close()` was called. Read under `stateLock`: the tunneled dial runs
+    /// on its own queue and may finish after the caller has gone, and a frame
+    /// already read may be dispatched after it.
+    private var closed = false
+
+    private var isClosed: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return closed
+    }
     private let tunnelRecvQueue = DispatchQueue(label: "me.lakko.sfu.tunnel.recv", qos: .userInitiated)
 
     init(
@@ -96,7 +117,7 @@ final class SfuSignalingClient {
     /// - Throws: `SfuSignalingError.alreadyConnected` if called twice,
     ///   `.badUrl` if the base URL / JWT cannot form a valid URL.
     func connect() throws {
-        guard task == nil, tunneledConn == nil else {
+        guard task == nil, tunneledConn == nil, !isClosed else {
             throw SfuSignalingError.alreadyConnected
         }
         // ADR-0026 — armed: route the signaling WebSocket through the tunnel.
@@ -151,6 +172,9 @@ final class SfuSignalingClient {
     /// Parse + dispatch one signaling frame (shared by the direct + tunneled
     /// receive loops). A parse failure surfaces via `onParseError`, never closes.
     private func handleFrameText(_ text: String) {
+        // A frame read before `close()` and dispatched after it belongs to a
+        // call that is over.
+        if isClosed { return }
         do {
             let frame = try parseSfuServerFrame(json: text)
             dispatch(frame)
@@ -219,9 +243,19 @@ final class SfuSignalingClient {
                 self.callbacks.onClosed?()
                 return
             }
+            // The caller may have closed while the tunnel was dialled (the
+            // person ended the call during the connect). `close()` found no
+            // connection to shut down then, so it is shut down here; kept, it
+            // would hold a socket on the SFU and a place in the call for a
+            // session nobody owns.
             self.stateLock.lock()
-            self.tunneledConn = conn
+            let closedMeanwhile = self.closed
+            if !closedMeanwhile { self.tunneledConn = conn }
             self.stateLock.unlock()
+            if closedMeanwhile {
+                try? conn.shutdown()
+                return
+            }
 
             // Blocking receive loop on this dedicated serial queue.
             while true {
@@ -263,13 +297,37 @@ final class SfuSignalingClient {
             callbacks.onPong?(nonce)
         case let .error(code, detail):
             callbacks.onServerError?(code, detail)
+        case let .videoGiven(given):
+            callbacks.onVideoGiven?(given)
+        case let .videoNeeded(main, middle):
+            callbacks.onVideoNeeded?(main, middle)
+        case let .publishBudget(mainKbps, middleKbps):
+            callbacks.onPublishBudget?(mainKbps, middleKbps)
         }
     }
 
     // MARK: - Send (client -> SFU)
 
     /// Send a client -> SFU SDP offer (publish path).
-    func sendSdpOffer(_ sdp: String) { enqueue(try? composeSfuSdpOffer(sdp: sdp)) }
+    ///
+    /// `lightMids` and `middleMids` name the offer's m-lines that carry the
+    /// light and the middle copy of the camera (ADR-0070 steps 1 and 5), so
+    /// the SFU forwards them as the camera's `~light` companion and its
+    /// `~mid` track. Empty while this device has no such sender.
+    func sendSdpOffer(_ sdp: String, lightMids: [String] = [], middleMids: [String] = []) {
+        enqueue(try? composeSfuSdpOfferWithMiddle(
+            sdp: sdp, lightMids: lightMids, middleMids: middleMids))
+    }
+
+    /// Tell the SFU which picture of each publisher this device shows
+    /// (ADR-0070 step 5): the whole set each time. `false` when the frame
+    /// could not be composed or there is no open socket to put it on.
+    @discardableResult
+    func sendVideoWants(_ wants: [SfuVideoWant]) -> Bool {
+        guard isOpen, let json = try? composeSfuVideoWants(wants: wants) else { return false }
+        enqueue(json)
+        return true
+    }
 
     /// Send a client -> SFU SDP answer (responds to a SFU-initiated
     /// offer).
@@ -322,6 +380,7 @@ final class SfuSignalingClient {
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
         stateLock.lock()
+        closed = true
         let conn = tunneledConn
         tunneledConn = nil
         stateLock.unlock()

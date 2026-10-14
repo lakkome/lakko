@@ -79,6 +79,8 @@ public struct KeychainOwnPredecessorStore: OwnPredecessorStoring {
         var seeds = load(accountIdB64: accountIdB64)
         guard !seeds.contains(seed) else { return }
         seeds.append(seed)
+        let gate = try AccountStoreGate.enterUnlessWipedOrEnd(accountIdB64)
+        defer { gate.leave() }
         try KeychainJSONItem.write(
             try JSONEncoder().encode(seeds), service: Self.serviceTag, account: accountIdB64)
     }
@@ -90,6 +92,8 @@ public struct KeychainOwnPredecessorStore: OwnPredecessorStoring {
             clear(accountIdB64: accountIdB64)
             return
         }
+        let gate = try AccountStoreGate.enterUnlessWipedOrEnd(accountIdB64)
+        defer { gate.leave() }
         try KeychainJSONItem.write(
             try JSONEncoder().encode(out), service: Self.serviceTag, account: accountIdB64)
     }
@@ -261,6 +265,8 @@ public struct KeychainKeyRotationPendingStore: KeyRotationPendingStoring {
             clear(accountIdB64: accountIdB64)
             return
         }
+        let gate = try AccountStoreGate.enterUnlessWipedOrEnd(accountIdB64)
+        defer { gate.leave() }
         try KeychainJSONItem.write(
             try JSONEncoder().encode(pending), service: Self.serviceTag, account: accountIdB64)
     }
@@ -494,6 +500,8 @@ public struct KeysRotatedNoticeStore {
     }
 
     public func markOwed(accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         defaults.set(true, forKey: Self.key(accountIdB64: accountIdB64))
     }
 

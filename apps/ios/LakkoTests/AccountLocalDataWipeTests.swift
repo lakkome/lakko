@@ -57,6 +57,11 @@ final class AccountLocalDataWipeTests: XCTestCase {
         savedMarks = JournalFoundingMarks.shared.all()
         wipeQuietly(a)
         wipeQuietly(b)
+        // The clean-up above is a wipe like any other and seals both
+        // accounts. Each test then seeds them as a signed-in account's own
+        // stores, which is the account landing again.
+        AccountStoreGate.open(a)
+        AccountStoreGate.open(b)
     }
 
     override func tearDown() async throws {
@@ -302,6 +307,9 @@ final class AccountLocalDataWipeTests: XCTestCase {
             accountIdB64: x, token: PersistedSessionToken(sessionToken: "tok", sessionExpiresAtMs: 1))
         try DeviceKeyStore.putDeviceKey(accountIdB64: x, rootKey: Data(repeating: 1, count: deviceRootKeyLength))
         try PhraseStore().putPhrase(accountIdB64: x, phraseBytes: Data("abandon ability".utf8))
+        // A guest account's phrase row, under its own key (`GuestAccount.swift`).
+        try PhraseStore().putPhrase(
+            accountIdB64: guestPhraseKey(accountIdB64: x), phraseBytes: Data("abandon ability".utf8))
         try BackupFloorStore.putFloor(
             accountIdB64: x, floor: BackupFloor(version: 1, envelopeHash: Data(repeating: 2, count: 32)))
         try ExportKeyStore.putExportKey(
@@ -398,6 +406,12 @@ final class AccountLocalDataWipeTests: XCTestCase {
             accountIdB64: x, channelId: channelHex, state: channelRotationStateAfterRotation(nowMs: 1))
         PendingSyncTracker(accountIdB64: x).markFailed()
         AutoBackupStore.save(accountIdB64: x, state: .clean)
+        RestoredKnownGroupsStore.add(
+            accountIdB64: x, groupIdsHex: [String(repeating: "ab", count: 32)])
+        BackupRestoreRetryStore.mark(accountIdB64: x)
+        // The guest marker.
+        GuestAccountMarker().mark(accountIdB64: x, nowMs: 1_760_000_000_000)
+        GuestAccountMarker().noteUsernameClaimed(accountIdB64: x, username: "mira")
 
         // UserDefaults, raw: stores whose writers take a live model (a group
         // call record, a member identity, a contact), under the keys the

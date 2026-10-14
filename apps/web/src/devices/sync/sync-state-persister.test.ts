@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FakeIndexedDb, MemoryStorage } from "../../test/fake-storage";
 import { base64Encode } from "../../auth/account-id";
 import { wipeAccountLocalData } from "../../auth/wipe-account";
+import { openAccountStores } from "../../auth/account-store-gate";
 import type { StampedEdit } from "../../chat/folders/folder-model";
 import { hasPendingFolderSync } from "./folder-outbox";
 import {
@@ -254,6 +255,9 @@ describe("Forget device and Delete account (the account wipe)", () => {
 
   it("leave a later sign-in on the same account free to write again", async () => {
     await deleteSyncState(ACCOUNT);
+    // The sign-in: the wipe above sealed the account's stores until it lands
+    // again (`auth/account-store-gate.ts`).
+    openAccountStores([ACCOUNT]);
     const rt = runtime();
     rt.bind();
     rt.state.synced = new Uint8Array([8]);

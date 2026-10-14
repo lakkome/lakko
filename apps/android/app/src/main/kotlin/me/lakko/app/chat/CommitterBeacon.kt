@@ -446,14 +446,16 @@ internal class SharedPrefsBeaconObservationStore(context: Context) : BeaconObser
         groupIdHex: String,
         observations: Map<String, Long>,
     ) {
-        try {
-            val key = rowKey(accountIdB64, groupIdHex)
-            val editor = prefs().edit()
-            if (observations.isEmpty()) editor.remove(key) else editor.putString(key, encodeRow(observations))
-            editor.apply()
-        } catch (_: Throwable) {
-            // Best-effort — losing the store costs a takeover's promptness,
-            // never its correctness.
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            try {
+                val key = rowKey(accountIdB64, groupIdHex)
+                val editor = prefs().edit()
+                if (observations.isEmpty()) editor.remove(key) else editor.putString(key, encodeRow(observations))
+                editor.apply()
+            } catch (_: Throwable) {
+                // Best-effort — losing the store costs a takeover's promptness,
+                // never its correctness.
+            }
         }
     }
 

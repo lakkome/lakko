@@ -319,44 +319,7 @@ class AccountProtectionTest {
         assertFalse(text.contains("name@example.com"))
     }
 
-    // ---- a guest chooses a username ----------------------------------------
-
-    @Test
-    fun `choose a username is offered only to an account without one`() {
-        assertTrue(usernameClaimOffered(hasUsername = false))
-        assertFalse(usernameClaimOffered(hasUsername = true))
-        // The name was saved and the first password is still owed.
-        assertTrue(usernameClaimOffered(hasUsername = true, passwordOwed = true))
-    }
-
-    @Test
-    fun `the claim opens on the name, on the owed password, or is done`() {
-        assertEquals(UsernameClaimStep.Name, usernameClaimStep(hasUsername = false, passwordOwed = false))
-        assertEquals(UsernameClaimStep.Password, usernameClaimStep(hasUsername = true, passwordOwed = true))
-        assertEquals(UsernameClaimStep.Done, usernameClaimStep(hasUsername = true, passwordOwed = false))
-    }
-
-    @Test
-    fun `a failed password after a saved name keeps the name and retries only the password`() {
-        val line = me.lakko.app.l10n.UiText("recovery.new_password.error.generic")
-        var state = UsernameClaimState(step = UsernameClaimStep.Name, busy = true)
-        // A failed name step changes nothing: the field is editable again.
-        val nameFailed = afterUsernameClaimFailure(state, me.lakko.app.l10n.UiText("auth.signup.error.username_taken"))
-        assertEquals(UsernameClaimStep.Name, nameFailed.step)
-        assertTrue(nameFailed.nameEditable)
-        // The name lands, the password fails.
-        state = afterUsernameSaved(state)
-        assertEquals(UsernameClaimStep.Password, state.step)
-        state = afterUsernameClaimFailure(state, line)
-        assertEquals(UsernameClaimStep.Password, state.step)
-        assertEquals(line, state.error)
-        assertFalse("the saved name is not typed again", state.nameEditable)
-        assertFalse(state.busy)
-        // The retry lands.
-        state = afterFirstPasswordSaved(state.copy(busy = true))
-        assertEquals(UsernameClaimStep.Done, state.step)
-        assertNull(state.error)
-    }
+    // ---- a guest's first password ------------------------------------------
 
     @Test
     fun `the first-password debt survives a restart and goes with the account`() {

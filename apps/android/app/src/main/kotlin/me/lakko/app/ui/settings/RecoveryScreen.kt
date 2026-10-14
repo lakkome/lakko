@@ -600,6 +600,7 @@ private fun TotpEnrollSection(sessionToken: String) {
                                 else -> TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
                             }
                         } catch (err: Throwable) {
+                            me.lakko.app.rethrowIfCancelled(err)
                             TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
                         }
                     }
@@ -668,6 +669,7 @@ private fun TotpEnrollSection(sessionToken: String) {
                                     else -> TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
                                 }
                             } catch (err: Throwable) {
+                                me.lakko.app.rethrowIfCancelled(err)
                                 TotpUi.Error(enrollFailure(err, TOTP_GENERIC))
                             }
                         }

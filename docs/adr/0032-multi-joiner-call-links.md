@@ -182,13 +182,81 @@ The protocol above serves a **live, ad-hoc** call — not a persistent room:
   `signup` machinery verbatim (OPAQUE registration under a random never-shown
   password, device-key bootstrap, first-ever identity-bundle publish with the
   G-30 genesis leaf-auth) but **skips `registerUsername`** — yielding a
-  **username-less full account** with phrase-only recovery. It lands via the
-  existing `save-fresh-phrase` state so the guest saves their recovery phrase;
-  **claiming a username is the later onboarding step** (a random `guest-xxxx`
-  handle is deliberately NOT minted — usernames are first-come immutable, so
-  auto-squatting would block the user's real choice). `signupGuest` adds no new
-  crypto; it is a new *entry point* to the existing account-creation path,
-  reachable pre-ACCESS from a public link — offered to `lakko-security`.
+  **username-less full account**. A random `guest-xxxx` handle is deliberately
+  NOT minted — usernames are first-come immutable, so auto-squatting would
+  block the user's real choice. `signupGuest` adds no new crypto; it is a new
+  *entry point* to the existing account-creation path, reachable pre-ACCESS
+  from a public link — offered to `lakko-security`.
+- **Guest lifecycle (amended 2026-10-02).** The first version landed the guest
+  through the `save-fresh-phrase` state: the 24-word recovery phrase was shown,
+  and had to be acknowledged, before the call. That asked a person who was sent
+  a link to take custody of an account they had not asked for. Decided by the
+  maintainer: the question whether to keep the account is asked **after** the
+  call, and an account nobody kept does not stay.
+  - **No phrase before the call.** `signupGuest` lands the session at once. The
+    phrase is kept on the device, wrapped under the device key, under a key of
+    its own in the phrase store (not the account's), and the account is marked
+    as a guest locally.
+  - **Nothing beyond the call on a server.** Because the backup upload and the
+    three-word vault enrolment (ADR-0049) read the phrase by the account's key,
+    neither runs for a guest; push registration is skipped explicitly. What a
+    guest leaves on the servers is the auth account row, its identity bundle
+    and KeyPackage in the directory, and the KT-log leaf that publish appended.
+  - **After the call: `Create account` or `No, thanks`**
+    ([`docs/ux/call-links.md`](../ux/call-links.md) section 9). A guest never
+    lands in the app shell.
+  - **`No, thanks` deletes at once**, then wipes the device. For a guest with
+    no username: `DELETE /account` on auth (decisive — a failure leaves
+    everything in place), then `DELETE /discovery/account` (best-effort; the
+    directory's sweep covers it). For a guest whose unfinished `Create
+    account` already took a username: the directory delete **first and
+    required**, then auth, because the directory's sweep never removes an
+    entry that has a username. Both deletes are idempotent.
+  - **The device keeps the same clock.** The guest marker carries when the
+    account was made; after 23 hours (an hour before the servers' day, so
+    `Create account` is never offered for an account about to be removed) the
+    device deletes the account without asking the next time it opens, on the
+    servers best-effort and locally always. A guest whose session cannot be
+    restored is wiped from the device at launch: there is no password anyone
+    could type to get back into it.
+  - **`Create account` adds no new protocol.** It is the `signup` username
+    claim (login handle at auth, then the directory, the handle released if the
+    directory refuses), followed by the existing phrase-proved password reset
+    (`recover`) to replace the random password, with this device's old
+    KeyPackage taken out of the directory first because the reset re-keys the
+    device. Then the phrase is shown through the ordinary sign-up phrase gate.
+    A username is claimed once; a retry after a failed reset goes on with it.
+  - **Unanswered guests are swept.** `services/auth` deletes, every ten
+    minutes, accounts older than `LAKKO_AUTH_UNCLAIMED_ACCOUNT_TTL_SECS`
+    (default one day, `0` = off) that have **no login handle and no passkey**;
+    the foreign keys cascade over the rest of the account's auth state. The
+    sweep is off when the login-handle pepper is unset, since without it no
+    account can have a handle and every account would qualify.
+    `services/discovery` deletes identity bundles older than
+    `LAKKO_DISCOVERY_UNCLAIMED_ACCOUNT_TTL_SECS` (default one day) that have no
+    username, with the account's KeyPackages, public record and owned invite
+    rows. Both sweeps key on facts each service already holds; neither learns
+    anything new (invariants #1, #2, #5).
+  - **Stated residuals.** (1) The KT log is append-only: a swept guest's genesis
+    leaf stays in it (a hash of the account id and a public key). (2) A guest
+    whose `Create account` took a username and then failed at the password step,
+    and who never opened Lakko on that device again, keeps that username: an
+    account with a login handle is not swept by the servers, and it still has
+    the random password. Opening the app again frees it (the device deletes
+    the account after 23 hours, or the person presses `No, thanks`). Closing
+    this needs the server to know an account is a guest, which it is not told
+    today. (3) An ordinary
+    account always has a login handle since ADR-0054 S5 binds it at signup and
+    on every session landing; an account created before S5 that has not signed
+    in since has none and no passkey, and the sweep deletes it. There is no
+    deployment, so no such account matters; a deployment that had them would
+    need the sweep off until they had signed in. (4) The Delivery Service has
+    no notion of an account: whatever a guest's device registered there (its
+    mailbox claim, keyed by a pseudonym derived from a public key) stays, as it
+    does after any account deletion.
+  - **ADR-0033 unchanged.** The admission throttle counts fresh accounts per
+    call; the sweep does not replace it, it removes what the throttle let
+    through and nobody kept.
 - **Account-creation-spam mitigation ~~(deferred backend sprint)~~ — BUILT as
   [ADR-0033](0033-call-admission-antispam-throttle.md)** (recorded here
   2026-09-02; the forward link was missing). The throttle described below is

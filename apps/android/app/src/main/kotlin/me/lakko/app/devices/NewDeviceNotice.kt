@@ -143,7 +143,7 @@ public class NewDeviceNoticeStore(private val storage: MarkerStorage) {
     }
 
     public fun save(accountIdB64: String, state: NewDeviceNoticeState) {
-        storage.set(accountIdB64, JSON.encodeToString(NewDeviceNoticeState.serializer(), state))
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.set(accountIdB64, JSON.encodeToString(NewDeviceNoticeState.serializer(), state)) }
     }
 
     public fun deleteAccount(accountIdB64: String) {

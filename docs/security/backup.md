@@ -21,18 +21,28 @@ trustless on this path.
 
 Defined in
 [`crates/lakko-backup/src/payload.rs`](../../crates/lakko-backup/src/payload.rs).
-Two versions in production:
+One version is emitted and accepted: **v6** (2026-10-02). Lakko has no
+deployment and no stored backups, so an older payload is refused rather than
+migrated.
 
-| Version | Fields | Notes |
-|---|---|---|
-| v1 | identity_seed (64 B), contacts[] | Initial 2a1 release |
-| **v2** | identity_seed, contacts[], **whole_storage_snapshot** | Phase 2a3d1 — adds the OpenMLS provider snapshot so multi-device recovery picks up MLS state too |
+| Field | Notes |
+|---|---|
+| `account_id` | binds the blob to the server-side row |
+| `created_at_ms` | wall clock at upload |
+| `ed25519_seed` | the identity signing seed |
+| `accepted_contacts[]` | public keys, display name, optional account id |
+| `known_group_ids[]` | the conversations the account's devices knew, so a restored device knows which conversations exist before any member has admitted it |
+| `synced_state` | the ADR-0058 folded DeviceGroup state (folders, pins, mutes, archive, read cursors, drafts, order) |
 
-v2 readers parse v1 envelopes seamlessly — the
-`whole_storage_snapshot` field folds to empty on a v1
-input. The reverse is not symmetric: a v1 client reading a
-v2 envelope sees the prefix only; the trailing
-`whole_storage_snapshot` is dropped on decode.
+**The payload carries no MLS state** (v2-v5 carried a whole-provider snapshot).
+A snapshot belongs to the device that made it: its leaf, its signature key,
+its ratchet counters. Loaded on another device it clones a leaf
+([ADR-0050](../adr/0050-per-device-conversation-leaves.md)); loaded on the
+same device after a reinstall it rolls the device back behind commits it has
+already published ([ADR-0040](../adr/0040-durable-pending-commit-outbox.md))
+and re-uses ratchet positions (G-34). A restored device is admitted to its
+conversations by other members (ADR-0050 section 2.5a). Message history is
+not in this payload either.
 
 ## On-disk shape
 
@@ -133,8 +143,9 @@ client (NEW device — no prior state)                    server
   │ AEAD-open(ciphertext, KEK, IV)  → BackupPayload       │
   │                                                       │
   │ rebuild Identity from identity_seed                   │
-  │ restoreStorage(whole_storage_snapshot)                │
-  │ upsert contacts[] into local store                    │
+  │ merge contacts[] into the local store                 │
+  │ merge synced_state into the DeviceGroup fold          │
+  │ keep known_group_ids (carried into later uploads)     │
 ```
 
 Failure surfaces on the AEAD-open step (wrong phrase →
@@ -148,8 +159,8 @@ The structured FFI surface is in
 [`crates/lakko-ffi-uniffi/`](../../crates/lakko-ffi-uniffi/)
 + [`crates/lakko-ffi-wasm/`](../../crates/lakko-ffi-wasm/):
 
-- `build_backup_payload(identity_seed, contacts, whole_storage_snapshot)
-   -> BackupPayload`
+- `build_backup_payload(account_id, created_at_ms, ed25519_seed, contacts,
+   known_group_ids, synced_state) -> payload bytes`
 - `seal_backup(envelope_proto, phrase) -> wire_bytes`
 - `open_backup(wire_bytes, phrase) -> BackupPayload`
 

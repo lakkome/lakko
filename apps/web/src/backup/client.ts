@@ -21,11 +21,14 @@
  *      `contacts/local-store.ts`. These feed the payload's
  *      identity-secrets + accepted-contacts fields.
  *
- * The payload also carries a whole-storage MLS snapshot
- * (`Identity.snapshotStorage()`, Phase 2a3d3) so a restored device
- * lands with the same group state the upload-side device had at
- * backup time; it is empty only on the signup baseline (no MLS state
- * to publish yet) or when the backup pre-dates 2a3d.
+ * The payload carries NO MLS provider state (2026-10-02, payload v6). A
+ * snapshot belongs to the device that made it: loaded on another device it
+ * clones a leaf (ADR-0050), loaded on the same device after a reinstall it
+ * rolls the device back behind commits it already published (ADR-0040) and
+ * re-uses ratchet positions (G-34). A restored device is admitted to its
+ * chats by the other members (ADR-0050 section 2.5a), never from the backup.
+ * What the payload does carry about conversations is the list of their ids
+ * (`knownGroupIds`), so a restore knows which conversations the account has.
  *
  * ## Two entry points
  *
@@ -39,10 +42,10 @@
  *   the right UX: success vs cache-miss vs decrypt-failed.
  *
  * The restore-side entry point ([`BackupClient.restore`]) lives
- * here too. It's used by the post-signup / post-recovery flow:
- * GET the blob from server, decrypt with phrase, return the
- * structured fields ready to feed back into the
- * `AuthContext` + `contacts/local-store`.
+ * here too. Every route that restores the identity from the phrase reaches
+ * it through `restoreAccountBackup` (`restore.ts`): GET the blob from the
+ * server, run the ADR-0037 head gate, decrypt with the phrase, return the
+ * structured fields for that function to apply.
  */
 import { loadWasm } from "../wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
@@ -102,22 +105,12 @@ export type RestoreResult =
       readonly createdAtMs: number;
       readonly ed25519Seed: Uint8Array;
       readonly acceptedContacts: AcceptedContact[];
-      /** Phase 2a3d3: whole-storage MLS snapshot from
-       *  `Identity.snapshotStorage()`. Empty when the backup
-       *  pre-dates 2a3d or no MLS state was published yet. The
-       *  recover handler feeds this into
-       *  `Identity.restoreStorage(...)` on the freshly-derived
-       *  Identity so the new device lands with the same group
-       *  state the upload-side device had at backup time. */
-      readonly wholeStorageSnapshot: Uint8Array;
-      /** The MLS group ids the backup was taken with, base64.
-       *
-       *  The snapshot above restores the provider, which holds every group,
-       *  but nothing can enumerate it - a client's chat list is built from a
-       *  separately persisted index of ids. Without this a restored device
-       *  holds every group and shows none. Empty for a backup written before
-       *  payload v4, and for a device that knew no groups; a restore treats
-       *  both the same and rebuilds nothing rather than guessing. */
+      /** The ids of the conversations the account had when the backup was
+       *  taken, base64. The backup carries no MLS state, so these name
+       *  conversations and open none: the restoring device keeps them
+       *  (`restored-known-groups.ts`) so its own later uploads still list
+       *  them, and is admitted to each by the other members. Empty for an
+       *  account that knew no groups. */
       readonly knownGroupIds: string[];
       /** ADR-0058 section 5.2 — the account's folded synced state (pins,
        *  mutes, archive, drafts, read cursors, chat folders) as
@@ -127,6 +120,9 @@ export type RestoreResult =
     }
   | { readonly kind: "no-backup" }
   | { readonly kind: "wrong-phrase-or-tampered" }
+  /** The envelope opened under the phrase but its payload is not one this
+   *  build reads (a payload version it refuses). Nothing was restored. */
+  | { readonly kind: "unsupported-payload" }
   /** ADR-0037 §6 rollback gate refused the served blob. `hard` = an
    *  unambiguous tamper / corruption (no override); `hard: false` = a stale
    *  head the user was offered and DECLINED to override. Either way no
@@ -234,19 +230,15 @@ export class BackupClient {
     accountId: Uint8Array,
     ed25519Seed: Uint8Array,
     phraseBytes: Uint8Array,
-    /** Phase 2a3d3: whole-storage MLS snapshot from
-     *  `Identity.snapshotStorage()`. Empty / omitted is fine —
-     *  on signup baseline there is no MLS state to publish
-     *  yet. Recover-time + scheduled auto-backup paths pass
-     *  the current snapshot here. */
-    wholeStorageSnapshot: Uint8Array = new Uint8Array(0),
     /** ADR-0037: the non-extractable device root key. When present, the
      *  auth-assigned `backup_version` floor is persisted into the device-key-
      *  encrypted store on a successful mint. Omitted → no floor persisted
      *  (the mint + framing still happen; a future restore falls back to the
      *  freshness window). */
     deviceKey?: CryptoKey,
-    /** The MLS group ids this device knows about, base64. */
+    /** The conversation ids the backup lists, base64: the groups this
+     *  device holds plus the restored ones it has not joined yet
+     *  (`backupKnownGroupIds`). */
     knownGroupIds: readonly string[] = [],
   ): Promise<UploadResult> {
     try {
@@ -254,7 +246,6 @@ export class BackupClient {
         accountId,
         ed25519Seed,
         phraseBytes,
-        wholeStorageSnapshot,
         knownGroupIds,
       );
       // ADR-0037: mint the auth-signed head, frame `TAG ‖ head ‖ envelope`,
@@ -320,11 +311,7 @@ export class BackupClient {
     accountId: Uint8Array,
     ed25519Seed: Uint8Array,
     deviceKey: CryptoKey,
-    /** The current whole-storage MLS snapshot. This parameter did not exist
-     *  while the method had no callers, and its absence was not cosmetic: the
-     *  body passed an empty snapshot, so the first caller would have uploaded
-     *  a backup carrying contacts but no groups. */
-    wholeStorageSnapshot: Uint8Array = new Uint8Array(0),
+    /** As in [`uploadNow`]. */
     knownGroupIds: readonly string[] = [],
   ): Promise<UploadResult> {
     const accountIdB64 = base64Encode(accountId);
@@ -345,7 +332,6 @@ export class BackupClient {
         accountId,
         ed25519Seed,
         cached.phrase,
-        wholeStorageSnapshot,
         deviceKey,
         knownGroupIds,
       );
@@ -431,7 +417,16 @@ export class BackupClient {
       console.warn("BackupClient: openBackup failed", err);
       return { kind: "wrong-phrase-or-tampered" };
     }
-    const parsed = wasm.parseBackupPayload(payloadBytes);
+    let parsed: ReturnType<typeof wasm.parseBackupPayload>;
+    try {
+      parsed = wasm.parseBackupPayload(payloadBytes);
+    } catch (err) {
+      // A payload version this build refuses (v5 and older carried an MLS
+      // snapshot and are not read). Nothing to restore from it.
+      // eslint-disable-next-line no-console
+      console.warn("BackupClient: parseBackupPayload failed", err);
+      return { kind: "unsupported-payload" };
+    }
 
     // Translate the wasm `BackupContact[]` into the TS-side
     // `AcceptedContact` shape `contacts/local-store.ts` expects.
@@ -473,7 +468,6 @@ export class BackupClient {
       createdAtMs: Number(parsed.createdAtMs),
       ed25519Seed: parsed.ed25519Seed,
       acceptedContacts,
-      wholeStorageSnapshot: parsed.wholeStorageSnapshot,
       knownGroupIds: splitGroupIds(parsed.knownGroupIds),
       syncedState: parsed.syncedState,
     };
@@ -489,7 +483,6 @@ export class BackupClient {
     accountId: Uint8Array,
     ed25519Seed: Uint8Array,
     phraseBytes: Uint8Array,
-    wholeStorageSnapshot: Uint8Array,
     knownGroupIds: readonly string[],
   ): Promise<Uint8Array> {
     const wasm = await loadWasm();
@@ -509,11 +502,10 @@ export class BackupClient {
       return new wasm.BackupContact(ed, x, c.displayName, accountId);
     });
 
-    // Flat-concatenated 32-byte ids: the index the snapshot cannot supply,
-    // because the restored provider holds every group and offers no way to
-    // enumerate them. An id of the wrong width is dropped rather than failing
-    // the backup - a malformed local row must not cost the user the whole
-    // envelope - and the payload codec caps the rest.
+    // Flat-concatenated 32-byte ids: the list of the account's conversations.
+    // An id of the wrong width is dropped rather than failing the backup - a
+    // malformed local row must not cost the user the whole envelope - and the
+    // payload codec caps the rest.
     const idBytes = knownGroupIds
       .map((id) => {
         try {
@@ -531,7 +523,9 @@ export class BackupClient {
       BigInt(Date.now()),
       ed25519Seed,
       contacts,
-      wholeStorageSnapshot,
+      // Payload v6: no MLS snapshot argument. The position it held now takes
+      // the group ids, and both are `Uint8Array`, so this list is positional
+      // by hand.
       flatGroupIds,
       // ADR-0058 section 5.2 — the folded synced state, so a restore with no
       // other device alive still gets its pins, drafts and folders back.

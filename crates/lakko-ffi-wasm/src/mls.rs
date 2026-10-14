@@ -2768,8 +2768,10 @@ impl DeviceGroup {
 
     /// Compose a `FolderChanges` cross-device payload (ADR-0058): a live
     /// chat-folder edit carrying only the changed registers, each with its
-    /// own stamp. `hlc` is the message stamp and is ignored by the fold for
-    /// this kind. Throws when the change set breaks an ADR-0058 bound, so an
+    /// own stamp. Also how a Save / Remove of a saved message is sent
+    /// (ADR-0065 section 4: `FolderChangeSet.addSaved` /
+    /// `addSavedRemoved`). `hlc` is the message stamp and is ignored by the
+    /// fold for this kind. Throws when the change set breaks an ADR-0058 bound, so an
     /// out-of-bounds edit is never sent. Fold the same change set locally
     /// with `SyncedState.applyFolderChanges`.
     #[wasm_bindgen(js_name = createDeviceGroupFolderChangesMessage)]
@@ -4128,7 +4130,10 @@ impl ParsedCallSignaling {
     }
 
     /// `end` / `groupLeave` only: one of `"hungUp"` /
-    /// `"busy"` / `"declined"` / `"timedOut"` / `"error"`.
+    /// `"busy"` / `"declined"` / `"timedOut"` / `"error"` /
+    /// `"endedForAll"` (`end` of a group or link call only: the call's
+    /// starter ended it for everyone; act on it only when the
+    /// MLS-authenticated sender is that starter).
     /// For `groupLeave` only `"hungUp"` / `"timedOut"` /
     /// `"error"` are meaningful.
     #[wasm_bindgen(getter, js_name = endReason)]
@@ -4211,7 +4216,7 @@ pub fn compose_call_ice_candidate_signaling(
 
 /// Compose an End call-signaling event. `reason` is one of
 /// `"hungUp"` / `"busy"` / `"declined"` / `"timedOut"` /
-/// `"error"`; unknown values fold to `"hungUp"`.
+/// `"error"` / `"endedForAll"`; unknown values fold to `"hungUp"`.
 #[wasm_bindgen(js_name = composeCallEndSignaling)]
 pub fn compose_call_end_signaling(call_id: &[u8], reason: &str) -> Result<Vec<u8>, JsValue> {
     let id = take_call_id(call_id)?;
@@ -4395,6 +4400,7 @@ fn parse_end_reason(s: &str) -> lakko_calls::EndReason {
         "declined" => lakko_calls::EndReason::Declined,
         "timedOut" => lakko_calls::EndReason::TimedOut,
         "error" => lakko_calls::EndReason::Error,
+        "endedForAll" => lakko_calls::EndReason::EndedForAll,
         _ => lakko_calls::EndReason::HungUp,
     }
 }
@@ -4406,6 +4412,7 @@ fn end_reason_str(r: lakko_calls::EndReason) -> &'static str {
         lakko_calls::EndReason::Declined => "declined",
         lakko_calls::EndReason::TimedOut => "timedOut",
         lakko_calls::EndReason::Error => "error",
+        lakko_calls::EndReason::EndedForAll => "endedForAll",
     }
 }
 
@@ -4430,8 +4437,9 @@ impl SframeParticipantKey {
         self.key_bytes_val.clone()
     }
 
-    /// 12-byte nonce salt — XOR with `(counter as u32 BE in
-    /// the low 4 bytes)` to compose each per-frame nonce.
+    /// 12-byte nonce salt — XOR with `(counter as 8 big-endian
+    /// bytes in the low 8 bytes)` to compose each per-frame
+    /// nonce (ADR-0069: the counter is 64-bit).
     #[wasm_bindgen(getter, js_name = nonceSalt)]
     pub fn nonce_salt(&self) -> Vec<u8> {
         self.nonce_salt_val.clone()
@@ -4495,6 +4503,8 @@ pub fn sframe_derive_participant_key(
 /// `(sender_leaf << 8) | stream_index` (ADR-0035) the receiver read from the
 /// frame's header (crossing to JS as a `BigInt`); the decryptor re-derives the
 /// exact sender-stream key from the KID with no separate media discriminator.
+/// `frame_counter` is the 64-bit counter from the header (ADR-0069), also a
+/// `BigInt` in JS.
 #[wasm_bindgen(js_name = sframeOpenWithOverlap)]
 pub fn sframe_open_with_overlap(
     current_call_key_seed: &[u8],
@@ -4502,7 +4512,7 @@ pub fn sframe_open_with_overlap(
     kid: u64,
     aad: &[u8],
     ciphertext: &[u8],
-    frame_counter: u32,
+    frame_counter: u64,
 ) -> Result<Vec<u8>, JsValue> {
     let take_seed = |bytes: &[u8]| -> Result<[u8; 32], JsValue> {
         if bytes.len() != 32 {

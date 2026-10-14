@@ -106,6 +106,9 @@ public class LoginViewModel(
                     )
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(busy = false, error = WRONG_CREDENTIALS)
                 }
@@ -161,6 +164,9 @@ public class LoginViewModel(
                     it.copy(busy = false, error = OFFLINE)
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false) }
+                }
                 mutableState.update {
                     it.copy(
                         busy = false,

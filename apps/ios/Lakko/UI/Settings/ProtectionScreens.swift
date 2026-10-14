@@ -91,8 +91,6 @@ struct ProtectAccountScreen: View {
     /// Leave the step (`Not now`, confirmed, or `Continue`); `nil` for the
     /// Settings entry.
     var onLeave: (() -> Void)?
-    /// "Choose a username first." as a button, for an account without one.
-    var onChooseUsername: (() -> Void)?
 
     @State private var confirmingSkip = false
     @ObservedObject private var l10n = Localization.shared
@@ -131,10 +129,11 @@ struct ProtectAccountScreen: View {
                     .stroke(Color.lakkoBorder, lineWidth: 1)
             )
 
-            // A guest: the email needs a username, which it can choose here.
-            if !hasUsername, center.status?.available == true, let onChooseUsername {
+            // The email needs a username. A guest account never reaches this
+            // step without one (it chooses it right before, ``GuestRoot``);
+            // this is the session that does not know its name on this device.
+            if !hasUsername, center.status?.available == true {
                 AuthHint(text: l10n.t("recovery_email.needs_username"))
-                ChooseUsernameButton(username: nil, action: onChooseUsername)
             }
 
             switch layout.footer {
@@ -244,8 +243,6 @@ struct RecoveryEmailScreen: View {
     var startsRemoving = false
     /// The code was accepted, or the address was removed.
     let onDone: () -> Void
-    /// "Choose a username first." as a button (a guest account).
-    var onChooseUsername: (() -> Void)?
 
     @StateObject private var model: RecoveryEmailModel
     @StateObject private var proof: FreshAuthProofModel
@@ -258,13 +255,11 @@ struct RecoveryEmailScreen: View {
         authRepository: AuthRepository,
         center: AccountProtectionCenter,
         startsRemoving: Bool = false,
-        onChooseUsername: (() -> Void)? = nil,
         onDone: @escaping () -> Void
     ) {
         self.authRepository = authRepository
         self.center = center
         self.startsRemoving = startsRemoving
-        self.onChooseUsername = onChooseUsername
         self.onDone = onDone
         let proof = FreshAuthProofModel(surface: .recoveryEmail, repository: authRepository)
         let replacing = center.status?.enabled ?? false
@@ -286,11 +281,8 @@ struct RecoveryEmailScreen: View {
         AuthScreen {
             AuthTitle(title: l10n.t("recovery_email.title"), subtitle: l10n.t("recovery_email.body"))
             if model.needsUsername {
-                // A guest account: the stored value is made from a username.
+                // The stored value is made from a username.
                 AuthHint(text: l10n.t("recovery_email.needs_username"))
-                if let onChooseUsername {
-                    ChooseUsernameButton(username: nil, action: onChooseUsername)
-                }
             } else if center.status?.available == false, center.status?.enabled != true {
                 AuthHint(text: l10n.t("recovery_email.unavailable"), isError: true)
             } else {

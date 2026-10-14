@@ -78,18 +78,32 @@ import { sessionFetch } from "../auth/session-fetch";
 import { tokenAccountSegment } from "../auth/session-pair";
 import { defaultAnonTokenStore, type AnonTokenStore } from "./anon-token-store";
 
-/** The token contexts, in wire order (`anonTokenContexts()`).
- *  `channel-subscribe` and `directory-search` are ADR-0059. */
-export type AnonTokenContext =
-  | "discovery-lookup"
-  | "discovery-register"
-  | "invite-consume"
-  | "ds-knock"
-  | "push-register"
-  | "channel-subscribe"
-  | "directory-search";
+/**
+ * The token contexts, in wire order: the names `anonTokenContexts()` returns
+ * (`lakko_anon_token::TokenContext::ALL`, wire bytes 1..=10), pinned against
+ * the wasm core by `anon-token-contexts.test.ts`. `channel-subscribe` and
+ * `directory-search` are ADR-0059; `vault-claim` is ADR-0064; `blob-upload`
+ * and `blob-read` are ADR-0065. Nothing spends the last three yet.
+ */
+export const ANON_TOKEN_CONTEXTS = [
+  "discovery-lookup",
+  "discovery-register",
+  "invite-consume",
+  "ds-knock",
+  "push-register",
+  "channel-subscribe",
+  "directory-search",
+  "vault-claim",
+  "blob-upload",
+  "blob-read",
+] as const;
 
-/** Tokens asked for per refill, by how often each action happens. */
+/** One token context (see {@link ANON_TOKEN_CONTEXTS}). */
+export type AnonTokenContext = (typeof ANON_TOKEN_CONTEXTS)[number];
+
+/** Tokens asked for per refill, by how often each action happens. The
+ *  values for `vault-claim`, `blob-upload` and `blob-read` are chosen, not
+ *  measured: no flow spends them yet. */
 export const REFILL_BATCH: Readonly<Record<AnonTokenContext, number>> = {
   "discovery-lookup": 8,
   "push-register": 4,
@@ -98,9 +112,14 @@ export const REFILL_BATCH: Readonly<Record<AnonTokenContext, number>> = {
   "discovery-register": 1,
   "channel-subscribe": 2,
   "directory-search": 1,
+  "vault-claim": 4,
+  "blob-upload": 2,
+  "blob-read": 2,
 };
 /** Refill a context when it holds fewer than this many tokens: lookups keep
- *  a spare, the rarer actions refill only once empty. */
+ *  a spare, the rarer actions refill only once empty. The three storage
+ *  contexts (`vault-claim`, `blob-upload`, `blob-read`) refill once empty
+ *  too; chosen, not measured. */
 export const LOW_WATER: Readonly<Record<AnonTokenContext, number>> = {
   "discovery-lookup": 2,
   "push-register": 1,
@@ -109,6 +128,9 @@ export const LOW_WATER: Readonly<Record<AnonTokenContext, number>> = {
   "discovery-register": 1,
   "channel-subscribe": 1,
   "directory-search": 1,
+  "vault-claim": 1,
+  "blob-upload": 1,
+  "blob-read": 1,
 };
 
 /** The refill batch of `context`. */

@@ -208,10 +208,10 @@ describe("recover by name: no lookup before the session, the id from the finish,
     // on a device with no cached account (ADR-0072 decision 6), where the
     // assertion carries only the account id and a typed name is kept only
     // when it resolves to that account (`usernameNamingAccount`, called
-    // after `installSessionToken`).
+    // after the session is installed).
     expect(src.match(/discoveryAccountLookup\(/g)?.length ?? 0).toBe(2);
     expect(src).toMatch(
-      /installSession\(accountIdB64, assertionSession\);[\s\S]{0,400}usernameNamingAccount\(usernameHint, accountIdBytes\)/,
+      /installFlowSession\(accountIdB64, assertionSession\);[\s\S]{0,400}usernameNamingAccount\(usernameHint, accountIdBytes\)/,
     );
     const resolution = readFileSync(fileURLToPath(new URL("./recover-resolution.ts", import.meta.url)), "utf8");
     expect(resolution).not.toMatch(/lookup/);

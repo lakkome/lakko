@@ -194,9 +194,13 @@ public object OwnProfileStore {
 
     /** Persist [profile] for [accountId]. */
     public fun save(context: Context, accountId: ByteArray, profile: OwnProfile) {
-        val stored = Stored(profile.displayName, profile.username, profile.updatedAtMs, profile.nameUpdatedAtMs)
-        prefs(context).edit().putString(key(accountId), json.encodeToString(stored)).apply()
-        mutableRevision.update { it + 1 }
+        // Not for an account whose session has ended (forget device removes
+        // the row; nothing writes it back).
+        me.lakko.app.account.AccountStoreGate.write(me.lakko.app.auth.base64Encode(accountId)) {
+            val stored = Stored(profile.displayName, profile.username, profile.updatedAtMs, profile.nameUpdatedAtMs)
+            prefs(context).edit().putString(key(accountId), json.encodeToString(stored)).apply()
+            mutableRevision.update { it + 1 }
+        }
     }
 
     /**

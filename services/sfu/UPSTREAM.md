@@ -34,6 +34,44 @@ fast to build until media routing is the work-in-progress.
 | Pinned by | `S-3-B-routing-media` step 1 |
 | Lakko sprint | `S-3-B-spike` decided; `S-3-B-routing-media` step 1 pinned the version + shipped `services/sfu/src/media.rs` foundation; steps 2–5 add SDP signaling wiring, UDP socket loop, RTP fanout, and integration tests |
 
+## The vendored fork
+
+The SFU does not build against the registry copy of `str0m` 0.19.0 but
+against `crates/vendor/str0m`, through `[patch.crates-io]` in the root
+`Cargo.toml`. Every change to it is described in the module documentation of
+[`tests/fork_delta_guard.rs`](./tests/fork_delta_guard.rs), which also pins
+the SHA-256 of every vendored file the fork touches, and in the comment above
+the patch line in the root `Cargo.toml`. Changes one to eight are listed
+there only. The three added for
+[ADR-0070](../../docs/adr/0070-call-media-through-a-loss-burst.md) steps 3
+and 4 (2026-10-05):
+
+| # | Change | Files | Why |
+|---|---|---|---|
+| 9 | A receive stream can be given its own NACK retry interval (`StreamRx::set_nack_retry_interval`); the session then builds NACKs at least that often. Default unchanged: every stream every 60 ms | `streams/register_nack.rs`, `streams/register.rs`, `streams/receive.rs`, `streams/mod.rs`, `session.rs` | The SFU asks a publisher again for a missing packet of its light video every 20 ms |
+| 10 | `StreamTx::resend(seq_no, now)` queues a retransmission of a cached packet without a NACK | `streams/send.rs` | The SFU sends each packet of a light companion track to a subscriber twice |
+| 11 | `StreamTx::nacked_packets`, `receiver_reports`, `last_fraction_lost`: read-only counters of what the receiver of a send stream asked for and reported | `streams/send.rs` | The SFU sees a burst of loss on a subscriber's downlink and raises its playout delay |
+
+The playout-delay header extension needed no change: upstream parses, writes
+and negotiates it once it is in a session's extension map.
+
+The two added for ADR-0070 step 6 (2026-10-05; see `README.md`,
+"Downlink control"):
+
+| # | Change | Files | Why |
+|---|---|---|---|
+| 12 | `DirectApi::set_twcc_on_local_media_only(on)`: with it on, a media line the remote side offered is answered without the transport-wide sequence number extension and without `transport-cc` feedback, and a media line this side offers carries both. Off by default: every line as upstream writes it | `session.rs`, `change/direct.rs`, `change/sdp.rs` | The SFU needs transport-wide feedback for what it sends a subscriber, and must not give a publisher any for what it publishes (ADR-0068). Upstream negotiates both per session, on every line alike |
+| 13 | `DirectApi::keep_twcc_feedback(keep)` and `DirectApi::take_twcc_feedback()`: the records of the receiver's transport-wide feedback, per packet sent the send time, the size and the reported arrival time (or none). Off by default; at most 8192 records held, the oldest dropped; str0m's own estimator is fed as before | `session.rs`, `change/direct.rs` | The SFU runs its own estimate of each subscriber's downlink. str0m's send-side estimator, measured through the SFU, took a second of loss on a 7.5 Mbit/s path to 178 kbit/s, cannot rise above 1.5 times what is being sent while tracks are paused, and lowered the estimate of an unlimited path on its first probe. (A first thirteenth change, `Bwe::current_estimate`, was taken out again with that estimator) |
+| 14 | A retransmission (RTX packet) is sent without RTP padding; a first transmission is padded to the SRTP block size as upstream does it | `streams/send.rs` | A libwebrtc receiver restores the original packet behind a copy of the RTX packet's header, padding bit included, and without the padding, so the restored packet lost as many bytes from its tail as its last byte says. Live call, 2026-10-07: a Chrome viewer restored 848 of 12 957 second copies of light frames intact (the one in sixteen whose RTX packet needed no padding); 12 109 were the frame less its last byte. The padded packet was correct by RFC 4588 and RFC 3550 |
+
+The one added for the key frame at the end of an unrepaired burst
+(2026-10-09; see `README.md`, "A key frame at the end of an unrepaired
+burst"):
+
+| # | Change | Files | Why |
+|---|---|---|---|
+| 15 | `StreamRx::give_up_missing()`: the packets of a receive stream that are missing right now are not asked for again. They stay missing, one that still arrives is delivered, and a packet that goes missing later is asked for as usual | `streams/register_nack.rs`, `streams/register.rs`, `streams/receive.rs` | When a burst of loss on a publisher's stream has ended unrepaired the SFU asks the publisher for a key frame. Upstream would go on asking for the packets of the burst until their request count ran out (up to 1.5 s from the first request), and each answer is a retransmission the publisher sends ahead of the key frame on a path that has just recovered |
+
 ## Why we pin exactly
 
 `Cargo.toml` lists dependencies with **exact** versions

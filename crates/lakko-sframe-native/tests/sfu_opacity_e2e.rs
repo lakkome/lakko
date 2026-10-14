@@ -74,7 +74,7 @@ fn encrypt_frame(pk: &mut ParticipantKey, aad: &[u8], plaintext: &[u8]) -> Vec<u
     let (counter, ciphertext) = pk.seal(aad, plaintext).expect("seal");
     let header = SframeHeader {
         kid: pk.kid(),
-        ctr: u64::from(counter),
+        ctr: counter,
     };
     let mut wire = header.encode();
     wire.extend_from_slice(&ciphertext);
@@ -97,7 +97,7 @@ fn decrypt_frame(
 ) -> Result<Vec<u8>, ()> {
     let (header, consumed) = SframeHeader::decode(wire).map_err(|_| ())?;
     let kid: u64 = header.kid;
-    let counter: u32 = u32::try_from(header.ctr).map_err(|_| ())?;
+    let counter: u64 = header.ctr;
     let ciphertext = &wire[consumed..];
 
     let pk = match cache.entry(kid) {

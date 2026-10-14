@@ -69,8 +69,10 @@ public object LineageMirror {
         cache[accountIdB64] = entries to buildLineage(entries)
         mutableVersion.value = mutableVersion.value + 1
         try {
-            context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit().putString(KEY_PREFIX + accountIdB64, encodeLineageMirror(entries)).apply()
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+                context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .edit().putString(KEY_PREFIX + accountIdB64, encodeLineageMirror(entries)).apply()
+            }
         } catch (_: Throwable) {
             // best-effort: the registers themselves are in the synced state
         }

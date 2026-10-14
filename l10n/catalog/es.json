@@ -255,7 +255,7 @@
       "status": "machine"
     },
     "backup.stale_restore.consequence": {
-      "text": "Restaurarla devolverá tu cuenta a un estado anterior: mensajes más antiguos, y los dispositivos que quitaste podrían volver a aparecer.",
+      "text": "Al restaurarla volverán una lista de contactos y unos ajustes más antiguos. Los cambios que hiciste después se perderán.",
       "status": "machine"
     },
     "backup.stale_restore.reason.anchor_unreadable": {
@@ -447,7 +447,7 @@
       "status": "machine"
     },
     "call.control.mute": {
-      "text": "Silenciar",
+      "text": "Micrófono",
       "status": "machine"
     },
     "call.control.mute_a11y": {
@@ -462,12 +462,20 @@
       "text": "Ocultar participantes",
       "status": "machine"
     },
+    "call.control.participants_menu_a11y": {
+      "text": "Participantes e invitaciones",
+      "status": "machine"
+    },
     "call.control.participants_show_a11y": {
       "text": "Mostrar participantes",
       "status": "machine"
     },
     "call.control.raise_hand": {
       "text": "Levantar la mano",
+      "status": "machine"
+    },
+    "call.control.settings": {
+      "text": "Ajustes",
       "status": "machine"
     },
     "call.control.share_screen": {
@@ -550,6 +558,26 @@
       "text": "Esta llamada está cifrada",
       "status": "machine"
     },
+    "call.end_menu.a11y": {
+      "text": "Opciones para finalizar la llamada",
+      "status": "machine"
+    },
+    "call.end_menu.end_for_all": {
+      "text": "Finalizar la llamada para todos",
+      "status": "machine"
+    },
+    "call.end_menu.leave": {
+      "text": "Salir de la llamada",
+      "status": "machine"
+    },
+    "call.ended.for_all": {
+      "text": "La llamada se finalizó para todos",
+      "status": "machine"
+    },
+    "call.ended.for_all_by": {
+      "text": "{name} finalizó la llamada para todos",
+      "status": "machine"
+    },
     "call.error.encryption_setup": {
       "text": "No se pudo configurar el cifrado de la llamada, así que la llamada no se inició.",
       "status": "machine"
@@ -594,6 +622,18 @@
       "text": "Cámara de {name}",
       "status": "machine"
     },
+    "call.grid.next_a11y": {
+      "text": "Página siguiente",
+      "status": "machine"
+    },
+    "call.grid.page_a11y": {
+      "text": "Página {page} de {total}",
+      "status": "machine"
+    },
+    "call.grid.prev_a11y": {
+      "text": "Página anterior",
+      "status": "machine"
+    },
     "call.group_banner.join_video": {
       "text": "Vídeo",
       "status": "machine"
@@ -608,6 +648,10 @@
     },
     "call.guest.default_name": {
       "text": "Invitado",
+      "status": "machine"
+    },
+    "call.guest.note": {
+      "text": "Te unes como invitado. No hace falta una cuenta.",
       "status": "machine"
     },
     "call.guest.working.title": {
@@ -710,8 +754,28 @@
       "text": "Enlace de la llamada",
       "status": "machine"
     },
+    "call.invite.menu_a11y": {
+      "text": "Invitar a esta llamada",
+      "status": "machine"
+    },
+    "call.invite.menu_contact": {
+      "text": "Invitar contactos",
+      "status": "machine"
+    },
+    "call.invite.menu_copy": {
+      "text": "Copiar enlace de invitación",
+      "status": "machine"
+    },
     "call.invite.minting": {
       "text": "Preparando un enlace a esta llamada. Tarda unos segundos.",
+      "status": "machine"
+    },
+    "call.invite.picker_empty": {
+      "text": "Aún no tienes contactos. Copia el enlace de invitación y envíalo por otro medio.",
+      "status": "machine"
+    },
+    "call.invite.picker_title": {
+      "text": "Invitar a la llamada",
       "status": "machine"
     },
     "call.invite.ready": {
@@ -720,6 +784,18 @@
     },
     "call.invite.retry_a11y": {
       "text": "Volver a preparar el enlace de invitación",
+      "status": "machine"
+    },
+    "call.invite.row_invited": {
+      "text": "Invitado",
+      "status": "machine"
+    },
+    "call.invite.send_failed": {
+      "text": "No se envió la invitación. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "call.invite.sent": {
+      "text": "Invitación enviada a {name}.",
       "status": "machine"
     },
     "call.invite.share_a11y": {
@@ -752,6 +828,14 @@
     },
     "call.label.group": {
       "text": "Llamada de grupo",
+      "status": "machine"
+    },
+    "call.layout.focus_a11y": {
+      "text": "Mostrar grande a quien habla",
+      "status": "machine"
+    },
+    "call.layout.grid_a11y": {
+      "text": "Mostrar a todos del mismo tamaño",
       "status": "machine"
     },
     "call.link.connecting": {
@@ -914,6 +998,10 @@
       "text": "Participante {number}",
       "status": "machine"
     },
+    "call.participant.pin_a11y": {
+      "text": "Fijar a {name}",
+      "status": "machine"
+    },
     "call.participant.pinned": {
       "text": "Fijado",
       "status": "machine"
@@ -928,6 +1016,10 @@
     },
     "call.participant.unnamed": {
       "text": "Participante",
+      "status": "machine"
+    },
+    "call.participant.unpin_a11y": {
+      "text": "Desfijar a {name}",
       "status": "machine"
     },
     "call.participant.you": {
@@ -1068,6 +1160,14 @@
     },
     "call.settings.system_default": {
       "text": "Predeterminado del sistema",
+      "status": "machine"
+    },
+    "call.settings.title": {
+      "text": "Ajustes de la llamada",
+      "status": "machine"
+    },
+    "call.settings.unnamed_device": {
+      "text": "Dispositivo {n}",
       "status": "machine"
     },
     "call.settings.video": {
@@ -1832,6 +1932,10 @@
     },
     "chat.call.voice": {
       "text": "Llamar",
+      "status": "machine"
+    },
+    "chat.call_invite.title": {
+      "text": "Invitación a una llamada",
       "status": "machine"
     },
     "chat.composer.attach": {
@@ -5702,6 +5806,58 @@
       "text": "Ninguno de los dos pasos tiene límite de tiempo. Si no pasa nada, puedes volver a enviar la solicitud.",
       "status": "machine"
     },
+    "guest.claim.error.generic": {
+      "text": "No se pudo crear la cuenta. Inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "guest.claim.error.phrase_missing": {
+      "text": "Esta cuenta de invitado no se puede conservar en este dispositivo. Puedes crear una cuenta nueva desde la pantalla de registro.",
+      "status": "machine"
+    },
+    "guest.claim.username_taken_for_you": {
+      "text": "Tu nombre de usuario es @{username}.",
+      "status": "machine"
+    },
+    "guest.claim.working": {
+      "text": "Creando tu cuenta...",
+      "status": "machine"
+    },
+    "guest.in_call.return": {
+      "text": "Volver a la llamada",
+      "status": "machine"
+    },
+    "guest.in_call.title": {
+      "text": "Estás en una llamada como invitado.",
+      "status": "machine"
+    },
+    "guest.offer.body": {
+      "text": "Estás aquí como invitado. Crea una cuenta para conservar tu nombre y volver a llamar o escribir a otras personas.",
+      "status": "machine"
+    },
+    "guest.offer.decline": {
+      "text": "No, gracias",
+      "status": "machine"
+    },
+    "guest.offer.decline_note": {
+      "text": "Si no aceptas, la cuenta de invitado se elimina de inmediato.",
+      "status": "machine"
+    },
+    "guest.offer.delete_failed": {
+      "text": "No se pudo eliminar la cuenta de invitado ahora. Inténtalo de nuevo; también se elimina automáticamente en un día.",
+      "status": "machine"
+    },
+    "guest.offer.deleted": {
+      "text": "La cuenta de invitado se eliminó.",
+      "status": "machine"
+    },
+    "guest.offer.deleting": {
+      "text": "Eliminando...",
+      "status": "machine"
+    },
+    "guest.offer.title": {
+      "text": "¿Seguir usando Lakko?",
+      "status": "machine"
+    },
     "invite.contact.accept_failed": {
       "text": "No se pudo aceptar la invitación. Inténtalo de nuevo.",
       "status": "machine"
@@ -7072,6 +7228,10 @@
     },
     "restore_identity.lost.create": {
       "text": "Restablecer las claves de la cuenta",
+      "status": "machine"
+    },
+    "restore_identity.lost.error.phrase_not_stored": {
+      "text": "No se pudo guardar la nueva frase de recuperación en este dispositivo. No se ha cambiado nada.",
       "status": "machine"
     },
     "restore_identity.lost.sub": {

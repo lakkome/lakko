@@ -55,14 +55,23 @@
 //! devices by [`SyncedState::own_username_envelope`] /
 //! [`SyncedState::apply_own_username_envelope`], persisted by
 //! [`SyncedState::to_bytes`], never in [`StateSnapshot`].
+//!
+//! ## Saved messages (ADR-0065 section 4)
+//!
+//! A saved message is one more register, keyed `(conversation, message
+//! id)`, and it follows the rule above with nothing added: a save and a
+//! removal are two values of the same register, so the greater stamp wins,
+//! a removal is held as a tombstone, and a later save with a greater stamp
+//! saves the message again. It is not folder-scoped: no folder deletion
+//! touches it.
 
 use std::collections::BTreeMap;
 
 use super::entry::{
-    take_bytes32, take_u32, take_u64, take_u8, CodecError, ConversationEntry,
+    take_bytes32, take_u32, take_u64, take_u8, BlobId, CodecError, ConversationEntry,
     ConversationOrderEntry, ConversationRef, DraftEntry, FlagsEntry, FolderChanges, FolderId,
     FolderMeta, LineageEntry, MemberState, OwnUsernameEntry, ReadCursorEntry, RecoveryEmailEntry,
-    RegisterKey, Stamped, StateSnapshot, SyncEntry,
+    RegisterKey, SavedSnapshot, SavedValue, Stamped, StateSnapshot, SyncEntry,
 };
 use super::lineage::{
     compose_lineage_envelope, decode_lineage_envelope, LineageEnvelopeError,
@@ -77,7 +86,12 @@ use super::recovery_email::{
 };
 
 /// The persistence format's version byte.
-const STATE_VERSION: u8 = 1;
+///
+/// `2` since the saved-message register (ADR-0065 section 4) joined the
+/// state. Version `1` is refused rather than read: nothing is deployed, and
+/// a build that silently accepted the older layout would be a second
+/// decoder nobody tests.
+const STATE_VERSION: u8 = 2;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +126,23 @@ pub struct FolderView {
     pub excluded: Vec<ConversationRef>,
     /// The folder's own pins, in their stored order.
     pub pinned: Vec<ConversationRef>,
+}
+
+/// One saved message as the clients list it (ADR-0065 section 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedView {
+    /// The stamp the save was written at.
+    pub hlc: u64,
+    /// The conversation the message is in.
+    pub conversation: ConversationRef,
+    /// The message's Delivery Service journal id.
+    pub message_id: u64,
+    /// Wall-clock millis of the save.
+    pub saved_at_ms: u64,
+    /// What a row shows before this device holds the message.
+    pub snapshot: SavedSnapshot,
+    /// The blob ids of the message's files and thumbnails.
+    pub blob_ids: Vec<BlobId>,
 }
 
 /// The folded synced state of one device (ADR-0058).
@@ -219,9 +250,10 @@ impl SyncedState {
 
     /// The whole state as ONE unsplit snapshot (`part` 0 of 1). The
     /// DeviceGroup layer splits it by encoded size before sending
-    /// (`lakko_mls::device_group::split_state_snapshot`), because only it
-    /// knows the wire encoding. `folders` may exceed the per-part register
-    /// cap here; the split respects it.
+    /// (`lakko_mls::device_group_sync::split_state_snapshot`), because only
+    /// it knows the wire encoding. `folders` (which also holds the saved
+    /// registers) may exceed the per-part register cap here; the split
+    /// respects it.
     #[must_use]
     pub fn snapshot(&self) -> StateSnapshot {
         let mut snap = StateSnapshot {
@@ -783,6 +815,76 @@ impl SyncedState {
         }
     }
 
+    /// The account's saved messages, most recently saved first (ADR-0065
+    /// section 4). Removed ones are not listed.
+    ///
+    /// Ordered by `saved_at_ms` descending, then by stamp descending, then
+    /// by `(conversation, message id)`, so two devices holding the same
+    /// state draw the same list.
+    #[must_use]
+    pub fn saved(&self) -> Vec<SavedView> {
+        let mut out: Vec<SavedView> = self
+            .registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::Saved(m) => match &m.value {
+                    SavedValue::Present {
+                        saved_at_ms,
+                        snapshot,
+                        blob_ids,
+                    } => Some(SavedView {
+                        hlc: h.hlc,
+                        conversation: m.conversation.clone(),
+                        message_id: m.message_id,
+                        saved_at_ms: *saved_at_ms,
+                        snapshot: snapshot.clone(),
+                        blob_ids: blob_ids.clone(),
+                    }),
+                    SavedValue::Removed => None,
+                },
+                _ => None,
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.saved_at_ms
+                .cmp(&a.saved_at_ms)
+                .then_with(|| b.hlc.cmp(&a.hlc))
+                .then_with(|| a.conversation.cmp(&b.conversation))
+                .then_with(|| a.message_id.cmp(&b.message_id))
+        });
+        out
+    }
+
+    /// Whether this message is saved now. `false` for a message never
+    /// saved and for one whose register holds a removal.
+    #[must_use]
+    pub fn is_saved(&self, conversation: &ConversationRef, message_id: u64) -> bool {
+        matches!(
+            self.registers
+                .get(&RegisterKey::Saved(conversation.clone(), message_id)),
+            Some(Held {
+                entry: SyncEntry::Saved(m),
+                ..
+            }) if matches!(m.value, SavedValue::Present { .. })
+        )
+    }
+
+    /// Every blob id a saved message names, each once, in bytewise order:
+    /// what a device sends keeps for (ADR-0065 section 3). Removed messages
+    /// contribute nothing.
+    #[must_use]
+    pub fn saved_blob_ids(&self) -> Vec<BlobId> {
+        let mut ids = std::collections::BTreeSet::new();
+        for h in self.registers.values() {
+            if let SyncEntry::Saved(m) = &h.entry {
+                if let SavedValue::Present { blob_ids, .. } = &m.value {
+                    ids.extend(blob_ids.iter().copied());
+                }
+            }
+        }
+        ids.into_iter().collect()
+    }
+
     /// The greatest stamp held, or 0. A client seeds its clock above it
     /// after a restore so its next write is newer than anything restored.
     #[must_use]
@@ -796,7 +898,7 @@ impl SyncedState {
 
     /// Encode for local persistence and for the backup payload.
     ///
-    /// Layout: `version(1) = 1 ‖ count(u32 BE) ‖ count × { hlc(u64 BE) ‖
+    /// Layout: `version(1) = 2 ‖ count(u32 BE) ‖ count × { hlc(u64 BE) ‖
     /// len(u32 BE) ‖ canonical entry bytes }`, in register order. Only
     /// entries the fold holds are written, so [`Self::from_bytes`] of the
     /// result is the same state.
@@ -818,7 +920,9 @@ impl SyncedState {
     }
 
     /// Read persisted bytes back by folding every entry in. Fail closed:
-    /// any malformed or out-of-bounds entry refuses the whole state.
+    /// any malformed or out-of-bounds entry refuses the whole state, and so
+    /// does any version byte but the one this build writes (version 1, the
+    /// layout before saved messages, included).
     ///
     /// # Errors
     ///
@@ -859,7 +963,7 @@ pub fn should_send_snapshot(own_leaf: u32, prior_member_leaves: &[u32]) -> bool 
 #[cfg(test)]
 mod tests {
     use super::super::entry::{
-        ConversationRefKind, FolderMember, FolderOrder, FolderPins, EXCLUDE_ARCHIVED,
+        ConversationRefKind, FolderMember, FolderOrder, FolderPins, SavedMessage, EXCLUDE_ARCHIVED,
         INCLUDE_GROUPS,
     };
     use super::super::lineage::LINEAGE_ENVELOPE_DOMAIN_V1;
@@ -909,6 +1013,216 @@ mod tests {
             conversation: cref(c),
             state,
         })
+    }
+
+    fn blob(b: u8) -> BlobId {
+        [b; 32]
+    }
+    fn save_at(c: u8, message_id: u64, saved_at_ms: u64, blobs: &[u8]) -> SyncEntry {
+        SyncEntry::Saved(SavedMessage {
+            conversation: cref(c),
+            message_id,
+            value: SavedValue::Present {
+                saved_at_ms,
+                snapshot: SavedSnapshot {
+                    author: "Ada".into(),
+                    excerpt: format!("message {message_id}"),
+                    attachment_kind: String::new(),
+                },
+                blob_ids: blobs.iter().copied().map(blob).collect(),
+            },
+        })
+    }
+    fn unsave(c: u8, message_id: u64) -> SyncEntry {
+        SyncEntry::Saved(SavedMessage {
+            conversation: cref(c),
+            message_id,
+            value: SavedValue::Removed,
+        })
+    }
+
+    #[test]
+    fn save_then_remove_then_save_again() {
+        let mut s = SyncedState::new();
+        assert!(!s.is_saved(&cref(1), 7));
+        assert_eq!(
+            s.apply(10, save_at(1, 7, 100, &[1])),
+            Ok(ApplyOutcome::Applied)
+        );
+        assert!(s.is_saved(&cref(1), 7));
+        // Another message of the same chat, and the same id in another
+        // chat, are their own registers.
+        assert!(!s.is_saved(&cref(1), 8));
+        assert!(!s.is_saved(&cref(2), 7));
+
+        assert_eq!(s.apply(11, unsave(1, 7)), Ok(ApplyOutcome::Applied));
+        assert!(!s.is_saved(&cref(1), 7));
+        assert!(s.saved().is_empty());
+        assert!(s.saved_blob_ids().is_empty());
+        // The removal is held as a tombstone, so a save from a device that
+        // was offline across it (an older stamp) does not come back.
+        assert_eq!(s.len(), 1);
+        assert_eq!(
+            s.apply(10, save_at(1, 7, 100, &[1])),
+            Ok(ApplyOutcome::Superseded)
+        );
+        assert_eq!(
+            s.apply(9, save_at(1, 7, 999, &[1])),
+            Ok(ApplyOutcome::Superseded)
+        );
+        assert!(!s.is_saved(&cref(1), 7));
+
+        // Saved again with a greater stamp.
+        assert_eq!(
+            s.apply(12, save_at(1, 7, 300, &[2])),
+            Ok(ApplyOutcome::Applied)
+        );
+        assert!(s.is_saved(&cref(1), 7));
+        let list = s.saved();
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].hlc, list[0].saved_at_ms), (12, 300));
+        assert_eq!(list[0].blob_ids, vec![blob(2)]);
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn on_an_equal_stamp_the_removal_wins_in_either_order() {
+        let mut a = SyncedState::new();
+        a.apply(5, save_at(1, 7, 100, &[0xFF])).ok();
+        a.apply(5, unsave(1, 7)).ok();
+        let mut b = SyncedState::new();
+        b.apply(5, unsave(1, 7)).ok();
+        b.apply(5, save_at(1, 7, 100, &[0xFF])).ok();
+        assert_eq!(a, b);
+        assert!(!a.is_saved(&cref(1), 7));
+        // Two saves on one stamp: the larger canonical bytes, either order.
+        let mut c = SyncedState::new();
+        c.apply(5, save_at(1, 7, 100, &[1])).ok();
+        c.apply(5, save_at(1, 7, 200, &[1])).ok();
+        let mut d = SyncedState::new();
+        d.apply(5, save_at(1, 7, 200, &[1])).ok();
+        d.apply(5, save_at(1, 7, 100, &[1])).ok();
+        assert_eq!(c, d);
+        assert_eq!(c.saved()[0].saved_at_ms, 200);
+    }
+
+    #[test]
+    fn the_saved_list_is_most_recently_saved_first() {
+        let mut s = SyncedState::new();
+        // Stamps deliberately disagree with the save times: the list is
+        // ordered by when the person saved, not by which write is newest.
+        s.apply(9, save_at(1, 1, 100, &[])).ok();
+        s.apply(1, save_at(2, 2, 300, &[])).ok();
+        s.apply(5, save_at(1, 3, 200, &[])).ok();
+        // Equal save times fall back to the stamp, then to the key.
+        s.apply(7, save_at(3, 4, 50, &[])).ok();
+        s.apply(8, save_at(3, 5, 50, &[])).ok();
+        s.apply(8, save_at(2, 6, 50, &[])).ok();
+        s.apply(2, unsave(1, 99)).ok();
+        let ids: Vec<u64> = s.saved().iter().map(|v| v.message_id).collect();
+        assert_eq!(ids, vec![2, 3, 1, 6, 5, 4]);
+        assert_eq!(s.saved()[0].conversation, cref(2));
+        assert_eq!(s.saved()[0].snapshot.excerpt, "message 2");
+    }
+
+    #[test]
+    fn saved_blob_ids_are_named_once_and_only_for_saved_messages() {
+        let mut s = SyncedState::new();
+        s.apply(1, save_at(1, 1, 10, &[3, 1])).ok();
+        s.apply(2, save_at(1, 2, 20, &[1, 2])).ok();
+        s.apply(3, save_at(2, 1, 30, &[9])).ok();
+        assert_eq!(s.saved_blob_ids(), vec![blob(1), blob(2), blob(3), blob(9)]);
+        s.apply(4, unsave(2, 1)).ok();
+        assert_eq!(s.saved_blob_ids(), vec![blob(1), blob(2), blob(3)]);
+        s.apply(5, unsave(1, 1)).ok();
+        // blob 1 is still named by the other saved message.
+        assert_eq!(s.saved_blob_ids(), vec![blob(1), blob(2)]);
+    }
+
+    #[test]
+    fn an_out_of_bounds_save_is_refused_by_the_fold() {
+        let mut s = SyncedState::new();
+        let dup = save_at(1, 1, 10, &[4, 4]);
+        assert_eq!(
+            s.apply(1, dup),
+            Err(super::super::entry::BoundsError::DuplicateBlobId)
+        );
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn deleting_a_folder_leaves_saved_messages_alone() {
+        let mut s = SyncedState::new();
+        s.apply(1, meta(1, "Work")).ok();
+        s.apply(2, save_at(1, 7, 100, &[1])).ok();
+        s.apply(3, SyncEntry::FolderRemoved(fid(1))).ok();
+        assert!(s.folders().is_empty());
+        assert!(s.is_saved(&cref(1), 7));
+        assert_eq!(
+            s.apply(4, save_at(1, 8, 200, &[])),
+            Ok(ApplyOutcome::Applied)
+        );
+    }
+
+    #[test]
+    fn saved_messages_survive_persistence_a_snapshot_and_a_merge() {
+        let mut s = SyncedState::new();
+        s.apply(1, meta(1, "Work")).ok();
+        s.apply(2, save_at(1, 7, 100, &[1, 2])).ok();
+        s.apply(3, unsave(2, 9)).ok();
+        s.apply(4, save_at(3, 1, 50, &[])).ok();
+
+        // Persistence (what the backup payload carries).
+        let back = SyncedState::from_bytes(&s.to_bytes());
+        assert_eq!(back.as_ref(), Ok(&s));
+        assert_eq!(back.map(|b| b.saved()), Ok(s.saved()));
+
+        // The snapshot hands a late device the saved list, tombstone
+        // included, every stamp as written.
+        let snap = s.snapshot();
+        assert_eq!(snap.folders.saved.len(), 3);
+        let mut late = SyncedState::new();
+        late.apply_all(snap.stamped_entries());
+        assert_eq!(late, s);
+        assert_eq!(
+            late.apply(2, save_at(2, 9, 1, &[])),
+            Ok(ApplyOutcome::Superseded)
+        );
+
+        // A restore merges: the newer write of each register survives.
+        let mut restored = SyncedState::new();
+        restored.apply(9, unsave(1, 7)).ok();
+        restored.apply(1, save_at(2, 9, 5, &[])).ok();
+        let mut ab = restored.clone();
+        ab.merge_from(&s);
+        let mut ba = s.clone();
+        ba.merge_from(&restored);
+        assert_eq!(ab, ba);
+        assert!(!ab.is_saved(&cref(1), 7));
+        assert!(!ab.is_saved(&cref(2), 9));
+        assert!(ab.is_saved(&cref(3), 1));
+        assert_eq!(ab.max_hlc(), 9);
+    }
+
+    #[test]
+    fn the_previous_persistence_version_is_refused() {
+        // Version 1 was the layout before saved messages. A well-formed v1
+        // state (here: empty, and one holding a folder tombstone) is
+        // refused on its version byte, not read.
+        assert_eq!(
+            SyncedState::from_bytes(&[1, 0, 0, 0, 0]),
+            Err(CodecError::UnknownVersion)
+        );
+        let mut s = SyncedState::new();
+        s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
+        let mut v1 = s.to_bytes();
+        assert_eq!(v1[0], 2);
+        v1[0] = 1;
+        assert_eq!(
+            SyncedState::from_bytes(&v1),
+            Err(CodecError::UnknownVersion)
+        );
+        assert_eq!(SyncedState::new().to_bytes(), vec![2, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -1443,7 +1757,7 @@ mod tests {
         assert_eq!(SyncedState::from_bytes(&bytes), Ok(s));
         assert_eq!(SyncedState::from_bytes(&[]), Err(CodecError::Truncated));
         assert_eq!(
-            SyncedState::from_bytes(&[2, 0, 0, 0, 0]),
+            SyncedState::from_bytes(&[3, 0, 0, 0, 0]),
             Err(CodecError::UnknownVersion)
         );
         let mut trailing = bytes;
@@ -1569,12 +1883,28 @@ mod tests {
             )),
             // Successors 0..3 and roots 10..13: several writers naming
             // different roots for one successor collide often.
-            (hlc.clone(), c, 10u8..13).prop_map(|(h, s, r)| (h, lineage(s, r))),
+            (hlc.clone(), c.clone(), 10u8..13).prop_map(|(h, s, r)| (h, lineage(s, r))),
             // One register for the whole account: addresses and removals
             // from several writers collide on few stamps.
             (hlc.clone(), prop::sample::select(ADDRESSES.to_vec()))
                 .prop_map(|(h, a)| (h, email(a))),
-            (hlc, prop::sample::select(USERNAMES.to_vec())).prop_map(|(h, u)| (h, uname(u))),
+            (hlc.clone(), prop::sample::select(USERNAMES.to_vec()))
+                .prop_map(|(h, u)| (h, uname(u))),
+            // Saved messages: two conversations x two message ids, so a
+            // save, a different save and a removal of one register meet on
+            // one stamp often.
+            (
+                hlc.clone(),
+                c.clone(),
+                0u64..2,
+                0u64..3,
+                prop::collection::btree_set(0u8..4, 0..3)
+            )
+                .prop_map(|(h, c, m, at, blobs)| (
+                    h,
+                    save_at(c, m, at, &blobs.into_iter().collect::<Vec<u8>>())
+                )),
+            (hlc, c, 0u64..2).prop_map(|(h, c, m)| (h, unsave(c, m))),
         ]
     }
 
@@ -1623,6 +1953,84 @@ mod tests {
             prop_assert_eq!(a.folders(), b.folders());
             prop_assert_eq!(a.recovery_email_register(), b.recovery_email_register());
             prop_assert_eq!(a.own_username_register(), b.own_username_register());
+            prop_assert_eq!(a.saved(), b.saved());
+            prop_assert_eq!(a.saved_blob_ids(), b.saved_blob_ids());
+        }
+
+        /// The tie-break, stated on its own: for any two writes of ONE
+        /// saved register on ONE stamp, both arrival orders hold the same
+        /// value, and it is the one with the larger canonical bytes.
+        #[test]
+        fn an_equal_stamp_tie_on_a_saved_register_has_one_winner(
+            h in 0u64..4,
+            first in (0u64..3, prop::collection::btree_set(0u8..4, 0..3), any::<bool>()),
+            second in (0u64..3, prop::collection::btree_set(0u8..4, 0..3), any::<bool>()),
+        ) {
+            let entry = |(at, blobs, removed): (u64, std::collections::BTreeSet<u8>, bool)| {
+                if removed {
+                    unsave(1, 7)
+                } else {
+                    save_at(1, 7, at, &blobs.into_iter().collect::<Vec<u8>>())
+                }
+            };
+            let (x, y) = (entry(first), entry(second));
+            let xy = fold(&[(h, x.clone()), (h, y.clone())]);
+            let yx = fold(&[(h, y.clone()), (h, x.clone())]);
+            prop_assert_eq!(&xy, &yx);
+            let winner = if x.canonical_bytes() >= y.canonical_bytes() { x } else { y };
+            prop_assert_eq!(xy.entries(), vec![(h, winner)]);
+        }
+
+        /// The list reads agree with the registers: a message is in the
+        /// saved list exactly when `is_saved` says so, the list is ordered
+        /// most recently saved first, and the blob ids are exactly the
+        /// distinct ids the listed messages name.
+        #[test]
+        fn the_saved_reads_agree_with_each_other(entries in prop::collection::vec(arb_entry(), 0..24)) {
+            let s = fold(&entries);
+            let list = s.saved();
+            for v in &list {
+                prop_assert!(s.is_saved(&v.conversation, v.message_id));
+            }
+            for (_, e) in s.entries() {
+                if let SyncEntry::Saved(m) = e {
+                    let listed = list
+                        .iter()
+                        .any(|v| v.conversation == m.conversation && v.message_id == m.message_id);
+                    prop_assert_eq!(listed, s.is_saved(&m.conversation, m.message_id));
+                    prop_assert_eq!(listed, matches!(m.value, SavedValue::Present { .. }));
+                }
+            }
+            prop_assert!(list.windows(2).all(|w| w[0].saved_at_ms >= w[1].saved_at_ms));
+            let mut want: Vec<BlobId> = list.iter().flat_map(|v| v.blob_ids.clone()).collect();
+            want.sort_unstable();
+            want.dedup();
+            prop_assert_eq!(s.saved_blob_ids(), want);
+        }
+
+        /// Persisted bytes that were damaged never panic the decoder, and
+        /// whatever it still accepts is a state the fold holds: every
+        /// entry within its bounds, and stable under a further round trip.
+        #[test]
+        fn damaged_persisted_bytes_are_refused_or_decode_to_a_valid_state(
+            entries in prop::collection::vec(arb_entry(), 0..12),
+            at in any::<prop::sample::Index>(),
+            flip in 1u8..=255,
+            cut in any::<prop::sample::Index>(),
+        ) {
+            let bytes = fold(&entries).to_bytes();
+            let mut flipped = bytes.clone();
+            let i = at.index(flipped.len());
+            flipped[i] ^= flip;
+            let truncated = &bytes[..cut.index(bytes.len())];
+            for candidate in [flipped.as_slice(), truncated] {
+                if let Ok(state) = SyncedState::from_bytes(candidate) {
+                    for (_, e) in state.entries() {
+                        prop_assert!(e.validate().is_ok());
+                    }
+                    prop_assert_eq!(SyncedState::from_bytes(&state.to_bytes()), Ok(state));
+                }
+            }
         }
 
         /// Idempotent: folding everything twice changes nothing.

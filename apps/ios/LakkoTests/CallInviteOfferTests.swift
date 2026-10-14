@@ -61,50 +61,107 @@ final class CallInviteValuesTests: XCTestCase {
     }
 }
 
-/// What one press of `Invite` does.
+/// What one use of `Invite` does (`docs/ux/call-links.md` sections 3 and 5).
+/// The same list as the web `in-call-invite.test.ts`.
 final class CallInviteOfferRulesTests: XCTestCase {
 
     typealias Rules = CallInviteOfferRules
 
-    /// The first press in a call is what pays for the link — which is what
-    /// keeps starting a call instant.
-    func testTheFirstPressMints() {
-        XCTAssertEqual(Rules.press(.idle), .mint)
-    }
+    private let url = "https://lakko.me/c/AAAA"
 
-    /// "A second `Invite` in the same call re-offers the link already minted."
-    func testASecondPressReOffersRatherThanMintingASecondLink() {
-        XCTAssertEqual(Rules.press(.ready(url: "https://lakko.me/c/abc")), .offer(url: "https://lakko.me/c/abc"))
+    // MARK: nextPress
+
+    /// The first use in a call is what pays for the link, which is what keeps
+    /// starting a call instant; a second use costs no round trip.
+    func testMintsOnceAndThenReOffers() {
+        XCTAssertEqual(Rules.nextPress(.idle), .mint)
+        XCTAssertEqual(Rules.nextPress(.ready(url: url, delivery: .copied)), .reoffer)
     }
 
     /// Two mints for one call would produce two different links for it, and a
     /// tap that lands while the first is in flight is the ordinary way to get
     /// there.
     func testAPressWhileOneIsBeingMadeIsIgnored() {
-        XCTAssertEqual(Rules.press(.minting), .ignore)
+        XCTAssertEqual(Rules.nextPress(.minting), .ignore)
     }
 
-    func testAFailedAttemptCanBeRetried() {
-        XCTAssertEqual(Rules.press(.failed(message: "nope")), .mint)
+    func testAFailedMintCanBeTriedAgain() {
+        XCTAssertEqual(Rules.nextPress(.failed(failure: .unavailable, url: nil)), .mint)
+        XCTAssertEqual(Rules.nextPress(.failed(failure: .signedOut, url: nil)), .mint)
+    }
+
+    /// The link exists; only the delivery failed. The next use sends the same
+    /// link rather than minting a second one for the same call.
+    func testDoesNotMintAgainWhenOnlyTheSendingFailed() {
+        let state = CallInviteOfferState.failed(failure: .notSent, url: url)
+        XCTAssertEqual(Rules.nextPress(state), .reoffer)
+        XCTAssertEqual(Rules.mintedUrl(state), url)
+        XCTAssertNil(Rules.mintedUrl(.failed(failure: .unavailable, url: nil)))
+        XCTAssertNil(Rules.mintedUrl(.idle))
+    }
+
+    // MARK: busy
+
+    func testBusyOnlyWhileMinting() {
+        XCTAssertFalse(Rules.busy(.idle))
+        XCTAssertTrue(Rules.busy(.minting))
+        XCTAssertFalse(Rules.busy(.ready(url: url, delivery: .copied)))
+        XCTAssertFalse(Rules.busy(.failed(failure: .unavailable, url: nil)))
+    }
+
+    // MARK: statusLine
+
+    func testSaysNothingBeforeTheFirstPress() {
+        XCTAssertNil(Rules.statusLine(.idle))
+    }
+
+    /// Section 5: the busy state "says what it is doing rather than only
+    /// spinning".
+    func testSaysWhatTheWaitIsNotOnlyThatThereIsOne() {
+        let line = Rules.statusLine(.minting) ?? ""
+        XCTAssertTrue(line.contains("link"))
+        XCTAssertTrue(line.contains("few seconds"))
+    }
+
+    func testNamesWhereTheLinkWent() {
+        XCTAssertEqual(
+            Rules.statusLine(.ready(url: url, delivery: .sent(name: "Anna")))
+                .map { $0.withoutIsolates },
+            "Invitation sent to Anna.")
+        XCTAssertTrue(
+            Rules.statusLine(.ready(url: url, delivery: .copied))?.contains("copied") == true)
+        XCTAssertTrue(Rules.statusLine(.ready(url: url, delivery: .shown))?.contains(url) == true)
     }
 
     /// Section 5: "One sentence on what happened and that it can be tried
-    /// again. The call is unaffected and does not end." Rendered from the kind
-    /// of failure (ADR-0061): the failure's own prose never reaches the screen.
-    func testTheFailureSaysWhatHappenedAndThatTheCallIsStillRunning() {
+    /// again. The call is unaffected and does not end."
+    func testAFailureSaysWhatHappenedAndWhatToDo() {
+        let failed = Rules.statusLine(.failed(failure: .unavailable, url: nil)) ?? ""
+        XCTAssertTrue(failed.contains("could not"))
+        XCTAssertTrue(failed.contains("try again"))
+        XCTAssertTrue(failed.contains("call is unaffected"))
+        XCTAssertTrue(
+            Rules.statusLine(.failed(failure: .signedOut, url: nil))?.contains("Sign in again")
+                == true)
+        XCTAssertEqual(
+            Rules.statusLine(.failed(failure: .notSent, url: url)),
+            Localization.text("call.invite.send_failed"))
+    }
+
+    /// Rendered from the kind of failure (ADR-0061): the failure's own prose
+    /// never reaches the screen.
+    func testAMintFailureIsRenderedFromItsKind() {
         struct Refused: Error {}
-        let message = Rules.failureMessage(for: Refused())
-        XCTAssertEqual(message, Localization.text("call.invite.unavailable"))
-        XCTAssertTrue(message.contains("The call is unaffected"))
-        XCTAssertTrue(message.contains("try again"))
-        XCTAssertFalse(message.contains("!"))
+        XCTAssertEqual(Rules.failure(for: Refused()), .unavailable)
+        XCTAssertEqual(Rules.failure(for: LinkCallHostError.signedOut), .signedOut)
+        XCTAssertEqual(
+            Rules.failureMessage(for: Refused()), Localization.text("call.invite.unavailable"))
+        XCTAssertEqual(
+            Rules.failureMessage(for: LinkCallHostError.signedOut), Rules.signedOutMessage)
     }
 
-    func testASignedOutFailureSaysSo() {
-        XCTAssertEqual(Rules.failureMessage(for: LinkCallHostError.signedOut), Rules.signedOutMessage)
-    }
-
-    /// The copy rules: no protocol names anywhere a person can read.
+    /// The copy rules: no protocol names anywhere a person can read, and no
+    /// exclamation marks.
     ///
     /// Matched on whole words, because the acronyms are short enough to hide
     /// inside ordinary English — a substring check for `DS` fails on
@@ -114,10 +171,16 @@ final class CallInviteOfferRulesTests: XCTestCase {
             "MLS", "OPRF", "KeyPackage", "pseudonym", "epoch", "capability",
             "proof of work", "proof-of-work", "by design", "DS",
         ]
-        let copy = [
-            Rules.controlLabel, Rules.mintingMessage, Rules.readyMessage,
-            Rules.signedOutMessage, Rules.failureMessage(for: URLError(.timedOut)),
+        let states: [CallInviteOfferState] = [
+            .idle, .minting,
+            .ready(url: url, delivery: .sent(name: "Anna")),
+            .failed(failure: .notSent, url: url),
+            .ready(url: url, delivery: .copied),
+            .ready(url: url, delivery: .shown),
+            .failed(failure: .signedOut, url: nil),
+            .failed(failure: .unavailable, url: nil),
         ]
+        let copy = states.compactMap(Rules.statusLine) + [Rules.controlLabel]
         for line in copy {
             for word in banned {
                 let pattern = "\\b\(NSRegularExpression.escapedPattern(for: word))\\b"
@@ -128,125 +191,266 @@ final class CallInviteOfferRulesTests: XCTestCase {
         }
     }
 
-    /// Section 5: the busy state "says what it is doing rather than only
-    /// spinning".
-    func testTheBusyStateSaysWhatItIsDoing() {
-        XCTAssertTrue(Rules.mintingMessage.hasPrefix("Preparing a link"))
-        XCTAssertTrue(Rules.mintingMessage.contains("seconds"))
+    // MARK: statusHoldMs
+
+    func testHoldsAFinishedLineForAFewSeconds() {
+        XCTAssertEqual(
+            Rules.statusHoldMs(.ready(url: url, delivery: .copied)), Rules.statusHoldMs)
+        XCTAssertEqual(
+            Rules.statusHoldMs(.failed(failure: .unavailable, url: nil)), Rules.statusHoldMs)
+        XCTAssertEqual(Rules.statusHoldMs, 6_000)
+    }
+
+    func testNeverTimesOutAWaitAnEmptyLineOrALinkBeingCopiedByHand() {
+        XCTAssertNil(Rules.statusHoldMs(.minting))
+        XCTAssertNil(Rules.statusHoldMs(.idle))
+        XCTAssertNil(Rules.statusHoldMs(.ready(url: url, delivery: .shown)))
+    }
+
+    // MARK: copyLink
+
+    func testPutsTheLinkOnTheClipboard() {
+        var copied: [String] = []
+        XCTAssertEqual(Rules.copyLink(url, copy: { copied.append($0) }), .copied)
+        XCTAssertEqual(copied, [url])
+    }
+
+    func testShowsTheLinkWhenTheClipboardIsNotReachable() {
+        struct Denied: Error {}
+        XCTAssertEqual(Rules.copyLink(url, copy: nil), .shown)
+        XCTAssertEqual(Rules.copyLink(url, copy: { _ in throw Denied() }), .shown)
     }
 }
 
-/// The offer itself, against a mint that never touches a network.
+/// The offer itself, against a mint, a clipboard and a send path that never
+/// touch a network.
 @MainActor
 final class CallInviteOfferTests: XCTestCase {
 
-    private final class Mints {
-        var calls = 0
-        var url = "https://lakko.me/c/one"
-        var failure: Error?
-    }
-
-    private func makeOffer(_ mints: Mints) -> CallInviteOffer {
-        CallInviteOffer(mint: {
-            mints.calls += 1
-            if let failure = mints.failure { throw failure }
-            return mints.url
-        })
+    private final class World {
+        var mints = 0
+        var url = "https://lakko.me/c/one#secret"
+        var mintFailure: Error?
+        var clipboard: [String] = []
+        var sent: [(conversation: String, text: String)] = []
+        var sendFailure: Error?
+        var contacts: [InviteContactRow] = []
+        var holds: [UInt64] = []
     }
 
     private struct Boom: Error, LocalizedError {
         var errorDescription: String? { "the upload was refused" }
     }
 
-    func testACallStartsWithNoLinkAtAll() {
-        let offer = makeOffer(Mints())
-        XCTAssertEqual(offer.state, .idle)
-        XCTAssertNil(offer.url)
-        XCTAssertFalse(offer.panelOpen)
+    private func row(_ key: String, _ name: String) -> InviteContactRow {
+        InviteContactRow(key: Data(key.utf8), name: name, username: nil)
     }
 
-    func testTheFirstPressMakesALinkAndOpensThePanel() async {
-        let mints = Mints()
-        let offer = makeOffer(mints)
-        await offer.press()
-        XCTAssertEqual(offer.state, .ready(url: "https://lakko.me/c/one"))
-        XCTAssertEqual(offer.url, "https://lakko.me/c/one")
-        XCTAssertTrue(offer.panelOpen, "the work is shown, not done off-screen")
-        XCTAssertEqual(mints.calls, 1)
+    private func makeOffer(_ world: World) -> CallInviteOffer {
+        CallInviteOffer(
+            mint: {
+                world.mints += 1
+                if let failure = world.mintFailure { throw failure }
+                return world.url
+            },
+            copy: { world.clipboard.append($0) },
+            contacts: { world.contacts },
+            send: { conversation, text in
+                if let failure = world.sendFailure { throw failure }
+                world.sent.append((conversation, text))
+            },
+            // The line's time on screen is not waited out in a test.
+            hold: { ms in world.holds.append(ms) })
+    }
+
+    func testACallStartsWithNoLinkAtAll() {
+        let offer = makeOffer(World())
+        XCTAssertEqual(offer.state, .idle)
+        XCTAssertNil(offer.url)
+        XCTAssertFalse(offer.menuOpen)
+        XCTAssertFalse(offer.pickerOpen)
+        XCTAssertNil(offer.statusLine)
+    }
+
+    /// `Participants` opens the app's own menu and does nothing else: no link
+    /// is made until an invite item is chosen.
+    func testParticipantsOpensTheMenuAndMintsNothing() {
+        let world = World()
+        let offer = makeOffer(world)
+        offer.toggleMenu()
+        XCTAssertTrue(offer.menuOpen)
+        XCTAssertEqual(world.mints, 0)
+        offer.toggleMenu()
+        XCTAssertFalse(offer.menuOpen)
+    }
+
+    func testCopyLinkMintsCopiesAndSaysSo() async {
+        let world = World()
+        let offer = makeOffer(world)
+        offer.toggleMenu()
+        await offer.copyLink()
+        XCTAssertEqual(world.mints, 1)
+        XCTAssertEqual(world.clipboard, [world.url], "the fragment travels with the link")
+        XCTAssertEqual(offer.state, .ready(url: world.url, delivery: .copied))
+        XCTAssertFalse(offer.menuOpen, "choosing an item closes the menu")
+        XCTAssertEqual(offer.statusLine, Localization.text("call.invite.copied"))
     }
 
     /// The whole point of holding the offer on the call: the same link for the
-    /// whole call, and no second round trip to re-show it.
-    func testASecondPressReOffersTheSameLinkWithoutMintingAgain() async {
-        let mints = Mints()
-        let offer = makeOffer(mints)
-        await offer.press()
-        offer.setPanelOpen(false)
-        mints.url = "https://lakko.me/c/two"
-        await offer.press()
-        XCTAssertEqual(offer.url, "https://lakko.me/c/one")
-        XCTAssertEqual(mints.calls, 1)
-        XCTAssertTrue(offer.panelOpen)
+    /// whole call, and no second round trip to hand it out again.
+    func testASecondUseReOffersTheSameLinkWithoutMintingAgain() async {
+        let world = World()
+        let offer = makeOffer(world)
+        await offer.copyLink()
+        world.url = "https://lakko.me/c/two#other"
+        await offer.copyLink()
+        XCTAssertEqual(offer.url, "https://lakko.me/c/one#secret")
+        XCTAssertEqual(world.mints, 1)
+        XCTAssertEqual(world.clipboard.count, 2)
     }
 
-    func testAFailureIsExplainedAndTheOfferStaysUsable() async {
-        let mints = Mints()
-        mints.failure = Boom()
-        let offer = makeOffer(mints)
-        await offer.press()
-        guard case .failed(let message) = offer.state else {
-            return XCTFail("expected a failure, got \(offer.state)")
-        }
+    func testAFailedMintIsExplainedAndCanBeTriedAgain() async {
+        let world = World()
+        world.mintFailure = Boom()
+        let offer = makeOffer(world)
+        await offer.copyLink()
+        XCTAssertEqual(offer.state, .failed(failure: .unavailable, url: nil))
+        let line = offer.statusLine ?? ""
         // Rendered from the kind; the error's own prose never reaches the screen.
-        XCTAssertFalse(message.contains("the upload was refused"))
-        XCTAssertTrue(message.contains("The call is unaffected"))
+        XCTAssertFalse(line.contains("the upload was refused"))
+        XCTAssertTrue(line.contains("The call is unaffected"))
+        XCTAssertEqual(world.clipboard, [])
 
-        mints.failure = nil
-        await offer.retry()
-        XCTAssertEqual(offer.state, .ready(url: "https://lakko.me/c/one"))
-        XCTAssertEqual(mints.calls, 2)
+        world.mintFailure = nil
+        await offer.copyLink()
+        XCTAssertEqual(offer.state, .ready(url: world.url, delivery: .copied))
+        XCTAssertEqual(world.mints, 2)
     }
 
-    func testRetryDoesNothingWhenThereIsNothingToRetry() async {
-        let mints = Mints()
-        let offer = makeOffer(mints)
-        await offer.retry()
-        XCTAssertEqual(offer.state, .idle)
-        XCTAssertEqual(mints.calls, 0)
-    }
-}
+    // MARK: Invite a contact
 
-// MARK: - The link a person reads before they send it
-
-@MainActor
-final class CallInviteShortLinkTests: XCTestCase {
-
-    /// A person about to send a link should see WHICH link. The panel that
-    /// showed only a Copy button beside the words "Call link" asked them to
-    /// send something they had never seen.
-    func testTheSchemeComesOffBecauseItIsTheSameOnEveryLink() {
-        XCTAssertEqual(
-            CallInviteOfferRules.shortLink("https://lakko.me/c/abc"),
-            "lakko.me/c/abc")
-        XCTAssertEqual(
-            CallInviteOfferRules.shortLink("http://lakko.me/c/abc"),
-            "lakko.me/c/abc")
+    /// The list is the person's contacts, read each time it is opened. It is
+    /// empty for someone with none; the item is offered all the same
+    /// (`CallInviteContactsItemTests`).
+    func testInviteContactsListsTheContacts() {
+        let world = World()
+        let offer = makeOffer(world)
+        XCTAssertTrue(offer.targets().isEmpty)
+        world.contacts = [row("aa", "Anna")]
+        XCTAssertEqual(offer.targets().map(\.name), ["Anna"])
+        XCTAssertEqual(offer.targets().map(\.key), [Data("aa".utf8)])
     }
 
-    /// Shortening here as well as in the layout elided one link twice, which
-    /// reads as a broken string rather than a shortened one. How much fits is
-    /// a question about a particular screen; this only drops what is noise on
-    /// every screen.
-    func testItDoesNotShortenBecauseTheLayoutAlreadyDoes() {
-        let long = "https://lakko.me/c/" + String(repeating: "A", count: 120)
-        let short = CallInviteOfferRules.shortLink(long)
-        XCTAssertFalse(short.contains("\u{2026}"), short)
-        XCTAssertEqual(short, String(long.dropFirst("https://".count)))
+    /// The message is the call's link and nothing else, sent through the
+    /// conversation's own send path. The picker STAYS OPEN so several people
+    /// can be invited; the row is marked as invited and the line names the
+    /// conversation.
+    func testInvitingAContactSendsTheLinkAndNothingElse() async {
+        let world = World()
+        world.contacts = [row("aa", "Anna")]
+        let offer = makeOffer(world)
+        offer.toggleMenu()
+        offer.openPicker()
+        XCTAssertFalse(offer.menuOpen)
+        XCTAssertTrue(offer.pickerOpen)
+
+        let sent = await offer.sendInvite(to: CallInviteTarget(id: "aa", title: "Anna"))
+        XCTAssertTrue(sent)
+        XCTAssertEqual(world.sent.count, 1)
+        XCTAssertEqual(world.sent.first?.conversation, "aa")
+        XCTAssertEqual(world.sent.first?.text, world.url, "the whole text is the link")
+        XCTAssertTrue(offer.pickerOpen, "the list stays open for the next person")
+        XCTAssertEqual(offer.invited, ["aa"])
+        XCTAssertNil(offer.pickerError)
+        XCTAssertEqual(offer.state, .ready(url: world.url, delivery: .sent(name: "Anna")))
+        XCTAssertEqual(offer.statusLine?.withoutIsolates, "Invitation sent to Anna.")
+        XCTAssertEqual(world.clipboard, [], "sending is not copying")
     }
 
-    func testAShortLinkIsLeftAloneApartFromItsScheme() {
-        XCTAssertEqual(
-            CallInviteOfferRules.shortLink("https://lakko.me/c/AbC123"),
-            "lakko.me/c/AbC123")
+    /// Several people in one go: each send reuses the one link, each row is
+    /// marked, and an invited row cannot be picked a second time.
+    func testSeveralContactsAreInvitedWithOneLinkAndNoneTwice() async {
+        let world = World()
+        world.contacts = [row("aa", "Anna"), row("bb", "Boris")]
+        let offer = makeOffer(world)
+        offer.openPicker()
+        _ = await offer.sendInvite(to: CallInviteTarget(id: "aa", title: "Anna"))
+        _ = await offer.sendInvite(to: CallInviteTarget(id: "bb", title: "Boris"))
+        let again = await offer.sendInvite(to: CallInviteTarget(id: "aa", title: "Anna"))
+        XCTAssertFalse(again, "an invited row is not sent to twice")
+        XCTAssertEqual(world.sent.map(\.conversation), ["aa", "bb"])
+        XCTAssertEqual(Set(world.sent.map(\.text)), [world.url])
+        XCTAssertEqual(world.mints, 1)
+        XCTAssertEqual(offer.invited, ["aa", "bb"])
+        XCTAssertEqual(offer.statusLine?.withoutIsolates, "Invitation sent to Boris.")
+        XCTAssertTrue(offer.pickerOpen)
+        offer.closePicker()
+        XCTAssertFalse(offer.pickerOpen)
+    }
+
+    /// A failure keeps the list open with the reason and the row pressable,
+    /// the call is untouched, and the link already made is kept: the next
+    /// attempt must not mint a second link for the same call.
+    func testAFailedSendKeepsThePickerOpenAndDoesNotMintAgain() async {
+        let world = World()
+        world.contacts = [row("aa", "Anna"), row("bb", "Boris")]
+        world.sendFailure = Boom()
+        let offer = makeOffer(world)
+        offer.openPicker()
+
+        let first = await offer.sendInvite(to: CallInviteTarget(id: "aa", title: "Anna"))
+        XCTAssertFalse(first)
+        XCTAssertTrue(offer.pickerOpen, "the list stays open with the reason")
+        XCTAssertEqual(offer.pickerError, Localization.text("call.invite.send_failed"))
+        XCTAssertEqual(offer.state, .failed(failure: .notSent, url: world.url))
+        XCTAssertEqual(world.mints, 1)
+        XCTAssertTrue(offer.invited.isEmpty, "a row that was not sent to stays pressable")
+
+        world.sendFailure = nil
+        world.url = "https://lakko.me/c/two#other"
+        let second = await offer.sendInvite(to: CallInviteTarget(id: "aa", title: "Anna"))
+        XCTAssertTrue(second)
+        XCTAssertEqual(world.mints, 1, "a failed send does not mint again")
+        XCTAssertEqual(world.sent.first?.text, "https://lakko.me/c/one#secret")
+        XCTAssertEqual(offer.invited, ["aa"])
+        XCTAssertNil(offer.pickerError)
+    }
+
+    /// When the link cannot be made at all, nothing is sent and the picker
+    /// says so.
+    func testASendWithNoLinkToSendSaysSoAndSendsNothing() async {
+        let world = World()
+        world.mintFailure = Boom()
+        let offer = makeOffer(world)
+        offer.openPicker()
+        let sent = await offer.sendInvite(to: CallInviteTarget(id: "aa", title: "Anna"))
+        XCTAssertFalse(sent)
+        XCTAssertTrue(world.sent.isEmpty)
+        XCTAssertTrue(offer.pickerOpen)
+        XCTAssertEqual(offer.pickerError, Localization.text("call.invite.send_failed"))
+    }
+
+    func testClosingThePickerSendsNothingAndClearsItsReason() async {
+        let world = World()
+        world.sendFailure = Boom()
+        let offer = makeOffer(world)
+        offer.openPicker()
+        _ = await offer.sendInvite(to: CallInviteTarget(id: "aa", title: "Anna"))
+        offer.closePicker()
+        XCTAssertFalse(offer.pickerOpen)
+        XCTAssertNil(offer.pickerError)
+        XCTAssertTrue(world.sent.isEmpty)
+    }
+
+    /// A finished line is asked to hold for a few seconds; a wait is not.
+    func testAFinishedLineIsHeldAndThenGoes() async {
+        let world = World()
+        let offer = makeOffer(world)
+        await offer.copyLink()
+        // The hold runs as its own task; let it finish.
+        for _ in 0..<20 where offer.statusLine != nil { await Task.yield() }
+        XCTAssertEqual(world.holds, [CallInviteOfferRules.statusHoldMs])
+        XCTAssertNil(offer.statusLine, "the line goes once its time is up")
+        XCTAssertEqual(offer.url, world.url, "the link itself is kept")
     }
 }

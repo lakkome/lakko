@@ -273,7 +273,7 @@ internal object DeviceGroupJournalAccess {
     /** [rootOf] over an account identity seed already in hand. */
     fun rootOfSeed(accountIdentitySeed: ByteArray, groupId: ByteArray): DsStatementSigning? =
         try {
-            Identity.fromSeed(accountIdentitySeed).use { FfiDsStatementSigning.root(it, groupId) }
+            me.lakko.app.auth.SessionSecretWipe.identity(accountIdentitySeed).use { FfiDsStatementSigning.root(it, groupId) }
         } catch (_: Throwable) {
             null
         }

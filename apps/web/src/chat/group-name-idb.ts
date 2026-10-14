@@ -16,6 +16,7 @@
  * `group-name-store.ts`'s {@link encodeGroupNameRow}.
  */
 
+import { accountStoresWritable } from "../auth/account-store-gate";
 import {
   decodeGroupNameRow,
   encodeGroupNameRow,
@@ -136,6 +137,7 @@ export class IdbGroupNameBackend implements GroupNameBackend {
     const ciphertext = await encryptBlob(deviceKey, new TextEncoder().encode(json));
     const db = await openDb();
     try {
+      if (!accountStoresWritable(accountId)) return;
       const tx = db.transaction(STORE, "readwrite");
       tx.objectStore(STORE).put({ accountId, ciphertext } satisfies PersistedRow);
       await awaitTx(tx);

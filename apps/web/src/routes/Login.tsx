@@ -13,6 +13,7 @@
  * edge (`auth-error-copy.ts`), which keeps the context's enumeration-safe
  * collapse: an unknown username and a wrong password read the same.
  */
+import { isAbandoned } from "../auth/binding-epoch";
 import { createSignal, Show, type JSX } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
@@ -70,6 +71,8 @@ export default function Login(): JSX.Element {
       // path-only by `readReturnUrl`, `/` otherwise.
       navigate(readReturnUrl(location), { replace: true });
     } catch (err) {
+      // Overtaken by another session on this device: nothing to report.
+      if (isAbandoned(err)) return;
       setError(loginErrorMessage(err));
     } finally {
       setBusy(false);
@@ -83,6 +86,7 @@ export default function Login(): JSX.Element {
       await auth.loginWithPasskey(username());
       navigate(readReturnUrl(location), { replace: true });
     } catch (err) {
+      if (isAbandoned(err)) return;
       // Dismissing the browser's sheet is not an error.
       if (!(err instanceof KeyedError && err.key === "auth.passkey.error.cancelled")) {
         setError(passkeyErrorMessage(err));

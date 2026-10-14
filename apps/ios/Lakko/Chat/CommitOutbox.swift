@@ -266,6 +266,8 @@ public final class CommitOutboxStore {
     /// Writes one `<id>.json` file atomically. Building block for
     /// `putNewDurable` + the store round-trip test.
     public func putEntryDurable(accountIdB64: String, entry: PendingCommitEntry) throws {
+        let gate = try AccountStoreGate.enterOrEnd(accountIdB64)
+        defer { gate.leave() }
         guard let dir = accountDir(accountIdB64) else {
             throw CommitOutboxStoreError.unavailable(
                 "no application-support directory to persist the commit outbox"
@@ -288,6 +290,8 @@ public final class CommitOutboxStore {
     /// `acked: false`. THROWS on failure (fail-closed) — this is the write a
     /// commit path runs (entry-first) BEFORE the snapshot + before any publish.
     public func putNewDurable(accountIdB64: String, entry: NewCommitEntry) throws {
+        let gate = try AccountStoreGate.enterOrEnd(accountIdB64)
+        defer { gate.leave() }
         let full = PendingCommitEntry(
             id: entry.id,
             accountId: accountIdB64,
@@ -430,9 +434,12 @@ public final class CommitOutboxStore {
         try? FileManager.default.removeItem(at: url)
     }
 
-    /// Purge every entry for an account — recover / forget-device hygiene, so a
-    /// prior session's pending commits never get swept into a later one. No-op
-    /// when there is nothing to purge.
+    /// Purge every entry for an account — Forget device / Delete account
+    /// (``AccountLocalDataWipe``), where the local MLS state the entries
+    /// describe is removed with them. A recover does NOT purge: the account
+    /// backup carries no MLS state, so a recover keeps the local snapshot and
+    /// the entries still describe its epochs. No-op when there is nothing to
+    /// purge.
     public func deleteOutboxForAccount(accountIdB64: String) {
         guard let dir = accountDir(accountIdB64) else { return }
         try? FileManager.default.removeItem(at: dir)

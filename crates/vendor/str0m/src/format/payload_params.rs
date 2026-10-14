@@ -309,6 +309,22 @@ impl PayloadParams {
             return Self::match_av1_score(c0, c1);
         }
 
+        // LAKKO FORK: two audio `red` entries match when both carry a
+        // redundancy list. The payload type the lists name is local to each
+        // peer's numbering and is not compared here; a remote list that does
+        // not name the remote's own Opus never gets this far (see
+        // `MediaLine::rtp_params`).
+        if c0.codec == Codec::Red {
+            return (c0.format.red.is_some() && c1.format.red.is_some())
+                .then_some(Self::EXACT_MATCH_SCORE - 1);
+        }
+
+        // LAKKO FORK: video `red` and `ulpfec` have no parameters to compare;
+        // the codec and clock rate checked above are the whole match.
+        if matches!(c0.codec, Codec::RedVideo | Codec::Ulpfec) {
+            return Some(Self::EXACT_MATCH_SCORE - 1);
+        }
+
         // TODO: Fuzzy matching for any other audio codecs
         // TODO: Fuzzy matching for video
 
@@ -558,6 +574,15 @@ impl PayloadParams {
             // The packetizer also uses this to decide whether to emit DONL.
             if first.spec.format.sprop_max_don_diff.is_some() {
                 self.spec.format.sprop_max_don_diff = first.spec.format.sprop_max_don_diff;
+            }
+        }
+
+        // LAKKO FORK: until locked, an audio `red` entry takes the remote's
+        // redundancy list, so the fmtp we send names the Opus payload type the
+        // remote uses (the answer echoes the offer's list).
+        if self.spec.codec == Codec::Red && !self.locked {
+            if let Some(red) = first.spec.format.red {
+                self.spec.format.red = Some(red);
             }
         }
 

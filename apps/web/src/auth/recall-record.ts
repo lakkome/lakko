@@ -34,6 +34,8 @@
  * username (UTF-8, the rest)`.
  */
 
+import { requireAccountStoresWritable } from "./account-store-gate";
+
 const DB_NAME = "lakko-recall-record";
 const DB_VERSION = 1;
 const STORE = "records";
@@ -133,6 +135,11 @@ export async function putRecallRecord(record: RecallRecord, deviceKey: CryptoKey
   envelope.set(ct, iv.length);
   const db = await openDb();
   try {
+    // A wiped account takes no late write (`account-store-gate.ts`). The
+    // staged wipe's record is written BEFORE that wipe seals the account, so
+    // this refuses only a write that outlived a wipe; it throws, because the
+    // caller then keeps nothing and runs the full wipe.
+    requireAccountStoresWritable(record.accountIdB64);
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite");
       tx.oncomplete = (): void => resolve();

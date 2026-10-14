@@ -59,23 +59,53 @@ public final class DeviceGroupSnapshotStore {
 
     /// Persist `blob` for `accountIdB64`. Overwrites any
     /// existing envelope. Best-effort — Keychain / FS failures
-    /// surface as logged-and-swallowed no-ops at the caller.
-    public func putSnapshot(accountIdB64: String, blob: Data) {
-        guard let envelopeDir = envelopeDir else { return }
-        let wrapKey: SymmetricKey
-        do {
-            wrapKey = try loadOrCreateWrapKey()
-        } catch {
-            return
-        }
-        let sealed: AES.GCM.SealedBox
-        do {
-            sealed = try AES.GCM.seal(blob, using: wrapKey)
-        } catch {
-            return
-        }
-        guard let combined = sealed.combined else { return }
+    /// surface as logged-and-swallowed no-ops at the caller. For a write
+    /// nothing is published on the strength of (state applied from a
+    /// received row); a write that precedes a publish uses
+    /// ``putSnapshotDurable(accountIdB64:blob:session:)``.
+    ///
+    /// `session`: the session the handle whose state this is was made in
+    /// (``AccountStoreGate/Session``); refused once it has ended.
+    public func putSnapshot(
+        accountIdB64: String, blob: Data, session: AccountStoreGate.Session? = nil
+    ) {
+        try? write(accountIdB64: accountIdB64, blob: blob, session: session, failClosed: false)
+    }
 
+    /// Persist `blob` and THROW when it did not durably land, or when the
+    /// account's session has ended (``AccountStoreGate/Sealed``). For the
+    /// write that precedes a DeviceGroup publish: the provider state in
+    /// `blob` holds the ratchet step the message about to be published took,
+    /// so a publish after a write that was not made is a ciphertext whose
+    /// generation the next session would use again.
+    public func putSnapshotDurable(
+        accountIdB64: String, blob: Data, session: AccountStoreGate.Session? = nil
+    ) throws {
+        try write(accountIdB64: accountIdB64, blob: blob, session: session, failClosed: true)
+    }
+
+    private func write(
+        accountIdB64: String, blob: Data, session: AccountStoreGate.Session?, failClosed: Bool
+    ) throws {
+        let entered: AccountStoreGate.Hold?
+        if let session {
+            entered = AccountStoreGate.enter(session: session)
+        } else {
+            entered = AccountStoreGate.enter(accountIdB64)
+        }
+        guard let gate = entered else {
+            if failClosed { throw AccountStoreGate.Sealed() }
+            return
+        }
+        defer { gate.leave() }
+        guard let envelopeDir = envelopeDir else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let wrapKey = try loadOrCreateWrapKey()
+        let sealed = try AES.GCM.seal(blob, using: wrapKey)
+        guard let combined = sealed.combined else {
+            throw CocoaError(.fileWriteUnknown)
+        }
         do {
             try FileManager.default.createDirectory(
                 at: envelopeDir,
@@ -83,11 +113,11 @@ public final class DeviceGroupSnapshotStore {
             )
             try Self.excludeFromBackup(envelopeDir)
         } catch {
-            // best-effort
+            // best-effort: the write below fails if the directory is missing
         }
         let url = envelopeURL(accountIdB64: accountIdB64)
+        try combined.write(to: url, options: .atomic)
         do {
-            try combined.write(to: url, options: .atomic)
             try Self.excludeFromBackup(url)
         } catch {
             // best-effort

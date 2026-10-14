@@ -72,6 +72,7 @@ public class InviteLandingViewModel(
             val result = try {
                 repo.acceptInviteLink(slug)
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err)
                 // ContactsRepository.acceptInviteLink already
                 // catches its internal failures into the
                 // Failed / NotFound / etc. variants — any throw

@@ -29,8 +29,11 @@ import kotlin.coroutines.cancellation.CancellationException
  * bounded then fail) run in a host JVM test with no native library.
  */
 
-/** The rationed actions, in wire order (`anonTokenContexts()`);
- *  `channel-subscribe` and `directory-search` are ADR-0059. */
+/** The rationed actions, in wire order (`anonTokenContexts()`, whose source
+ *  of truth is `TokenContext::ALL` in `crates/lakko-anon-token/src/context.rs`);
+ *  `channel-subscribe` and `directory-search` are ADR-0059, `vault-claim` is
+ *  ADR-0064, `blob-upload` and `blob-read` are ADR-0065. Nothing spends the
+ *  last three yet. */
 public enum class AnonTokenContext(public val wire: String) {
     DISCOVERY_LOOKUP("discovery-lookup"),
     DISCOVERY_REGISTER("discovery-register"),
@@ -39,6 +42,9 @@ public enum class AnonTokenContext(public val wire: String) {
     PUSH_REGISTER("push-register"),
     CHANNEL_SUBSCRIBE("channel-subscribe"),
     DIRECTORY_SEARCH("directory-search"),
+    VAULT_CLAIM("vault-claim"),
+    BLOB_UPLOAD("blob-upload"),
+    BLOB_READ("blob-read"),
 }
 
 /**
@@ -56,7 +62,10 @@ public data class AnonBatchPolicy(
 
 /** The per-context policy: `discovery-lookup` 8 (refill below 2),
  *  `push-register` 4, `invite-consume` 2, `ds-knock` 2, `channel-subscribe` 2,
- *  `discovery-register` 1, `directory-search` 1 (each refill when empty). */
+ *  `discovery-register` 1, `directory-search` 1, `vault-claim` 4,
+ *  `blob-upload` 2, `blob-read` 2 (each refill when empty). The numbers for
+ *  the last three are chosen, not measured: nothing spends those contexts
+ *  yet, so there is no usage to size them from. */
 public fun anonBatchPolicyFor(context: AnonTokenContext): AnonBatchPolicy = when (context) {
     AnonTokenContext.DISCOVERY_LOOKUP -> AnonBatchPolicy(batch = 8, refillBelow = 2)
     AnonTokenContext.PUSH_REGISTER -> AnonBatchPolicy(batch = 4, refillBelow = 1)
@@ -65,6 +74,9 @@ public fun anonBatchPolicyFor(context: AnonTokenContext): AnonBatchPolicy = when
     AnonTokenContext.DISCOVERY_REGISTER -> AnonBatchPolicy(batch = 1, refillBelow = 1)
     AnonTokenContext.CHANNEL_SUBSCRIBE -> AnonBatchPolicy(batch = 2, refillBelow = 1)
     AnonTokenContext.DIRECTORY_SEARCH -> AnonBatchPolicy(batch = 1, refillBelow = 1)
+    AnonTokenContext.VAULT_CLAIM -> AnonBatchPolicy(batch = 4, refillBelow = 1)
+    AnonTokenContext.BLOB_UPLOAD -> AnonBatchPolicy(batch = 2, refillBelow = 1)
+    AnonTokenContext.BLOB_READ -> AnonBatchPolicy(batch = 2, refillBelow = 1)
 }
 
 /** One finalized token, ready to spend in the `x-lakko-anon-token` header. */

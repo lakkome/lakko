@@ -26,6 +26,7 @@
  * Every decision is `protect/email-flow.ts`. The address and the codes live
  * in this component's memory only and are never logged.
  */
+import { isAbandoned } from "../binding-epoch";
 import { plainStore } from "../protect/local";
 import { createSignal, Match, onCleanup, Show, Switch, type JSX } from "solid-js";
 
@@ -134,6 +135,8 @@ export function EmailRecover(props: {
   }
 
   function fail(request: EmailRequest, err: unknown): void {
+    // Overtaken by another session on this device: nothing to report.
+    if (isAbandoned(err)) return;
     const answer = answerOf(err);
     const read: EmailFailure = answer === null ? { kind: "error" } : emailFailure(request, answer);
     if (read.kind === "rate-limited" && read.retryAfterSecs !== null) wait.startFor(read.retryAfterSecs);
@@ -236,6 +239,8 @@ export function EmailRecover(props: {
       dispatch({ type: "landed" });
       props.onDone();
     } catch (err) {
+      // Overtaken by another session on this device: nothing to report.
+      if (isAbandoned(err)) return;
       const secs = attemptsRetryAfterSecs(err);
       if (secs !== null) wait.startFor(secs);
       else setOwnError(recoverErrorMessage(err));

@@ -219,16 +219,18 @@ public object PushRoutingSecretStore {
         distributed: Boolean,
         mintEpoch: ULong,
     ) {
-        require(secret.size == SECRET_LENGTH) {
-            "push_routing_secret must be $SECRET_LENGTH bytes (got ${secret.size})"
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            require(secret.size == SECRET_LENGTH) {
+                "push_routing_secret must be $SECRET_LENGTH bytes (got ${secret.size})"
+            }
+            openPrefs(context)
+                .edit()
+                .putString(
+                    rowKey(accountIdB64, groupIdHex),
+                    encodeValue(secret, distributed, mintEpoch),
+                )
+                .apply()
         }
-        openPrefs(context)
-            .edit()
-            .putString(
-                rowKey(accountIdB64, groupIdHex),
-                encodeValue(secret, distributed, mintEpoch),
-            )
-            .apply()
     }
 
     /**
@@ -281,18 +283,20 @@ public object PushRoutingSecretStore {
         accountIdB64: String,
         groupIdHex: String,
     ) {
-        val current = entry(context, accountIdB64, groupIdHex) ?: return
-        if (current.distributed) return
-        // ADR-0044 — the stamp is REPLAYED, never refreshed: this write
-        // flips a flag, it does not mint anything.
-        put(
-            context,
-            accountIdB64,
-            groupIdHex,
-            current.secret,
-            distributed = true,
-            mintEpoch = current.mintEpoch,
-        )
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val current = entry(context, accountIdB64, groupIdHex) ?: return
+            if (current.distributed) return
+            // ADR-0044 — the stamp is REPLAYED, never refreshed: this write
+            // flips a flag, it does not mint anything.
+            put(
+                context,
+                accountIdB64,
+                groupIdHex,
+                current.secret,
+                distributed = true,
+                mintEpoch = current.mintEpoch,
+            )
+        }
     }
 
     /**
@@ -326,18 +330,20 @@ public object PushRoutingSecretStore {
         accountIdB64: String,
         groupIdHex: String,
     ) {
-        val current = entry(context, accountIdB64, groupIdHex) ?: return
-        if (!current.distributed) return
-        // ADR-0044 — the stamp is REPLAYED, never refreshed (see
-        // [markDistributed]).
-        put(
-            context,
-            accountIdB64,
-            groupIdHex,
-            current.secret,
-            distributed = false,
-            mintEpoch = current.mintEpoch,
-        )
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            val current = entry(context, accountIdB64, groupIdHex) ?: return
+            if (!current.distributed) return
+            // ADR-0044 — the stamp is REPLAYED, never refreshed (see
+            // [markDistributed]).
+            put(
+                context,
+                accountIdB64,
+                groupIdHex,
+                current.secret,
+                distributed = false,
+                mintEpoch = current.mintEpoch,
+            )
+        }
     }
 
     /**

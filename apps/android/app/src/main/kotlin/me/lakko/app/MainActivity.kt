@@ -56,6 +56,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -80,6 +82,7 @@ import me.lakko.app.feed.reporting
 import me.lakko.app.push.LakkoMessagingService
 import me.lakko.app.push.PushIntake
 import me.lakko.app.ui.auth.LoginScreen
+import me.lakko.app.ui.call.EndedForEveryoneNoticeBar
 import me.lakko.app.ui.call.LinkCallNoticeBar
 import me.lakko.app.ui.call.OneToOneCallOverlay
 import me.lakko.app.ui.auth.LoginViewModel
@@ -184,33 +187,25 @@ class MainActivity : ComponentActivity() {
         // process lifetime.
         me.lakko.sframe.SFrameAvailability.bootProbe()
 
-        val authRepository = AuthRepository(applicationContext)
-        // ChatRepository before ContactsRepository — the
-        // contacts side optionally bridges to chat via
-        // joinGroupFromWelcome, and the order of construction
-        // makes the dependency obvious in the call site.
-        val chatRepository = ChatRepository(applicationContext)
+        // One set per process, not per Activity: a configuration change
+        // recreates this Activity, and a second set built here would run
+        // beside the first for the same account (see [AppRepositories]).
+        val repositories = AppRepositories.get(applicationContext)
+        val authRepository = repositories.auth
+        val chatRepository = repositories.chat
         // Every call lives in the process-wide call host, not in a screen: the
         // 1x1 call must ring whichever screen is showing, and no call — 1x1,
         // group or call link — may end or vanish because its screen went away.
         // Every poll of every group hands one-to-one call signaling to it, and
-        // every settled group reaches the group-call rekey. An activity
-        // recreate builds a new repository, so the wiring is re-attached here
-        // each time.
+        // every settled group reaches the group-call rekey. Attached on every
+        // Activity create; the repository is the process's one.
         me.lakko.app.calls.AppCallHost.attach(
             applicationContext = applicationContext,
             repository = chatRepository,
             sessionTokenProvider = { authRepository.identitySecrets.value?.sessionToken },
         )
         val callHost = me.lakko.app.calls.AppCallHost.instance
-        val contactsRepository = ContactsRepository(
-            authRepo = authRepository,
-            // G-4 (ADR-0016) — the app context backs the persistent
-            // PeerPinStore so the fetch-path supersession gate is
-            // active on every real send.
-            appContext = applicationContext,
-            chatRepo = chatRepository,
-        )
+        val contactsRepository = repositories.contacts
         // ADR-0060 §4 / §5 — contacts of contacts: an offer or a bundle a
         // contact sent is kept, and the relay re-runs; a changed setting
         // re-runs the offer. Re-attached on every activity recreate, like the
@@ -230,8 +225,7 @@ class MainActivity : ComponentActivity() {
         // identitySecrets land; cleared on logout /
         // forgetDevice from the same place ChatRepository
         // gets cleared.
-        val deviceGroupSync = me.lakko.app.devices.sync
-            .DeviceGroupSyncRepository(applicationContext)
+        val deviceGroupSync = repositories.deviceGroupSync
         // ADR-0073 R.5 — a conversation that continues in a new group keeps
         // its row through the lineage register of the synced state.
         chatRepository.lineageRecorder = { successor, root -> deviceGroupSync.recordLineage(successor, root) }
@@ -650,15 +644,61 @@ private fun AppRoot(
         return
     }
 
+    // docs/ux/call-links.md section 9 — a guest account (made to join a call
+    // from a link) never lands in the app. The repository publishes the guest
+    // flag before the session and drops it after, so a session observed here
+    // already carries it.
+    val guestAccount by authRepository.guestAccount.collectAsStateWithLifecycle()
+    val guest = me.lakko.app.auth.guestSessionOf(state, guestAccount)
+    // `No, thanks` runs the Forget-device orchestration, which lives in the
+    // session root (it stops the runtimes that root owns before the wipe).
+    val forgetDeviceSlot = remember { ForgetDeviceSlot() }
+    // One model for the question, shared by the call-link landing and the
+    // whole-screen form, so a step taken on one is not lost on the other.
+    val guestOffer: me.lakko.app.ui.auth.GuestAccountOfferViewModel? = guest?.let { guestSession ->
+        viewModel(
+            key = "guest-offer-${guestSession.accountIdB64}",
+            factory = singletonViewModelFactory {
+                me.lakko.app.ui.auth.GuestAccountOfferViewModel(
+                    claim = { username, password ->
+                        authRepository.claimGuestAccount(
+                            username = username,
+                            password = password,
+                            forgetThisDevice = { forgetDeviceSlot.forget(fallback = { authRepository.forgetDevice() }) },
+                        )
+                    },
+                    discard = {
+                        authRepository.discardGuestAccount(
+                            forgetThisDevice = { forgetDeviceSlot.forget(fallback = { authRepository.forgetDevice() }) },
+                        )
+                    },
+                    // A guest account lives 23 hours on a device: past that it
+                    // is deleted when the question appears, not offered.
+                    expire = {
+                        authRepository.expireGuestIfDue(
+                            forgetThisDevice = { forgetDeviceSlot.forget(fallback = { authRepository.forgetDevice() }) },
+                        )
+                    },
+                    claimedUsername = {
+                        me.lakko.app.auth.guestSessionOf(
+                            authRepository.state.value,
+                            authRepository.guestAccount.value,
+                        )?.claimedUsername
+                    },
+                )
+            },
+        )
+    }
+
     // ADR-0032 (G-21/G-22) — a tapped `https://lakko.me/c/<slug>` multi-joiner
     // call-invite link opens the PUBLIC JoinCall landing, in ANY auth state (an
     // anonymous visitor gets the guest-join path). Without a session it takes
-    // over the whole screen, gated before the auth-state router so a guest
-    // mid-onboarding (auth flips to SaveFreshPhrase) stays inside the JoinCall
-    // context instead of falling into the top-level SaveFreshPhraseRoot. With a
+    // over the whole screen, gated before the auth-state router. With a
     // session it is drawn ABOVE the session screens instead (see the end of
     // this function): the session root keeps running underneath — its receive
-    // loop is what answers a 1x1 offer busy during the link call.
+    // loop is what answers a 1x1 offer busy during the link call. A guest's
+    // session lands the moment its account exists, so the landing simply
+    // moves from the first place to the second and the call starts.
     val pendingCallJoinSlug by inviteIntake.pendingCallJoinSlug.collectAsStateWithLifecycle()
     val callSlug = pendingCallJoinSlug
     val appContext = LocalContext.current.applicationContext
@@ -682,6 +722,29 @@ private fun AppRoot(
         if (state !is AuthState.Session) {
             deviceGroupSync.clear()
         }
+    }
+
+    // A fresh identity's phrase that was never confirmed, brought back after
+    // a restart, is shown before the app. (Sign-up, a guest's included,
+    // shows no phrase: ADR-0075 D2.)
+    val parkedPhrase by authRepository.signupPhrase.collectAsState()
+    val callOccupant by me.lakko.app.calls.AppCallHost.occupant.collectAsStateWithLifecycle()
+
+    // What became of a guest account. Kept: once it has a name and a
+    // password (and no call is running) the person goes into the app,
+    // where an account belongs; the call-link landing would only offer the
+    // call again. Deleted: the landing says so itself.
+    var wasGuestHere by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(guest != null, state, parkedPhrase != null, callOccupant != null) {
+        val watch = me.lakko.app.auth.observeGuestOutcome(
+            wasGuest = wasGuestHere,
+            guest = guest != null,
+            state = state,
+            signupPhrasePending = parkedPhrase != null,
+            callInProgress = callOccupant != null,
+        )
+        wasGuestHere = watch.wasGuest
+        if (watch.outcome == me.lakko.app.auth.GuestOutcome.KEPT) inviteIntake.consumeCallJoin()
     }
 
     // ADR-0048 — one resolver for every call surface below: the collapsed bar
@@ -730,12 +793,15 @@ private fun AppRoot(
             SaveFreshPhraseRoot(repository = authRepository, username = current.account.username)
         }
         is AuthState.Session -> {
-            // A fresh identity's phrase that was never confirmed, brought
-            // back after a restart, is shown before the app. (Sign-up shows
-            // no phrase: ADR-0075 D2.)
-            val owedPhrase by authRepository.signupPhrase.collectAsState()
-            val phraseToSave = owedPhrase
-            if (phraseToSave != null) {
+            // What a live session shows is decided in one place: a phrase
+            // still owed first (a fresh identity's, never confirmed; sign-up
+            // shows none, ADR-0075 D2), then a guest's screens, else the app.
+            val surface = me.lakko.app.auth.sessionSurface(
+                signupPhrasePending = parkedPhrase != null,
+                guest = guest != null,
+            )
+            val phraseToSave = parkedPhrase
+            if (surface == me.lakko.app.auth.SessionSurface.SAVE_SIGNUP_PHRASE && phraseToSave != null) {
                 InsetRoot {
                     me.lakko.app.ui.auth.SaveFreshPhraseScreen(
                         phrase = phraseToSave,
@@ -772,6 +838,9 @@ private fun AppRoot(
                 nameForOneToOne = resolveOneToOneName,
                 groupNameFor = resolveGroupName,
             )
+            // Everything a session's screens keep (their ViewModels, the back
+            // stack) belongs to ONE account's session: see [SessionViewModels].
+            SessionViewModels(accountIdB64 = current.account.accountIdB64) {
             SessionRoot(
                 authRepository = authRepository,
                 contactsRepository = contactsRepository,
@@ -782,6 +851,10 @@ private fun AppRoot(
                 pushIntake = pushIntake,
                 antiCensorship = antiCensorship,
                 account = current.account,
+                guest = guest.takeIf { surface == me.lakko.app.auth.SessionSurface.GUEST },
+                guestOffer = guestOffer,
+                callInProgress = callOccupant != null,
+                forgetDeviceSlot = forgetDeviceSlot,
                 banners = if (shownUpdate == null) {
                     null
                 } else {
@@ -807,6 +880,7 @@ private fun AppRoot(
                     }
                 },
             )
+            }
         }
     }
 
@@ -870,6 +944,10 @@ private fun AppRoot(
                     onExit = { inviteIntake.consumeCallJoin() },
                     host = me.lakko.app.calls.AppCallHost.link,
                     endCurrentCall = { me.lakko.app.calls.AppCallHost.endCurrentCall() },
+                    // A guest who is on the landing and not in the call is
+                    // asked whether to keep the account.
+                    guestOffer = guestOffer,
+                    guestClaimedUsername = guest?.claimedUsername,
                 )
             }
             // The 1x1 call's ringing banner and in-call screen.
@@ -880,6 +958,9 @@ private fun AppRoot(
                 host = me.lakko.app.calls.AppCallHost.link,
                 onOpen = { slug -> inviteIntake.publishCallJoin(slug) },
             )
+            // docs/ux/calls.md section 4.1.2 — the call this device was in was
+            // ended for everyone by the person who started it.
+            EndedForEveryoneNoticeBar(notice = me.lakko.app.calls.AppCallHost.endedForEveryone)
         }
         // ADR-0049 section 2 — "confirm on another device": this signed-in
         // device answers a sign-in request while it is in the foreground. A
@@ -898,6 +979,7 @@ private fun AppRoot(
             // ADR-0051 — the group name every member holds, so a group call is
             // titled by its group instead of by a participant's label.
             groupNameFor = resolveGroupName,
+            endedForEveryone = me.lakko.app.calls.AppCallHost.endedForEveryone,
         )
         // docs/ux/call-links.md section 3 — the `Invite` control reads the
         // session at the moment it is pressed; it is never held for the call.
@@ -906,6 +988,14 @@ private fun AppRoot(
             // The landing covers the collapsed bar's strip, so putting the call
             // away leaves it — see `LinkCallOverlay`'s parameter.
             onLeaveLanding = { inviteIntake.consumeCallJoin() },
+            // `Invite contacts` lists the person's contacts and sends the
+            // invitation into the one-to-one with the chosen one, through
+            // that conversation's ordinary send.
+            chatRepository = chatRepository,
+            contactsRepository = contactsRepository,
+            // Every account gets `Invite contacts`; a guest gets the link alone.
+            guest = guest != null,
+            endedForEveryone = me.lakko.app.calls.AppCallHost.endedForEveryone,
             identity = {
                 authRepository.identitySecrets.value?.let { secrets ->
                     me.lakko.app.calls.CallInviteIdentity(
@@ -940,6 +1030,97 @@ private fun AppRoot(
 }
 
 /**
+ * The Forget-device orchestration of the live session root, for a caller
+ * outside it (the guest's `No, thanks`, pressed on the call-link landing the
+ * app root draws). The session root sets it while it is composed.
+ */
+internal class ForgetDeviceSlot {
+    @Volatile
+    var orchestration: (() -> Unit)? = null
+
+    /** Run the session root's orchestration, or [fallback] when no session
+     *  root is composed. */
+    fun forget(fallback: () -> Unit) {
+        (orchestration ?: fallback).invoke()
+    }
+}
+
+/**
+ * The ViewModel store of the signed-in session, kept in the Activity's own
+ * store so it survives a configuration change exactly as the Activity's does.
+ *
+ * Without it the session's ViewModels outlive the session. The session root
+ * builds its `NavHost` under the Activity's store, where navigation keeps one
+ * store per back-stack entry until the entry is popped; signing out removes
+ * the `NavHost` from the composition but pops nothing, so every chat, contact
+ * and channel model of the account that left stayed alive for the rest of the
+ * Activity, its `viewModelScope` running: collecting the repositories, which
+ * by then hold the NEXT account, and acting on what they emit.
+ */
+internal class SessionViewModelStore : androidx.lifecycle.ViewModel() {
+    var store: androidx.lifecycle.ViewModelStore = androidx.lifecycle.ViewModelStore()
+        private set
+
+    /** The session ended: clear its models (cancelling their scopes) and
+     *  start an empty store for the next one. */
+    fun endSession() {
+        store.clear()
+        store = androidx.lifecycle.ViewModelStore()
+    }
+
+    override fun onCleared() {
+        store.clear()
+    }
+}
+
+/**
+ * Compose [content] as one account's session: its ViewModels live in the
+ * [SessionViewModelStore] and are cleared when the session leaves the
+ * composition for any reason but a configuration change (sign-out, forget
+ * device, the removed-device screen, the Activity finishing). Keyed on the
+ * account, so a landing for another account over a live session rebuilds the
+ * session's screens rather than showing the previous account's back stack.
+ */
+@Composable
+private fun SessionViewModels(accountIdB64: String, content: @Composable () -> Unit) {
+    val holder: SessionViewModelStore = viewModel()
+    val activityOwner = androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner.current
+    val activity = LocalContext.current as? android.app.Activity
+    androidx.compose.runtime.key(accountIdB64) {
+        val owner = remember(holder, activityOwner) {
+            object :
+                androidx.lifecycle.ViewModelStoreOwner,
+                androidx.lifecycle.HasDefaultViewModelProviderFactory {
+                private val defaults =
+                    activityOwner as? androidx.lifecycle.HasDefaultViewModelProviderFactory
+
+                override val viewModelStore: androidx.lifecycle.ViewModelStore
+                    get() = holder.store
+
+                override val defaultViewModelProviderFactory: androidx.lifecycle.ViewModelProvider.Factory
+                    get() = defaults?.defaultViewModelProviderFactory
+                        ?: androidx.lifecycle.ViewModelProvider.NewInstanceFactory()
+
+                override val defaultViewModelCreationExtras: androidx.lifecycle.viewmodel.CreationExtras
+                    get() = defaults?.defaultViewModelCreationExtras
+                        ?: androidx.lifecycle.viewmodel.CreationExtras.Empty
+            }
+        }
+        // Declared before the content, so it is disposed after it: the
+        // screens are gone when their models are cleared.
+        DisposableEffect(holder) {
+            onDispose {
+                if (activity?.isChangingConfigurations != true) holder.endSession()
+            }
+        }
+        androidx.compose.runtime.CompositionLocalProvider(
+            androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner provides owner,
+            content = content,
+        )
+    }
+}
+
+/**
  * ADR-0017 fresh-device fail-safe subgraph — renders the
  * [RestoreIdentityPrompt] that completes the session once the user
  * supplies their recovery phrase. "Sign out" routes back to the Anon
@@ -951,7 +1132,10 @@ private fun RestoreIdentityRoot(
     repository: AuthRepository,
     account: SessionAccount,
 ) {
+    // Keyed on the account: the model holds what was typed for it, and this
+    // root's store lives as long as the Activity.
     val vm: me.lakko.app.ui.auth.RestoreIdentityPromptViewModel = viewModel(
+        key = "restore-identity-${account.accountIdB64}",
         factory = singletonViewModelFactory {
             me.lakko.app.ui.auth.RestoreIdentityPromptViewModel(repo = repository)
         },
@@ -1030,6 +1214,19 @@ private fun SessionRoot(
     pushIntake: PushIntake,
     antiCensorship: AntiCensorshipManager,
     account: SessionAccount,
+    /**
+     * `docs/ux/call-links.md` section 9 — the session is a guest account's
+     * (`auth/GuestAccount.kt`), or `null`. The session runs as any other (the
+     * call it was made for needs it), but the app shell is never drawn for
+     * it: in its place the guest gets the way back to the call, or the
+     * question whether to keep the account ([guestOffer]).
+     */
+    guest: me.lakko.app.auth.GuestSession?,
+    guestOffer: me.lakko.app.ui.auth.GuestAccountOfferViewModel?,
+    /** Any call is ringing, starting or live. */
+    callInProgress: Boolean,
+    /** Where this root publishes its Forget-device orchestration. */
+    forgetDeviceSlot: ForgetDeviceSlot,
     /** The security / update banners, drawn above the tab content. */
     banners: (@Composable () -> Unit)?,
     /**
@@ -1169,8 +1366,11 @@ private fun SessionRoot(
         // would only be a second, staler truth. Recording that we ASKED is a
         // different fact, and it is written before the prompt is raised.
     }
-    LaunchedEffect(identitySecrets) {
-        if (identitySecrets == null) return@LaunchedEffect
+    // Not for a guest: a person who was sent a call link is not asked whether
+    // this app may send notifications. The ask comes once they keep the
+    // account (the key changes when the guest flag drops).
+    LaunchedEffect(identitySecrets, guest != null) {
+        if (identitySecrets == null || guest != null) return@LaunchedEffect
         val granted = Build.VERSION.SDK_INT < me.lakko.app.push.NOTIFICATION_PERMISSION_SDK ||
             ContextCompat.checkSelfPermission(
                 notificationAskContext,
@@ -1313,7 +1513,9 @@ private fun SessionRoot(
                             )
                         }
                     } catch (cancel: kotlinx.coroutines.CancellationException) {
-                        throw cancel
+                        // The repository's session ending under one pass is
+                        // not this loop ending.
+                        endPassUnlessCancelled(cancel)
                     } catch (_: Throwable) {
                         kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
                     }
@@ -1355,7 +1557,8 @@ private fun SessionRoot(
     // exactly twice in an account's life - an empty baseline at signup and one
     // at recover - so a restore on a new device landed the person back at
     // registration day. Inert while nothing has changed; see
-    // `backup/AutoBackup.kt` for what counts as a change.
+    // `backup/AutoBackup.kt` for what counts as a change. The backup carries
+    // contacts, the synced state and the conversations' ids - no MLS state.
     val backupContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
     LaunchedEffect(lifecycleOwner, authRepository, chatRepository) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
@@ -1381,7 +1584,6 @@ private fun SessionRoot(
                             if (st.bootstrapped) st.threads.map { it.groupIdHex } else null
                         }
                     },
-                    snapshot = { chatRepository.currentStorageSnapshot() },
                     // ADR-0058 section 5.2 — the folded synced state (folders,
                     // pins, mutes, archive, read cursors, drafts, order).
                     syncedState = { deviceGroupSync.currentSyncedStateBytes() },
@@ -1403,7 +1605,7 @@ private fun SessionRoot(
                 try {
                     contactsRepository.refreshInbox(waitSecs = APP_LONG_POLL_SECS)
                 } catch (cancel: kotlinx.coroutines.CancellationException) {
-                    throw cancel
+                    endPassUnlessCancelled(cancel)
                 } catch (_: Throwable) {
                     kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
                 }
@@ -1443,7 +1645,9 @@ private fun SessionRoot(
                     try {
                         chatRepository.pollGroup(laneGroup, waitSecs = APP_LONG_POLL_SECS)
                     } catch (cancel: kotlinx.coroutines.CancellationException) {
-                        throw cancel
+                        // The repository's session ending under one pass is
+                        // not this loop ending.
+                        endPassUnlessCancelled(cancel)
                     } catch (_: Throwable) {
                         kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
                     }
@@ -1469,8 +1673,15 @@ private fun SessionRoot(
         me.lakko.app.devices.NewDeviceNotices.consumeOpenDevices()
     }
 
+    //
+    // Not while the session is a guest's: the tabs are not drawn then, so
+    // there is no graph to navigate. The link waits; it is followed if the
+    // guest keeps the account (the key changes), and it goes with the session
+    // if they do not. The same holds for the three effects further down.
+    val guestShell = guest != null
     val pendingInviteSlug by inviteIntake.pendingInviteSlug.collectAsStateWithLifecycle()
-    LaunchedEffect(pendingInviteSlug) {
+    LaunchedEffect(pendingInviteSlug, guestShell) {
+        if (guestShell) return@LaunchedEffect
         val slug = pendingInviteSlug ?: return@LaunchedEffect
         navController.navigate(Routes.invite(slug)) { launchSingleTop = true }
         inviteIntake.consume()
@@ -1527,7 +1738,8 @@ private fun SessionRoot(
     // A tapped shared-feed link pushes the import screen.
     val pendingFeedImport by me.lakko.app.ui.feed.FeedImportIntake.pending.collectAsStateWithLifecycle()
     val pendingFeedFile by me.lakko.app.ui.feed.FeedImportIntake.pendingFile.collectAsStateWithLifecycle()
-    LaunchedEffect(pendingFeedImport, pendingFeedFile) {
+    LaunchedEffect(pendingFeedImport, pendingFeedFile, guestShell) {
+        if (guestShell) return@LaunchedEffect
         if (pendingFeedImport == null && pendingFeedFile == null) return@LaunchedEffect
         navController.navigate(Routes.FEED_IMPORT) { launchSingleTop = true }
     }
@@ -1535,7 +1747,8 @@ private fun SessionRoot(
     // ADR-0028 (G-3) — a tapped `/g/<slug>` group join-ticket link pushes the
     // group-join landing the same way.
     val pendingGroupJoin by inviteIntake.pendingGroupJoin.collectAsStateWithLifecycle()
-    LaunchedEffect(pendingGroupJoin) {
+    LaunchedEffect(pendingGroupJoin, guestShell) {
+        if (guestShell) return@LaunchedEffect
         val link = pendingGroupJoin ?: return@LaunchedEffect
         navController.navigate(Routes.groupJoin(link)) { launchSingleTop = true }
         inviteIntake.consumeGroupJoin()
@@ -1545,7 +1758,8 @@ private fun SessionRoot(
     // is known locally; a stale wake lands on the list its kind belongs to.
     val pendingWake by pushIntake.pendingWake.collectAsStateWithLifecycle()
     val chatState by chatRepository.state.collectAsStateWithLifecycle()
-    LaunchedEffect(pendingWake, chatState.bootstrapped) {
+    LaunchedEffect(pendingWake, chatState.bootstrapped, guestShell) {
+        if (guestShell) return@LaunchedEffect
         val wake = pendingWake ?: return@LaunchedEffect
         if (!chatState.bootstrapped) return@LaunchedEffect
         val knownThread = chatState.threads.firstOrNull {
@@ -1579,6 +1793,11 @@ private fun SessionRoot(
         // the publisher provider snapshot stay for the next sign-in.
         channelsState.unbind()
         subscriberAdmission.clear()
+        // Before the chat side: its poll hands the reach manager envelopes
+        // from the account's other devices, and one handed over after the
+        // reach manager let the account go would wait there for the next
+        // account to bind.
+        deviceGroupSync.clear()
         chatRepository.clear()
         authRepository.logout()
     }
@@ -1597,9 +1816,18 @@ private fun SessionRoot(
         contactsRepository.clear()
         channelsState.unbind()
         subscriberAdmission.clear()
-        chatRepository.forgetDevice()
+        // Device sync before chat, as in logout above.
         deviceGroupSync.clear()
+        chatRepository.forgetDevice()
         authRepository.forgetDevice()
+    }
+
+    // `No, thanks` on the guest offer reaches the orchestration above from
+    // the app root, where the call-link landing is drawn.
+    val currentForgetDevice by rememberUpdatedState(forgetDevice)
+    DisposableEffect(forgetDeviceSlot) {
+        forgetDeviceSlot.orchestration = { currentForgetDevice() }
+        onDispose { forgetDeviceSlot.orchestration = null }
     }
 
     // ADR-0074 section 2.3 / docs/ux/identity-recovery.md 18.2 — another
@@ -1613,6 +1841,20 @@ private fun SessionRoot(
         if (deviceRemoved) authRepository.onRemovedFromDeviceGroup()
     }
     if (deviceRemoved) return
+
+    // docs/ux/call-links.md section 9 — a guest never lands in the app: it is
+    // an empty shell for them. Everything above keeps running (the session is
+    // real), but in place of the tabs the guest gets the way back to a running
+    // call, or the one question once there is none.
+    if (guest != null && guestOffer != null) {
+        me.lakko.app.ui.auth.GuestAccountScreen(
+            viewModel = guestOffer,
+            claimedUsername = guest.claimedUsername,
+            callInProgress = callInProgress,
+            onReturnToCall = { me.lakko.app.calls.AppCallHost.expandCurrentCall() },
+        )
+        return
+    }
 
     Scaffold(
         // Each screen pads by its own Scaffold; the shell contributes only the
@@ -2049,7 +2291,6 @@ private fun SessionRoot(
                         repository = authRepository,
                         onDone = { navController.popBackStack() },
                         onBack = { navController.popBackStack() },
-                        onChooseUsername = { navController.navigate(Routes.CHOOSE_USERNAME) },
                     )
                 }
                 // ADR-0076 - change the username.
@@ -2057,32 +2298,6 @@ private fun SessionRoot(
                     me.lakko.app.ui.auth.ChangeUsernameScreen(
                         repository = authRepository,
                         onDone = { navController.popBackStack() },
-                        onBack = { navController.popBackStack() },
-                    )
-                }
-                // A guest chooses a username and its first password.
-                composable(Routes.CHOOSE_USERNAME) {
-                    val ctx = chatRepository.context
-                    me.lakko.app.ui.auth.ChooseUsernameScreen(
-                        repository = authRepository,
-                        onDone = { claimed ->
-                            // The profile now carries the username (and its
-                            // certificate): through the existing publishers.
-                            identitySecrets?.accountId?.let { accountId ->
-                                val existing = me.lakko.app.profile.OwnProfileStore.load(ctx, accountId)
-                                me.lakko.app.profile.applyOwnNameChange(
-                                    current = existing,
-                                    newName = existing?.displayName,
-                                    username = claimed.takeIf { it.isNotBlank() },
-                                    nowMs = System.currentTimeMillis(),
-                                )?.let { me.lakko.app.profile.OwnProfileStore.save(ctx, accountId, it) }
-                            }
-                            chatRepository.publishOwnProfileToAllGroups()
-                            me.lakko.app.reach.ReachManager.get(ctx).publishOwnProfileToDevices()
-                            navController.popBackStack()
-                            // Then, once: "Protect your account".
-                            authRepository.finishUsernameClaim()
-                        },
                         onBack = { navController.popBackStack() },
                     )
                 }
@@ -2221,37 +2436,46 @@ private fun SessionRoot(
                             appContext, chatRepository, profileDirectory, groupIdHex,
                         )
                     }
-                    ChatScreen(
-                        viewModel = chatVm,
-                        // Back returns to wherever the chat was opened from.
-                        onNavigateBack = { navController.popBackStack() },
-                        contactsRepository = contactsRepository,
-                        // docs/ux/conversation-info.md section 3, "Except a
-                        // person" — a one-to-one header opens the person, which
-                        // is the contact screen, pushed exactly as the contacts
-                        // list pushes it (the same route, above). This chat
-                        // stays beneath it, so Back and `Message` return here.
-                        onOpenContact = { key -> navController.navigate(Routes.contact(key)) },
-                        groupTitle = groupTitle,
-                        // ADR-0052 decision 2 / UX 5.1 — Forward opens the
-                        // picker with the message in the one-shot slot; the
-                        // picker's route takes it into its own view model.
-                        onForwardMessage = { request ->
-                            me.lakko.app.chat.PendingForward.publish(request)
-                            navController.navigate(Routes.FORWARD)
+                    // docs/ux/call-links.md section 3 — the `Join` of a call
+                    // invitation in the timeline opens the same `/c/` landing a
+                    // tapped or a pasted link does.
+                    androidx.compose.runtime.CompositionLocalProvider(
+                        me.lakko.app.ui.chat.LocalOpenCallLink provides { argument: String ->
+                            inviteIntake.publishCallJoin(argument)
                         },
-                        // UX section 8 — a selection's Forward: the same
-                        // picker, one target, the requests oldest first.
-                        onForwardSelection = { requests ->
-                            me.lakko.app.chat.PendingForward.publishSelection(requests)
-                            navController.navigate(Routes.FORWARD)
-                        },
-                        // UX 5.1 "Tap to jump" — the origin conversation is
-                        // pushed over this one; Back returns here.
-                        onOpenConversation = { hex ->
-                            navController.navigate(Routes.chat(hex)) { launchSingleTop = true }
-                        },
-                    )
+                    ) {
+                        ChatScreen(
+                            viewModel = chatVm,
+                            // Back returns to wherever the chat was opened from.
+                            onNavigateBack = { navController.popBackStack() },
+                            contactsRepository = contactsRepository,
+                            // docs/ux/conversation-info.md section 3, "Except a
+                            // person" — a one-to-one header opens the person, which
+                            // is the contact screen, pushed exactly as the contacts
+                            // list pushes it (the same route, above). This chat
+                            // stays beneath it, so Back and `Message` return here.
+                            onOpenContact = { key -> navController.navigate(Routes.contact(key)) },
+                            groupTitle = groupTitle,
+                            // ADR-0052 decision 2 / UX 5.1 — Forward opens the
+                            // picker with the message in the one-shot slot; the
+                            // picker's route takes it into its own view model.
+                            onForwardMessage = { request ->
+                                me.lakko.app.chat.PendingForward.publish(request)
+                                navController.navigate(Routes.FORWARD)
+                            },
+                            // UX section 8 — a selection's Forward: the same
+                            // picker, one target, the requests oldest first.
+                            onForwardSelection = { requests ->
+                                me.lakko.app.chat.PendingForward.publishSelection(requests)
+                                navController.navigate(Routes.FORWARD)
+                            },
+                            // UX 5.1 "Tap to jump" — the origin conversation is
+                            // pushed over this one; Back returns here.
+                            onOpenConversation = { hex ->
+                                navController.navigate(Routes.chat(hex)) { launchSingleTop = true }
+                            },
+                        )
+                    }
                 }
                 composable(Routes.FORWARD) {
                     // The request is taken from the slot ONCE, into a view
@@ -2310,7 +2534,6 @@ private fun SessionRoot(
                                 me.lakko.app.reach.ReachManager.get(ctx).publishOwnProfileToDevices()
                             },
                             onBack = { navController.popBackStack() },
-                            onChooseUsername = { navController.navigate(Routes.CHOOSE_USERNAME) },
                             onChangeUsername = { navController.navigate(Routes.CHANGE_USERNAME) },
                         )
                     } else {
@@ -2348,7 +2571,6 @@ private fun SessionRoot(
                         authRepository = authRepository,
                         onBack = { navController.popBackStack() },
                         chatRepository = chatRepository,
-                        onChooseUsername = { navController.navigate(Routes.CHOOSE_USERNAME) },
                     )
                 }
                 // docs/ux/chat-folders.md section 4 — Settings > Chat folders.
@@ -2525,7 +2747,6 @@ private object Routes {
     const val RECOVERY = "settings/recovery"
     const val RECOVERY_EMAIL = "settings/recovery_email"
     const val SAVE_PHRASE = "settings/save_phrase"
-    const val CHOOSE_USERNAME = "settings/choose_username"
     const val CHANGE_USERNAME = "settings/change_username"
     const val ANTI_CENSORSHIP = "settings/anti_censorship"
     const val CHANNELS_I_SHARE = "settings/channels_i_share"

@@ -67,6 +67,10 @@ public object AccountLocalWipe {
      *  inventory walk notices a store left out). */
     internal fun runSteps(context: Context, accountIdB64: String, steps: List<Step>): List<String> {
         if (accountIdB64.isEmpty()) return emptyList()
+        // From here on the rows a signed-out account may still be written
+        // (guess budget, owed logout, recall record) are refused too, until
+        // the account lands again ([AccountStoreGate.writeUnlessWiped]).
+        AccountStoreGate.markWiped(accountIdB64)
         val app = context.applicationContext
         val failed = ArrayList<String>()
         for (step in steps) {
@@ -108,6 +112,12 @@ public object AccountLocalWipe {
             me.lakko.app.auth.DeviceIdentityStore.deleteDeviceIdentitySeed(ctx, acct)
         },
         Step("export-key") { ctx, acct -> me.lakko.app.auth.ExportKeyStore.deleteExportKey(ctx, acct) },
+        // The guest marker (`auth/GuestAccount.kt`): a plain row. (The phrase
+        // a device still owes its person is `auth/RecoveryOwed.kt`, below.)
+        Step("guest-account") { ctx, acct ->
+            me.lakko.app.auth.SharedPrefsMarkerStorage(ctx, me.lakko.app.auth.GUEST_ACCOUNT_PREFS)
+                .remove(me.lakko.app.auth.guestMarkerKey(acct))
+        },
         // One pool per account (ADR-0054, account data since 2026-10-01): this
         // account's tokens, in memory and on disk, go; other accounts' stay.
         // `under` also removes the retired device-wide `pool.json`.
@@ -152,8 +162,16 @@ public object AccountLocalWipe {
             me.lakko.app.devices.NewDeviceNoticeStore.onDevice(ctx).deleteAccount(acct)
         },
         Step("recovery-phrase") { ctx, acct -> me.lakko.app.backup.PhraseStore.deletePhrase(ctx, acct) },
+        // A guest account's phrase is kept under a key of its own
+        // (`auth/GuestAccount.kt`), so it has a step of its own.
+        Step("guest-phrase") { ctx, acct ->
+            me.lakko.app.backup.PhraseStore.deletePhrase(ctx, me.lakko.app.auth.guestPhraseKey(acct))
+        },
         Step("backup-floor") { ctx, acct -> me.lakko.app.backup.FloorStore.deleteFloor(ctx, acct) },
         Step("auto-backup") { ctx, acct -> me.lakko.app.backup.AutoBackupStore.clear(ctx, acct) },
+        // The conversation ids a restored backup named, and the restore's
+        // pending flag.
+        Step("backup-restore") { ctx, acct -> me.lakko.app.backup.BackupRestoreStore.clear(ctx, acct) },
 
         // ---- DeviceGroup + multi-device --------------------------------------
         Step("device-group-snapshot") { ctx, acct ->

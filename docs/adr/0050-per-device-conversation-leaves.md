@@ -445,8 +445,10 @@ one hook covers both. Order:
    persist; the history bundle (2.9) now lands under real groups; reconcile the
    durable cursor so the bundled tail is not re-fetched.
 
-The user sees one label, "Synchronizing...", in the chat list while any
-self-service Add for this device is pending; nothing per chat. See the UX spec.
+The user sees one label, "Synchronizing...", in the chat list while any chat
+the pairing bundle named has not arrived; nothing per chat. See the UX spec.
+The label belongs to this route only: a device restored with no other device
+alive shows none (2.9a).
 
 ### 2.9 What else must follow the device
 
@@ -464,6 +466,41 @@ with no other device alive gets its contacts only from there).
 
 Call history has no store on any client; it is out of scope here and is
 listed in `docs/PRODUCT-READINESS.md` section 5 D.
+
+### 2.9a The backup carries no MLS state (amended 2026-10-02)
+
+**Found.** The account backup carried a whole-provider MLS snapshot of the
+device that uploaded it (`BackupPayload.whole_storage_snapshot`, v2-v5). The
+web client stored it where nothing read it; iOS and Android discarded it on a
+fresh install and loaded it on a reinstall whose device key had survived,
+without checking whose state it was.
+
+**Decided.** The backup carries no MLS state (`lakko-backup` payload v6), and
+no client loads MLS state from a backup on any route. The reasons are the ones
+this ADR rests on:
+
+1. A snapshot is the state of one leaf. The signature key of that leaf never
+   leaves its device (invariant #7), so another device that loads the snapshot
+   cannot sign for the leaf it now claims to be.
+2. A snapshot is older than the journal. A device that loads one cannot read
+   its own commits published after the upload (the ADR-0040 brick) and re-uses
+   ratchet positions it has already spent (G-34). This holds for a reinstall on
+   the same device too, which is why the reinstall case is removed and not
+   merely gated on the device key.
+3. If the uploading device is still alive, two devices hold one leaf.
+
+A restored device gets what the backup does carry (contacts, the ADR-0058
+synced state, the list of known group ids) on every route that restores the
+identity from the phrase, and is admitted to its conversations by other
+members (2.5a). A backup uploaded after a restore keeps the group ids the
+restored backup named until the device has joined them, so the first upload
+after a restore no longer erases the list.
+
+**No general label.** A device restored with no other device alive shows no
+"Synchronizing..." label: it cannot know when, or whether, each conversation
+comes back. Saved history, a device that re-enters by itself and the one
+per-conversation state that replaces the label are
+[ADR-0064](0064-conversation-backup-and-device-re-entry.md).
 
 ### 2.10 Device removal
 

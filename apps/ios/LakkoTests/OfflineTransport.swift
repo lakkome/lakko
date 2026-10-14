@@ -155,7 +155,7 @@ extension AuthRepository {
         sessionStore: SessionStore = SessionStore(),
         authClientFactory: @escaping () -> AuthClient = { Offline.auth() },
         persistence: SessionPersistence = KeychainSessionPersistence(),
-        nowMs: () -> Int64 = SessionRestore.nowMs
+        nowMs: @escaping () -> Int64 = SessionRestore.nowMs
     ) -> AuthRepository {
         AuthRepository(
             sessionStore: sessionStore,

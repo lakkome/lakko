@@ -147,9 +147,46 @@ class AnonTokenPoolTest {
                 // ADR-0059 S2 contexts (`anonBatchPolicyFor`).
                 AnonTokenContext.CHANNEL_SUBSCRIBE to 2,
                 AnonTokenContext.DIRECTORY_SEARCH to 1,
+                // ADR-0064 / ADR-0065 contexts; chosen, not measured.
+                AnonTokenContext.VAULT_CLAIM to 4,
+                AnonTokenContext.BLOB_UPLOAD to 2,
+                AnonTokenContext.BLOB_READ to 2,
             ),
             firstBatch,
         )
+    }
+
+    @Test
+    fun theContextListIsTheCoresTenNamesInWireOrder() {
+        // The source of truth is `TokenContext::ALL` / `TokenContext::name` in
+        // `crates/lakko-anon-token/src/context.rs` (wire bytes 1..=10), which
+        // `anonTokenContexts()` in `crates/lakko-ffi-uniffi/src/anon_token.rs`
+        // returns in that order. The host JVM cannot load the native library,
+        // so the names are pinned here as literals: a context added to or
+        // reordered in the core must be mirrored in `AnonTokenContext` and
+        // in this list.
+        assertEquals(
+            listOf(
+                "discovery-lookup",
+                "discovery-register",
+                "invite-consume",
+                "ds-knock",
+                "push-register",
+                "channel-subscribe",
+                "directory-search",
+                "vault-claim",
+                "blob-upload",
+                "blob-read",
+            ),
+            AnonTokenContext.entries.map { it.wire },
+        )
+    }
+
+    @Test
+    fun theStorageContextsDrawSmallBatchesAndRefillWhenEmpty() {
+        assertEquals(AnonBatchPolicy(batch = 4, refillBelow = 1), anonBatchPolicyFor(AnonTokenContext.VAULT_CLAIM))
+        assertEquals(AnonBatchPolicy(batch = 2, refillBelow = 1), anonBatchPolicyFor(AnonTokenContext.BLOB_UPLOAD))
+        assertEquals(AnonBatchPolicy(batch = 2, refillBelow = 1), anonBatchPolicyFor(AnonTokenContext.BLOB_READ))
     }
 
     @Test

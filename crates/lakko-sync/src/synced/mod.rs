@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 //! State the account's own devices keep in step over the DeviceGroup
-//! (ADR-0058): chat folders, and the four older maps (flags, read cursors,
-//! drafts, conversation order).
+//! (ADR-0058): chat folders, the four older maps (flags, read cursors,
+//! drafts, conversation order), and the account's saved messages (ADR-0065
+//! section 4).
 //!
 //! ## Where the types live
 //!
@@ -11,10 +12,21 @@
 //! `devicegroup_v1.proto` messages into them when it decodes a DeviceGroup
 //! payload, and back when it composes one. So the dependency runs
 //! `lakko-mls -> lakko-sync`, never the other way, and this crate needs no
-//! protobuf. The bounds of ADR-0058 section 4 are written here once
-//! ([`entry::FolderChanges::validate`], [`entry::StateSnapshot::validate`])
-//! and the decoder calls them; the display-name character rule comes from
-//! `lakko_contacts::profile`, the one definition it has.
+//! protobuf. The bounds of ADR-0058 section 4 and of the saved-message
+//! register are written here once ([`entry::FolderChanges::validate`],
+//! [`entry::StateSnapshot::validate`]) and the decoder calls them; the
+//! display-name character rule comes from `lakko_contacts::profile`, the
+//! one definition it has.
+//!
+//! ## Saved messages
+//!
+//! One register per saved message, keyed `(conversation, message id)`,
+//! holding either the save (when, a display snapshot, the blob ids of the
+//! message's files) or a removal tombstone, folded like every other
+//! register. It rides in [`entry::FolderChanges::saved`], so a live Save or
+//! Remove is an ordinary change set and a late device gets the list in the
+//! snapshot. [`SAVED_MAX_CLIENT`] and [`SAVED_MAX_PER_CHANGE_SET`] are
+//! client-side limits, not decode bounds.
 //!
 //! - [`entry`] — the register types, their bounds and their canonical
 //!   encoding (the tie-break and the persistence element).
@@ -33,6 +45,12 @@ pub mod own_username;
 pub mod recovery_email;
 pub mod state;
 
+pub use entry::{
+    blob_id_from_slice, BlobId, SavedMessage, SavedSnapshot, SavedValue,
+    SAVED_ATTACHMENT_KIND_MAX_BYTES, SAVED_AUTHOR_MAX_BYTES, SAVED_BLOB_IDS_MAX, SAVED_BLOB_ID_LEN,
+    SAVED_EXCERPT_MAX_BYTES, SAVED_MAX_CLIENT, SAVED_MAX_PER_CHANGE_SET, SAVED_STATE_PRESENT,
+    SAVED_STATE_REMOVED,
+};
 pub use entry::{
     check_folder_name, check_own_username, check_recovery_email_address, folder_id_from_slice,
     BoundsError, CodecError, ConversationEntry, ConversationOrderEntry, ConversationRef,
@@ -60,7 +78,7 @@ pub use recovery_email::{
     RecoveryEmailEnvelopeError, RECOVERY_EMAIL_ENVELOPE_DOMAIN_V1, RECOVERY_EMAIL_ENVELOPE_MAX_LEN,
     RECOVERY_EMAIL_ENVELOPE_MIN_LEN, RECOVERY_EMAIL_ENVELOPE_VERSION_V1,
 };
-pub use state::{should_send_snapshot, ApplyOutcome, FolderView, SyncedState};
+pub use state::{should_send_snapshot, ApplyOutcome, FolderView, SavedView, SyncedState};
 
 /// The largest encoded snapshot part a sender produces (ADR-0058 section 5:
 /// 256 KiB; the DS accepts 1 MiB per publish).

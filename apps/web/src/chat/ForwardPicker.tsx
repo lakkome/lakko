@@ -236,7 +236,9 @@ export function ForwardPicker(props: ForwardPickerProps): JSX.Element {
                         </Show>
                       </div>
                       <div class="lk-row-line">
-                        <span class="lk-row-sub">{busy() ? t("common.sending") : row.preview}</span>
+                        <span class="lk-row-sub">
+                          {busy() ? t("common.sending") : row.preview}
+                        </span>
                       </div>
                     </div>
                   </button>

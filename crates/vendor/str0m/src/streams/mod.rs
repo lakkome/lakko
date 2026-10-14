@@ -430,7 +430,7 @@ impl Streams {
             }
 
             if do_nack {
-                stream.maybe_create_nack(sender_ssrc, feedback);
+                stream.maybe_create_nack(now, sender_ssrc, feedback);
             }
 
             stream.handle_timeout(now);
@@ -680,6 +680,15 @@ impl Streams {
         self.streams_rx
             .values()
             .find(|s| s.ssrc() == ssrc || s.rtx() == Some(ssrc))
+    }
+
+    // LAKKO FORK: the shortest per-stream NACK retry interval among the
+    // receive streams that send NACKs, if any has one.
+    pub(crate) fn min_nack_retry_interval(&self) -> Option<std::time::Duration> {
+        self.streams_rx
+            .values()
+            .filter_map(|s| s.nack_retry_interval())
+            .min()
     }
 
     pub(crate) fn any_nack_enabled(&mut self) -> bool {

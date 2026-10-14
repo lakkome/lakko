@@ -653,12 +653,29 @@ pub(crate) async fn check_handle(
 /// The removed handle becomes the one a later bind may restore within the
 /// minimum interval; the time of the last change is left as it was, so
 /// releasing a handle does not reopen the interval.
+///
+/// An account older than the unclaimed-account lifetime needs the fresh-auth
+/// grant in `x-lakko-fresh-grant` (`403 fresh-auth-required` otherwise).
 #[axum::debug_handler]
 pub(crate) async fn delete(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     pepper(&state)?;
+    // An account past the unclaimed-account lifetime may not drop its name
+    // on a session alone (see `unclaimed::is_past_unclaimed_lifetime`).
+    if crate::unclaimed::is_past_unclaimed_lifetime(&state.db, &auth.0)
+        .await
+        .map_err(ApiError::Db)?
+    {
+        crate::session::require_fresh_grant(
+            &state,
+            &auth.0,
+            crate::session::fresh_grant_header(&headers),
+        )
+        .await?;
+    }
     let removed = remove(&state.db, &auth.0).await.map_err(ApiError::Db)?;
     tracing::info!(
         account_id = %URL_SAFE_NO_PAD.encode(auth.0),

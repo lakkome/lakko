@@ -21,7 +21,7 @@
   under G-39; see "Phase 2 as built". Its residual (the old identity's
   leaves stay in a group the old identity owned, in a group with no role
   table, and where no admin is the person's contact) is tracked as
-  **G-44**, the stolen-session reset residual of section 2 as **G-45**. The
+  **G-45**, the stolen-session reset residual of section 2 as **G-46**. The
   maintainer's decisions of 2026-10-03 (what a reset must do) are recorded
   as given; the mechanisms are this document's and are built as written
   except where the build section says otherwise. **Phase 2 revised on
@@ -29,7 +29,7 @@
   built" is rejected and replaced by silent continuity**, where a peer
   accepts an auth-attested, KT-confirmed reset automatically and shows
   nothing; designed in "Phase 2 revised", **not built**, and the clients
-  still hold the visible flow until it is. It changes G-44's remaining
+  still hold the visible flow until it is. It changes G-45's remaining
   cases and amends invariant #6's acceptance side and
   [ADR-0016](0016-identity-supersession-transport.md).
 - **Date:** 2026-10-03
@@ -53,7 +53,8 @@
   rewritten 2026-10-04 as the silent model).
 
 Renumbered from 0065 on 2026-10-13: the main branch had taken 0064 to 0071 for
-other decisions. Commit messages before that date name this ADR as 0065.
+other decisions. Commit messages before that date name this ADR as 0065, and so do the
+migration files of this work, whose bytes are checksummed and were left as written.
 
 ## Context
 
@@ -980,7 +981,7 @@ than smoothed over:**
   contact screen to verify in; the gate blocked them before too, only the
   copy changed.
 
-**What phase 2 closes and what stays:** G-44 is closed in code for every
+**What phase 2 closes and what stays:** G-45 is closed in code for every
 group where some owner or admin that is a contact of the person runs a
 client (the old leaves are proposed out and the sweep lands when a
 committer is online); it stays **open for a group the old identity owned**
@@ -1128,7 +1129,7 @@ exception (`lakko-mls` stays untouched; nothing here adds to G-39).
 14. **The re-admission arm looks up accepted contacts only**, not every
     roster account (web `chat/BackgroundReceiveContext.tsx:639-663`, iOS
     `Chat/ChatRepository.swift:5401-5407`, Android
-    `chat/ChatRepository.kt:6833-6870`); this is G-44's "no admin is the
+    `chat/ChatRepository.kt:6833-6870`); this is G-45's "no admin is the
     person's contact" case.
 15. **Discovery deletes every KeyPackage row at an attested change** and the
     resetting device re-publishes at its next landing (section 4.1, the
@@ -1195,7 +1196,7 @@ previous key must now be **kept** on the contact (fact 7).
 **Triggers.** Every existing `identityFetch` site; the re-admission arm,
 extended from accepted contacts to every roster account whose account id the
 device knows (contact row or the profile store, ADR-0048 v2 carries it),
-which also removes G-44's "no admin is the person's contact" case; opening a
+which also removes G-45's "no admin is the person's contact" case; opening a
 one-to-one; before a send in a one-to-one whose last check is older than the
 arm's interval.
 
@@ -1472,7 +1473,7 @@ stays; a co-publisher or subscriber who reset is not re-admitted by anyone
   do not come back." The second sentence is unaffected (section 4.1).
 - **What the operator can now do.** Whoever holds the auth attest signing
   key, or whoever can authenticate as the account (password and second
-  factor, or a stolen session: G-45), can replace a contact's identity
+  factor, or a stolen session: G-46), can replace a contact's identity
   toward every peer **silently**, where before the peer was stopped and
   asked to compare. A peer that never compared a safety number has no
   defence of its own.
@@ -1506,7 +1507,7 @@ stays; a co-publisher or subscriber who reset is not re-admitted by anyone
   deliver a Welcome for its lifetime (R.4), and the new identity's device
   joins what it is added to (fact 8).
 
-**G-44's remaining cases change.** "A group the old identity owned" is
+**G-45's remaining cases change.** "A group the old identity owned" is
 handled by the successor (case 3) instead of being left; "no admin is the
 person's contact" is removed by the wider lookup (R.2); "a group with no
 role table" stays. New residuals that take their place: the window before a
@@ -2020,12 +2021,12 @@ accepted; their bodies are left as they are.
 | S6 web | `SessionTokenProvider` (3.3); the reset flow in the new order with `publish-owed`; the landing rule (4.2) with the banner and heal deleted; the signed-out screen and automatic wipe (3.5); the DS attested reset in `ds/ownership.ts` and the founder; the KeyPackage binding re-derivation check (2.3 step 5); the UX of section 15. `tsc` + vitest. **Built 2026-10-03** (`apps/web/src/auth/{session-token-provider,session-401,landing-rule,key-reset-owed,wipe-account}.ts` + `AuthContext.tsx`; `tsc` + vitest 3914 + `vite build` observed by the coordinator; not walked in a browser against a server). See "What the build changed / found". |
 | S7 iOS, S8 Android | The same model (the same-class rule: one pass, all three). `xcodebuild test`, `:app:testDebugUnitTest`. **Built 2026-10-03** (iOS `apps/ios/Lakko/Auth/{SessionTokenProvider,KeyReset,SessionPair}.swift`, `LakkoTests` 2613 on a simulator with the core rebuilt; Android `apps/android/.../auth/{SessionTokenProvider,SessionPair,KeyReset}.kt` + `transport/SessionBearerEngine.kt`, 2997 host unit tests with the native core not loaded and the `.so` not rebuilt); the token provider is a transport-seam interceptor on both, see "What the build changed / found". Not run on a device. |
 | S9 walk | Two devices per client: reset on A, B shows the signed-out screen within the access TTL and wipes; B signs in again and restores from A; A's Devices list shows A alone; the old phrase is refused and the new one accepted; `docs/PRODUCT-READINESS.md` updated from what was seen. **Open:** nothing was walked live on any device or against a server on 2026-10-03. |
-| S10 docs and security | The amendment notes in ADR-0014 / 0017 / 0050 / 0053 / 0057 / 0072; `CLAUDE.md` ADR row and module-map rows (`lakko-attest`, `lakko-auth-token`, `auth`, `discovery`, `ds`); `docs/security/invariant-index.md` (a new C-entry for "a key change at the directory is attested or proven"); `known-gaps.md` (the phase-2 gap, minted); a `lakko-security` pass on request. **Docs reconciled 2026-10-03:** the `CLAUDE.md` rows (0065 added; 0014 / 0017 / 0057 / 0064 and the five module-map rows amended), `docs/security/auth-flow.md`, `threat-model.md`, C-71 in `calls.md` + the index, G-44 (phase 2) and G-45 (the stolen-session reset) in `known-gaps.md`, `docs/PRODUCT-READINESS.md`, UX section 15. The dated notes at the top of the amended ADR files are still to be written; the `lakko-security` pass has not run. |
+| S10 docs and security | The amendment notes in ADR-0014 / 0017 / 0050 / 0053 / 0057 / 0072; `CLAUDE.md` ADR row and module-map rows (`lakko-attest`, `lakko-auth-token`, `auth`, `discovery`, `ds`); `docs/security/invariant-index.md` (a new C-entry for "a key change at the directory is attested or proven"); `known-gaps.md` (the phase-2 gap, minted); a `lakko-security` pass on request. **Docs reconciled 2026-10-03:** the `CLAUDE.md` rows (0065 added; 0014 / 0017 / 0057 / 0064 and the five module-map rows amended), `docs/security/auth-flow.md`, `threat-model.md`, C-71 in `calls.md` + the index, G-45 (phase 2) and G-46 (the stolen-session reset) in `known-gaps.md`, `docs/PRODUCT-READINESS.md`, UX section 15. The dated notes at the top of the amended ADR files are still to be written; the `lakko-security` pass has not run. |
 | Phase 2 | **Built 2026-10-04** on web, iOS and Android without the `lakko-mls` owner-slot exception (open question 6 decided: Recreate group only); the `group-closed` envelope in `lakko-contacts` + both FFI surfaces + the NSE decode arm; UX section 16; the 46 catalog keys with machine translations. See "Phase 2 as built". |
 
 ## Amended 2026-10-04: password-fresh reset grant
 
-Maintainer decision, 2026-10-04; closes the main part of G-45. Built the
+Maintainer decision, 2026-10-04; closes the main part of G-46. Built the
 same day in `crates/lakko-auth-token` and `services/auth`; the three
 clients are not wired yet, so until they are every client-side reset is
 refused `403`.
@@ -2399,7 +2400,7 @@ the ones the client reports recorded.
   a KeyPackage row of the account, including the resetting device's
   re-published one, which the other devices would then retire from chats
   (ADR-0050 re-admission). Bounded by the access TTL and self-healing at the
-  next re-publish; recorded under G-45.
+  next re-publish; recorded under G-46.
 - **DS:** an attested reset on a journal nobody claimed claims it; the
   attested arm drops the push binding, which the plain ADR-0057 root reset
   does not (that one keeps the binding and the registrar set unless one is

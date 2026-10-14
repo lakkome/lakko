@@ -79,7 +79,7 @@ public class GenesisRecordedStore(private val storage: MarkerStorage) {
 
     public fun markRecorded(accountIdB64: String, pubkeyB64: String) {
         try {
-            storage.set(KEY_PREFIX + accountIdB64, pubkeyB64)
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.set(KEY_PREFIX + accountIdB64, pubkeyB64) }
         } catch (_: Throwable) {
             // Then the mint is simply asked again at the next landing.
         }
@@ -167,7 +167,8 @@ public class LogoutOwedStore(private val storage: MarkerStorage) {
 
     public fun save(accountIdB64: String, owed: LogoutOwed) {
         try {
-            storage.set(KEY_PREFIX + accountIdB64, json.encodeToString(LogoutOwed.serializer(), owed))
+            me.lakko.app.account.AccountStoreGate.writeUnlessWiped(accountIdB64) { storage.set(KEY_PREFIX + accountIdB64, json.encodeToString(LogoutOwed.serializer(), owed)) }
+                ?: return
             val index = accounts().toMutableSet().apply { add(accountIdB64) }
             storage.set(INDEX_KEY, index.joinToString(INDEX_SEPARATOR))
         } catch (_: Throwable) {

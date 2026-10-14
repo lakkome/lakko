@@ -33,18 +33,21 @@ import org.junit.Test
 class ChatViewModelReplyTest {
     private lateinit var repo: ChatRepository
     private lateinit var vm: ChatViewModel
+    private val chats = OpenChats()
 
     @Before
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
         repo = ChatRepository(applicationContext = InMemoryContext())
-        vm = ChatViewModel(repo = repo, groupIdHex = "00".repeat(16))
+        vm = chats.open(ChatViewModel(repo = repo, groupIdHex = "00".repeat(16)))
     }
 
     @After
     fun tearDown() {
-        // Before `resetMain`: see [clearAndJoin].
-        vm.clearAndJoin()
+        // Before `resetMain` (see [OpenChats]): every test here leaves the
+        // constructor's collectors, and the send test its MLS-thread hops,
+        // resuming through Main.
+        chats.leaveAllAndSettle()
         repo.close()
         Dispatchers.resetMain()
     }
@@ -115,15 +118,9 @@ class ChatViewModelReplyTest {
         vm.onDraftChange("an answer")
         vm.onSendClicked()
         assertNull(vm.replyingTo.value)
-        // The typing signal and the send each hop to the repository's MLS
-        // thread and resume on Main. Wait for them here, while the test Main
-        // is still installed: a resumption after `resetMain` reaches the
-        // global handler and is charged to whichever `runTest` comes next in
-        // this JVM. The send's failure path is the observable (`sending`
-        // flips back), and the MLS dispatcher is one FIFO thread, so the
-        // typing tasks dispatched before it have finished by then. Joining the
-        // scope's children instead would never return: the constructor's
-        // collectors live as long as the view model.
+        // The send hops to the repository's MLS thread and resumes on Main;
+        // its failure path is the observable (`sending` flips back). Whatever
+        // is still in flight after that is waited for in `tearDown`.
         val deadline = System.nanoTime() + 10_000_000_000L
         while (vm.state.value.sending && System.nanoTime() < deadline) Thread.sleep(5)
         assertFalse(vm.state.value.sending)

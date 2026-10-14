@@ -252,10 +252,14 @@ describe("AuthContext wiring", () => {
   it("every sign-in by name records its re-bind", () => {
     // The one remaining direct closure is the sync's own bind.
     expect(src.match(/bind: \(token, handle\) => client\.bindLoginHandle/g)?.length).toBe(1);
-    // Password login, phrase recovery, the authenticator code, the
-    // password replacement from a device that holds the keys
-    // (docs/ux/identity-recovery.md 7.1) and the sign-in after the local
-    // three-word check.
-    expect(src.match(/bind: bindByName,/g)?.length).toBe(5);
+    // Password login, phrase recovery, the authenticator code and the
+    // sign-in after the local three-word check: through `bindIfCurrent`,
+    // which records it with `bindByName` unless the sign-in was overtaken
+    // by another session meanwhile.
+    expect(src.match(/bind: bindIfCurrent\(flow\),/g)?.length).toBe(4);
+    expect(src).toMatch(/flow\.current\(\) \? bindByName\(token, handle\) : Promise\.resolve\(\)/);
+    // The password replacement from a device that holds the keys
+    // (docs/ux/identity-recovery.md 7.1) runs inside a live session.
+    expect(src.match(/bind: bindByName,/g)?.length).toBe(1);
   });
 });

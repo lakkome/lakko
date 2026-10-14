@@ -236,7 +236,7 @@ public class SharedPrefsResetLedgerStore(context: Context) : ResetLedgerStore {
     override fun save(ownerAccountIdB64: String, accountIdB64: String, row: ResetLedgerRow) {
         synchronized(lock) {
             val all = loadAll(ownerAccountIdB64) + (accountIdB64 to row)
-            prefs().edit().putString(KEY_PREFIX + ownerAccountIdB64, encodeResetLedger(all)).commit()
+            me.lakko.app.account.AccountStoreGate.write(ownerAccountIdB64) { prefs().edit().putString(KEY_PREFIX + ownerAccountIdB64, encodeResetLedger(all)).commit() }
         }
     }
 

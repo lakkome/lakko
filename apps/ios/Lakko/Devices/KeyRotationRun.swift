@@ -388,6 +388,8 @@ public struct KeyRotationStore {
 
     /// Store `record`, or drop it when nothing is owed any more.
     public func put(_ record: KeyRotationRecord, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         if KeyRotationPlan.isComplete(record) {
             clear(accountIdB64: accountIdB64)
         } else if let data = try? JSONEncoder().encode(record) {
@@ -1266,11 +1268,17 @@ extension KeyRotationRunner.Ports {
                 guard let auth else { throw SessionNotReady() }
                 try await KeyRotationBackup.reseal(
                     chatBootstrapped: chat?.state.bootstrapped ?? false,
-                    snapshot: { chat?.currentStorageSnapshot() },
-                    knownGroupIdsHex: { chat?.knownGroupIdHexes ?? [] },
-                    upload: { snapshot, groupIds in
+                    // The groups this device holds plus the conversations a
+                    // restored backup named that it has not joined yet, as
+                    // every other upload lists them.
+                    knownGroupIdsHex: {
+                        let own = chat?.knownGroupIdHexes ?? []
+                        guard let secrets = auth.identitySecrets else { return own }
+                        return RestoredKnownGroupsStore.uploadGroupIds(
+                            accountIdB64: base64Encode(secrets.accountId), own: own)
+                    },
+                    upload: { groupIds in
                         try await auth.resealBackupAfterKeyRotation(
-                            wholeStorageSnapshot: snapshot,
                             knownGroupIdsHex: groupIds,
                             syncedState: auth.identitySecrets.flatMap {
                                 SyncedStateStore.bytes(accountIdB64: base64Encode($0.accountId))
@@ -1293,25 +1301,23 @@ enum KeyRotationBackup {
     enum NotReady: Error, Equatable {
         /// The chat layer has not bootstrapped: its group list is not known.
         case chatNotBootstrapped
-        /// No MLS storage snapshot could be taken, or it is empty.
-        case noSnapshot
     }
 
     /// Re-seal and upload, or throw. Returns only when `upload` returned,
     /// which it does only for an accepted upload. A chat layer that is not
-    /// ready throws before `upload` is called: an envelope with an empty
-    /// snapshot would overwrite the one the server holds.
+    /// ready throws before `upload` is called: an envelope listing no
+    /// conversation would overwrite the list the server holds.
+    ///
+    /// The envelope carries NO MLS state (the account backup never does), so
+    /// there is no snapshot to wait for.
     @MainActor
     static func reseal(
         chatBootstrapped: Bool,
-        snapshot: @MainActor () -> Data?,
         knownGroupIdsHex: @MainActor () -> [String],
-        upload: @MainActor (_ snapshot: Data, _ knownGroupIdsHex: [String]) async throws -> Void
+        upload: @MainActor (_ knownGroupIdsHex: [String]) async throws -> Void
     ) async throws {
         guard chatBootstrapped else { throw NotReady.chatNotBootstrapped }
-        guard var taken = snapshot(), !taken.isEmpty else { throw NotReady.noSnapshot }
-        defer { taken.resetBytes(in: 0..<taken.count) }
-        try await upload(taken, knownGroupIdsHex())
+        try await upload(knownGroupIdsHex())
     }
 }
 

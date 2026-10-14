@@ -319,22 +319,16 @@ public final class ContactsViewModel: ObservableObject {
         repositoryState.accepted.first { $0.request.messageId == messageId }
     }
 
-    /// The 1x1 chat with this contact: the one the accept flow created, else
-    /// the two-person chat whose other member holds the contact's key (the
-    /// case where the OTHER side accepted and the Welcome created the chat
-    /// here). A read over the live rosters, no state change.
+    /// The 1x1 chat with this contact: the one linked on the contact record
+    /// while this device still holds it, else the one-to-one whose two people
+    /// are this account and the contact (the case where the OTHER side
+    /// accepted and the Welcome created the chat here). The rule is
+    /// ``ContactConversation``, shared with the call screen's
+    /// `Invite contacts`. A read over the live rosters, no state change.
     public func chatGroupIdHex(for contact: AcceptedContact) -> String? {
         guard let chatRepository else { return contact.groupIdHex }
-        // The linked id is an address only while this device still holds the
-        // chat: a link whose chat is gone (deleted here, or never present on
-        // this device) opened a dead chat - seen live on web 2026-09-26, and
-        // the same trust existed here.
-        let known = chatRepository.conversationHeadIdHexes
-        let key = contact.request.fromPubkey
-        if let linked = contact.groupIdHex, known.contains(linked) { return linked }
-        return known.first {
-            chatRepository.oneToOnePeerSignatureKey(groupIdHex: $0) == key
-        }
+        return chatRepository.oneToOneConversation(
+            contactKey: contact.request.fromPubkey, linkedGroupIdHex: contact.groupIdHex)
     }
 
     /// The accepted contact on the other side of a conversation between two
@@ -486,6 +480,9 @@ public final class ContactsViewModel: ObservableObject {
             }
             activeInvitesLoaded = true
         } catch {
+            // The screen was left while the list was loading: not a failure
+            // of the load. The next visit loads it again.
+            if Cancellation.endedByCancellation(error) { return }
             activeInvitesError = Self.contactsErrorText(for: error, fallbackKey: "invite.links.error.load")
         }
     }

@@ -25,6 +25,7 @@
  * credential this device already holds, not a server limit (see
  * `three-words.ts`).
  */
+import { isAbandoned } from "../binding-epoch";
 import { createEffect, createResource, createSignal, onMount, Show, untrack, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { AuthHttpError } from "../client";
@@ -143,6 +144,8 @@ export function WordsRecover(props: {
     } catch (err) {
       // The words matched (or the check could not run); nothing here is a
       // wrong guess, so the budget is not charged.
+      // Overtaken by another session on this device: nothing to report.
+      if (isAbandoned(err)) return;
       const secs = attemptsRetryAfterSecs(err);
       if (err instanceof ThreeWordsSuspendedError) {
         // The phrase stored here did not sign in (most likely a new identity

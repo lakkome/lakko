@@ -160,9 +160,6 @@ public fun RecoveryEmailScreen(
     onDone: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
-    /** Opens "Choose a username" for an account that has none; `null`
-     *  where the surface cannot navigate there (the line is then plain). */
-    onChooseUsername: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -283,14 +280,10 @@ public fun RecoveryEmailScreen(
         modifier = modifier,
     ) {
         if (username.isBlank()) {
-            // A guest account: the stored value is made from the username.
-            if (onChooseUsername != null) {
-                Lead(t("recovery_email.needs_username"))
-                Spacer(Modifier.height(16.dp))
-                BusyButton(label = t("username.claim.title"), busy = false, onClick = onChooseUsername)
-            } else {
-                Lead(t("recovery_email.needs_username"))
-            }
+            // An account with no username: the stored value is made from
+            // it. (A guest never reaches this screen: it is asked to create
+            // an account after its call, docs/ux/call-links.md section 9.)
+            Lead(t("recovery_email.needs_username"))
             return@AuthScaffold
         }
         if (unavailable || status?.available == false) {

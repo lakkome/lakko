@@ -255,6 +255,9 @@ public class SignupViewModel internal constructor(
                     it.copy(busy = false, solving = false, error = userFacingDiscoveryError(err))
                 }
             } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableState.update { it.copy(busy = false, solving = false) }
+                }
                 mutableState.update {
                     it.copy(busy = false, solving = false, error = GENERIC)
                 }

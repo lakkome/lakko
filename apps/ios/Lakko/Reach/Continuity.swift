@@ -103,6 +103,8 @@ public enum Continuity {
 
     /// Record this device's own reset (the reset's client order).
     public static func writeMarker(_ marker: Marker, accountIdB64: String, defaults: UserDefaults = .standard) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         guard let raw = try? JSONEncoder().encode(marker) else { return }
         defaults.set(raw, forKey: markerPrefix + accountIdB64)
     }

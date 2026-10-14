@@ -94,12 +94,8 @@ struct CoPublishersPanel: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .accessibilityLabel(l10n.t(copied ? "common.copied" : "chat.invite_link.copy"))
-                ShareLink(item: link) {
-                    Image(systemName: "square.and.arrow.up")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityLabel(l10n.t("chat.invite_link.share"))
+                // Copy is the whole of it: a link is never handed to the
+                // system's share sheet.
             }
             .padding(10)
             .background(Color.lakkoSurfaceSunken)

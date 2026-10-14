@@ -24,14 +24,24 @@ import SwiftUI
 ///     — no media before the group is joined). If no committer responds within
 ///     the admission window the call is dead.
 ///
-/// ## Guest join (no login required, ADR-0032 UX)
+/// ## Guest join (no login required, ADR-0032, docs/ux/call-links.md section 9)
 ///
-/// An anonymous visitor (no session) joins WITHOUT logging in: on tapping Join
-/// we auto-create a FULL, username-less account via ``AuthRepository/signupGuest()``
-/// (the audited PoW-gated signup). ADR-0075 D2: the recovery phrase is not
-/// shown at sign-up, a guest's included, so the session lands directly and —
-/// because the call slug stays parked in ``InviteIntake`` with the auto-resume
-/// flag armed — the re-mounted landing continues the join automatically.
+/// A visitor with no session joins without an account of their own making: on
+/// `Join` a guest account is created silently
+/// (``AuthRepository/signupGuest(onCommitting:onAccountReady:)``, the audited
+/// PoW-gated signup without a username) and the call starts as soon as its
+/// session lands. No recovery phrase is shown first: a person who was sent a
+/// link wants the call. The session landing replaces the anonymous root with
+/// ``GuestRoot``, which re-mounts this landing; because the call slug stays
+/// parked in ``InviteIntake`` with the auto-resume flag armed, the re-mounted
+/// landing continues the join automatically.
+///
+/// Once the guest is not in the call (it ended, it is dead, the join failed,
+/// the app was reopened) this screen asks whether to keep the account
+/// (``GuestOfferQuestion``): `Create account` takes a username and a password
+/// and then lands on "Protect your account" (ADR-0075 D2: the recovery phrase
+/// is not shown); `No, thanks` deletes the account at once. An account left
+/// unanswered is deleted by the servers after a day.
 @MainActor
 public final class JoinCallLandingViewModel: ObservableObject {
 
@@ -85,11 +95,19 @@ public final class JoinCallLandingViewModel: ObservableObject {
     @Published public private(set) var creatingGuest = false
     /// The guest sign-up in flight; cancelled on Back / Cancel until the
     /// account is being committed.
-    private var guestTask: Task<SignupOutcome, Error>?
+    private var guestTask: Task<Void, Error>?
     private var guestCommitting = false
+
+    /// Creates the guest account. ``AuthRepository/signupGuest(onCommitting:onAccountReady:)``
+    /// in the app; a test replaces it to drive the latches below.
+    typealias GuestSignup = @MainActor (
+        _ onCommitting: @escaping @MainActor () -> Void,
+        _ onAccountReady: @escaping @MainActor (_ accountIdB64: String) -> Void
+    ) async throws -> Void
 
     private let slug: String
     private let authRepository: AuthRepository
+    private let guestSignup: GuestSignup
     private let intake: InviteIntake
     /// The call itself lives here, app-wide, so it survives this screen.
     let linkCallHost: LinkCallHost
@@ -101,9 +119,19 @@ public final class JoinCallLandingViewModel: ObservableObject {
     private var mintingGuest = false
     private var beginning = false
 
-    init(slug: String, authRepository: AuthRepository, intake: InviteIntake, linkCallHost: LinkCallHost) {
+    init(
+        slug: String,
+        authRepository: AuthRepository,
+        intake: InviteIntake,
+        linkCallHost: LinkCallHost,
+        guestSignup: GuestSignup? = nil
+    ) {
         self.slug = slug
         self.authRepository = authRepository
+        self.guestSignup = guestSignup ?? { [authRepository] onCommitting, onAccountReady in
+            try await authRepository.signupGuest(
+                onCommitting: onCommitting, onAccountReady: onAccountReady)
+        }
         self.intake = intake
         self.linkCallHost = linkCallHost
         // The host's slot is what this screen shows once the call is started.
@@ -146,10 +174,11 @@ public final class JoinCallLandingViewModel: ObservableObject {
             didDecode = true
             await decode()
         }
-        // Guest-join resume (web `pendingJoin` effect): once `signupGuest` +
-        // the session it lands (no phrase screen since ADR-0075), continue the parked
-        // join automatically. The short-circuit means the one-shot flag is only
-        // consumed when we actually have a valid, live-session decode.
+        // Guest-join resume (web `pendingJoin` effect): once `signupGuest` has
+        // landed a session and the guest root re-mounted this landing, continue
+        // the parked join automatically. The short-circuit means the one-shot
+        // flag is only consumed when we actually have a valid, live-session
+        // decode.
         if let decoded, decoded.valid,
             authRepository.identitySecrets != nil,
             intake.consumeCallJoinAutoResume() {
@@ -167,8 +196,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
     }
 
     /// Tap Join: use the live session if there is one, else create a guest
-    /// account first (username-less full account) and resume after the phrase is
-    /// saved.
+    /// account first (username-less full account) and go on into the call.
     public func onStart(_ decoded: Decoded) async {
         if let mine = linkCallHost.slot(forCallIdHex: decoded.callIdHex),
            LinkCallHostRules.occupiesSlot(mine.phase) {
@@ -183,10 +211,10 @@ public final class JoinCallLandingViewModel: ObservableObject {
             await beginJoin(decoded)
             return
         }
-        // No session — mint a guest account. ADR-0075 D2: its phrase is not
-        // shown; the session lands directly and the resume effect above
-        // continues the join. The synchronous latch makes
-        // a rapid double-tap idempotent — never two guest accounts.
+        // No session — mint a guest account. Its session lands at once and the
+        // guest root re-mounts this landing; the resume step in `onAppear`
+        // continues the join there. The synchronous latch makes a rapid
+        // double-tap idempotent — never two guest accounts.
         if mintingGuest { return }
         if guestNameError != nil {
             localPhase = .error(UiText { [weak self] in self?.guestNameError ?? "" })
@@ -199,38 +227,49 @@ public final class JoinCallLandingViewModel: ObservableObject {
         intake.armCallJoinAutoResume()
         creatingGuest = true
         guestCommitting = false
-        let task = Task { @MainActor [authRepository] in
-            try await authRepository.signupGuest(onCommitting: {
-                self.guestCommitting = true
-            })
+        let task = Task { @MainActor [guestSignup] in
+            try await guestSignup(
+                { self.guestCommitting = true },
+                { accountIdB64 in
+                    // The guest account exists and its session is about to
+                    // land: keep the name as its own profile and make it the
+                    // active one, so the call the re-mounted landing starts
+                    // shows it on the own tile and announces it to the others.
+                    do {
+                        try ProfileDirectory.shared.setOwnDisplayName(
+                            nameSnapshot, accountIdB64: accountIdB64)
+                    } catch {
+                        NSLog("ADR-0048 guest name not saved: \(error)")
+                    }
+                    ProfileDirectory.shared.activate(accountIdB64: accountIdB64, username: nil)
+                })
         }
         guestTask = task
         defer {
             guestTask = nil
             creatingGuest = false
+            // The latch covers one attempt, not the life of the screen: once
+            // it is over a tap takes the signed-in branch above; and if that
+            // guest account is later deleted while this screen is still up
+            // (`No, thanks`), Join has to work again (found live on web
+            // 2026-10-02: it did nothing).
+            mintingGuest = false
         }
         do {
-            _ = try await task.value
-            // The guest account exists and its session landed, so its id is
-            // known: keep the name as its own profile, published into every
-            // group it later joins.
-            if case .session(let account) = authRepository.state {
-                do {
-                    try ProfileDirectory.shared.setOwnDisplayName(
-                        nameSnapshot, accountIdB64: account.accountIdB64)
-                } catch {
-                    NSLog("ADR-0048 guest name not saved: \(error)")
-                }
-            }
+            try await task.value
+            // The session landed; the guest root's landing takes over from
+            // here. This one shows the Join button again if it outlives the
+            // guest account.
+            if localPhase == .starting { localPhase = .idle }
         } catch {
-            mintingGuest = false // allow a retry after a failed mint
-            intake.clearCallJoin() // clears the auto-resume flag too
+            // Nothing landed, so nothing is resumed. The slug stays parked:
+            // the landing stays up for the retry.
+            _ = intake.consumeCallJoinAutoResume()
             if task.isCancelled || error is CancellationError {
                 // Back / Cancel while the account was being created.
                 localPhase = .idle
                 return
             }
-            // Re-park the slug so the landing stays reachable for the retry.
             NSLog("join-call: guest account not created: \(error)")
             localPhase = .error(UiText {
                 AuthErrorCopy.shared(error) ?? Localization.text("auth.signup.error.generic")
@@ -251,6 +290,10 @@ public final class JoinCallLandingViewModel: ObservableObject {
 
     /// `true` when this device has no session, so joining creates a guest.
     public var joinsAsGuest: Bool { authRepository.identitySecrets == nil }
+
+    /// A guest account was just deleted on this device (`No, thanks`); the
+    /// landing says so above the Join button.
+    public var guestAccountDeleted: Bool { authRepository.guestAccountDeleted }
 
     /// Leave this screen. A call still starting or waiting for admission keeps
     /// going (its status shows on every other screen); an outcome already shown
@@ -355,6 +398,13 @@ public final class JoinCallLandingViewModel: ObservableObject {
             )
             loading = false
         } catch {
+            // The screen was left while the link was being fetched. Nothing
+            // failed: keep the loading state and let the next appearance
+            // fetch it again, rather than show a link that "does not work".
+            if Cancellation.endedByCancellation(error) {
+                didDecode = false
+                return
+            }
             NSLog("join-call: decode/verify failed: %@", String(describing: error))
             decoded = nil
             rateLimited = DiscoveryClientError.isRateLimited(error)
@@ -373,16 +423,22 @@ public final class JoinCallLandingViewModel: ObservableObject {
         if beginning { return }
         beginning = true
         localPhase = .starting
-        let outcome = await linkCallHost.start(
-            LinkCallHost.Request(
-                slug: slug,
-                callId: decoded.callId,
-                ownerAccountId: decoded.ownerAccountId,
-                ownerSignatureKey: decoded.ownerSignatureKey,
-                mediaVideo: decoded.mediaVideo,
-                isOwner: decoded.isOwner
-            )
+        // The call belongs to the app-level host, not to this screen: a call
+        // still starting keeps going when the person leaves (``exit()``). The
+        // auto-resume reaches here from the screen's `.task`, which is
+        // cancelled on leaving, and a cancelled start would be filed on the
+        // host's slot as a call that failed. So the start is not this task's
+        // to cancel.
+        let host = linkCallHost
+        let request = LinkCallHost.Request(
+            slug: slug,
+            callId: decoded.callId,
+            ownerAccountId: decoded.ownerAccountId,
+            ownerSignatureKey: decoded.ownerSignatureKey,
+            mediaVideo: decoded.mediaVideo,
+            isOwner: decoded.isOwner
         )
+        let outcome = await Cancellation.shielded { await host.start(request) }
         beginning = false
         switch outcome {
         case .started, .alreadyInThisCall:
@@ -404,10 +460,26 @@ public struct JoinCallLandingScreen: View {
     @StateObject private var viewModel: JoinCallLandingViewModel
     @ObservedObject private var l10n = Localization.shared
     private let onDone: () -> Void
+    /// The guest's one question (`docs/ux/call-links.md` section 5), when the
+    /// session is a guest account: drawn whenever the guest is not in the
+    /// call, in place of `Close` (this landing is the guest's screen; there is
+    /// no app behind it to close to). `nil` for everyone else.
+    private let guestOffer: GuestAccountOfferModel?
 
     public init(viewModel: JoinCallLandingViewModel, onDone: @escaping () -> Void) {
         self._viewModel = StateObject(wrappedValue: viewModel)
         self.onDone = onDone
+        self.guestOffer = nil
+    }
+
+    init(
+        viewModel: JoinCallLandingViewModel,
+        guestOffer: GuestAccountOfferModel?,
+        onDone: @escaping () -> Void
+    ) {
+        self._viewModel = StateObject(wrappedValue: viewModel)
+        self.onDone = onDone
+        self.guestOffer = guestOffer
     }
 
     public var body: some View {
@@ -415,6 +487,15 @@ public struct JoinCallLandingScreen: View {
             .task { await viewModel.onAppear() }
             .onAppear { viewModel.setVisible(true) }
             .onDisappear { viewModel.setVisible(false) }
+            // A call that ends while this screen is up sends a signed-in person
+            // back into the app (`docs/ux/call-links.md` section 5). A guest
+            // stays: this screen is where they are asked about an account.
+            .onChange(of: viewModel.phase) { _, phase in
+                if phase == .ended && guestOffer == nil {
+                    viewModel.exit()
+                    onDone()
+                }
+            }
     }
 
     @ViewBuilder
@@ -446,6 +527,12 @@ public struct JoinCallLandingScreen: View {
                     .foregroundStyle(.secondary)
                 closeButton
             } else if let decoded = viewModel.decoded {
+                if viewModel.guestAccountDeleted {
+                    Text(l10n.t("guest.offer.deleted"))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
                 if let host = hostName(decoded) {
                     Text(l10n.t("call.link.host", texts: ["name": host]))
                         .font(.footnote)
@@ -488,9 +575,15 @@ public struct JoinCallLandingScreen: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(viewModel.joinsAsGuest && viewModel.guestNameError != nil)
-            // No login required: a joiner with no session gets a full,
-            // username-less guest account (signupGuest) on tap.
-            closeButton
+            // No login required: a visitor with no session joins as a guest,
+            // and is told so before pressing.
+            if viewModel.joinsAsGuest && !decoded.isOwner {
+                Text(l10n.t("call.guest.note"))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            afterCall
         case .starting:
             if viewModel.creatingGuest {
                 // `docs/ux/anti-abuse.md` section 1 — the guest account's one
@@ -520,11 +613,11 @@ public struct JoinCallLandingScreen: View {
         case .dead:
             Text(l10n.t("call.link.dead"))
                 .multilineTextAlignment(.center)
-            closeButton
+            afterCall
         case .ended:
             Text(l10n.t("call.link.ended"))
                 .multilineTextAlignment(.center)
-            closeButton
+            afterCall
         case .busy(let message):
             Text(message.text)
                 .multilineTextAlignment(.center)
@@ -538,6 +631,19 @@ public struct JoinCallLandingScreen: View {
                 .multilineTextAlignment(.center)
             Button(l10n.t("common.try_again")) { viewModel.tryAgain() }
                 .buttonStyle(.bordered)
+            afterCall
+        }
+    }
+
+    /// What follows when the visitor is not in the call: a guest is asked
+    /// whether to keep the account; anyone else gets the way out of the
+    /// landing.
+    @ViewBuilder
+    private var afterCall: some View {
+        if let guestOffer {
+            GuestOfferQuestion(model: guestOffer)
+                .padding(.top, 8)
+        } else {
             closeButton
         }
     }

@@ -59,9 +59,11 @@ public class PushRouteStore(context: Context) {
      * secret persist (mint + receive).
      */
     public fun put(accountIdB64: String, pushGidHex: String, groupIdHex: String) {
-        prefs.edit()
-            .putString(keyFor(accountIdB64, pushGidHex), groupIdHex.lowercase())
-            .apply()
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            prefs.edit()
+                .putString(keyFor(accountIdB64, pushGidHex), groupIdHex.lowercase())
+                .apply()
+        }
     }
 
     /**
@@ -81,7 +83,9 @@ public class PushRouteStore(context: Context) {
      * the row is absent.
      */
     public fun remove(accountIdB64: String, pushGidHex: String) {
-        prefs.edit().remove(keyFor(accountIdB64, pushGidHex)).apply()
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            prefs.edit().remove(keyFor(accountIdB64, pushGidHex)).apply()
+        }
     }
 
     /**

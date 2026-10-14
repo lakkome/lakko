@@ -28,6 +28,7 @@ use lakko_svc_sfu::{
 };
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     dotenv_in_debug();
@@ -70,17 +71,46 @@ async fn main() -> anyhow::Result<()> {
     // with no advertisable host-candidate address, and the
     // media task re-applies the same rules before binding.
     let media_handle = if let Some(bind) = cfg.media_bind {
-        let (handle, advertised) = media::spawn_media_task_advertising(
+        let (handle, advertised) = media::spawn_media_task_with_bitrate_control(
             bind,
             cfg.media_advertise_ip,
             peers.clone(),
-            cfg.media_diagnostics,
+            media::MediaTaskOptions {
+                diagnostics: cfg.media_diagnostics,
+                video_fec: cfg.video_fec,
+                uplink_fallback: cfg.uplink_fallback,
+                protection: cfg.protection,
+                downlink_control: cfg.downlink_control,
+            },
+            cfg.bitrate_control,
         )
         .await?;
+        // Who decides a publisher's bitrate (ADR-0068), once at startup.
+        match cfg.bitrate_control {
+            media::BitrateControl::Client => info!(
+                bitrate_control = cfg.bitrate_control.as_str(),
+                "media: publishers decide their own bitrate (transport-wide feedback)"
+            ),
+            media::BitrateControl::Server(estimator) => info!(
+                bitrate_control = cfg.bitrate_control.as_str(),
+                start_kbps = estimator.start_bps / 1000,
+                max_kbps = estimator.max_bps / 1000,
+                "media: the SFU decides publishers' bitrate (no transport-cc; REMB)"
+            ),
+        }
         info!(
             media_bind = %bind,
             media_advertised_addr = %advertised,
             media_diagnostics = ?cfg.media_diagnostics,
+            video_fec = cfg.video_fec,
+            uplink_fallback = cfg.uplink_fallback,
+            light_duplicate = cfg.protection.light_duplicate,
+            playout_delay = cfg.protection.playout_delay,
+            burst_keyframe = cfg.protection.burst_keyframe,
+            video_needed = cfg.protection.video_needed,
+            publish_budget = cfg.protection.publish_budget
+                && matches!(cfg.bitrate_control, media::BitrateControl::Server(_)),
+            downlink_control = cfg.downlink_control,
             "media: UDP socket bound; routing task spawned; ICE host candidate advertised"
         );
         Some(handle)

@@ -18,6 +18,7 @@
  * written in the clear.
  */
 
+import { accountStoresWritable } from "../../auth/account-store-gate";
 import {
   decodeSyncState,
   encodeSyncState,
@@ -154,6 +155,7 @@ export async function saveSyncState(
     if (onlyIfGeneration !== undefined && syncStateGeneration(accountId) !== onlyIfGeneration) {
       return;
     }
+    if (!accountStoresWritable(accountId)) return;
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put({ accountId, ciphertext } satisfies PersistedRow);
     await awaitTx(tx);
@@ -184,20 +186,25 @@ export async function deleteSyncState(accountId: string): Promise<void> {
  * Merge a restored backup's synced state into this account's stored row
  * (ADR-0058 section 5.2). Always a merge, never "seed only when empty": the
  * fold keeps the newer register from each side. `merge` combines two fold
- * byte strings (`mergeRestoredFold` over the wasm core); the pending folder
- * edits already stored are kept as they are.
+ * byte strings (`mergeRestoredFoldBytes` over the wasm core) and answers
+ * `null` when the backup's bytes hold nothing this build can read, in which
+ * case nothing is written; the pending folder edits already stored are kept
+ * as they are. Resolves `true` when a row was written.
  */
 export async function mergeSyncStateFromBackup(
   accountId: string,
   deviceKey: CryptoKey | null,
   synced: Uint8Array,
-  merge: (local: Uint8Array | null, backup: Uint8Array) => Uint8Array,
-): Promise<void> {
-  if (deviceKey === null || synced.length === 0) return;
+  merge: (local: Uint8Array | null, backup: Uint8Array) => Uint8Array | null,
+): Promise<boolean> {
+  if (deviceKey === null || synced.length === 0) return false;
   const existing = await loadSyncState(accountId, deviceKey);
   const local = existing !== null && existing.synced.length > 0 ? existing.synced : null;
+  const merged = merge(local, synced);
+  if (merged === null) return false;
   await saveSyncState(accountId, deviceKey, {
-    synced: merge(local, synced),
+    synced: merged,
     pending: existing?.pending ?? [],
   });
+  return true;
 }

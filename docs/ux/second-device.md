@@ -22,9 +22,17 @@ admitted to any of the account's chats, the chat list header shows
 the list as they arrive, fully usable. When nothing is pending the label
 disappears. That is the whole surface.
 
-After a restore with no other live device, the same "Synchronizing..." shows
-while contacts re-admit this device; there is nothing else to say to the user.
-The ADR-0049 "Your identity is restored" block is removed.
+The label is for a device added while another device of the account is
+alive: the pairing bundle names the account's chats, so the list is known and
+finite, and the label ends when the last one arrives.
+
+After a restore with no other live device there is no label (decided
+2026-10-02). The device does not know when, or whether, each chat will come
+back, so one label over the whole list would either never end or end without
+meaning anything. Chats appear as members admit the device. Saved history
+and the one per-chat state (waiting) that replaces this label on every route
+are [`conversation-backup.md`](conversation-backup.md) (ADR-0064, proposed).
+The ADR-0049 "Your identity is restored" block stays removed.
 
 The old device shows nothing extra during pairing beyond the existing
 "Device added". The fan-out runs on the journal and needs no screen.
@@ -68,17 +76,19 @@ gives the same answer). Unbuilt.
 ## 5. Failures
 
 Anything that keeps a chat from admitting the device (peer offline, cap
-reached, a bad binding) is not surfaced per chat. "Synchronizing..." stays,
-the request stays on the journal, and the re-admission rule finishes it when
-a member is online. The only user-facing error is the device cap, shown on the
+reached, a bad binding) is not surfaced per chat. After a pairing
+"Synchronizing..." stays while a chat the bundle named is still missing; the
+request stays on the journal, and the re-admission rule finishes it when a
+member is online. The only user-facing error is the device cap, shown on the
 **adding** device at pairing time: "Up to 8 devices per account. Remove one
 first." A device whose binding is rejected by peers is a client bug, logged,
 not a screen.
 
 ## 6. Data the UI needs
 
-- Whether any self-service Add for this device is still pending in any of
-  the account's known groups (one boolean drives "Synchronizing...").
+- Whether any chat the pairing bundle named has not been joined yet (one
+  boolean drives "Synchronizing..."). A restore from the phrase sets nothing
+  here.
 - Per member: the resolved account key (people, not leaves, in every list).
 - Per device in the DeviceGroup roster: binding `issued_at`, self flag.
 - Whether this device's own DeviceGroup is still active (`DeviceGroup.isActive`),
