@@ -182,12 +182,23 @@ describe("new words are shown only to a phrase-protected account (alignment A an
     expect(rule).toBeLessThan(body.indexOf("readDevicePhraseWith("));
   });
 
-  it("a recall records whether the account had a saved phrase before anything is sent", () => {
+  it("a recall takes whether the account had a saved phrase before anything is sent", () => {
     const start = ctx.indexOf("function runRecall(");
     const body = ctx.slice(start, ctx.indexOf("\n  }\n", start));
-    const flag = body.indexOf("setPhraseProtected(plainStorage(), accountIdB64, check.status.phraseArm);");
-    expect(flag).toBeGreaterThan(0);
-    expect(flag).toBeLessThan(body.indexOf("await client.recallPrepare("));
+    // Taken from the anchor check before the request leaves, and kept with
+    // the attempt so a lost answer found later reads the same.
+    const taken = body.indexOf("phraseArm = check.status.phraseArm;");
+    expect(taken).toBeGreaterThan(0);
+    expect(taken).toBeLessThan(body.indexOf("await client.recallPrepare("));
+    expect(body.indexOf("phraseArm = earlier.phraseArm;")).toBeGreaterThan(0);
+    // Written once the recall landed and the staged wipe's seal was lifted
+    // (`account-store-gate.ts`): a write made while the account is sealed is
+    // dropped. Before the landing's own steps read it.
+    const opened = body.indexOf("openStoresFor(accountIdB64);");
+    const flag = body.indexOf("setPhraseProtected(plainStorage(), accountIdB64, phraseArm);");
+    expect(opened).toBeGreaterThan(body.indexOf("await client.recallFinish(prepared);"));
+    expect(flag).toBeGreaterThan(opened);
+    expect(flag).toBeLessThan(body.indexOf("await adoptKeyResetOutcome("));
   });
 
   it("the reset / guest phrase screen lands by itself when no words are shown", () => {

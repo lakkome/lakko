@@ -105,7 +105,13 @@ enum AcceptedContactsStore {
     /// Persist one account's accepted contacts. A best-effort write — an
     /// encode failure (impossible for the all-`Codable` model) leaves the
     /// prior value in place rather than clearing it.
+    ///
+    /// Not written once the account's session has ended
+    /// (``AccountStoreGate``): the writers include the restore and the
+    /// pairing state bundle, which run off the main actor or after a wait.
     static func save(_ accepted: [AcceptedContact], accountIdB64: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard let data = try? JSONEncoder().encode(accepted) else { return }
         defaults.set(data, forKey: storageKey(accountIdB64: accountIdB64))
     }

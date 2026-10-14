@@ -40,7 +40,13 @@ public enum ChannelSubscriberKeyStore {
     }
 
     /// Persist the encoded keypair `blob`, replacing any existing item.
+    ///
+    /// Not written once the account's session has ended
+    /// (``AccountStoreGate``): channel work still in flight then (a poll, an
+    /// approve, a rotation) must not put a forgotten account's keys back.
     public static func save(_ blob: Data, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         delete(accountIdB64: accountIdB64)
         let addQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,

@@ -112,6 +112,11 @@ struct UserDefaultsProfilePersistence: ProfilePersistence {
     }
 
     func save(_ data: Data, accountIdB64: String) {
+        // Refused once the account's session ended (``AccountStoreGate``): a
+        // profile accepted from a poll that outlived the session must not
+        // land after Forget device removed the map.
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         defaults.set(data, forKey: keyPrefix + accountIdB64)
     }
 
@@ -297,12 +302,18 @@ struct OwnProfileStore {
     /// when it is STRICTLY newer, so two saves in the same millisecond — or a
     /// device clock that stepped backwards — must still produce an update
     /// every peer accepts.
+    ///
+    /// Nothing is written once the account's session has ended
+    /// (``AccountStoreGate``); a caller that goes on to publish checks the
+    /// gate itself first (``ProfileDirectory/setOwnDisplayName(_:accountIdB64:)``).
     @discardableResult
     func save(displayName: String?, accountIdB64: String, nowMs: UInt64) -> OwnProfile {
         let previous = load(accountIdB64: accountIdB64)?.updatedAtMs ?? 0
         let stamp = max(nowMs, previous &+ 1)
         let profile = OwnProfile(displayName: displayName, updatedAtMs: stamp)
-        if let data = try? JSONEncoder().encode(profile) {
+        if let data = try? JSONEncoder().encode(profile),
+           let gate = AccountStoreGate.enter(accountIdB64) {
+            defer { gate.leave() }
             defaults.set(data, forKey: keyPrefix + accountIdB64)
         }
         return profile
@@ -312,7 +323,9 @@ struct OwnProfileStore {
     /// another of this account's devices set (ADR-0048 section 4a). Never
     /// re-stamped, or the next device it reaches would order it wrongly.
     func store(_ profile: OwnProfile, accountIdB64: String) {
-        if let data = try? JSONEncoder().encode(profile) {
+        if let data = try? JSONEncoder().encode(profile),
+           let gate = AccountStoreGate.enter(accountIdB64) {
+            defer { gate.leave() }
             defaults.set(data, forKey: keyPrefix + accountIdB64)
         }
     }

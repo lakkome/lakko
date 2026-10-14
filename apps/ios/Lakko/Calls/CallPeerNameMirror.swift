@@ -111,6 +111,9 @@ public enum CallPeerNameMirror {
         defaults: UserDefaults? = SharedStorage.sharedDefaults()
     ) {
         guard let defaults else { return }
+        // Not written once the account's session has ended (``AccountStoreGate``).
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         let storageKey = key(accountIdB64, groupIdHex)
         let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty else {

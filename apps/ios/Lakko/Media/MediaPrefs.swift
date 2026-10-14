@@ -76,8 +76,12 @@ public struct MediaPrefs {
     }
 
     public func markPlayed(_ key: String) {
-        guard let storageKey = playedStorageKey else { return }
-        var list = playedKeys()
+        guard let account = accountIdB64() else { return }
+        // Not written once the account's session has ended (``AccountStoreGate``).
+        guard let gate = AccountStoreGate.enter(account) else { return }
+        defer { gate.leave() }
+        let storageKey = Self.playedKeyPrefix + account
+        var list = defaults.stringArray(forKey: storageKey) ?? []
         guard !list.contains(key) else { return }
         list.append(key)
         if list.count > Self.maxPlayed { list.removeFirst(list.count - Self.maxPlayed) }

@@ -177,7 +177,12 @@ final class ChannelPostLogStore {
 
     init() {}
 
+    /// Not written once the account's session has ended
+    /// (``AccountStoreGate``): a post sync captures its account before the
+    /// fetches it waits on.
     func put(accountIdB64: String, payload: ChannelPostLogPayload) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard let url = fileURL(accountIdB64: accountIdB64) else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

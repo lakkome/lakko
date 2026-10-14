@@ -29,6 +29,8 @@
  */
 import { createSignal, type Accessor } from "solid-js";
 
+import { registerAccountMemory } from "../auth/account-memory";
+
 export interface PendingDevice {
   /** The device's signature public key, hex. */
   readonly key: string;
@@ -241,6 +243,19 @@ const [current, setCurrent] = createSignal<{
   readonly accountIdB64: string;
   readonly state: AddedNoticeState | null;
 } | null>(null);
+
+// The live state is what the next roster fold starts from and saves: a state
+// held from before Forget device (or put back by a fold in flight across it)
+// would be saved into the wiped account's store at its next sign-in on this
+// page, and `bindAddedNotice` keeps a state already bound to the account.
+registerAccountMemory(
+  "device-added-notice",
+  (ids) => {
+    const c = current();
+    if (c !== null && ids.includes(c.accountIdB64)) setCurrent(null);
+  },
+  { signOut: true },
+);
 
 /** Bind the live state to `accountIdB64` (or to nobody). */
 export function bindAddedNotice(accountIdB64: string | null): void {

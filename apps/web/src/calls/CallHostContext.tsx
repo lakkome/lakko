@@ -240,6 +240,7 @@ import { CallBar } from "./CallBar";
 import { callBarWouldShow } from "./call-bar-model";
 import { t } from "../l10n";
 import { callFailureReason, callFailureText } from "./call-errors";
+import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 
 /** A 1x1 call that ended, for the chat view's "Last call ended" line. */
 export interface EndedCallNotice {
@@ -499,11 +500,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   // seam (`call-signaling-publish.ts`), like every other application message.
   const chat = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const s = auth.state();
-      if (s.kind !== "session") return;
-      await chats.persistSnapshot(s.account.accountId);
-    },
+    onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
     // ADR-0054 — a call offer and a call end ring a closed tab through the
     // `x-lakko-wake` header of their DS publish, which names the group's
     // opaque `push_gid` (ADR-0042). Without a resolver there is no wake at
@@ -2644,11 +2641,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const contactsClient = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
     accountIdentityProvider: () => chats.accountIdentity(),
-    onPersist: async () => {
-      const s = auth.state();
-      if (s.kind !== "session") return;
-      await chats.persistSnapshot(s.account.accountId);
-    },
+    onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
     ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
     onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
   });

@@ -25,6 +25,8 @@
  * classes and modules outside the Solid tree.
  */
 
+import { registerAccountMemory } from "../auth/account-memory";
+
 /** The roster as the filter reads it: the account it belongs to and its
  *  devices' leaf signature keys, lowercase hex. */
 export interface OwnDeviceRoster {
@@ -33,6 +35,18 @@ export interface OwnDeviceRoster {
 }
 
 let current: OwnDeviceRoster | null = null;
+
+// The roster decides which of the account's own devices are admitted. One
+// held from before Forget device names the device set of the DeviceGroup this
+// device left; it must not admit anything in the account's next session on
+// this page before the new roster is published.
+registerAccountMemory(
+  "own-device-roster",
+  (ids) => {
+    if (current !== null && ids.includes(current.accountIdB64)) current = null;
+  },
+  { signOut: true },
+);
 
 /** Publish the roster of `accountIdB64`, or `null` when no handle is loaded
  *  (signed out, an account switch, this device removed). */

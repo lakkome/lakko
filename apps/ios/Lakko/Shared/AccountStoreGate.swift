@@ -76,6 +76,57 @@ public enum AccountStoreGate {
     /// Guarded by ``lock``.
     private static var endings: [String: UInt64] = [:]
 
+    /// How many times each account's stores were wiped in this process (full
+    /// or staged). Guarded by ``lock``.
+    private static var wipes: [String: UInt64] = [:]
+
+    /// The wipes of one account so far, as work that started then holds them
+    /// (``wipeMark(_:)``).
+    ///
+    /// For what a sign-in writes BEFORE its session lands (a key the device is
+    /// about to rely on, written off the main actor or after a wait): the
+    /// account may still be sealed then by an earlier sign-out on this device,
+    /// or not opened yet, so neither "sealed" nor "wiped and not reopened" is
+    /// the question. The question is whether the account was wiped AFTER the
+    /// sign-in started: such a write would put a forgotten account's key back.
+    /// A sign-out, or a wipe that came before the work started, refuses
+    /// nothing here.
+    public struct WipeMark: Equatable {
+        fileprivate let key: String
+        fileprivate let wipes: UInt64
+    }
+
+    /// The wipes of `accountIdB64` so far.
+    public static func wipeMark(_ accountIdB64: String) -> WipeMark {
+        pthread_rwlock_rdlock(lock)
+        defer { pthread_rwlock_unlock(lock) }
+        let key = key(accountIdB64)
+        return WipeMark(key: key, wipes: wipes[key] ?? 0)
+    }
+
+    /// Begin one write that is refused only when the account was wiped since
+    /// `mark` was taken (``WipeMark``).
+    public static func enter(unlessWipedSince mark: WipeMark) -> Hold? {
+        if sealing || depth > 0 {
+            depth += 1
+            return Hold(locked: false)
+        }
+        pthread_rwlock_rdlock(lock)
+        if (wipes[mark.key] ?? 0) != mark.wipes {
+            pthread_rwlock_unlock(lock)
+            return nil
+        }
+        depth += 1
+        return Hold(locked: true)
+    }
+
+    /// ``enter(unlessWipedSince:)`` for a write its caller must not go on
+    /// without: refused, it throws ``Sealed``.
+    public static func enterOrEnd(unlessWipedSince mark: WipeMark) throws -> Hold {
+        guard let hold = enter(unlessWipedSince: mark) else { throw Sealed() }
+        return hold
+    }
+
     /// One session of one account, as a long-lived handle holds it.
     ///
     /// An account that signs out and back in is open again, but a handle
@@ -250,6 +301,7 @@ public enum AccountStoreGate {
         guard !accountIdB64.isEmpty else { return }
         let key = key(accountIdB64)
         if wiping && !staged { fullyWiped.insert(key) }
+        if wiping { wipes[key] = (wipes[key] ?? 0) &+ 1 }
         // Every ending is a new one, also for an account sealed already.
         endings[key] = (endings[key] ?? 0) &+ 1
         sealed[key] = (sealed[key] ?? false) || wiping
@@ -276,6 +328,7 @@ public enum AccountStoreGate {
         sealed.removeAll()
         fullyWiped.removeAll()
         endings.removeAll()
+        wipes.removeAll()
         pthread_rwlock_unlock(lock)
     }
 }

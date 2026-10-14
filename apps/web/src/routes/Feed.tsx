@@ -138,6 +138,7 @@ import { createLiveText } from "../l10n/live-text";
 import { KeyedError, RenderedError, keyedErrorText } from "../l10n/keyed-error";
 import { readFeedSelection, writeFeedSelection } from "../feed/feed-selection-store";
 import { screenAnchor } from "../ui/screen-anchor";
+import { durableSnapshotHook } from "../chat/persist-hooks";
 
 const BANNER_STORAGE_KEY = "lakko.feed.device-banner-dismissed";
 /** Within this many pixels of the top, new items are shown at once;
@@ -639,10 +640,7 @@ export default function Feed(): JSX.Element {
   // ChatClient on the page.
   const receiptPublisher = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const account = accountId();
-      if (account !== null) await chats.persistSnapshot(account);
-    },
+    onPersist: durableSnapshotHook(chats, accountId),
   });
 
   /** Seen ids waiting to be filed, per group log key. */
@@ -870,10 +868,7 @@ export default function Feed(): JSX.Element {
 
   const forwardClient = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const account = accountId();
-      if (account !== null) await chats.persistSnapshot(account);
-    },
+    onPersist: durableSnapshotHook(chats, accountId),
     // ADR-0042 — the wake goes under the opaque routing id, as from the chat.
     pushGidResolver: async (groupId) => {
       const account = accountId();

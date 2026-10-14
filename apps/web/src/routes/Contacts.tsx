@@ -94,6 +94,7 @@ import { foundOneToOneWith } from "../contacts/found-one-to-one";
 import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
 import { screenAnchor } from "../ui/screen-anchor";
+import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 
 export default function Contacts(): JSX.Element {
   const auth = useAuth();
@@ -106,11 +107,7 @@ export default function Contacts(): JSX.Element {
   // `chats` + `auth` lazily, so they always see the current session.
   const client = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const s = auth.state();
-      if (s.kind !== "session") return;
-      await chats.persistSnapshot(s.account.accountId);
-    },
+    onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
     // ADR-0048 §2 — every outgoing request carries this account's profile.
     ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
     onUsernameResolved: (key, username) => profiles.learnUsername(key, username),

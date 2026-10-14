@@ -323,6 +323,11 @@ enum ChannelRotationStateStore {
         defaults: UserDefaults = .standard
     ) {
         guard let accountIdB64 else { return }
+        // Not written once the account's session has ended
+        // (``AccountStoreGate``): the rotation cron files its state from its
+        // own actor after the rotation's network calls.
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         let p = Persisted(
             lastRotationMs: state.lastRotationMs,
             postsSinceRotation: state.postsSinceRotation

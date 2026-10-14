@@ -306,6 +306,10 @@ public object AnonTokens {
     @Volatile
     private var poolRef: AnonTokenPool? = null
 
+    /** Accounts forgotten while no pool was built, handed to the pool when
+     *  it is. Guarded by this object's monitor, as is building the pool. */
+    private val forgottenBeforePool: HashSet<String> = HashSet()
+
     private fun pool(): AnonTokenPool =
         poolRef ?: synchronized(this) {
             poolRef ?: AnonTokenPool(
@@ -314,7 +318,11 @@ public object AnonTokens {
                 session = { sessionSource() },
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
                 store = installedStore,
-            ).also { poolRef = it }
+                forgottenAccounts = forgottenBeforePool.toSet(),
+            ).also {
+                poolRef = it
+                forgottenBeforePool.clear()
+            }
         }
 
     /** Where the pool persists between launches (ADR-0054 S5). */
@@ -340,8 +348,28 @@ public object AnonTokens {
         // The session keys the pool with standard base64; the wipe may hold
         // another spelling of the same id.
         val key = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountKey)
-        val pool = poolRef
+        // Recorded for a pool built later too: a take that reads the session
+        // between the wipe and the end of forgetDevice would otherwise build
+        // one and write the account's file back.
+        val pool = synchronized(this) {
+            poolRef ?: run {
+                forgottenBeforePool.add(key)
+                null
+            }
+        }
         if (pool != null) pool.forgetAccount(key) else runCatching { storeRef.delete(key) }
+    }
+
+    /** [accountKey] landed on this device (a sign-in, a restore): a wipe of
+     *  it earlier in this process no longer stops its pool being written.
+     *  Called at every landing, next to the store gate's open. */
+    public fun accountLanded(accountKey: String) {
+        val key = me.lakko.app.contacts.AcceptedContactsStore.canonicalAccountB64(accountKey)
+        val pool = synchronized(this) {
+            forgottenBeforePool.remove(key)
+            poolRef
+        }
+        pool?.accountLanded(key)
     }
 
     /** What the spending clients use by default. Nothing native is touched

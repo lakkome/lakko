@@ -340,7 +340,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
                 createdAt: "2026-10-11T00:00:00Z", intro: "hello")],
             accountIdB64: x)
         ChannelPublisherKeyStore.save(Data([1]), accountIdB64: x)
-        ChannelPublishCounterStore.save(Data([1]), accountIdB64: x)
+        try ChannelPublishCounterStore.save(Data([1]), accountIdB64: x)
         ChannelSubscriberKeyStore.save(Data([1]), accountIdB64: x)
 
         // Files.

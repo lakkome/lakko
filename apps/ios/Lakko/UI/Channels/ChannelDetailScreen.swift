@@ -444,7 +444,7 @@ private struct ChannelOwnerView: View {
         publishError = nil
         do {
             let epoch = state.epochByChannel[channelId] ?? 0
-            let counter = state.nextCounter(channelId: channelId)
+            let counter = try state.nextCounter(channelId: channelId)
             let wire = try ChannelsComposer.compose(
                 keys: keys,
                 channelIdHex: channelId,
@@ -459,6 +459,9 @@ private struct ChannelOwnerView: View {
             ChannelPostSync.requestSync()
             await refresh()
         } catch {
+            // The account signed out (or its counter was refused with it):
+            // nothing was published and nobody is here to read a line.
+            if Cancellation.endedByCancellation(error) { return }
             NSLog("Channels: publish failed: %@", String(describing: error))
             publishError = ChannelsErrorCopy.text(
                 for: error, prefixKey: "channels.publish.error.prefix",

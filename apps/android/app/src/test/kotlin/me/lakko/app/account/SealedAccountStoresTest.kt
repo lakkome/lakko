@@ -132,4 +132,96 @@ class SealedAccountStoresTest {
         assertTrue(crashSafe.indexOf("persistEntryOrThrow()") < crashSafe.indexOf("persistSnapshotOrThrow()"))
         assertTrue("throw persistFailure" in crashSafe)
     }
+
+    @Test
+    fun `founding a group persists the founder's state before any Welcome goes out`() {
+        val chat = java.io.File("src/main/kotlin/me/lakko/app/chat/ChatRepository.kt").readText()
+        val start = chat.substringAfter("    private suspend fun startGroupWithOnMlsThread(").substringBefore("\n    }\n")
+        val persisted = start.indexOf("persistFoundedGroupBeforeWelcome(")
+        val published = start.indexOf("publishWelcomeToMailbox(")
+        assertTrue(persisted in 0 until published)
+        // The persist is the fail-closed one, and the known-groups row is
+        // written inside the gate's throwing variant.
+        val persist = chat.substringAfter("    private suspend fun persistFoundedGroupBeforeWelcome(").substringBefore("\n    }\n")
+        assertTrue("persistSnapshotDurableOrThrow()" in persist)
+        assertTrue("AccountStoreGate.writeOrEnd(accountIdB64)" in persist)
+        assertTrue("persistSnapshotBestEffort" !in persist)
+    }
+
+    @Test
+    fun `the known-groups row of a founded group is refused for a sealed account`() {
+        AccountStoreGate.seal(account)
+        try {
+            AccountStoreGate.writeOrEnd(account) { KnownGroupsStore(context).add(account, group) }
+            org.junit.Assert.fail("a refused founding persist was reported as made")
+        } catch (_: me.lakko.app.StaleBindingException) {
+            // expected: the creation stops before its Welcome
+        }
+        assertTrue(KnownGroupsStore(context).load(account).isEmpty())
+    }
+
+    @Test
+    fun `the email route's own-action marker survives an earlier sign-out but not a wipe`() {
+        val notices = me.lakko.app.auth.AccountNoticeStore.onDevice(context)
+        val kind = me.lakko.app.auth.AccountNoticeKind.AccountOpenedByEmail
+        // Signed out earlier in this process: the marker written before the
+        // landing is kept, so the landing does not show the person their own
+        // action as a stranger's.
+        AccountStoreGate.seal(account)
+        notices.markOwnBeforeLanding(account, kind, 1_000L)
+        assertEquals(1_000L, notices.ownActions(account)[kind])
+        // The ordinary marker of a landed session is refused while sealed.
+        notices.markOwn(account, kind, 2_000L)
+        assertEquals(1_000L, notices.ownActions(account)[kind])
+        // A wiped account takes neither.
+        AccountStoreGate.seal(account) {
+            AccountStoreGate.markWiped(account)
+            notices.clearAccount(account)
+        }
+        notices.markOwnBeforeLanding(account, kind, 3_000L)
+        assertNull(notices.ownActions(account)[kind])
+
+        val auth = java.io.File("src/main/kotlin/me/lakko/app/auth/AuthRepository.kt").readText()
+        val email = auth.substringAfter("    public suspend fun emailRecoverFinish(").substringBefore("\n    }\n")
+        val preMark = email.indexOf("noticeStore.markOwnBeforeLanding(it, AccountNoticeKind.AccountOpenedByEmail")
+        assertTrue(preMark in 0 until email.indexOf("recover(phrase, newPassword"))
+    }
+
+    @Test
+    fun `the stores added for key resets and contact keys refuse a sealed account`() {
+        AccountStoreGate.seal(account)
+        me.lakko.app.reach.ContinuityMarkerStore.write(context, account, me.lakko.app.reach.ContinuityMarker(2L, 5L))
+        assertNull(me.lakko.app.reach.ContinuityMarkerStore.read(context, account))
+
+        val links = me.lakko.app.contacts.SharedPrefsProvenLinkStore(context)
+        links.save(account, emptyList())
+        assertTrue(
+            context.getSharedPreferences(me.lakko.app.contacts.SharedPrefsProvenLinkStore.PREFS_NAME, Context.MODE_PRIVATE)
+                .all.isEmpty(),
+        )
+
+        val blobs = HashMap<String, ByteArray>()
+        val sent = me.lakko.app.contacts.SealedSentRequestsStore(
+            object : me.lakko.app.auth.SealedBlobStorage {
+                override fun read(name: String): ByteArray? = blobs[name]
+                override fun write(name: String, plaintext: ByteArray) {
+                    blobs[name] = plaintext
+                }
+                override fun delete(name: String) {
+                    blobs.remove(name)
+                }
+            },
+        )
+        assertEquals(false, sent.save(account, emptyList()))
+        AccountStoreGate.open(account)
+        assertEquals(true, sent.save(account, emptyList()))
+    }
+
+    @Test
+    fun `an owed logout's index row is not written for a wiped account`() {
+        val store = me.lakko.app.auth.LogoutOwedStore.onDevice(context)
+        AccountStoreGate.seal(account) { AccountStoreGate.markWiped(account) }
+        store.save(account, me.lakko.app.auth.LogoutOwed(accessToken = "a", accessExpiresAtMs = 1L, refreshToken = "r", refreshExpiresAtMs = 2L))
+        assertTrue(store.accounts().isEmpty())
+    }
 }

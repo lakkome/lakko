@@ -60,6 +60,7 @@ import {
   type SharedChannelsVerdict,
   type SharedList,
 } from "./shared-channels";
+import { durableSnapshotHook } from "../chat/persist-hooks";
 
 export type SharedChannelsEvent = Extract<IncomingChatEvent, { kind: "shared-channels" }>;
 
@@ -126,10 +127,7 @@ export function SharedChannelsProvider(props: { children: JSX.Element }): JSX.El
   // ChatClient on the page.
   const publisher = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const account = accountId();
-      if (account !== null) await chats.persistSnapshot(account);
-    },
+    onPersist: durableSnapshotHook(chats, accountId),
   });
 
   async function send(entry: ActiveGroup, list: SharedList): Promise<void> {

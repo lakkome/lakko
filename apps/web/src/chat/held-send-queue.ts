@@ -21,6 +21,7 @@
  * in a conversation that is not held: there is no attachment reference to
  * keep yet.
  */
+import { registerAccountMemory } from "../auth/account-memory";
 import { getDeviceKey } from "../auth/key-store";
 import type { AttachmentRefBytes, ForwardRef, ReplyRef } from "./attachments";
 import { forwardRefFromPersisted, persistedFromForwardRef } from "./forward";
@@ -168,6 +169,15 @@ export function resetHeldSends(): void {
   heldSends.clear();
   restoredFor = null;
 }
+
+// Forget device: the queue is mirrored into the message log after every
+// change, so a message still held for the wiped account (or added by a send
+// that was in flight across the wipe) would be written back into that
+// account's new log once it signs in again on this page. The queue holds the
+// session's messages only; `restoredFor` names the account when it is known.
+registerAccountMemory("held-sends", (ids) => {
+  if (restoredFor === null || ids.includes(restoredFor)) resetHeldSends();
+});
 
 // ---------------------------------------------------------------------------
 // What the background flush sent

@@ -82,6 +82,7 @@ import {
   subscribeOwnProfileAdopted,
   unbindOwnProfileSync,
 } from "./own-profile-sync";
+import { durableSnapshotHook } from "../chat/persist-hooks";
 
 export interface ProfileApi {
   /** Bumped on any change a resolved name may depend on. `resolve` reads it,
@@ -315,11 +316,7 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
   // every other ChatClient on the page (`chat/own-published.ts`).
   const publisher = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const account = accountId();
-      if (account === null) return;
-      await chats.persistSnapshot(account);
-    },
+    onPersist: durableSnapshotHook(chats, accountId),
   });
 
   async function ownProfileEnvelope(groupIdB64?: string): Promise<Uint8Array | null> {

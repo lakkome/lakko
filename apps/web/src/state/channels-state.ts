@@ -56,6 +56,7 @@ import {
   seedCounter,
 } from "../channels/publish-counter-store";
 import { base64Encode } from "../auth/account-id";
+import { registerAccountMemory } from "../auth/account-memory";
 import { loadWasm } from "../wasm";
 
 interface ChannelsStateInternal {
@@ -513,6 +514,12 @@ export function markChannelsHydrationUnavailable(): void {
  */
 export function clearChannelsSession(): Promise<void> {
   const pending = flushPending();
+  dropChannelsMemory();
+  return pending;
+}
+
+/** Empty the in-memory state and disarm write-through, writing nothing. */
+function dropChannelsMemory(): void {
   sink = null;
   lastProviderSnapshot = null;
   lastProviderLeafKeyB64 = null;
@@ -527,8 +534,24 @@ export function clearChannelsSession(): Promise<void> {
   setMetaByChannel(new Map());
   setOrphanedByKeyReset(new Set<string>());
   setHydrated(false);
-  return pending;
 }
+
+// Forget device. The hydration MERGES what is in memory into the stored row
+// and writes the union back, so a channel, key or seed put in memory by work
+// that was in flight across the wipe (after the wipe step cleared the state)
+// would be written into the wiped account's new row at its next sign-in on
+// this page. Nothing is flushed: the account's stores are sealed. The state
+// is the session's; it is dropped when it belongs to one of `ids` or to
+// nobody (the session already ended), never when another account owns it.
+registerAccountMemory("channels-state", (ids) => {
+  const owner = sink?.accountIdB64 ?? counterOwner;
+  if (owner !== null && !ids.includes(owner)) return;
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  dropChannelsMemory();
+});
 
 /**
  * The Forget device / Delete account half: drop the in-memory state, the

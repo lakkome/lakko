@@ -200,7 +200,9 @@ public final class ChannelsUiState: ObservableObject {
     }
 
     private func persistOwnerGenerations() {
-        guard let account = boundAccountIdB64 else { return }
+        guard let account = boundAccountIdB64,
+              let gate = AccountStoreGate.enter(account) else { return }
+        defer { gate.leave() }
         UserDefaults.standard.set(
             ownerKeyGenerationByChannel.mapValues { NSNumber(value: $0) },
             forKey: Self.ownerGenerationKey(account))
@@ -370,7 +372,9 @@ public final class ChannelsUiState: ObservableObject {
         if counterByChannel[channelId] == nil {
             counterByChannel[channelId] = 0
         }
-        persistPublishCounters()
+        // Best effort here: nothing is published yet, and every post persists
+        // its own floor before it goes out (``nextCounter(channelId:)``).
+        try? persistPublishCounters()
         publisherSigningSeedByChannel[channelId] = keys.signingKeySeed
         publisherContentSeedByChannel[channelId] = keys.seed
         persistPublisherKeys()
@@ -394,10 +398,17 @@ public final class ChannelsUiState: ObservableObject {
     /// across a relaunch (a skipped value on a crash is safe — the crate needs
     /// strict monotonicity, not gapless; a REUSED value is the catastrophic
     /// AEAD nonce reuse this defends against).
-    public func nextCounter(channelId: String) -> UInt64 {
+    ///
+    /// Throws, and hands out no counter, when the new floor did not reach the
+    /// Keychain: no account is bound (``StaleBindingError``), the account's
+    /// session has ended (``AccountStoreGate/Sealed``), or the Keychain
+    /// refused the write. The caller publishes nothing then; the value is
+    /// skipped, never reused.
+    public func nextCounter(channelId: String) throws -> UInt64 {
         let current = counterByChannel[channelId] ?? 0
         counterByChannel[channelId] = current + 1
-        persistPublishCounters()
+        guard boundAccountIdB64 != nil else { throw StaleBindingError() }
+        try persistPublishCounters()
         return current
     }
 
@@ -456,7 +467,7 @@ public final class ChannelsUiState: ObservableObject {
         // Wipe the persisted publish counters (logout / reset). A fresh account
         // on this device starts every channel's counter at 0 again — safe
         // because a fresh account also mints fresh publisher keys + seeds.
-        persistPublishCounters()
+        try? persistPublishCounters()
         if let account = boundAccountIdB64 {
             logStore.delete(accountIdB64: account)
         }
@@ -626,7 +637,7 @@ public final class ChannelsUiState: ObservableObject {
         let counter: UInt64
     }
 
-    private func persistPublishCounters() {
+    private func persistPublishCounters() throws {
         // The counter is the AEAD nonce input `lakko-channels` requires to be
         // strictly monotone within `(channel_id, epoch_id, sender_pubkey)`
         // BETWEEN SESSIONS; the content seed re-derives stably from the MLS
@@ -645,8 +656,8 @@ public final class ChannelsUiState: ObservableObject {
             counterByChannel.map { (channelId, counter) in
                 PersistedPublishCounter(channelId: channelId, counter: counter)
             }
-        guard let data = try? JSONEncoder().encode(rows) else { return }
-        ChannelPublishCounterStore.save(data, accountIdB64: account)
+        let data = try JSONEncoder().encode(rows)
+        try ChannelPublishCounterStore.save(data, accountIdB64: account)
     }
 
     private static func loadPublishCounters(accountIdB64: String) -> [String: UInt64] {

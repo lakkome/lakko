@@ -95,8 +95,8 @@ final class AccountScopedStoresTests: XCTestCase {
         let asAlice = ChannelsUiState(accountIdB64: alice)
         asAlice.setSubscriberKeys(channelId: channel, keys: subscriberKeys)
         asAlice.setKeys(channelId: channel, keys: publisherKeys)
-        XCTAssertEqual(asAlice.nextCounter(channelId: channel), 0)
-        XCTAssertEqual(asAlice.nextCounter(channelId: channel), 1)
+        XCTAssertEqual(try asAlice.nextCounter(channelId: channel), 0)
+        XCTAssertEqual(try asAlice.nextCounter(channelId: channel), 1)
 
         // A second account on the same phone: nothing of the first one's. A
         // reused subscriber key would link the two accounts at the server.
@@ -126,7 +126,8 @@ final class AccountScopedStoresTests: XCTestCase {
         let unbound = ChannelsUiState()
         unbound.setSubscriberKeys(
             channelId: channel, keys: ChannelSubscriberKeys(secret: secret, publicKey: pair.`public`()))
-        _ = unbound.nextCounter(channelId: channel)
+        // Unbound: no counter is handed out (nowhere to persist it).
+        XCTAssertThrowsError(try unbound.nextCounter(channelId: channel))
         XCTAssertTrue(ChannelsUiState(accountIdB64: alice).subscriberKeysByChannel.isEmpty)
         XCTAssertTrue(ChannelsUiState(accountIdB64: alice).counterByChannel.isEmpty)
     }

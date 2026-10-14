@@ -84,6 +84,7 @@ import {
   runOwedHandover,
   takeOverJournal,
 } from "./root-handover";
+import { durableSnapshotHook } from "../chat/persist-hooks";
 
 /** How long a reconcile that left members pending waits before trying the
  *  unresolved ones again (chosen, not measured: a member's profile, which
@@ -205,11 +206,7 @@ export function JournalOwnershipProvider(props: { children: JSX.Element }): JSX.
   // ChatClient on the page (`chat/own-published.ts`).
   const publisher = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const account = accountId();
-      if (account === null) return;
-      await chats.persistSnapshot(account);
-    },
+    onPersist: durableSnapshotHook(chats, accountId),
   });
 
   /** The member's account X25519 key from its identity bundle, verified to

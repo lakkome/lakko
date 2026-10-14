@@ -15,6 +15,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -331,6 +332,97 @@ class AnonTokenPoolTest {
         assertEquals(0, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
         assertEquals(null, store.pools["bob"])
         assertEquals(listOf("alice", "bob"), store.deletes)
+    }
+
+    @Test
+    fun aRefillInFlightAtTheWipeDoesNotWriteTheFileBack() = runTest {
+        val store = MemoryStore()
+        val api = FakeApi()
+        val pool = pool(FakeCore(), api, { alice }, store = store)
+        pool.take(AnonTokenContext.DISCOVERY_LOOKUP) // seven left, below none
+        // Drain to below the refill threshold with the issuer held, so a
+        // refill is in flight when the wipe runs.
+        api.gate = CompletableDeferred()
+        repeat(6) { pool.take(AnonTokenContext.DISCOVERY_LOOKUP) }
+        runCurrent()
+        assertEquals("the refill is out, waiting on the issuer", 2, api.sessions.size)
+        pool.forgetAccount("alice")
+        api.gate!!.complete(Unit)
+        advanceUntilIdle()
+        assertNull("the wipe's delete stays", store.pools["alice"])
+    }
+
+    @Test
+    fun aTakeThatReadTheSessionBeforeTheWipeNeitherAdoptsNorRefills() = runTest {
+        // forgetDevice wipes while the live secrets still name the account,
+        // and clears them only afterwards: a take in that window.
+        val store = MemoryStore()
+        val core = FakeCore()
+        val api = FakeApi()
+        val pool = pool(core, api, { alice }, store = store)
+        pool.forgetAccount("alice")
+        val err = runCatching { pool.take(AnonTokenContext.DISCOVERY_LOOKUP) }.exceptionOrNull()
+        advanceUntilIdle()
+        assertTrue(err is AnonTokenUnavailable)
+        assertTrue("nothing issued for a forgotten account", core.begun.isEmpty())
+        assertNull(store.pools["alice"])
+    }
+
+    @Test
+    fun aForgottenAccountsPoolIsNeitherSpentNorRewrittenByADetachedTake() = runTest {
+        val store = MemoryStore()
+        val api = FakeApi()
+        val pool = pool(FakeCore(), api, { null }, store = store)
+        pool.forgetAccount("alice")
+        // A file that reappeared by some other route is not read back.
+        store.pools["alice"] = PersistedAnonPool("alice", listOf(PooledAnonToken(AnonTokenContext.PUSH_REGISTER, 10, "old")))
+        val t = pool.takeDetached(alice, AnonTokenContext.PUSH_REGISTER)
+        assertTrue(t.headerValue != "old")
+        assertEquals("left as it was, never rewritten", "old", store.pools["alice"]!!.tokens.single().headerValue)
+    }
+
+    @Test
+    fun theAccountsNextLandingPersistsItsPoolAgain() = runTest {
+        val store = MemoryStore()
+        val pool = pool(FakeCore(), FakeApi(), { alice }, store = store)
+        pool.forgetAccount("alice")
+        pool.accountLanded("alice")
+        pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
+        assertEquals(7, store.pools["alice"]!!.tokens.size)
+    }
+
+    @Test
+    fun aWipeRecordedBeforeThePoolWasBuiltStillHolds() = runTest {
+        val store = MemoryStore()
+        val core = FakeCore()
+        val pool = AnonTokenPool(
+            core = core,
+            api = FakeApi(),
+            session = { alice },
+            scope = this,
+            nowSecs = { 1_000L },
+            store = store,
+            forgottenAccounts = setOf("alice"),
+        )
+        assertTrue(runCatching { pool.take(AnonTokenContext.DISCOVERY_LOOKUP) }.exceptionOrNull() is AnonTokenUnavailable)
+        assertNull(store.pools["alice"])
+        // Bob is not affected.
+        val bobPool = AnonTokenPool(core, FakeApi(), { bob }, this, nowSecs = { 1_000L }, store = store, forgottenAccounts = setOf("alice"))
+        bobPool.take(AnonTokenContext.DISCOVERY_LOOKUP)
+        assertEquals(7, store.pools["bob"]!!.tokens.size)
+    }
+
+    @Test
+    fun aSignOutIsNotAForgetTheUnregisterStillSavesTheReducedPool() = runTest {
+        val store = MemoryStore()
+        var who: AnonSession? = alice
+        val pool = pool(FakeCore(), FakeApi(), { who }, store = store)
+        pool.take(AnonTokenContext.PUSH_REGISTER)
+        assertEquals(3, store.persisted!!.tokens.size)
+        pool.releaseSession()
+        who = null
+        pool.takeDetached(alice, AnonTokenContext.PUSH_REGISTER)
+        assertEquals(2, store.persisted!!.tokens.size)
     }
 
     @Test

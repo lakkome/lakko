@@ -486,6 +486,17 @@ public enum PairingOrchestrator {
         /// it here; zeroed in place after the write and on release.
         private var deviceSeed: Data
         private(set) var persisted = false
+        /// The account's wipes when the join was held (``AccountStoreGate/WipeMark``).
+        ///
+        /// ``persist()`` runs off the main actor (the restore awaits it as a
+        /// nonisolated closure), after the restore's network checks, before
+        /// the session lands. The device seed it writes is refused when the
+        /// account was wiped on this device since: Forget device or Delete
+        /// account on this device must not get a device key back. An earlier
+        /// sign-out of the same account (sealed, not wiped) or a wipe before
+        /// the join started refuses nothing: this is a sign-in, and the seed
+        /// is the leaf the account's other device has just added.
+        private let wipeMark: AccountStoreGate.WipeMark
 
         init(identity: Identity, joined: DeviceGroup, accountIdBytes: Data, deviceSeed: Data) {
             self.identity = identity
@@ -493,6 +504,7 @@ public enum PairingOrchestrator {
             self.accountIdBytes = accountIdBytes
             self.accountIdB64 = base64Encode(accountIdBytes)
             self.deviceSeed = deviceSeed
+            self.wipeMark = AccountStoreGate.wipeMark(base64Encode(accountIdBytes))
         }
 
         deinit {
@@ -506,14 +518,30 @@ public enum PairingOrchestrator {
         func persist() {
             guard !persisted else { return }
             persisted = true
+            // Wiped since the join was held: none of it is this device's any
+            // more. (Each write below is gated again on its own, so a wipe
+            // that lands from here on refuses the writes after it.)
+            guard let check = AccountStoreGate.enter(unlessWipedSince: wipeMark) else {
+                NSLog("join by name not persisted: the account was removed from this device")
+                wipeDeviceSeed()
+                historySealed = nil
+                stateBundle = nil
+                return
+            }
+            check.leave()
             if !deviceSeed.isEmpty {
-                do {
-                    try DeviceIdentityStore.putDeviceIdentitySeed(
-                        accountIdB64: accountIdB64,
-                        seed: deviceSeed
-                    )
-                } catch {
-                    NSLog("device identity seed persist (join by name) failed: %@", error.localizedDescription)
+                if let gate = AccountStoreGate.enter(unlessWipedSince: wipeMark) {
+                    defer { gate.leave() }
+                    do {
+                        try DeviceIdentityStore.putDeviceIdentitySeed(
+                            accountIdB64: accountIdB64,
+                            seed: deviceSeed
+                        )
+                    } catch {
+                        NSLog("device identity seed persist (join by name) failed: %@", error.localizedDescription)
+                    }
+                } else {
+                    NSLog("device identity seed not persisted (join by name): the account was removed from this device")
                 }
                 wipeDeviceSeed()
             }

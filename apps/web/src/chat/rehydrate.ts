@@ -62,6 +62,7 @@ import { type ChatApi } from "./ChatContext";
 import { loadGroupNameRows } from "./group-name-idb";
 import { GROUP_STAND_IN } from "./group-title";
 import { loadMlsSnapshot } from "./mls-store";
+import { durableSnapshotHook } from "./persist-hooks";
 
 /**
  * Pull the encrypted MLS snapshot for `accountIdB64`, decrypt
@@ -171,9 +172,7 @@ export async function rehydrateMlsState(
   // Identity + the snapshot persist, same as the chat view's client.
   const sweepClient = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      await chats.persistSnapshot(accountIdB64);
-    },
+    onPersist: durableSnapshotHook(chats, () => accountIdB64),
   });
 
   // ADR-0051 — the shared names this device holds, so a restored group is

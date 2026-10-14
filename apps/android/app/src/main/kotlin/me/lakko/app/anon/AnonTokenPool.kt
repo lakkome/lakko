@@ -253,7 +253,8 @@ public interface AnonTokenSource {
  * Adopting a different account drops the memory and loads that account's own
  * persisted tokens, leaving every other account's on disk; [releaseSession]
  * (Log out) drops the memory only; [forgetAccount] (the Forget device / Delete
- * account wipe) removes one account's tokens from memory and disk. A token is
+ * account wipe) removes one account's tokens from memory and disk, and nothing
+ * is written for that account again until [accountLanded]. A token is
  * only ever handed to a request made under the account it was issued to.
  * Dead-epoch tokens are dropped on load.
  */
@@ -267,6 +268,9 @@ public class AnonTokenPool(
     private val policy: (AnonTokenContext) -> AnonBatchPolicy = ::anonBatchPolicyFor,
     private val max: Int = MAX_HELD,
     private val store: AnonTokenStore = NoAnonTokenStore,
+    /** Accounts forgotten before this pool was built ([AnonTokens] records
+     *  a wipe that ran while no pool existed). */
+    forgottenAccounts: Set<String> = emptySet(),
 ) : AnonTokenSource {
 
     override val headerName: String get() = core.headerName
@@ -274,6 +278,20 @@ public class AnonTokenPool(
     private val lock = Any()
     private var generation: Long = 0
     private var owner: String? = null
+
+    /**
+     * Accounts whose tokens a wipe removed ([forgetAccount]) and that have
+     * not landed on this device again ([accountLanded]). Guarded by [lock]:
+     * checked on the same lock every write to [store] runs under, so no take,
+     * refill or detached spend that raced the wipe can write a forgotten
+     * account's file back. A sign-out is not a forget: the logout's push
+     * unregister still spends from and saves its account's pool.
+     *
+     * Kept here rather than asked of [me.lakko.app.account.AccountStoreGate]:
+     * the wipe holds the gate's exclusive lock while it takes this one, so a
+     * gate read under [lock] would invert that order.
+     */
+    private val forgotten: HashSet<String> = HashSet(forgottenAccounts)
     private val queues = EnumMap<AnonTokenContext, ArrayDeque<PooledAnonToken>>(AnonTokenContext::class.java)
     private val refills = EnumMap<AnonTokenContext, Refill>(AnonTokenContext::class.java)
     private val exhaustedUntil = EnumMap<AnonTokenContext, Long>(AnonTokenContext::class.java)
@@ -300,6 +318,10 @@ public class AnonTokenPool(
     override suspend fun take(context: AnonTokenContext): PooledAnonToken {
         val s = session() ?: throw AnonTokenUnavailable(context, "no signed-in session")
         val (token, pending) = synchronized(lock) {
+            // A take that read the session before a forget-device cleared it
+            // neither re-adopts the account nor refills: either would write
+            // its file back after the wipe removed it.
+            if (s.accountKey in forgotten) throw AnonTokenUnavailable(context, "the account was forgotten on this device")
             adoptLocked(s)
             val t = popLiveLocked(context)
             val refill = if ((queues[context]?.size ?: 0) < policy(context).refillBelow) {
@@ -341,13 +363,21 @@ public class AnonTokenPool(
         synchronized(lock) { resetLocked(newOwner = null) }
     }
 
-    /** Remove [accountKey]'s tokens, held and persisted. Another account's
-     *  stay, in memory and on disk. */
+    /** Remove [accountKey]'s tokens, held and persisted, and write nothing
+     *  for it again until it lands on this device ([accountLanded]). Another
+     *  account's stay, in memory and on disk. */
     public fun forgetAccount(accountKey: String) {
         synchronized(lock) {
+            forgotten.add(accountKey)
             if (owner == accountKey) resetLocked(newOwner = null)
             runCatching { store.delete(accountKey) }
         }
+    }
+
+    /** [accountKey] signed in on this device again: its pool is kept and
+     *  written as before. */
+    public fun accountLanded(accountKey: String) {
+        synchronized(lock) { forgotten.remove(accountKey) }
     }
 
     private fun failureFor(
@@ -390,6 +420,9 @@ public class AnonTokenPool(
      *  account the memory does not hold; the rest is written back (dead
      *  tokens dropped). */
     private fun popPersistedLocked(accountKey: String, context: AnonTokenContext): PooledAnonToken? {
+        // Its file was removed by the wipe; whatever is there now was not
+        // left by this account's session and is neither spent nor rewritten.
+        if (accountKey in forgotten) return null
         val persisted = runCatching { store.load(accountKey) }.getOrNull() ?: return null
         if (persisted.owner != accountKey) return null
         val current = currentEpochLocked()
@@ -404,6 +437,7 @@ public class AnonTokenPool(
      *  survival; the pool itself carries on. */
     private fun persistLocked() {
         val who = owner ?: return
+        if (who in forgotten) return
         val tokens = queues.values.flatten()
         runCatching { store.save(PersistedAnonPool(who, tokens)) }
     }

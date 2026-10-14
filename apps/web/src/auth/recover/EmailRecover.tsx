@@ -312,12 +312,18 @@ export function EmailRecover(props: {
           return id === undefined ? {} : { deviceIdB64: id };
         })(),
       });
-      markOwnAction(plainStore(), base64Encode(landed.accountId), actedKind, actedAtMs);
-      // The mailed code was accepted for this address.
-      rememberAddress(base64Encode(landed.accountId), address());
+      const landedB64 = base64Encode(landed.accountId);
+      const kind = actedKind;
+      const typed = address();
       setPassword("");
       setConfirm("");
-      await auth.landEmailPasswordRecovery(canonicalUsername, landed.accountId, landed.session);
+      // Written once the landing opened the account's stores: before that a
+      // write would be dropped for an account wiped earlier on this page.
+      await auth.landEmailPasswordRecovery(canonicalUsername, landed.accountId, landed.session, () => {
+        markOwnAction(plainStore(), landedB64, kind, actedAtMs);
+        // The mailed code was accepted for this address.
+        rememberAddress(landedB64, typed);
+      });
       dispatch({ type: "landed" });
       // On a device without the account's keys the guard shows "Restore
       // your keys" on this very state change; otherwise the app opens.

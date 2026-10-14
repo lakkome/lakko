@@ -60,12 +60,23 @@
  * disk. Skipping it would be the harmful outcome. The one row a late write
  * must not bring back after a sign-out is the session token.
  *
+ * ## Memory
+ *
+ * The gate guards stores, not memory. A cache that holds an account's rows
+ * and saves them later would write the pre-wipe rows back once the account
+ * lands again and the gate opens. Such caches register with
+ * `account-memory.ts`; the seal for a wipe drops them, and so does the first
+ * landing of an account that was sealed by a wipe (in-flight work may have
+ * refilled them in between).
+ *
  * The three durable MLS writes (the MLS snapshot, the commit outbox, the
  * DeviceGroup snapshot) use {@link requireAccountStoresWritable} and THROW:
  * their callers publish only after the persist succeeded, and a persist that
  * silently did nothing followed by a publish reuses a ratchet position at the
  * next sign-in. Every other store skips.
  */
+
+import { dropAccountMemory } from "./account-memory";
 
 /** A durable write was refused because its account is sealed. */
 export class AccountStoresSealedError extends Error {
@@ -253,6 +264,9 @@ export function sealAccountStoresForWipe(ids: readonly string[], nowMs: number =
     (e) => nowMs - e.at < WIPED_MARKER_TTL_MS && !digests.includes(e.h),
   );
   writeWiped([...kept, ...digests.map((h) => ({ h, at: nowMs }))]);
+  // The in-memory caches of the account go with the seal, before the first
+  // delete (`account-memory.ts`).
+  dropAccountMemory(fresh, "wipe");
 }
 
 /** The wipe's deletes have all run. The account stays sealed until it lands
@@ -282,6 +296,16 @@ export function pruneWipedMarker(nowMs: number = Date.now()): void {
  */
 export function openAccountStores(ids: readonly string[]): void {
   const opened = ids.filter((id) => !wiping.has(id));
+  // A wipe in another tab that this realm has not absorbed yet still counts:
+  // what this realm holds in memory for the account predates it.
+  for (const id of opened) known.add(id);
+  absorbMarker();
+  const reopened = opened.filter((id) => sealed.has(id));
+  if (reopened.length > 0) {
+    // Whatever in-flight work put back in memory since the wipe goes before
+    // the landing's first write can save it (`account-memory.ts`).
+    dropAccountMemory(opened, "wipe");
+  }
   for (const id of opened) {
     known.add(id);
     sealed.delete(id);

@@ -95,6 +95,7 @@ import {
   resolveInvitePreview,
   type GroupInvitePreviewData,
 } from "./join-group-preview";
+import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 
 type JoinPhase = "idle" | "requesting" | "waiting" | "joined" | "error";
 
@@ -130,10 +131,7 @@ export default function JoinGroup() {
     // The join request mints a KeyPackage whose private key must survive
     // until the admin's Welcome arrives; without a persist hook a reload of
     // this page lost it and the Welcome could never be opened.
-    onPersist: async () => {
-      const s = auth.state();
-      if (s.kind === "session") await chats.persistSnapshotDurable(s.account.accountId);
-    },
+    onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
   });
 
   // Resolve the slug (pointer => ledger fetch, inline => passthrough), then

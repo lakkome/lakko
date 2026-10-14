@@ -323,7 +323,23 @@ public final class BackupClient {
 
     /// Cache the phrase under the Keychain. Called from the
     /// post-signup / post-recover bootstrap path.
-    public func cachePhrase(accountIdB64: String, phraseBytes: Data) throws {
+    ///
+    /// Refused (``AccountStoreGate/Sealed``) when the account was wiped on
+    /// this device: this client is not main-actor bound, so a caller may run
+    /// it off the main actor or after a wait, and a phrase written after
+    /// Forget device would put the forgotten account's recovery phrase back.
+    /// `since` is the account's ``AccountStoreGate/WipeMark`` taken when the
+    /// work began, for a caller whose session has not landed yet (the account
+    /// may still be sealed by an earlier sign-out then, which refuses
+    /// nothing). Without it the caller is a signed-in session (the one
+    /// caller today, the key rotation's re-seal, on the main actor), and a
+    /// wipe not yet followed by a new landing refuses.
+    public func cachePhrase(
+        accountIdB64: String, phraseBytes: Data, since: AccountStoreGate.WipeMark? = nil
+    ) throws {
+        let gate = try since.map { try AccountStoreGate.enterOrEnd(unlessWipedSince: $0) }
+            ?? AccountStoreGate.enterUnlessWipedOrEnd(accountIdB64)
+        defer { gate.leave() }
         try phraseStore.putPhrase(
             accountIdB64: accountIdB64,
             phraseBytes: phraseBytes

@@ -204,6 +204,7 @@ import { readIntentSnapshot, reissueOwnRequest } from "./rerequest-membership";
 import { membershipRefusalRetryMaySucceed } from "../../wasm/lakko_ffi_wasm";
 import { BindingEpoch, StaleBindingError } from "../auth/binding-epoch";
 import type { SweepOutcome } from "./sweep";
+import { durableSnapshotHook, sessionAccountOf } from "./persist-hooks";
 
 export interface BackgroundReceiveApi {
   /** Shared with the chat view — see `receive-coordinator.ts`. */
@@ -304,11 +305,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   const backoff = new GroupBackoff();
   const chat = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const s = auth.state();
-      if (s.kind !== "session") return;
-      await chats.persistSnapshot(s.account.accountId);
-    },
+    onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
   });
   // ADR-0045 / ADR-0050 — the membership half for chats whose view is not
   // open: the sweep at the tail of every background poll, and the device
@@ -318,11 +315,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   const contacts = new ContactsClient(discovery, undefined, {
     identityProvider: () => chats.identity(),
     accountIdentityProvider: () => chats.accountIdentity(),
-    onPersist: async () => {
-      const s = auth.state();
-      if (s.kind !== "session") return;
-      await chats.persistSnapshot(s.account.accountId);
-    },
+    onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
     onPersistWithCommit: async (entry) => {
       const s = auth.state();
       if (s.kind !== "session") {

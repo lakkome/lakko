@@ -56,8 +56,29 @@ public enum ChannelPublishCounterStore {
     }
 
     /// Persist the encoded counter `blob`, replacing any existing item.
-    public static func save(_ blob: Data, accountIdB64: String) {
-        delete(accountIdB64: accountIdB64)
+    ///
+    /// Throws ``AccountStoreGate/Sealed`` when the account's session has
+    /// ended (nothing is written), and ``ChannelPublishCounterStoreError``
+    /// on a Keychain failure. The publish path stops on either
+    /// (``ChannelsUiState/nextCounter(channelId:)``): a post whose counter
+    /// is not on disk could be issued again after a relaunch.
+    ///
+    /// The item is updated in place, and added only when absent: deleting it
+    /// first left a window where a failed add lost the floor altogether, and
+    /// a relaunch would then start the counter at 0 again.
+    public static func save(_ blob: Data, accountIdB64: String) throws {
+        let gate = try AccountStoreGate.enterOrEnd(accountIdB64)
+        defer { gate.leave() }
+        let match: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: serviceTag,
+            kSecAttrAccount: itemAccount(accountIdB64),
+        ]
+        let updated = SecItemUpdate(match as CFDictionary, [kSecValueData: blob] as CFDictionary)
+        if updated == errSecSuccess { return }
+        guard updated == errSecItemNotFound else {
+            throw ChannelPublishCounterStoreError.keychain(status: updated)
+        }
         let addQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: serviceTag,
@@ -65,10 +86,10 @@ public enum ChannelPublishCounterStore {
             kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecValueData: blob,
         ]
-        // Best-effort: a Keychain write failure must not crash the channels
-        // surface; the counter stays in memory for the session and re-persists
-        // on the next bump.
-        SecItemAdd(addQuery as CFDictionary, nil)
+        let added = SecItemAdd(addQuery as CFDictionary, nil)
+        guard added == errSecSuccess else {
+            throw ChannelPublishCounterStoreError.keychain(status: added)
+        }
     }
 
     /// Read the persisted counter blob, or `nil` when absent.
@@ -109,4 +130,9 @@ public enum ChannelPublishCounterStore {
         ]
         SecItemDelete(query as CFDictionary)
     }
+}
+
+/// A publish counter the Keychain did not take.
+public enum ChannelPublishCounterStoreError: Error, Equatable {
+    case keychain(status: OSStatus)
 }

@@ -19,6 +19,8 @@
  */
 import { createSignal } from "solid-js";
 
+import { registerAccountMemory } from "../account-memory";
+
 /** The synced state's half, installed by `DeviceGroupSyncProvider`. */
 export interface AddressRegisterPort {
   readonly accountIdB64: string;
@@ -87,3 +89,14 @@ export function rememberAddress(accountIdB64: string, address: string | null): v
 export function dropPendingAddress(): void {
   pending = null;
 }
+
+// Forget device: a register write still waiting for its port, and the address
+// held for display, belong to the wiped account. Left in memory, the pending
+// write would be made into the account's new synced state at its next sign-in
+// on this page. A sign-out keeps them: the server already holds the change and
+// the account's own next session should still carry it to its devices.
+registerAccountMemory("recovery-address-register", (ids) => {
+  if (pending !== null && ids.includes(pending.accountIdB64)) pending = null;
+  const h = held();
+  if (h !== null && ids.includes(h.accountIdB64)) setHeld(null);
+});

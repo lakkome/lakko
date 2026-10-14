@@ -21,6 +21,7 @@ import {
   type RecoveryEmailStatus,
 } from "./account-protection";
 import { RecoveryEmailClient } from "./recovery-email-client";
+import { registerAccountMemory } from "../account-memory";
 
 interface Held {
   readonly accountIdB64: string;
@@ -93,6 +94,22 @@ export function dropProtectionStatus(): void {
   setHeld(null);
   setFlagVersion((v) => v + 1);
 }
+
+// The status the server last gave for an account: shown, and the source of
+// the "phrase-protected" flag's next write. A status held from before Forget
+// device belongs to the wiped account; a sign-out drops it too (it is
+// re-asked at the next session). A refresh in flight for the account is
+// forgotten so the next one asks again.
+registerAccountMemory(
+  "protection-status",
+  (ids) => {
+    const h = held();
+    if (h !== null && ids.includes(h.accountIdB64)) setHeld(null);
+    if (inflight !== null && ids.includes(inflight.accountIdB64)) inflight = null;
+    setFlagVersion((v) => v + 1);
+  },
+  { signOut: true },
+);
 
 /** For a component: the signed-in account's status as an accessor. */
 export function useProtectionStatus(accountIdB64: Accessor<string | null>): Accessor<RecoveryEmailStatus | null> {

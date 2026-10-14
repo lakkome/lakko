@@ -1273,14 +1273,36 @@ public final class ChatRepository: ObservableObject {
            !ReachCenter.shared.keyResolver.samePerson(own, recipientSignaturePubkey) {
             targets.append((own, ReachCenter.shared.writeAuth(toAccountKey: own)))
         }
-        for target in targets {
-            try await deliverWelcome(
-                welcomeEnvelope: welcomeEnvelope, toAccountKey: target.accountKey, auth: target.auth)
-            try bound.require()
-        }
 
         let groupId = try group.groupId()
         let groupIdHex = DsClient.pseudonymHex(groupId)
+        // The founder's state is on disk BEFORE any Welcome goes out, fail
+        // closed (the commit paths' discipline): the MLS snapshot holding the
+        // new group, then its row in the known groups. A sign-out between a
+        // Welcome and a best-effort persist used to lose the group on the
+        // founder while its members joined it. A refused or failed persist
+        // throws here, and nothing was published.
+        let foundingAccount = try persistFoundingOrThrow(groupIdHex: groupIdHex)
+        var delivered = 0
+        do {
+            for target in targets {
+                try await deliverWelcome(
+                    welcomeEnvelope: welcomeEnvelope, toAccountKey: target.accountKey, auth: target.auth)
+                delivered += 1
+                try bound.require()
+            }
+        } catch {
+            // No Welcome went out: nobody else holds the group, so its row
+            // goes again (the provider keeps the MLS state, as it did before
+            // the row was written up front). Once one went out the group has
+            // a member, and the founder keeps it for this account's next
+            // start, signed out in between or not.
+            if FoundingRollback.forgetsRow(welcomesDelivered: delivered) {
+                knownGroupsStore.remove(accountIdB64: foundingAccount, groupIdHex: groupIdHex)
+            }
+            throw error
+        }
+
         groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
         // ADR-0073 R.5 — a group that continues a conversation is known to
         // the notification extension as that conversation.
@@ -6118,6 +6140,22 @@ public final class ChatRepository: ObservableObject {
         )
     }
 
+    /// A founder's state, written before its Welcome is published
+    /// (``startGroupWith(recipientAccountId:recipientSignaturePubkey:kind:recipientWriteAuth:)``):
+    /// the MLS snapshot holding the new group, durably, then the group's row
+    /// in the known groups, so the next start of the account loads it.
+    /// Throws when either is refused or fails, or when no account is bound
+    /// (``StaleBindingError``); the caller then publishes nothing. Returns
+    /// the account the row was written under.
+    func persistFoundingOrThrow(groupIdHex: String) throws -> String {
+        guard canonicalIdentity != nil, let accountIdB64 = currentAccountIdB64 else {
+            throw StaleBindingError()
+        }
+        try persistSnapshotDurableOrThrow()
+        try knownGroupsStore.addOrEnd(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        return accountIdB64
+    }
+
 
     // MARK: - ADR-0045 proposal-based membership + the committer sweep
 
@@ -8607,7 +8645,8 @@ public final class ChatRepository: ObservableObject {
         else { return }
         // The cursor survives a relaunch: a request rejected here must not be
         // read back into the quarantine from the knock queue on the next start.
-        let cursorKey = currentAccountIdB64.map {
+        let cursorAccount = currentAccountIdB64
+        let cursorKey = cursorAccount.map {
             "me.lakko.chat.knock-cursor.v1.\($0).\(groupIdHex)"
         }
         if record.knockCursor == 0, let cursorKey {
@@ -8661,7 +8700,13 @@ public final class ChatRepository: ObservableObject {
                 return
             }
             state = state.with(threads: buildThreadList())
-            if let cursorKey {
+            // The account was captured before the fetch: its cursor is not
+            // written once its session has ended (``AccountStoreGate``). The
+            // snapshot persist above does not cover that: with no account
+            // bound any more it is a no-op, not a refusal.
+            if let cursorKey, let cursorAccount,
+               let gate = AccountStoreGate.enter(cursorAccount) {
+                defer { gate.leave() }
                 UserDefaults.standard.set(Int(record.knockCursor), forKey: cursorKey)
             }
         }
@@ -10127,5 +10172,17 @@ final class GroupRecord {
         case .commit: return "[mls commit]"
         case .externalJoinProposal: return "[mls external join]"
         }
+    }
+}
+
+/// What a founder does with its new group's known-groups row when delivering
+/// the Welcome fails (``ChatRepository/startGroupWith(recipientAccountId:recipientSignaturePubkey:kind:recipientWriteAuth:)``).
+/// The row is written before the first Welcome; pure so the rule is testable.
+enum FoundingRollback {
+    /// `true` when no Welcome went out: nobody else holds the group, and the
+    /// row goes again. Once one did, the group has a member and the row
+    /// stays.
+    static func forgetsRow(welcomesDelivered: Int) -> Bool {
+        welcomesDelivered == 0
     }
 }

@@ -39,11 +39,18 @@ if [[ ${SKIP_BACKEND:-0} != 1 ]]; then
   docker build --platform linux/amd64 -q -t lakko-linux-builder -f "$HERE/Dockerfile.builder" "$HERE" >/dev/null
   pkgs=()
   for svc in "${SERVICES[@]}"; do pkgs+=(-p "lakko-svc-$svc"); done
+  # One target volume per checkout. Every checkout is mounted at /src, so two
+  # worktrees on different branches sharing one target saw each other's build
+  # artefacts at identical paths, and cargo's mtime fingerprints could take an
+  # older branch's crate for fresh (seen 2026-10-13: lakko-svc-auth built
+  # against a stale lakko-anon-token). The registry and git caches are
+  # content-addressed and stay shared.
+  target_volume="lakko-amd64-target-$(printf '%s' "$REPO" | shasum | cut -c1-12)"
   docker run --rm --platform linux/amd64 \
     -v "$REPO":/src \
     -v lakko-amd64-registry:/opt/cargo/registry \
     -v lakko-amd64-git:/opt/cargo/git \
-    -v lakko-amd64-target:/target \
+    -v "$target_volume":/target \
     -v "$OUT/bin":/out \
     -e CARGO_TARGET_DIR=/target \
     -e CARGO_BUILD_JOBS="${JOBS:-3}" \

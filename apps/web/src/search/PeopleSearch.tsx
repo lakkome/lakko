@@ -36,6 +36,7 @@ import { searchPeople, type PeopleSearchOutcome } from "./people-search";
 import { REQUEST_REFUSED, searchStateMessage, type PeopleSearchState } from "./search-state";
 import { sendFoundRequest } from "./send-request";
 import { localCandidates, normalizerOf, peopleSearchDeps, sendDeps } from "./wiring";
+import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 
 export function PeopleSearch(props: {
   /** What was typed in the search field. */
@@ -192,11 +193,7 @@ function PersonRow(props: {
     const client = new ContactsClient(undefined, undefined, {
       identityProvider: () => props.chats.identity(),
       accountIdentityProvider: () => props.chats.accountIdentity(),
-      onPersist: async () => {
-        const s = auth.state();
-        if (s.kind !== "session") return;
-        await props.chats.persistSnapshot(s.account.accountId);
-      },
+      onPersist: durableSnapshotHook(props.chats, () => sessionAccountOf(auth.state())),
       ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
       onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
     });

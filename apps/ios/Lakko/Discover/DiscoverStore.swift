@@ -45,7 +45,12 @@ final class DiscoverStore {
         return plaintext
     }
 
+    /// Throws ``AccountStoreGate/Sealed`` once the account's session has
+    /// ended: the Discover model and the shared-channels hub write after
+    /// waits, under the account they read before them.
     func save(accountIdB64: String, kind: Kind, plaintext: Data) throws {
+        let gate = try AccountStoreGate.enterOrEnd(accountIdB64)
+        defer { gate.leave() }
         guard let url = fileURL(accountIdB64: accountIdB64, kind: kind) else {
             throw CocoaError(.fileWriteUnknown)
         }

@@ -168,6 +168,25 @@ public class AccountNoticeStore(private val storage: MarkerStorage) {
     public fun markOwn(accountIdB64: String, kind: AccountNoticeKind, atMs: Long): Unit =
         write(accountIdB64, ownKey(accountIdB64, kind), atMs.toString())
 
+    /**
+     * [markOwn] for an action a sign-in takes BEFORE its account lands (the
+     * email route's `recover/open`, which the server records as a notice):
+     * the account may still be sealed from its last sign-out in this
+     * process, and a refused marker would show the person their own action
+     * as someone else's once the landing reads the notices. Refused only for
+     * an account whose data was wiped
+     * ([me.lakko.app.account.AccountStoreGate.writeUnlessWiped]).
+     */
+    public fun markOwnBeforeLanding(accountIdB64: String, kind: AccountNoticeKind, atMs: Long) {
+        try {
+            me.lakko.app.account.AccountStoreGate.writeUnlessWiped(accountIdB64) {
+                storage.set(ownKey(accountIdB64, kind), atMs.toString())
+            }
+        } catch (_: Throwable) {
+            // The value then lives for this process only.
+        }
+    }
+
     public fun ownActions(accountIdB64: String): Map<AccountNoticeKind, Long> =
         AccountNoticeKind.entries.mapNotNull { kind ->
             read(ownKey(accountIdB64, kind))?.toLongOrNull()?.let { kind to it }

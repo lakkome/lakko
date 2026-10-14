@@ -455,6 +455,8 @@ public struct AccountProtectionStore {
     }
 
     public func markOwnAction(_ kind: AccountNoticeKind, atMs: Int64, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         var actions = ownActions(accountIdB64: accountIdB64)
         actions[kind.rawValue] = atMs
         defaults.set(actions, forKey: Self.key("own-actions", accountIdB64: accountIdB64))
@@ -462,6 +464,9 @@ public struct AccountProtectionStore {
 
     /// A marker did its work: it suppresses one notice, not every later one.
     public func clearOwnAction(_ kind: String, accountIdB64: String) {
+        // A read-modify-write: after a wipe it would write the rest back.
+        guard let gate = AccountStoreGate.enterUnlessWiped(accountIdB64) else { return }
+        defer { gate.leave() }
         var actions = ownActions(accountIdB64: accountIdB64)
         actions[kind] = nil
         defaults.set(actions, forKey: Self.key("own-actions", accountIdB64: accountIdB64))

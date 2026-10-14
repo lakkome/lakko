@@ -54,6 +54,7 @@ import {
 } from "./group-name-store";
 import { readIsActive } from "./membership-ended";
 import { conversationKindOf } from "./conversation-kind";
+import { durableSnapshotHook } from "./persist-hooks";
 
 /** The receive-loop event this runtime consumes. */
 export type GroupNameEvent = Extract<IncomingChatEvent, { kind: "group-name" }>;
@@ -119,11 +120,7 @@ export function GroupNameProvider(props: { children: JSX.Element }): JSX.Element
   // every other ChatClient on the page (`chat/own-published.ts`).
   const publisher = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const account = accountId();
-      if (account === null) return;
-      await chats.persistSnapshot(account);
-    },
+    onPersist: durableSnapshotHook(chats, accountId),
   });
 
   async function liveRole(group: WasmGroup): Promise<PushRotationRole> {

@@ -200,19 +200,26 @@ public final class PendingSyncTracker {
 
     private let defaults: UserDefaults
     private let key: String
+    private let accountIdB64: String
     /// Failures seen in this process; a flush compares it before and after.
     private var failures: UInt64 = 0
 
     public init(accountIdB64: String, defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.key = "lakko.deviceSync.pending." + accountIdB64
+        self.accountIdB64 = accountIdB64
     }
 
     public var isPending: Bool { defaults.bool(forKey: key) }
 
     /// A publish failed: remember it across a relaunch.
+    ///
+    /// The flag is not written once the account's session has ended
+    /// (``AccountStoreGate``): the failure is learned after a publish's wait.
     public func markFailed() {
         failures &+= 1
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         defaults.set(true, forKey: key)
     }
 

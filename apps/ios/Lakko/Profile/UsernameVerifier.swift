@@ -189,7 +189,9 @@ final class UsernameVerifier {
     private func record(_ verdict: UsernameVerificationState, key: String) -> UsernameVerificationState {
         let changed = verdicts[key] != verdict
         verdicts[key] = verdict
-        if let accountIdB64, let defaults {
+        // Not written once the account's session ended (``AccountStoreGate``).
+        if let accountIdB64, let defaults, let gate = AccountStoreGate.enter(accountIdB64) {
+            defer { gate.leave() }
             let durable = verdicts.filter { if case .failed = $0.value { return false } else { return true } }
             if let data = try? JSONEncoder().encode(durable) {
                 defaults.set(data, forKey: keyPrefix + accountIdB64)

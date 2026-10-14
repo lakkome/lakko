@@ -42,6 +42,7 @@ import { ScopedDiscoveryClient } from "./scoped-discovery";
 import type { OprfPair } from "../discovery/oprf-pair";
 import { loadIntroductions } from "./scoped-intake";
 import { visibilitySetting } from "./visibility-store";
+import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 
 /** How often the runtime re-checks without a trigger (a contact's offer that
  *  arrived, a new one-to-one). Chosen, not measured. */
@@ -54,10 +55,7 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
   const scoped = new ScopedDiscoveryClient(() => auth.identitySecrets()?.sessionToken ?? null);
   const publisher = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const s = auth.state();
-      if (s.kind === "session") await chats.persistSnapshot(s.account.accountId);
-    },
+    onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
   });
 
   let running: Promise<void> | null = null;

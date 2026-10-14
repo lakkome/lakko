@@ -107,6 +107,9 @@ public enum ConversationMuteMirror {
         defaults: UserDefaults? = SharedStorage.sharedDefaults()
     ) {
         guard let defaults, let accountIdB64 else { return }
+        // Not written once the account's session has ended (``AccountStoreGate``).
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         let prefix = accountPrefix(accountIdB64)
         let wanted = Set(mutedGroupIdsHex.map { key(accountIdB64, $0) })
         for (storageKey, _) in defaults.dictionaryRepresentation()

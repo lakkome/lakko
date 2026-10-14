@@ -31,6 +31,7 @@ import {
   type GroupCallRecords,
   type GroupCallViewer,
 } from "./group-call-record";
+import { registerAccountMemory } from "../auth/account-memory";
 
 const records = new Map<string, GroupCallRecords>();
 const [version, setVersion] = createSignal(0);
@@ -110,13 +111,25 @@ export function clearGroupCallStore(): void {
   setVersion(version() + 1);
 }
 
-/** Forget device / Delete account: drop the account's records, in memory and
- *  in this tab's session storage. Another account's are left alone. */
-export function clearGroupCallsForAccount(accountId: string): void {
+/** Drop the in-memory records of `accountId` only. */
+function dropMemoryFor(accountId: string): void {
   const memoryPrefix = `${accountId}|`;
   for (const k of [...records.keys()]) {
     if (k.startsWith(memoryPrefix)) records.delete(k);
   }
+}
+
+// A record folded in after the wipe step (a receive that was in flight) would
+// be merged into the next save once the account signs in again on this page.
+registerAccountMemory("group-calls", (ids) => {
+  for (const id of ids) dropMemoryFor(id);
+  setVersion(version() + 1);
+});
+
+/** Forget device / Delete account: drop the account's records, in memory and
+ *  in this tab's session storage. Another account's are left alone. */
+export function clearGroupCallsForAccount(accountId: string): void {
+  dropMemoryFor(accountId);
   try {
     const store = globalThis.sessionStorage;
     if (store !== undefined) {

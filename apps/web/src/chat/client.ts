@@ -669,8 +669,9 @@ export interface ChatClientOptions {
   identityProvider?: () => WasmIdentity | null;
   /** Fires after every successful MLS state-mutating call so
    *  the route layer can persist the canonical Identity's
-   *  provider snapshot to disk. Best-effort — exceptions are
-   *  logged and swallowed; the in-memory state stays good. */
+   *  provider snapshot to disk. Must resolve only when the snapshot
+   *  was written and throw otherwise (`chat/persist-hooks.ts`): a send
+   *  publishes only after it resolved (`persistDurableOrThrow`). */
   onPersist?: () => Promise<void>;
   /** ADR-0042 / ADR-0054 — resolve the opaque `push_gid` for a group's DS
    *  `group_id`, so the `x-lakko-wake` header of a publish names the routing

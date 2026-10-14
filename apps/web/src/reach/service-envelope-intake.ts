@@ -24,6 +24,7 @@
  * {@link applyHeldServiceEnvelopes}, which `ReachProvider` calls once both
  * are loaded and `ProfileContext` once the own profile is bound.
  */
+import { registerAccountMemory } from "../auth/account-memory";
 import type { Wasm } from "../wasm";
 import { loadWasm } from "../wasm";
 import { reachSession } from "./reach-service";
@@ -227,3 +228,9 @@ export function clearHeldServiceEnvelopes(): void {
   heldProfile = null;
   heldReachStates.length = 0;
 }
+
+// Forget device: an envelope held for the wiped account (or received by a
+// poll that was in flight across the wipe) would be applied, and saved, once
+// the account's state loads again on this page. The held set is the session's
+// and records no account, so it goes whole.
+registerAccountMemory("held-service-envelopes", () => clearHeldServiceEnvelopes());

@@ -183,14 +183,21 @@ public final class CallHistoryStore: ObservableObject {
     }
 
     static func markBackfilled(backing: CallHistoryBacking, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         backing.save(accountIdB64: backfillMarkerKey(accountIdB64), data: Data([1]))
     }
 
+    /// Not written once the account's session has ended
+    /// (``AccountStoreGate``): a call that finishes after Forget device must
+    /// not file a row back.
     static func save(
         backing: CallHistoryBacking,
         accountIdB64: String,
         entries: [CallHistoryEntry]
     ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard !entries.isEmpty else {
             backing.remove(accountIdB64: accountIdB64)
             return

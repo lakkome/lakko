@@ -17,6 +17,8 @@
  */
 import { createSignal } from "solid-js";
 
+import { registerAccountMemory } from "./account-memory";
+
 export interface UsernameRegisterPort {
   readonly accountIdB64: string;
   /** Write the register and send it to the account's other devices. Never
@@ -86,6 +88,16 @@ export function rememberUsername(accountIdB64: string, username: string): void {
 export function dropPendingUsername(): void {
   setPending(null);
 }
+
+// Forget device: as for the recovery-address register. A sign-out keeps the
+// pending write: dropping it would let the account's next session seed the
+// register from an older name and undo the rename.
+registerAccountMemory("username-register", (ids) => {
+  const p = pending();
+  if (p !== null && ids.includes(p.accountIdB64)) setPending(null);
+  const h = held();
+  if (h !== null && ids.includes(h.accountIdB64)) setHeld(null);
+});
 
 /** What a device does about the register. */
 export type UsernameRegisterAction =

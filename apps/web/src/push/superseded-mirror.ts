@@ -30,6 +30,7 @@
  * the store.
  */
 
+import { registerAccountMemory } from "../auth/account-memory";
 import { accountStoresWritable } from "../auth/account-store-gate";
 
 export const SUPERSEDED_MIRROR_DB = "lakko-superseded-keys";
@@ -89,6 +90,17 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
 
 /** What this session last wrote, so an unchanged set costs no transaction. */
 let lastWritten: SupersededMirrorRow | null = null;
+
+// After Forget device the row is gone; a remembered "already written" would
+// skip the same set's write at the account's next sign-in on this page and
+// leave the service worker without it.
+registerAccountMemory(
+  "superseded-mirror",
+  (ids) => {
+    if (lastWritten !== null && ids.includes(lastWritten.accountId)) lastWritten = null;
+  },
+  { signOut: true },
+);
 
 /**
  * Write the mirror for `accountIdB64`. Best effort: a failure leaves the

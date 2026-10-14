@@ -217,6 +217,8 @@ public class AuthRepository(
      */
     private fun openStoresFor(accountIdB64: String) {
         me.lakko.app.account.AccountStoreGate.open(accountIdB64)
+        // The token pool keeps its own "forgotten" marks, under its own lock.
+        me.lakko.app.anon.AnonTokens.accountLanded(accountIdB64)
     }
 
     /** Record which account is bound; a change ends the previous binding. */
@@ -225,6 +227,7 @@ public class AuthRepository(
         // sealed them ([me.lakko.app.account.AccountStoreGate]), and every
         // landing passes through this function.
         accountIdB64?.let(me.lakko.app.account.AccountStoreGate::open)
+        accountIdB64?.let(me.lakko.app.anon.AnonTokens::accountLanded)
         val replaced = synchronized(boundAccountLock) {
             if (boundAccountIdB64 == accountIdB64) return
             boundAccountIdB64.also { boundAccountIdB64 = accountIdB64 }
@@ -3632,8 +3635,10 @@ public class AuthRepository(
                 }
                 // The server recorded "account opened by email" at `open`:
                 // this device's own action.
+                // Before the landing, so a marker of an account still sealed
+                // from its last sign-out is not refused.
                 candidate?.let {
-                    noticeStore.markOwn(it, AccountNoticeKind.AccountOpenedByEmail, System.currentTimeMillis())
+                    noticeStore.markOwnBeforeLanding(it, AccountNoticeKind.AccountOpenedByEmail, System.currentTimeMillis())
                 }
                 // Opened from the email vault: never typed, never shown.
                 recover(phrase, newPassword, named.username, phraseHeldByPerson = false)

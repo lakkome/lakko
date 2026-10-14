@@ -27,6 +27,8 @@ import type { DsClient } from "./client";
 import { dsAccess } from "./access";
 import { ensureDeviceGroup } from "../devices/lifecycle";
 import { openOrFoundPublisherGroup, type UnconfirmedFoundingStorage } from "../channels/composer";
+import { AccountStoresSealedError } from "../auth/account-store-gate";
+import { durableSnapshotHook } from "../chat/persist-hooks";
 
 beforeAll(async () => {
   const wasmPath = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -44,7 +46,7 @@ function httpError(status: number): Error {
 }
 
 describe("a conversation group: no Welcome before the claim lands", () => {
-  function setup(claimStatus: number) {
+  function setup(claimStatus: number, onPersist?: (order: string[]) => Promise<void>) {
     const device = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x21));
     const account = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x22));
     const peer = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x23));
@@ -68,6 +70,7 @@ describe("a conversation group: no Welcome before the claim lands", () => {
     const client = new ContactsClient(discovery, ds, {
       identityProvider: () => device,
       accountIdentityProvider: () => account,
+      ...(onPersist === undefined ? {} : { onPersist: () => onPersist(order) }),
     });
     // The key the caller expects the peer to have: the one its KeyPackage's
     // binding names. `startGroupWith` adds only a device bound to it
@@ -102,6 +105,87 @@ describe("a conversation group: no Welcome before the claim lands", () => {
       }
     });
   }
+});
+
+describe("a conversation group: no Welcome before the founder's state is on disk", () => {
+  function setup(onPersist: (order: string[]) => Promise<void>) {
+    const device = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x24));
+    const account = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x25));
+    const peer = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x26));
+    const order: string[] = [];
+    const ds = {
+      putStatement: vi.fn(async () => {
+        order.push("claim");
+      }),
+      publishMailbox: vi.fn(async () => {
+        order.push("welcome");
+        return { id: 1, createdAt: "t" };
+      }),
+    } as unknown as DsClient;
+    const discovery = {
+      identityFetch: async () => null,
+      fetchKeyPackages: async () => [{ deviceId: peer.signaturePublicKey, keyPackage: peer.createKeyPackage() }],
+    } as unknown as DiscoveryClient;
+    const client = new ContactsClient(discovery, ds, {
+      identityProvider: () => device,
+      accountIdentityProvider: () => account,
+      onPersist: () => onPersist(order),
+    });
+    return {
+      client,
+      ds,
+      order,
+      peerKey: peer.signaturePublicKey,
+      free: () => [device, account, peer].forEach((i) => i.free()),
+    };
+  }
+
+  it("the founder's snapshot is written after the claim and before the Welcome", async () => {
+    const s = setup(async (order) => {
+      order.push("persist");
+    });
+    try {
+      await s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat");
+      // The second persist is the best-effort one after the delivery.
+      expect(s.order).toEqual(["claim", "persist", "welcome", "persist"]);
+    } finally {
+      s.free();
+    }
+  });
+
+  it("a refused persist sends no Welcome (a sealed account, an ended session, a disk failure)", async () => {
+    const s = setup(async (order) => {
+      order.push("persist");
+      throw new AccountStoresSealedError();
+    });
+    try {
+      await expect(
+        s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat"),
+      ).rejects.toBeDefined();
+      expect(s.order).toEqual(["claim", "persist"]);
+      expect(s.ds.publishMailbox).not.toHaveBeenCalled();
+    } finally {
+      s.free();
+    }
+  });
+
+  it("the durable hook refuses when no account is signed in, so nothing is sent", async () => {
+    const persistSnapshotDurable = vi.fn(async () => undefined);
+    const hook = durableSnapshotHook({ persistSnapshotDurable }, () => null);
+    const s = setup(async (order) => {
+      order.push("persist");
+      await hook();
+    });
+    try {
+      await expect(
+        s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat"),
+      ).rejects.toBeDefined();
+      expect(persistSnapshotDurable).not.toHaveBeenCalled();
+      expect(s.ds.publishMailbox).not.toHaveBeenCalled();
+    } finally {
+      s.free();
+    }
+  });
 });
 
 describe("a DeviceGroup founding: nothing persisted before the claim lands", () => {

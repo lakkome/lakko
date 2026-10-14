@@ -58,6 +58,7 @@ import {
   type PinVerdict,
   type StoredPin,
 } from "./pin-store";
+import { durableSnapshotHook } from "./persist-hooks";
 
 /** The receive-loop event this runtime consumes. */
 export type PinEvent = Extract<IncomingChatEvent, { kind: "pin" }>;
@@ -128,11 +129,7 @@ export function PinProvider(props: { children: JSX.Element }): JSX.Element {
   // every other ChatClient on the page (`chat/own-published.ts`).
   const publisher = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const account = accountId();
-      if (account === null) return;
-      await chats.persistSnapshot(account);
-    },
+    onPersist: durableSnapshotHook(chats, accountId),
   });
 
   async function liveRole(group: WasmGroup): Promise<PushRotationRole> {

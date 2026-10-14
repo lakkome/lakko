@@ -165,7 +165,12 @@ public final class InviteLinkSecretStore {
         backend.save(accountIdB64: accountIdB64, blob: blob)
     }
 
+    /// Not written once the account's session has ended
+    /// (``AccountStoreGate``): the secret arrives after the ledger upload,
+    /// a wait the session may not survive.
     public func put(accountIdB64: String, slug: String, secret: Data) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var current = map(accountIdB64: accountIdB64)
         current[slug] = base64UrlEncodeNoPad(secret)
         write(accountIdB64: accountIdB64, current)
@@ -177,6 +182,9 @@ public final class InviteLinkSecretStore {
 
     /// Revoke: the link is gone, so is its secret.
     public func remove(accountIdB64: String, slug: String) {
+        // A read-modify-write: after a wipe it would write the rest back.
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         var current = map(accountIdB64: accountIdB64)
         guard current.removeValue(forKey: slug) != nil else { return }
         write(accountIdB64: accountIdB64, current)

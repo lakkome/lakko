@@ -128,11 +128,16 @@ public enum AutoBackupStore {
         return decoded
     }
 
+    /// Not written once the account's session has ended
+    /// (``AccountStoreGate``): the driver files an upload's outcome after
+    /// the upload's wait, under the account it captured before it.
     public static func save(
         accountIdB64: String,
         state: AutoBackup.State,
         defaults: UserDefaults = .standard
     ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard let data = try? JSONEncoder().encode(state) else { return }
         defaults.set(data, forKey: key(accountIdB64))
     }
@@ -147,6 +152,8 @@ public enum AutoBackupStore {
         nowMs: Int64,
         defaults: UserDefaults = .standard
     ) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         let state = load(accountIdB64: accountIdB64, defaults: defaults)
         let next = AutoBackup.markedDirty(state, nowMs: nowMs)
         if next != state { save(accountIdB64: accountIdB64, state: next, defaults: defaults) }
@@ -164,6 +171,9 @@ public enum AutoBackupStore {
         groupIds: [String],
         defaults: UserDefaults = .standard
     ) -> Bool {
+        // Sealed: nothing is recorded and no change is reported.
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return false }
+        defer { gate.leave() }
         let key = AutoBackup.groupsKey(groupIds)
         var state = load(accountIdB64: accountIdB64, defaults: defaults)
         if state.lastGroupsKey == key { return false }

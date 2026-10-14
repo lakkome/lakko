@@ -158,8 +158,15 @@ public final class ProfileDirectory: ObservableObject {
             throw DisplayNameRuleViolation(message: Localization.text("display_name.error.signed_out"))
         }
         let normalized = try checkDisplayName(input)
+        // A name the store refuses (the account's session ended,
+        // ``AccountStoreGate``) is not kept and never sent to the account's
+        // other devices: refused here, before the write, as signed out.
+        guard let gate = AccountStoreGate.enter(account) else {
+            throw DisplayNameRuleViolation(message: Localization.text("display_name.error.signed_out"))
+        }
         let nowMs = UInt64(max(0, Date().timeIntervalSince1970 * 1000))
         let saved = ownStore.save(displayName: normalized, accountIdB64: account, nowMs: nowMs)
+        gate.leave()
         if account == self.accountIdB64 {
             ownProfile = saved
             bump()

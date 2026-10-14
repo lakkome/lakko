@@ -59,7 +59,11 @@ public enum CoPublisher {
     /// whose local PublisherGroup was lost and founded again).
     static func markFounded(_ group: PublisherGroup) {
         guard let groupId = try? group.groupId() else { return }
-        JournalFoundingMarks.shared.mark(journalIdHex: DsClient.pseudonymHex(groupId))
+        // Filed for the bound account, the one whose channel this is: refused
+        // with none bound or once its session has ended.
+        JournalFoundingMarks.shared.mark(
+            journalIdHex: DsClient.pseudonymHex(groupId),
+            accountIdB64: AcceptedContactsStore.boundAccountIdB64)
     }
 
     /// Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`.
@@ -440,8 +444,10 @@ public enum CoPublisher {
         let binding = try composeChannelCopublisherBinding(
             accountIdentity: identity, channelId: channelIdBytes)
         // ADR-0057 — this device asks to CO-publish, so it is not the channel
-        // owner: it must never claim the PublisherGroup journal.
-        CoPublishedJournals.shared.mark(journalIdHex: DsClient.pseudonymHex(groupId))
+        // owner: it must never claim the PublisherGroup journal. Recorded
+        // before the knock, fail closed: an unrecorded request could later
+        // let this account's claim squat the owner's journal.
+        try CoPublishedJournals.shared.markOrEnd(journalIdHex: DsClient.pseudonymHex(groupId))
         // ADR-0053 point 6 — the knock: a probe learns the registered epoch,
         // the proposal is built for it, a second knock carries the self-signed
         // attribution (OQ2, advisory) and the proposal. No journal read.
@@ -709,8 +715,22 @@ public final class CoPublishedJournals {
         accountIdB64().map { Self.prefix + $0 }
     }
 
+    /// Best effort: no account bound, or one whose session has ended
+    /// (``AccountStoreGate``), marks nothing.
     public func mark(journalIdHex: String) {
-        guard let key = key() else { return }
+        try? markOrEnd(journalIdHex: journalIdHex)
+    }
+
+    /// ``mark(journalIdHex:)`` for a caller about to ask to co-publish: the
+    /// mark is what stops this account claiming the journal later, so the
+    /// request is not sent without it. Throws ``StaleBindingError`` with no
+    /// account bound and ``AccountStoreGate/Sealed`` once the account's
+    /// session has ended; nothing is written then.
+    public func markOrEnd(journalIdHex: String) throws {
+        guard let account = accountIdB64() else { throw StaleBindingError() }
+        let gate = try AccountStoreGate.enterOrEnd(account)
+        defer { gate.leave() }
+        let key = Self.prefix + account
         var set = Set(defaults.stringArray(forKey: key) ?? [])
         guard set.insert(journalIdHex.lowercased()).inserted else { return }
         defaults.set(Array(set).sorted(), forKey: key)

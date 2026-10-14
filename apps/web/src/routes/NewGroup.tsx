@@ -29,6 +29,7 @@ import { DEFAULT_GROUP_LABEL } from "../chat/group-title";
 import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
 import { screenAnchor } from "../ui/screen-anchor";
+import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 
 export const GROUP_NAME_MAX = 64;
 
@@ -42,11 +43,7 @@ export default function NewGroup(): JSX.Element {
 
   const client = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const s = auth.state();
-      if (s.kind !== "session") return;
-      await chats.persistSnapshot(s.account.accountId);
-    },
+    onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
     ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
     onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
   });

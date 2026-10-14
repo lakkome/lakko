@@ -167,10 +167,13 @@ public class LogoutOwedStore(private val storage: MarkerStorage) {
 
     public fun save(accountIdB64: String, owed: LogoutOwed) {
         try {
-            me.lakko.app.account.AccountStoreGate.writeUnlessWiped(accountIdB64) { storage.set(KEY_PREFIX + accountIdB64, json.encodeToString(LogoutOwed.serializer(), owed)) }
-                ?: return
-            val index = accounts().toMutableSet().apply { add(accountIdB64) }
-            storage.set(INDEX_KEY, index.joinToString(INDEX_SEPARATOR))
+            // The index row inside the same gate: written after a wipe, it
+            // would name the wiped account on this device again.
+            me.lakko.app.account.AccountStoreGate.writeUnlessWiped(accountIdB64) {
+                storage.set(KEY_PREFIX + accountIdB64, json.encodeToString(LogoutOwed.serializer(), owed))
+                val index = accounts().toMutableSet().apply { add(accountIdB64) }
+                storage.set(INDEX_KEY, index.joinToString(INDEX_SEPARATOR))
+            }
         } catch (_: Throwable) {
             // The server is then not told; the credentials expire by themselves.
         }

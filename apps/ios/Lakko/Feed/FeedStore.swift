@@ -124,8 +124,11 @@ final class FeedStore {
         return FeedState.decode(plaintext)
     }
 
-    /// Throws when the file cannot be written, so Save can say so.
+    /// Throws when the file cannot be written, so Save can say so, and
+    /// ``AccountStoreGate/Sealed`` once the account's session has ended.
     func save(accountIdB64: String, state: FeedState) throws {
+        let gate = try AccountStoreGate.enterOrEnd(accountIdB64)
+        defer { gate.leave() }
         guard let url = fileURL(accountIdB64: accountIdB64) else {
             throw CocoaError(.fileWriteUnknown)
         }

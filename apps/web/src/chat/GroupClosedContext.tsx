@@ -62,6 +62,7 @@ import {
   type ClaimVerdict,
   type SuccessorClaim,
 } from "./successor-claim";
+import { durableSnapshotHook } from "./persist-hooks";
 
 /** The receive-loop event this runtime consumes. */
 export type GroupClosedEvent = Extract<IncomingChatEvent, { kind: "group-closed" }>;
@@ -158,11 +159,7 @@ export function GroupClosedProvider(props: { children: JSX.Element }): JSX.Eleme
 
   const publisher = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const account = accountId();
-      if (account === null) return;
-      await chats.persistSnapshot(account);
-    },
+    onPersist: durableSnapshotHook(chats, accountId),
   });
 
   let boundAccount: string | null = null;

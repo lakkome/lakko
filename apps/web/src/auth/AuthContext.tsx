@@ -90,6 +90,7 @@ import {
 } from "./client";
 import { loadPersistedAccount, savePersistedAccount } from "./persisted-account";
 import { accountStoreIds, wipeAccountLocalData, wipeAccountStaged } from "./wipe-account";
+import { dropAccountMemory } from "./account-memory";
 import {
   deleteRecallRecord,
   getRecallRecord,
@@ -724,11 +725,18 @@ export interface AuthApi {
    *  answered (ADR-0075 section 7, password mode): the password was already
    *  replaced by the mailed code, so no new-password step is owed and no
    *  fresh-auth proof is held. On a device that holds the account's keys the
-   *  session lands; otherwise the guard shows "Restore your keys". */
+   *  session lands; otherwise the guard shows "Restore your keys".
+   *
+   *  `whenOpened` runs once the account's local stores are open
+   *  (`account-store-gate.ts`), before anything of the landing is awaited:
+   *  the place for the screen's own writes of this account (a write made
+   *  before it would be dropped when the account was wiped on this page
+   *  earlier, and a pending write would be dropped by the landing). */
   landEmailPasswordRecovery(
     username: string,
     accountId: Uint8Array,
     session: SessionPair,
+    whenOpened?: () => void,
   ): Promise<void>;
   /** URL-safe base64 of this device's id for a landing of `username`'s
    *  account, when this device already holds its keys; else `undefined`. */
@@ -2907,6 +2915,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     readonly phrase: string;
     readonly newPubkey: Uint8Array;
     readonly preparedAtMs: number;
+    /** The anchor's phrase arm the attempt was checked against: recorded
+     *  once the recall landed (the account's stores are sealed until then). */
+    readonly phraseArm: boolean;
   } | null = null;
 
   /** Take the account back (ADR-0074 part 1). From the server's answer on
@@ -3039,6 +3050,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       let seed: Uint8Array;
       let phrase: string;
       let newPubkey: Uint8Array;
+      let phraseArm: boolean;
       // ADR-0074 T5 item 25: a finish that was sent and never answered may
       // have LANDED. Ask it again with the same bytes (the server answers an
       // identical finish 200 again for the attempt's ten minutes) before
@@ -3063,6 +3075,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         seed = earlier.seed.slice();
         phrase = earlier.phrase;
         newPubkey = earlier.newPubkey;
+        phraseArm = earlier.phraseArm;
         dropPending();
       } else {
         dropPending();
@@ -3075,9 +3088,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         if (oldPhraseSeed !== null && !check.status.phraseArm) return { kind: "wrong-password" };
         // Whether the account had a saved phrase when its keys were reset
         // (the anchor's phrase arm): only then are the NEW words shown after
-        // the recall. Recorded before anything is sent, so an attempt whose
-        // answer is lost and found later reads the same.
-        setPhraseProtected(plainStorage(), accountIdB64, check.status.phraseArm);
+        // the recall. Taken before anything is sent and kept with the
+        // attempt, so an attempt whose answer is lost and found later reads
+        // the same. Written to the store once the recall landed: the staged
+        // wipe sealed the account's stores (`account-store-gate.ts`), and a
+        // write made now would be dropped.
+        phraseArm = check.status.phraseArm;
         const wasm = await loadWasm();
         // A brand-new phrase and identity: the old key authorises the recall
         // and does not return (ADR-0074 section 1.2).
@@ -3113,6 +3129,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           phrase,
           newPubkey,
           preparedAtMs: Date.now(),
+          phraseArm,
         };
         try {
           reset = await client.recallFinish(prepared);
@@ -3126,9 +3143,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
         dropPending();
       }
-      // The account is this device's again. The staged wipe dropped the
-      // restore marker; a reload must find the account.
+      // The account is this device's again: the stores the staged wipe
+      // sealed open here, before the first write of the landing. The staged
+      // wipe dropped the restore marker; a reload must find the account.
       oldPhraseSeed?.fill(0);
+      openStoresFor(accountIdB64);
+      setPhraseProtected(plainStorage(), accountIdB64, phraseArm);
       savePersisted({ v: 1, accountIdB64, username: target.username });
       explicitSignInThisPage = true;
       if (reset.freshGrant !== null) freshGrants.put(accountIdB64, reset.freshGrant);
@@ -5341,11 +5361,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       if (s.kind === "session") clearProtectStepOwed(plainStorage(), s.account.accountId);
       setProtectVersion((v) => v + 1);
     },
-    async landEmailPasswordRecovery(username, accountId, session) {
+    async landEmailPasswordRecovery(username, accountId, session, whenOpened) {
       // Called with the session a mailed code just returned; from here the
       // landing is overtaken like any other sign-in.
       const flow = startFlow();
       const accountIdB64 = base64Encode(accountId);
+      // The first place that holds the account id of the session it was
+      // just given: open its stores, then let the screen write.
+      openStoresFor(accountIdB64);
+      whenOpened?.();
       setRestoreNotice(null);
       explicitSignInThisPage = true;
       // The mailed code already replaced the password.
@@ -7366,9 +7390,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // closed by a sign-out; its next landing opens the row again.
       {
         const bound = boundAccountId();
-        if (bound !== null) sealAccountSession(bound);
-        if (cached !== null) sealAccountSession(cached.accountIdB64);
-        if (heldAccount !== null) sealAccountSession(heldAccount);
+        const ended = new Set<string>();
+        if (bound !== null) ended.add(bound);
+        if (cached !== null) ended.add(cached.accountIdB64);
+        if (heldAccount !== null) ended.add(heldAccount);
+        for (const account of ended) {
+          sealAccountSession(account);
+          // The page-lifetime caches that are cheap to re-read and would
+          // otherwise outlive the session (`account-memory.ts`). The account's
+          // stored data stays.
+          dropAccountMemory(accountStoreIds(account), "sign-out");
+        }
       }
       // ADR-0074: the row is deleted once the server holds the logout; while
       // that is owed it stays for the one retry, and the marker keeps a

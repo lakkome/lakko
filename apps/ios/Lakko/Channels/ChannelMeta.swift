@@ -83,7 +83,8 @@ public enum ChannelMetaRecord {
     /// newest-wins rule a reader applies.
     ///
     /// Throws the core's refusal (an empty name, a bound violation) before
-    /// any counter is consumed, or the publish error.
+    /// any counter is consumed, a counter that did not reach the Keychain
+    /// (nothing is published then), or the publish error.
     @MainActor
     public static func post(
         state: ChannelsUiState,
@@ -100,7 +101,7 @@ public enum ChannelMetaRecord {
                 name: meta.name, description: meta.description, updatedAtMs: meta.updatedAtMs,
                 topic: meta.topic, language: meta.language, listed: meta.listed))
         let epoch = state.epochByChannel[channelId] ?? 0
-        let counter = state.nextCounter(channelId: channelId)
+        let counter = try state.nextCounter(channelId: channelId)
         let wire = try ChannelsComposer.compose(
             keys: keys,
             channelIdHex: channelId,

@@ -487,6 +487,7 @@ import {
 } from "../chat/timeline-layout";
 import { conversationKindOf, type ConversationKind } from "../chat/conversation-kind";
 import { MembersCanFindMeSwitch } from "../settings/MembersCanFindMeSwitch";
+import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 
 /**
  * `/chat/:id` (from the Chats list) and `/groups/:id` (from the Groups list)
@@ -650,11 +651,7 @@ function ChatView(props: {
   );
   const chat = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const s = auth.state();
-      if (s.kind !== "session") return;
-      await chats.persistSnapshot(s.account.accountId);
-    },
+    onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
     // ADR-0042 — route the notify wake under the opaque `push_gid` instead
     // of the leaky DS `group_id`. Returns null when no secret is held yet
     // (→ the wake is skipped; recipients catch up on foreground poll).
@@ -679,11 +676,7 @@ function ChatView(props: {
     undefined,
     {
       identityProvider: () => chats.identity(),
-      onPersist: async () => {
-        const s = auth.state();
-        if (s.kind !== "session") return;
-        await chats.persistSnapshot(s.account.accountId);
-      },
+      onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
       // ADR-0048 §3 — an add-by-username lookup proves the binding a username
       // verification would check.
       onUsernameResolved: (key, username) => profiles.learnUsername(key, username),

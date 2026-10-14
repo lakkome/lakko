@@ -82,6 +82,20 @@ public final class KnownGroupsStore {
     public func add(accountIdB64: String, groupIdHex: String) {
         guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
         defer { gate.leave() }
+        write(accountIdB64: accountIdB64, adding: groupIdHex)
+    }
+
+    /// ``add(accountIdB64:groupIdHex:)`` for a caller that must not go on
+    /// without the row: a founder records its new group here before the
+    /// Welcome goes out. Throws ``AccountStoreGate/Sealed`` when the
+    /// account's session has ended; nothing is written then.
+    public func addOrEnd(accountIdB64: String, groupIdHex: String) throws {
+        let gate = try AccountStoreGate.enterOrEnd(accountIdB64)
+        defer { gate.leave() }
+        write(accountIdB64: accountIdB64, adding: groupIdHex)
+    }
+
+    private func write(accountIdB64: String, adding groupIdHex: String) {
         var current = load(accountIdB64: accountIdB64)
         let (inserted, _) = current.insert(groupIdHex)
         if !inserted { return }

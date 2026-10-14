@@ -19,6 +19,7 @@
  * receipt (C-68); an unresolvable sender is dropped.
  */
 import { base64Decode, base64Encode } from "../auth/account-id";
+import { registerAccountMemory } from "../auth/account-memory";
 import { journalHex } from "../ds/access";
 import { loadWasm } from "../wasm";
 import type { ScopedEnvelopeKind } from "./envelope-sniff";
@@ -75,6 +76,19 @@ export function decodeIntroductionsRow(json: string | null): IntroductionsRow {
 }
 
 let introductionsCache: { account: string; row: IntroductionsRow } | null = null;
+
+// The cache is what the next save starts from: a row cached before Forget
+// device would be saved back over the wiped store at the account's next
+// sign-in on this page. A sign-out drops it too (re-read on the next load).
+registerAccountMemory(
+  "reach-introductions",
+  (ids) => {
+    if (introductionsCache !== null && ids.includes(introductionsCache.account)) {
+      introductionsCache = null;
+    }
+  },
+  { signOut: true },
+);
 
 /** The kept introductions of the signed-in account. */
 export async function loadIntroductions(accountIdB64: string): Promise<IntroductionsRow> {

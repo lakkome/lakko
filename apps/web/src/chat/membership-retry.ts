@@ -207,6 +207,7 @@ import {
   type RetryPort,
 } from "./membership-refusal";
 import { recordUnapplied, unappliedFromRequest } from "./unapplied-requests";
+import { registerAccountMemory } from "../auth/account-memory";
 
 // ---------------------------------------------------------------------------
 // What a retryable request is
@@ -648,6 +649,15 @@ export function armedRetries(scope: string): ArmedRetry[] {
 export function clearArmedRetries(scope: string): void {
   armedByScope.delete(scope);
 }
+
+// Forget device: an armed retry fires a proposal and records it as the
+// account's own request, so one armed before the wipe would act for the
+// account in its next session on this page. Every scope of the account goes.
+registerAccountMemory("membership-retries", (ids) => {
+  for (const scope of [...armedByScope.keys()]) {
+    if (ids.some((id) => scope.startsWith(`${id} `))) armedByScope.delete(scope);
+  }
+});
 
 // ===========================================================================
 // ADR-0050 section 2.5a point 4 — re-requesting a SUPERSEDED own request

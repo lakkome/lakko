@@ -135,8 +135,12 @@ public object ContinuityMarkerStore {
 
     public fun write(context: android.content.Context, accountIdB64: String, marker: ContinuityMarker) {
         try {
-            context.applicationContext.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
-                .edit().putString(KEY_PREFIX + accountIdB64, encodeContinuityMarker(marker)).apply()
+            // Refused once the account's session ended
+            // ([me.lakko.app.account.AccountStoreGate]).
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+                context.applicationContext.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+                    .edit().putString(KEY_PREFIX + accountIdB64, encodeContinuityMarker(marker)).apply()
+            }
         } catch (_: Throwable) {
             // storage blocked
         }

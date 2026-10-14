@@ -61,7 +61,14 @@ public final class ChannelLogStore {
     /// Persist the channel log for `accountIdB64`, replacing any prior
     /// envelope. Best-effort: a Keychain or file-system failure is a no-op
     /// here and the next mutation writes again.
+    ///
+    /// Not written once the account's session has ended
+    /// (``AccountStoreGate``): ``ChannelsUiState`` stays bound to its account
+    /// for as long as any task holds it, so a subscribe or a post sync that
+    /// finishes after Forget device would otherwise write the list back.
     public func put(accountIdB64: String, payload: ChannelLogPayload) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
         guard let target = writeTarget(accountIdB64: accountIdB64) else { return }
         let plaintext: Data
         do {

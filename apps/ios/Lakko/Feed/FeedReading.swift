@@ -249,7 +249,11 @@ final class FeedReadingStore {
         return FeedReading.decode(plaintext)
     }
 
+    /// Throws ``AccountStoreGate/Sealed`` once the account's session has
+    /// ended: a feed screen still on the way out must not write it back.
     func save(accountIdB64: String, reading: FeedReading) throws {
+        let gate = try AccountStoreGate.enterOrEnd(accountIdB64)
+        defer { gate.leave() }
         guard let url = fileURL(accountIdB64: accountIdB64) else {
             throw CocoaError(.fileWriteUnknown)
         }

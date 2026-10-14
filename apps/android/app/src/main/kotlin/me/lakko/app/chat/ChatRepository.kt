@@ -1229,6 +1229,13 @@ public class ChatRepository(
             expectedKeyB64 = outboxB64(recipientSignaturePubkey),
         )
         val createdHex = DsClient.pseudonymHex(created.groupId)
+        // The founder's state is on disk BEFORE any Welcome goes out, and a
+        // persist that fails or is refused (the account's session ended, its
+        // store gate sealed) stops the creation with nothing sent. Published
+        // first, a Welcome would land the invitee in a group whose founder
+        // lost it at the next restart, or that a forgotten account wrote
+        // back. The ADR-0073 successor path does the same ([prepareSuccessor]).
+        persistFoundedGroupBeforeWelcome(created.group, createdHex)
         // ADR-0074 3.5a rule 1 — the recipient is the PERSON: a leaf bound
         // to a proven predecessor of the key the caller named is theirs, and
         // two keys of one person are one mailbox (written once).
@@ -1250,10 +1257,42 @@ public class ChatRepository(
                     },
                 )
             } catch (e: Throwable) {
+                // Not held after all: the next bootstrap does not rebuild it.
+                currentAccountIdB64.get()?.let { runCatching { knownGroupsStore.remove(it, createdHex) } }
+                runCatching { created.group.close() }
                 throw ChatError(dsErrorMessage(e, "DS publishMailbox (Welcome) failed"), e)
             }
         }
         return registerFoundedGroup(identity, created.group, created.groupId)
+    }
+
+    /**
+     * The fail-closed persist [startGroupWith] runs between creating a group
+     * and sending its Welcome: the MLS snapshot (which holds the new group)
+     * durably, then the known-groups row so a restart after the Welcome went
+     * out rebuilds the conversation. Throws, with the group handle closed,
+     * when either cannot be written for the account that made the group.
+     */
+    private suspend fun persistFoundedGroupBeforeWelcome(group: Group, groupIdHex: String) {
+        try {
+            providerLock.sessionLock { persistSnapshotDurableOrThrow() }
+            val accountIdB64 = currentAccountIdB64.get()
+                ?: throw IllegalStateException("cannot record the new group - no account id")
+            // Refused by the store gate when the session ended since the
+            // snapshot was written: nothing is sent then either.
+            me.lakko.app.account.AccountStoreGate.writeOrEnd(accountIdB64) {
+                knownGroupsStore.add(accountIdB64, groupIdHex)
+            }
+            // A sign-out (and another sign-in) between the lock and here
+            // would have written the next account's snapshot, not this group.
+            ensureSession()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            runCatching { group.close() }
+            throw e
+        } catch (e: Throwable) {
+            runCatching { group.close() }
+            throw ChatError("Could not save the new conversation on this device. Nothing was sent.", e)
+        }
     }
 
     /**

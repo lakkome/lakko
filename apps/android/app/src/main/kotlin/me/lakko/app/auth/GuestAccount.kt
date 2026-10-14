@@ -127,10 +127,14 @@ public fun markGuestAccount(storage: MarkerStorage?, accountIdB64: String, nowMs
 public fun noteGuestUsernameClaimed(storage: MarkerStorage?, accountIdB64: String, username: String) {
     val current = guestAccountState(storage, accountIdB64) ?: return
     try {
-        storage?.set(
-            guestMarkerKey(accountIdB64),
-            "$MARK_NAMED_PREFIX${current.markedAtMs}:$username",
-        )
+        // Refused once the account's session ended: read before a wipe and
+        // written after it, the marker would come back for a removed account.
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            storage?.set(
+                guestMarkerKey(accountIdB64),
+                "$MARK_NAMED_PREFIX${current.markedAtMs}:$username",
+            )
+        }
     } catch (_: Exception) {
         // Storage refused: a retry asks for the name again and the server
         // answers that the account already has one.

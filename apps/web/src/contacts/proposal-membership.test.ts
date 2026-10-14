@@ -746,6 +746,43 @@ describe("ADR-0045 S7 — approving an external join is a PROPOSAL", () => {
   });
 });
 
+describe("a refused persist publishes no proposal", () => {
+  // The proposal lives in this device's pending store. A persist refused
+  // because the account's stores were sealed by Forget device, the session
+  // ended, or the disk failed used to be swallowed and the proposal published
+  // anyway; the rule is that a refused persist means nothing was published.
+  function refusingClient(order: string[]): ContactsClient {
+    return new ContactsClient(
+      {} as unknown as DiscoveryClient,
+      ds(order) as unknown as DsClient,
+      {
+        identityProvider: () => IDENTITY_TOKEN,
+        onPersist: async () => {
+          order.push("persist");
+          throw new Error("the local stores of this account are sealed");
+        },
+        onPersistWithCommit: async () => {
+          order.push("record");
+        },
+      },
+    );
+  }
+
+  it("a removal proposal is not published", async () => {
+    const g = fakeGroup({ gid: freshGid(), roleTable: true, rank: undefined });
+    const c = refusingClient(g.order);
+    await expect(c.removeMemberFromGroup(null, g.group, 4)).rejects.toBeDefined();
+    expect(g.order).toEqual(["proposeRemoveMember", "persist"]);
+  });
+
+  it("an approve of an external join is not published", async () => {
+    const f = fakeGroup({ gid: freshGid(), roleTable: true, rank: 0 });
+    const c = refusingClient(f.order);
+    await expect(c.approveExternalJoin(null, f.group, new Uint8Array(32).fill(0xd2))).rejects.toBeDefined();
+    expect(f.order).toEqual(["approveExternalJoin", "persist"]);
+  });
+});
+
 describe("ADR-0050 2.5a point 4 — every own proposal records its intent", () => {
   class MemoryStorage {
     private readonly map = new Map<string, string>();

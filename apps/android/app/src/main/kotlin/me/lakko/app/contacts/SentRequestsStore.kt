@@ -118,8 +118,12 @@ public class SealedSentRequestsStore(private val storage: SealedBlobStorage) : S
     override fun save(accountIdB64: String, sent: List<SentContactRequest>): Boolean {
         val name = SentRequestsFiles.nameOf(accountIdB64) ?: return false
         return try {
-            if (sent.isEmpty()) storage.delete(name) else storage.write(name, encodeSentRequests(sent))
-            true
+            // Refused once the account's session ended: a list a forgotten
+            // account's runtime saved late would put its recipients back.
+            me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+                if (sent.isEmpty()) storage.delete(name) else storage.write(name, encodeSentRequests(sent))
+                true
+            } ?: false
         } catch (_: Throwable) {
             false
         }

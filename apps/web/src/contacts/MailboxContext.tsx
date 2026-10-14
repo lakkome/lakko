@@ -118,6 +118,7 @@ import {
 } from "./address-resolver";
 import { createPendingInbox, type FetchedRequest, type PendingInbox } from "./inbox-store";
 import { createMailboxPoller, type MailboxPoller } from "./mailbox-poller";
+import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 
 /** Copy for a Welcome this device could not open. */
 export const JOIN_FAILURE_MESSAGE = (): string => t("contacts.mailbox.join_failed");
@@ -196,11 +197,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     // ADR-0050: requests, acks and the account mailbox are the person's;
     // groups and the device mailbox are this device's.
     accountIdentityProvider: () => chats.accountIdentity(),
-    onPersist: async () => {
-      const s = auth.state();
-      if (s.kind !== "session") return;
-      await chats.persistSnapshot(s.account.accountId);
-    },
+    onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
     ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
     onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
   });
@@ -680,11 +677,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const predecessorClient = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
     accountIdentityProvider: () => polledPredecessor,
-    onPersist: async () => {
-      const s = auth.state();
-      if (s.kind !== "session") return;
-      await chats.persistSnapshot(s.account.accountId);
-    },
+    onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
     ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
     onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
   });

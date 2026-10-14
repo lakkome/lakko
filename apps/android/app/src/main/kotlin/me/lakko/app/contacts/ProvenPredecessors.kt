@@ -224,7 +224,11 @@ public class SharedPrefsProvenLinkStore(context: Context) : ProvenLinkStore {
 
     override fun save(ownerAccountIdB64: String, links: List<ProvenLink>) {
         try {
-            prefs().edit().putString(KEY_PREFIX + ownerAccountIdB64, json.encodeToString(LIST, links)).apply()
+            // Refused once the owner's session ended
+            // ([me.lakko.app.account.AccountStoreGate]).
+            me.lakko.app.account.AccountStoreGate.write(ownerAccountIdB64) {
+                prefs().edit().putString(KEY_PREFIX + ownerAccountIdB64, json.encodeToString(LIST, links)).apply()
+            }
         } catch (_: Throwable) {
             // The step then lives until the next fetch re-proves it.
         }

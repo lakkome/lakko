@@ -128,7 +128,8 @@ public enum DeviceGroupLifecycle {
         // journal if the same root claimed this deterministic id before (a
         // DeviceGroup lost with the local state and founded again).
         if let groupId = try? group.groupId() {
-            JournalFoundingMarks.shared.mark(journalIdHex: DsClient.pseudonymHex(groupId))
+            JournalFoundingMarks.shared.mark(
+                journalIdHex: DsClient.pseudonymHex(groupId), accountIdB64: accountIdB64)
         }
         return Ensured(identity: identity, group: group, bootstrapped: true)
     }

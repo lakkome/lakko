@@ -210,8 +210,10 @@ export interface ContactsClientOptions {
   accountIdentityProvider?: () => WasmIdentity | null;
   /** Fires after every successful MLS state-mutating call so
    *  the route layer can persist the canonical Identity's
-   *  provider snapshot to disk. Best-effort — exceptions are
-   *  logged and swallowed; the in-memory state stays good. */
+   *  provider snapshot to disk. Must resolve only when the snapshot
+   *  was written and throw otherwise (`chat/persist-hooks.ts`): the
+   *  founding path and the proposal paths publish only after it
+   *  resolved; the other calls log and swallow a throw. */
   onPersist?: () => Promise<void>;
   /** ADR-0040 (G-35) — the FAIL-CLOSED persist used by the four
    *  group-membership commit paths BEFORE they publish: persist a durable
@@ -1291,6 +1293,22 @@ export class ContactsClient {
   private async persistDurableOrThrow(): Promise<void> {
     if (this.onPersist === undefined) return;
     await this.onPersist();
+  }
+
+  /**
+   * The FAIL-CLOSED persist a proposal path runs before its publish, and the
+   * founding path before its Welcome leaves: {@link persistDurableOrThrow}
+   * with the failure wrapped like every other refusal of these paths. A
+   * proposal or a Welcome on the wire whose MLS state this device did not
+   * record is the case the rule "a refused persist means nothing was
+   * published" excludes.
+   */
+  private async persistProposalOrThrow(): Promise<void> {
+    try {
+      await this.persistDurableOrThrow();
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
   }
 
   /**
@@ -3286,8 +3304,23 @@ export class ContactsClient {
     }
     // The creation mutated the canonical provider's storage (the group's
     // epoch state, the leaf private key, the queued Welcome state). Snapshot
-    // it so a reload can `Group::load` this group id.
-    await this.persistBestEffort();
+    // it so a reload can `Group::load` this group id. FAIL-CLOSED: the
+    // Welcome is returned only once the founder's state is on disk. A
+    // Welcome delivered for a group the founder did not record would put
+    // the others in a group whose founder (after a reload) is not in it, and
+    // a persist refused because the account's stores were sealed by Forget
+    // device (or the session ended) would otherwise be read as success. The
+    // claimed journal id is never reused.
+    try {
+      await this.persistProposalOrThrow();
+    } catch (err) {
+      try {
+        group.free();
+      } catch {
+        /* already freed */
+      }
+      throw err;
+    }
     return { group, welcome: added.welcome, targets };
   }
 
@@ -3763,7 +3796,8 @@ export class ContactsClient {
     }
     // The proposal is now in this device's own pending store, which is provider
     // state — persist so a reload does not lose a request the peers hold.
-    await this.persistBestEffort();
+    // A refused persist publishes nothing (see `persistProposalOrThrow`).
+    await this.persistProposalOrThrow();
     let publish;
     try {
       publish = await this.ds.publishGroup(group.groupId, proposalBytes);
@@ -4136,7 +4170,8 @@ export class ContactsClient {
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    await this.persistBestEffort();
+    // A refused persist publishes nothing (see `persistProposalOrThrow`).
+    await this.persistProposalOrThrow();
     let publish;
     try {
       publish = await this.ds.publishGroup(group.groupId, proposalBytes);
@@ -4339,7 +4374,11 @@ export class ContactsClient {
       } catch (err) {
         throw ContactsError.wrap(err);
       }
-      await this.persistBestEffort();
+      // A refused persist publishes nothing: the proposal lives in this
+      // device's pending store, and one on the wire that the device did not
+      // record (its account wiped, the session gone, a disk failure) is a
+      // request this device can no longer account for.
+      await this.persistProposalOrThrow();
       let publish;
       try {
         publish = await this.ds.publishGroup(group.groupId, proposalBytes);
@@ -4472,7 +4511,11 @@ export class ContactsClient {
       } catch (err) {
         throw ContactsError.wrap(err);
       }
-      await this.persistBestEffort();
+      // A refused persist publishes nothing: the proposal lives in this
+      // device's pending store, and one on the wire that the device did not
+      // record (its account wiped, the session gone, a disk failure) is a
+      // request this device can no longer account for.
+      await this.persistProposalOrThrow();
       let publish;
       try {
         publish = await this.ds.publishGroup(group.groupId, proposalBytes);
@@ -4537,7 +4580,11 @@ export class ContactsClient {
       } catch (err) {
         throw ContactsError.wrap(err);
       }
-      await this.persistBestEffort();
+      // A refused persist publishes nothing: the proposal lives in this
+      // device's pending store, and one on the wire that the device did not
+      // record (its account wiped, the session gone, a disk failure) is a
+      // request this device can no longer account for.
+      await this.persistProposalOrThrow();
       let publish;
       try {
         publish = await this.ds.publishGroup(group.groupId, proposalBytes);

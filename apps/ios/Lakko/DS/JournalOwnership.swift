@@ -738,6 +738,17 @@ public final class JournalFoundingMarks {
         defaults.set(Array(set).sorted(), forKey: Self.key)
     }
 
+    /// ``mark(journalIdHex:)`` for a journal of `accountIdB64` (its
+    /// DeviceGroup, a channel it owns). The set is device-wide, but each mark
+    /// is that account's data, and the wipe removes the account's marks: a
+    /// mark made after the account's session ended (``AccountStoreGate``), or
+    /// with no account named, is not written.
+    public func mark(journalIdHex: String, accountIdB64: String?) {
+        guard let accountIdB64, let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        mark(journalIdHex: journalIdHex)
+    }
+
     public func isMarked(journalIdHex: String) -> Bool {
         (defaults.stringArray(forKey: Self.key) ?? []).contains(journalIdHex)
     }
