@@ -5012,3 +5012,39 @@ Host-tested; not walked live.
 commits, which still publish before a debounced, error-swallowing persist on
 web (G-50). Invariants **#4** (strengthened); #3 untouched (no `lakko-mls`
 change).
+
+## Mailbox rows the server cannot attribute (C-75)
+
+### C-75: A mailbox row names no sender, and a mailbox is not computable from an identity key
+
+[ADR-0078](../adr/0078-servers-cannot-link-accounts.md) section 1, phase 1.
+**The rule.** Every row stored in a person's mailbox on the Delivery Service is
+one sealed box to that mailbox's X25519 key, padded to a size bucket, its kind
+inside the seal (`lakko_contacts::mailbox`); the DS stores nothing that names
+the writer. A mailbox address is `BLAKE3-derive-key("lakko/mailbox/address/v1",
+mailbox_pk)` for a key derived from the account seed, so neither the identity
+key nor the account id gives it; the DS stores the mailbox key, never an
+identity key. A writer learns the mailbox only from a 97-byte binding signed by
+the account identity key and verifies it against the account key it holds
+before writing; a write with no reach proof spends a `mailbox-write` anonymous
+token.
+
+**Why it is indexed.** Before this the DS database alone was the contact graph:
+a contact request stored the sender's identity key and account id outside its
+seal, the ack was not sealed at all, a Welcome carried a clear kind byte and its
+recipient's KeyPackage reference, and the mailbox address was a public function
+of the identity key with the key itself stored beside it.
+
+**Where it is enforced.** `crates/lakko-contacts/src/mailbox.rs` (seal, open,
+binding, buckets) and the 134-byte reach grant in every carrier;
+`crates/lakko-ds-proof` (no identity-derived mailbox); `services/ds` migration
+`0010_sealed_mailbox.sql`, the claim by mailbox key, the well-formed-row check
+and the token gate; web `contacts/mailbox-row.ts` and `reach/mailbox-write.ts`,
+iOS `MailboxAddressing.swift` / `ReachCenter`, Android `contacts/MailboxRows.kt`
+/ `ReachManager`. Host-tested on 2026-10-15; not walked live and not deployed.
+**Does NOT** cover timing: the DS still sees when a Welcome-sized row arrives
+after a journal's epoch changes, and when a reply key is registered before a
+request (ADR-0078 phase 5). Nor the ADR-0073 continuity path, which has no
+carrier for a reset account's new mailbox (a recorded no-op on all three
+clients, the ADR's open question).
+

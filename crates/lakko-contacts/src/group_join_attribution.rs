@@ -57,6 +57,14 @@
 //! but `reply` is refused, so a joiner cannot hand the group a standing
 //! `contact` or `group` key by mistake.
 //!
+//! **The grant's mailbox binding is NOT verified here** (ADR-0078): the
+//! attribution is signed by the joiner's device leaf key, not the account
+//! identity key that signs the binding. The committer (the writer) resolves
+//! the joiner's account key from the external-join proposal's leaf (the
+//! ADR-0050 device binding) and calls
+//! `reply_grant.mailbox_pk_verified(joiner_account_key)` before it delivers
+//! the Welcome; a grant that does not verify is never written under.
+//!
 //! ## Wire format (manual codec, v3, all big-endian)
 //!
 //! ```text
@@ -64,7 +72,7 @@
 //! [32]      joiner_signature_key                 — Ed25519 leaf verifying key
 //! u16be     cap_len                              — bounded by MAX_CAPABILITY_LEN
 //! [cap_len] capability                           — a GroupInviteCapability blob
-//! [37]      reply_grant                          — ReachGrant, class `reply` (SECRET)
+//! [134]     reply_grant                          — ReachGrant, class `reply` (SECRET)
 //! [64]      signature                            — Ed25519 by the joiner over
 //!                                                   DOMAIN ‖ (everything above)
 //! ```

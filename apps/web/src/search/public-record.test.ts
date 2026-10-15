@@ -19,14 +19,28 @@ import { toHex } from "./people";
 import { searchPeople, type KnownPerson, type PeopleSearchDeps } from "./people-search";
 import { openPublicRecordWith } from "./wiring";
 
+// ADR-0078: a public record carries its owner's mailbox binding, which the
+// core verifies against the record's key; so the people are real identities.
+let ANNA: wasm.Identity;
+let BO: wasm.Identity;
+let ANNA_KEY: Uint8Array;
+let BO_KEY: Uint8Array;
+
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await initWasm({ module_or_path: readFileSync(path) });
+  ANNA = wasm.Identity.fromSeed(new Uint8Array(64).fill(0xa1));
+  BO = wasm.Identity.fromSeed(new Uint8Array(64).fill(0xb1));
+  ANNA_KEY = ANNA.signaturePublicKey;
+  BO_KEY = BO.signaturePublicKey;
 });
 
-const ANNA_KEY = new Uint8Array(32).fill(0xa1);
+/** The mailbox binding of the person whose key is `identityPk`. */
+function bindingOf(identityPk: Uint8Array): Uint8Array {
+  return wasm.signMailboxBinding(toHex(identityPk) === toHex(ANNA_KEY) ? ANNA : BO);
+}
+
 const ANNA_ACC = new Uint8Array(16).fill(0xa2);
-const BO_KEY = new Uint8Array(32).fill(0xb1);
 const BO_ACC = new Uint8Array(16).fill(0xb2);
 
 /** A 64-byte stand-in for an OPRF output / lookup key. */
@@ -47,7 +61,14 @@ const NOBODY: KnownPerson = {
 /** A public record as the person publishes it: over their name term and
  *  username outputs. */
 function publicRecord(identityPk: Uint8Array, accountId: Uint8Array, name: string): Uint8Array {
-  const payload = wasm.IntroductionPayload.forPublicRecord(identityPk, accountId, name, "anna", undefined);
+  const payload = wasm.IntroductionPayload.forPublicRecord(
+    identityPk,
+    accountId,
+    name,
+    "anna",
+    undefined,
+    bindingOf(identityPk),
+  );
   try {
     return wasm.composePublicRecord(payload, [TERM_OUT, USER_OUT], 1n);
   } finally {
@@ -99,6 +120,26 @@ describe("a name hit in Everyone", () => {
     });
   });
 
+  it("ADR-0078: carries the mailbox binding the record names, and it verifies against the person's key", async () => {
+    const record = publicRecord(ANNA_KEY, ANNA_ACC, "Anna Weber");
+    const out = await searchPeople(
+      "anna w",
+      deps({ accountsOfNameTermLookupKey: async () => [{ accountId: ANNA_ACC, publicRecord: record }] }),
+    );
+    const b64 = out.people[0]?.openBindingB64;
+    expect(b64).toBeDefined();
+    const binding = Uint8Array.from(atob(b64!), (c) => c.charCodeAt(0));
+    const pk = wasm.verifyMailboxBinding(binding, ANNA_KEY);
+    const key = wasm.MailboxKey.fromAccountIdentity(ANNA);
+    try {
+      expect(toHex(pk)).toBe(toHex(key.publicKey()));
+    } finally {
+      key.free();
+    }
+    // Not Bo's: a binding verifies under its owner's key only.
+    expect(() => wasm.verifyMailboxBinding(binding, BO_KEY)).toThrow();
+  });
+
   it("ignores a record naming another account (the hit stays unnamed and is dropped)", async () => {
     // Bo's record served beside Anna's account id.
     const record = publicRecord(BO_KEY, BO_ACC, "Anna Weber");
@@ -121,7 +162,14 @@ describe("a name hit in Everyone", () => {
 
   it("ignores a record that does not open, and one that is not a record", async () => {
     const sealedElsewhere = (() => {
-      const payload = wasm.IntroductionPayload.forPublicRecord(ANNA_KEY, ANNA_ACC, "Anna Weber", undefined, undefined);
+      const payload = wasm.IntroductionPayload.forPublicRecord(
+        ANNA_KEY,
+        ANNA_ACC,
+        "Anna Weber",
+        undefined,
+        undefined,
+        bindingOf(ANNA_KEY),
+      );
       try {
         return wasm.composePublicRecord(payload, [bytes64(0x77)], 1n);
       } finally {

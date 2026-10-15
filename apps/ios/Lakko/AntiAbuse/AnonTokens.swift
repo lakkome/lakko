@@ -37,6 +37,9 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
     case blobUpload = "blob-upload"
     /// Reading an attachment blob (ADR-0065). No route spends it yet.
     case blobRead = "blob-read"
+    /// A write to someone's mailbox carrying no reach proof (ADR-0078):
+    /// to an open (Everyone) mailbox, an unclaimed one, or a closed one.
+    case mailboxWrite = "mailbox-write"
 
     /// Tokens asked for per issuance (ADR-0054 S5): a lookup is the common
     /// action; the others are rare, so a small batch leaves little unspent
@@ -55,6 +58,7 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
         case .vaultClaim: return 4
         case .blobUpload: return 2
         case .blobRead: return 2
+        case .mailboxWrite: return 2
         }
     }
 

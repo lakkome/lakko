@@ -54,6 +54,7 @@ pub mod feed;
 pub mod key_reset;
 pub mod key_rotation;
 pub mod l10n;
+pub mod mailbox;
 pub mod mnemonic;
 pub mod pairing;
 pub mod passkey_vault;
@@ -705,6 +706,20 @@ pub enum FfiError {
     /// every earlier variant keeps its ordinal.
     #[error("{0}")]
     Vault(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0078 sealed-sender mailboxes — appended, for the ordinal reason
+    // above.
+    // ------------------------------------------------------------------
+    /// A mailbox operation was refused (`mailbox.rs`). The message is
+    /// `"<code>: <reason>"` with the frozen codes of
+    /// `lakko_contacts::mailbox::MailboxError` (`badLength`,
+    /// `unknownVersion`, `badKey`, `badBinding`, `bodyTooLong`, `notOpened`,
+    /// `unknownKind`, `badPadding`) or `keyLength` for an argument of the
+    /// wrong length. `badBinding` from `verifyMailboxBinding` /
+    /// `reachGrantMailboxPkVerified` means: do not write to that mailbox.
+    #[error("{0}")]
+    Mailbox(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

@@ -152,6 +152,10 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
           name ?? undefined,
           username ?? undefined,
           certificate ?? undefined,
+          // ADR-0078 - the public record carries this account's mailbox
+          // binding (not an identity-derived address), so a finder learns
+          // where to write and verifies it against the key it pins.
+          session.mailboxBinding(),
         );
         let publicRecord: Uint8Array;
         try {

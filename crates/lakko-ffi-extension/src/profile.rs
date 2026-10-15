@@ -163,7 +163,7 @@ mod tests {
         // Profile v3 (ADR-0060): the certificate and two reach grants widen
         // the range at both ends.
         assert_eq!(profile_envelope_min_len(), 31);
-        assert_eq!(profile_envelope_max_len(), 561);
+        assert_eq!(profile_envelope_max_len(), 755);
         let smallest = compose_profile(&profile(None, None)).unwrap();
         assert_eq!(smallest.len(), 31);
         assert_eq!(smallest[0], 0x6c);
@@ -177,10 +177,11 @@ mod tests {
                 class,
                 version: 1,
                 seed: lakko_crypto::SecretBytes::new([3; 32]),
+                binding: lakko_contacts::mailbox::MailboxBinding::for_account_seed(&[3; 32]),
             })
             .collect();
         let largest = compose_profile(&maximal).unwrap();
-        assert_eq!(largest.len(), 561);
+        assert_eq!(largest.len(), 755);
         decode_profile_envelope(largest).expect("the maximal envelope decodes");
     }
 

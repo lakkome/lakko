@@ -203,7 +203,8 @@ export interface SweepJournalPort {
   /** Publish to this group's journal; resolves to the DS-assigned id. */
   publishGroup(bytes: Uint8Array): Promise<number>;
   /**
-   * Publish to a member's mailbox pseudonym; resolves to the DS id, or to
+   * Publish the (raw) Welcome to a member's account mailbox, sealed there to
+   * the mailbox key the write resolves (ADR-0078); resolves to the DS id, or to
    * `null` when nothing was written because no authorisation this device
    * holds reaches that mailbox (ADR-0050 section 2.5a item 7: never written
    * unsigned). A `null` keeps the Welcome OWED: the entry is not acked, and
@@ -313,14 +314,15 @@ export interface SweepPorts {
   readonly cursor: SweepCursorRef;
   /** Derive a member's mailbox pseudonym from their 32-byte signature key. */
   welcomeMailbox(signatureKey: Uint8Array): Uint8Array;
-  /** Wrap the raw Welcome in the stranger-inbox envelope the recipient's
-   *  mailbox poll expects (`wrapEnvelope(KIND_WELCOME, welcome)`).
+  /** What the outbox keeps of the raw Welcome. ADR-0078: the identity on
+   *  the web client - a mailbox row is sealed to the mailbox key each write
+   *  resolves, so `publishMailbox` seals it, per attempt.
    *
    *  ADR-0053 contract point 8: this is the ONLY Welcome delivery. The
    *  `WelcomeRendezvous` the sweep used to post to the group journal for every
    *  added key (C-69) existed because the journal was the one place a `/g/`
    *  link joiner could read; a claimed journal answers only its members, and
-   *  the link joiner now waits on its own device mailbox like every other
+   *  the link joiner now waits on its own account mailbox like every other
    *  added member. */
   wrapWelcome(welcome: Uint8Array): Uint8Array;
   /**

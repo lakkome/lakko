@@ -13,7 +13,7 @@ section that describes it.
 | Class | Count | Range | Source file |
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 74  | C-1..C-74  | [`calls.md`](./calls.md) |
+| **C-** | 75  | C-1..C-75  | [`calls.md`](./calls.md) |
 | **T-** | 16  | T-1..T-16  | [`transport.md`](./transport.md) |
 | **G-** | 51  | G-1..G-51 | [`known-gaps.md`](./known-gaps.md) â open / deferred |
 | Total invariants  | 98  | (I + C + T) | live properties |
@@ -106,7 +106,7 @@ in `crates/lakko-mls/`.
 | I-7 | Opening a `SealedBundle` with an unknown `algorithm` discriminator is rejected before AEAD-open is attempted | Forward-compat ratchet |
 | I-8 | `create_devicegroup_message` round-trips through `parse_devicegroup_payload` losslessly for every typed body variant | Wire-format byte-stability |
 
-## Call-side invariants (C-1..C-74)
+## Call-side invariants (C-1..C-75)
 
 Source: [`calls.md`](./calls.md). The `C-` class is the
 catch-all for "everything the SFU / channels / storage /
@@ -116,7 +116,7 @@ media-key pipeline (C-1..C-14), call-admission JWT
 (C-15..C-23), link-based invite + composer + dispatcher
 (C-24..C-36), SFrame + RFC 9605 + SFU signaling
 (C-37..C-39), channel-broadcast backend opacity
-(C-40..C-44), then per-arc additions C-45..C-74
+(C-40..C-44), then per-arc additions C-45..C-75
 (SFrame native shim, TURN, PublisherGroup persistence,
 host-side bridge validation, rotation policy, the
 SFU multi-party client SFrame coverage, the KT-log
@@ -317,6 +317,12 @@ store gate and persist-before-publish rules).
 | C-72 | **An account's work never acts as another account** ([ADR-0077](../adr/0077-account-binding-and-store-gate.md) decisions 1 and 2, built 2026-10-13 to 2026-10-14 on web, iOS and Android, host-tested, not walked live). Work started for a bound account captures an epoch before its first wait and stops after any wait at which the epoch moved; the epoch advances at every landing and every sign-out, so a sign-out and sign-in to the same account counts. A stale binding is a cancellation, not an error. A sign-in round trip overtaken by a sign-out or another landing does not land (maintainer decision 2026-10-13); sign-up lands once the registration finished on the server. Web `binding-epoch.ts` (`SessionBinding`), iOS `BindingEpoch.swift`, Android `BindingEpoch.kt` (`takeOver` makes the check and a sign-in's landing one step). **Does NOT** undo server-side effects of an abandoned sign-in (G-49), nor stop a write already past its check on another thread (C-73). Invariant **#4**. Full entry: [`calls.md` C-72](./calls.md). |
 | C-73 | **A wiped account's stores accept no late write** ([ADR-0077](../adr/0077-account-binding-and-store-gate.md) decision 4). Forget device seals the account before its first delete and waits for writes in flight; a sealed account's writes are refused until it lands again; the MLS snapshot, commit outbox and DeviceGroup snapshot throw, other stores skip; a long-lived handle of an earlier session is refused after the same account signs in again. iOS and Android `AccountStoreGate` (read/write locks, the wipe inside the exclusive seal), web `account-store-gate.ts` (a synchronous check before each IndexedDB `readwrite` transaction, a `Storage.setItem` wrapper, a cross-tab marker) plus `account-memory.ts` for page caches. **Does NOT** have one logout model (web seals the session-token row only; iOS and Android every store) or cover the paths in G-48. Invariant **#4**. Full entry: [`calls.md` C-73](./calls.md). |
 | C-74 | **A refused persist means nothing was published** ([ADR-0077](../adr/0077-account-binding-and-store-gate.md) decision 5, extending [ADR-0040](../adr/0040-durable-pending-commit-outbox.md)). A send, a commit, a proposal, a DeviceGroup step and a group founding persist fail-closed before they publish, and a refused or failed persist stops the publish. Web `durableSnapshotHook` on every `onPersist` hook; iOS send, proposals, DeviceGroup commits and sync, the channel publish counter; Android proposals; the founder's snapshot and known-groups row before any Welcome on all three. **Does NOT** cover the channel PublisherGroup commits (G-50). Invariant **#4** strengthened; #3 untouched. Full entry: [`calls.md` C-74](./calls.md). |
+
+### C-75 — Sealed mailbox rows (ADR-0078 phase 1)
+
+| ID   | Title |
+|---|---|
+| C-75 | **A mailbox row names no sender, and a mailbox is not computable from an identity key** ([ADR-0078](../adr/0078-servers-cannot-link-accounts.md) section 1, built 2026-10-15 in the core, the DS, discovery, the three FFI surfaces and web / iOS / Android, host-tested, not walked live, not deployed). Every mailbox row is one sealed box to the mailbox key, padded to a bucket, its kind inside; the address is derived from a mailbox key derived from the account seed; a writer verifies an identity-key-signed 97-byte binding before writing; a proofless write spends a `mailbox-write` token. `lakko_contacts::mailbox`, `services/ds` migration `0010`. **Does NOT** cover timing (phase 5) or the ADR-0073 continuity path (open question). Invariant **#5**. Full entry: [`calls.md` C-75](./calls.md). |
 
 ## Transport-layer invariants (T-1..T-16)
 

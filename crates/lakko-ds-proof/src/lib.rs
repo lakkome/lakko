@@ -6,7 +6,9 @@
 //! A claimed journal on `services/ds` answers only a request signed with a
 //! key the journal was claimed under: for a group a per-epoch Ed25519 key
 //! every member derives from the MLS exporter (`ACCESS_KEY_LABEL`), for a
-//! mailbox the identity key its pseudonym is the hash of. This crate is the
+//! mailbox the mailbox key its address is the hash of ([ADR-0078]: an
+//! account-level key derived from the account seed, not the identity key).
+//! This crate is the
 //! one definition of what is signed and how the proof travels, shared by the
 //! server and both FFI surfaces so no client re-derives the bytes.
 //!
@@ -81,6 +83,7 @@
 //!
 //! [ADR-0053]: ../../../docs/adr/0053-ds-journal-authorisation.md
 //! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
+//! [ADR-0078]: ../../../docs/adr/0078-servers-cannot-link-accounts.md
 
 #![forbid(unsafe_code)]
 
@@ -95,9 +98,11 @@ pub use statement::{
 
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
-use lakko_contacts::IdentityPseudonym;
 use lakko_crypto::hash;
 
+pub use lakko_contacts::mailbox::{
+    is_well_formed_row as is_well_formed_mailbox_row, mailbox_address, mailbox_seed, MailboxKey,
+};
 pub use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey};
 
 pub mod committer;
@@ -395,20 +400,13 @@ pub fn access_signing_key(exporter_seed: &[u8; 32]) -> SigningKey {
     SigningKey::from_seed(exporter_seed)
 }
 
-/// Whether `identity_pk` is the key a mailbox pseudonym is named after
-/// (`IdentityPseudonym::from_identity`, the ADR-0005 derivation). The server
-/// runs this on a mailbox claim; the derivation is defined once in
-/// `lakko-contacts` and used here rather than copied.
+/// Whether `mailbox_pk` is the key the mailbox at `address` is named after
+/// ([`mailbox_address`], ADR-0078). The server runs this on a mailbox claim;
+/// the derivation is defined once in `lakko-contacts` and used here rather
+/// than copied.
 #[must_use]
-pub fn mailbox_owner_matches(pseudonym: &[u8; 32], identity_pk: &VerifyingKey) -> bool {
-    mailbox_pseudonym(identity_pk) == *pseudonym
-}
-
-/// The pseudonym of the mailbox `identity_pk` owns - the same derivation
-/// [`mailbox_owner_matches`] checks, for a client naming its own mailbox.
-#[must_use]
-pub fn mailbox_pseudonym(identity_pk: &VerifyingKey) -> [u8; 32] {
-    *IdentityPseudonym::from_identity(identity_pk).as_bytes()
+pub fn mailbox_owner_matches(address: &[u8; 32], mailbox_pk: &VerifyingKey) -> bool {
+    mailbox_address(&mailbox_pk.to_bytes()) == *address
 }
 
 /// The client half: one signer per journal per epoch, held by the client and
@@ -443,13 +441,22 @@ impl DsProofSigner {
         }
     }
 
-    /// The mailbox signer: the identity key itself, at [`MAILBOX_EPOCH`].
+    /// The mailbox signer, at [`MAILBOX_EPOCH`]: the account's mailbox key
+    /// (ADR-0078) from its [`mailbox_seed`] - never the identity key, which
+    /// would put the identity key back on the mailbox route.
     #[must_use]
-    pub fn for_mailbox(identity_seed: &[u8; 32]) -> Self {
+    pub fn for_mailbox(mailbox_seed: &[u8; 32]) -> Self {
         Self {
             epoch: MAILBOX_EPOCH,
-            key: SigningKey::from_seed(identity_seed),
+            key: SigningKey::from_seed(mailbox_seed),
         }
+    }
+
+    /// [`Self::for_mailbox`] for the account whose identity seed is
+    /// `account_seed`: derives the mailbox seed first.
+    #[must_use]
+    pub fn for_account_mailbox(account_seed: &[u8; 32]) -> Self {
+        Self::for_mailbox(mailbox_seed(account_seed).as_bytes())
     }
 
     /// A reach-key signer ([ADR-0060] section 2), at [`REACH_EPOCH`]: signs a
@@ -504,21 +511,21 @@ impl DsProofSigner {
     }
 
     /// The JSON body of `PUT /ds/mailbox/{hex}/access` claiming the mailbox
-    /// this signer's identity key names: `{"identity_pk_b64":"<standard
+    /// this signer's mailbox key names: `{"mailbox_pk_b64":"<standard
     /// base64>"}`.
     #[must_use]
     pub fn mailbox_claim_body_json(&self) -> String {
         format!(
-            "{{\"identity_pk_b64\":\"{}\"}}",
+            "{{\"mailbox_pk_b64\":\"{}\"}}",
             B64_STD.encode(self.verifying_key().to_bytes())
         )
     }
 
-    /// The pseudonym of the mailbox this signer's key names (meaningful for
-    /// a [`Self::for_mailbox`] signer).
+    /// The address of the mailbox this signer's key names (meaningful for a
+    /// [`Self::for_mailbox`] signer).
     #[must_use]
-    pub fn mailbox_pseudonym(&self) -> [u8; 32] {
-        mailbox_pseudonym(&self.verifying_key())
+    pub fn mailbox_address(&self) -> [u8; 32] {
+        mailbox_address(&self.verifying_key().to_bytes())
     }
 }
 
@@ -787,13 +794,22 @@ mod tests {
     }
 
     #[test]
-    fn a_mailbox_is_named_after_its_identity_key() {
-        let k = key();
-        let vk = k.verifying_key();
-        let pseudonym = *IdentityPseudonym::from_identity(&vk).as_bytes();
-        assert!(mailbox_owner_matches(&pseudonym, &vk));
+    fn a_mailbox_is_named_after_its_mailbox_key_not_the_identity_key() {
+        let account_seed = [0x32u8; 32];
+        let mailbox = MailboxKey::from_account_seed(&account_seed);
+        let vk = mailbox.signing_key().verifying_key();
+        let address = mailbox.address();
+        assert!(mailbox_owner_matches(&address, &vk));
         let other = SigningKey::from_seed(&[0x33u8; 32]).verifying_key();
-        assert!(!mailbox_owner_matches(&pseudonym, &other));
+        assert!(!mailbox_owner_matches(&address, &other));
+        // ADR-0078: the account's identity key does not name its mailbox,
+        // and the ADR-0005 identity pseudonym is not its address.
+        let identity = SigningKey::from_seed(&account_seed).verifying_key();
+        assert!(!mailbox_owner_matches(&address, &identity));
+        assert_ne!(
+            address,
+            *lakko_contacts::IdentityPseudonym::from_identity(&identity).as_bytes()
+        );
     }
 
     #[test]
@@ -824,15 +840,29 @@ mod tests {
 
     #[test]
     fn the_mailbox_signer_names_its_own_mailbox() {
-        let identity_seed = [0x62u8; 32];
-        let signer = DsProofSigner::for_mailbox(&identity_seed);
+        let account_seed = [0x62u8; 32];
+        let signer = DsProofSigner::for_account_mailbox(&account_seed);
         assert_eq!(signer.epoch(), MAILBOX_EPOCH);
-        let vk = SigningKey::from_seed(&identity_seed).verifying_key();
-        assert_eq!(signer.mailbox_pseudonym(), mailbox_pseudonym(&vk));
+        let mailbox = MailboxKey::from_account_seed(&account_seed);
+        assert_eq!(signer.verifying_key().to_bytes(), mailbox.public());
+        assert_eq!(signer.mailbox_address(), mailbox.address());
         assert!(mailbox_owner_matches(
-            &signer.mailbox_pseudonym(),
+            &signer.mailbox_address(),
             &signer.verifying_key()
         ));
+        // It never signs with the identity key.
+        assert_ne!(
+            signer.verifying_key().to_bytes(),
+            SigningKey::from_seed(&account_seed)
+                .verifying_key()
+                .to_bytes()
+        );
+        assert_eq!(
+            DsProofSigner::for_mailbox(mailbox.seed().as_bytes())
+                .verifying_key()
+                .to_bytes(),
+            mailbox.public()
+        );
     }
 
     #[test]
@@ -957,7 +987,7 @@ mod tests {
 
     #[test]
     fn a_delegate_writes_with_a_reach_signer_over_its_own_seed() {
-        let mailbox = mailbox_pseudonym(&SigningKey::from_seed(&[0x70u8; 32]).verifying_key());
+        let mailbox = MailboxKey::from_account_seed(&[0x70u8; 32]).address();
         let reach_seed = [0x71u8; 32];
         let delegate = DsProofSigner::for_reach(&[0x72u8; 32]);
         let d = sign_delegation(
@@ -1000,7 +1030,7 @@ mod tests {
         let pk = B64_STD.encode(mailbox.verifying_key().to_bytes());
         assert_eq!(
             mailbox.mailbox_claim_body_json(),
-            format!("{{\"identity_pk_b64\":\"{pk}\"}}")
+            format!("{{\"mailbox_pk_b64\":\"{pk}\"}}")
         );
         // Standard base64 with padding is what the server decodes.
         assert!(pk.ends_with('=') || pk.len() % 4 == 0);

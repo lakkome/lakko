@@ -103,7 +103,11 @@ async function session(clock: { now: number }): Promise<ReachSession> {
   const seed = crypto.getRandomValues(new Uint8Array(32));
   const accountKey = wasm.reachVerifyingKey(seed);
   const ds = { putMailboxReach: vi.fn(async () => undefined) } as unknown as DsClient;
-  return ReachSession.open("YWNjb3VudA==", seed, accountKey, { ds, now: () => clock.now });
+  return ReachSession.open("YWNjb3VudA==", seed, accountKey, {
+    ds,
+    now: () => clock.now,
+    accountMailbox: new Uint8Array(32).fill(0xaa),
+  });
 }
 
 describe("classifyServiceEnvelope", () => {

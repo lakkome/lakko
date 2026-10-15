@@ -26,29 +26,35 @@
 //! names. The Delivery Service checks the chain against the registered reach
 //! key and consumes the delegation's nonce (one write per delegation).
 //!
-//! ## Wire format (v1)
+//! ## Wire format (v2, ADR-0078)
 //!
 //! ```text
-//! COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1 || version(1) = 0x01
-//!   || added_account_key(32) || count(1, 1..=16) || count × delegation(185)
+//! COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1 || version(1) = 0x02
+//!   || added_account_key(32) || added_mailbox_binding(97)
+//!   || count(1, 1..=16) || count × delegation(185)
 //! ```
 //!
-//! `added_account_key` is the added person's account signature key: its
-//! mailbox is `BLAKE3(added_account_key)`, which every delegation must name
-//! (checked where the delegations are parsed, below). Each `delegation` is a
-//! `lakko_ds_proof::Delegation` wire blob, exactly
-//! [`COMMITTER_DELEGATION_BLOB_LEN`] bytes.
+//! `added_account_key` is the added person's account signature key, and
+//! `added_mailbox_binding` its [`MailboxBinding`] (the mailbox key signed by
+//! that account key, ADR-0078): the proposer copies it from the grant it
+//! holds for the added person. Every delegation must name
+//! `mailbox_address(binding.mailbox_pk)`, and the binding must verify under
+//! `added_account_key` (both checked where the delegations are parsed,
+//! below). Each `delegation` is a `lakko_ds_proof::Delegation` wire blob,
+//! exactly [`COMMITTER_DELEGATION_BLOB_LEN`] bytes. v1 (no binding) is
+//! refused: a flag day.
 //!
 //! ## What this module checks, and what it cannot
 //!
 //! `lakko-ds-proof` depends on this crate (it names mailboxes with
-//! [`crate::pseudonym::IdentityPseudonym`]), so this crate cannot depend on
-//! it back. The codec here is therefore **structural only**: the domain, the
-//! version, the count bound and that every blob is exactly
-//! [`COMMITTER_DELEGATION_BLOB_LEN`] bytes. Parsing each blob, checking that
-//! it names the added person's mailbox and that no two name the same
-//! delegate, lives in `lakko_ds_proof::committer`, which both FFI surfaces
-//! call. `lakko-ds-proof` pins [`COMMITTER_DELEGATION_BLOB_LEN`] against its
+//! [`crate::mailbox::mailbox_address`]), so this crate cannot depend on it
+//! back. The codec here is therefore **structural only**: the domain, the
+//! version, the binding's layout, the count bound and that every blob is
+//! exactly [`COMMITTER_DELEGATION_BLOB_LEN`] bytes. Verifying the binding,
+//! parsing each blob, checking that it names the added person's mailbox and
+//! that no two name the same delegate, lives in `lakko_ds_proof::committer`,
+//! which both FFI surfaces call. The client still checks that
+//! `added_account_key` is the account its `Add` adds (the roster). `lakko-ds-proof` pins [`COMMITTER_DELEGATION_BLOB_LEN`] against its
 //! own `DELEGATION_LEN` in a test, so the two cannot drift.
 //!
 //! ## Lifetime: the proposer re-sends
@@ -78,6 +84,8 @@ use core::result::Result as CoreResult;
 
 use thiserror::Error;
 
+use crate::mailbox::{MailboxBinding, MAILBOX_BINDING_LEN};
+
 /// 30-byte domain separator. The trailing `\x00` keeps a UTF-8 free-text
 /// payload from ever starting with it.
 ///
@@ -86,8 +94,9 @@ use thiserror::Error;
 /// in-payload version byte is the knob that moves.
 pub const COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1: &[u8] = b"lakko/committer-delegation/v1\x00";
 
-/// Schema-version byte carried first after the separator.
-pub const COMMITTER_DELEGATION_VERSION_V1: u8 = 0x01;
+/// Schema-version byte carried first after the separator (v2: the added
+/// person's mailbox binding, ADR-0078).
+pub const COMMITTER_DELEGATION_VERSION_V2: u8 = 0x02;
 
 /// Length of one delegation blob: `lakko_ds_proof::DELEGATION_LEN`
 /// (`version(1) || mailbox(32) || delegate_pk(32) || expires_at_ms(8) ||
@@ -105,8 +114,8 @@ pub const MAX_COMMITTER_DELEGATIONS: usize = 16;
 pub const ADDED_ACCOUNT_KEY_LEN: usize = 32;
 
 /// Bytes after the separator before the first delegation: version,
-/// `added_account_key`, count.
-const HEADER_LEN: usize = 1 + ADDED_ACCOUNT_KEY_LEN + 1;
+/// `added_account_key`, the binding, count.
+const HEADER_LEN: usize = 1 + ADDED_ACCOUNT_KEY_LEN + MAILBOX_BINDING_LEN + 1;
 
 /// Shortest well-formed envelope: one delegation.
 pub const COMMITTER_DELEGATION_ENVELOPE_MIN_LEN: usize =
@@ -122,9 +131,12 @@ pub const COMMITTER_DELEGATION_ENVELOPE_MAX_LEN: usize = COMMITTER_DELEGATION_EN
 /// the module docs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitterDelegationEnvelope {
-    /// The added person's account signature key; its mailbox is the one
-    /// every delegation must name.
+    /// The added person's account signature key.
     pub added_account_key: [u8; ADDED_ACCOUNT_KEY_LEN],
+    /// The added person's mailbox binding (ADR-0078): every delegation must
+    /// name its mailbox, and it must verify under `added_account_key`
+    /// (checked in `lakko_ds_proof::committer`, not here).
+    pub added_mailbox_binding: MailboxBinding,
     /// 1 to [`MAX_COMMITTER_DELEGATIONS`] `lakko_ds_proof::Delegation` wire
     /// blobs, one per committer candidate.
     pub delegations: Vec<[u8; COMMITTER_DELEGATION_BLOB_LEN]>,
@@ -139,7 +151,7 @@ pub enum CommitterDelegationError {
     /// returns `Ok(None)`.
     #[error("plaintext does not carry the committer-delegation domain separator")]
     WrongDomain,
-    /// The version byte is not [`COMMITTER_DELEGATION_VERSION_V1`].
+    /// The version byte is not [`COMMITTER_DELEGATION_VERSION_V2`].
     #[error("committer delegation carries unknown schema version {0:#04x}")]
     UnknownVersion(u8),
     /// The count is 0 or above [`MAX_COMMITTER_DELEGATIONS`].
@@ -155,6 +167,9 @@ pub enum CommitterDelegationError {
         /// What the header (or the minimum header) requires.
         expected: usize,
     },
+    /// The mailbox binding's layout is malformed.
+    #[error("committer delegation carries a malformed mailbox binding")]
+    BadBinding,
 }
 
 impl CommitterDelegationError {
@@ -166,6 +181,7 @@ impl CommitterDelegationError {
             Self::UnknownVersion(_) => "unknownVersion",
             Self::BadCount(_) => "badCount",
             Self::BadLength { .. } => "badLength",
+            Self::BadBinding => "badBinding",
         }
     }
 }
@@ -192,8 +208,9 @@ pub fn compose_committer_delegation(
             + count * COMMITTER_DELEGATION_BLOB_LEN,
     );
     out.extend_from_slice(COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1);
-    out.push(COMMITTER_DELEGATION_VERSION_V1);
+    out.push(COMMITTER_DELEGATION_VERSION_V2);
     out.extend_from_slice(&envelope.added_account_key);
+    out.extend_from_slice(&envelope.added_mailbox_binding.encode());
     out.push(count_byte);
     for blob in &envelope.delegations {
         out.extend_from_slice(blob);
@@ -228,10 +245,10 @@ pub fn try_unwrap_committer_delegation(
             actual: payload.len(),
             expected: HEADER_LEN,
         })?;
-    if version != COMMITTER_DELEGATION_VERSION_V1 {
+    if version != COMMITTER_DELEGATION_VERSION_V2 {
         return Err(CommitterDelegationError::UnknownVersion(version));
     }
-    if rest.len() < ADDED_ACCOUNT_KEY_LEN + 1 {
+    if rest.len() < ADDED_ACCOUNT_KEY_LEN + MAILBOX_BINDING_LEN + 1 {
         return Err(CommitterDelegationError::BadLength {
             actual: payload.len(),
             expected: HEADER_LEN,
@@ -240,6 +257,9 @@ pub fn try_unwrap_committer_delegation(
     let (key_bytes, rest) = rest.split_at(ADDED_ACCOUNT_KEY_LEN);
     let mut added_account_key = [0u8; ADDED_ACCOUNT_KEY_LEN];
     added_account_key.copy_from_slice(key_bytes);
+    let (binding_bytes, rest) = rest.split_at(MAILBOX_BINDING_LEN);
+    let added_mailbox_binding =
+        MailboxBinding::decode(binding_bytes).map_err(|_| CommitterDelegationError::BadBinding)?;
     let (&count_byte, blobs) = rest
         .split_first()
         .ok_or(CommitterDelegationError::BadLength {
@@ -267,6 +287,7 @@ pub fn try_unwrap_committer_delegation(
         .collect();
     Ok(Some(CommitterDelegationEnvelope {
         added_account_key,
+        added_mailbox_binding,
         delegations,
     }))
 }
@@ -291,6 +312,7 @@ mod tests {
     fn envelope(count: usize) -> CommitterDelegationEnvelope {
         CommitterDelegationEnvelope {
             added_account_key: [0xA0; 32],
+            added_mailbox_binding: MailboxBinding::for_account_seed(&[0xA0; 32]),
             delegations: (0..count)
                 .map(|i| {
                     let mut blob = [0u8; COMMITTER_DELEGATION_BLOB_LEN];
@@ -309,15 +331,16 @@ mod tests {
             let wire = compose_committer_delegation(&env).unwrap();
             let d = COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1.len();
             assert_eq!(&wire[..d], COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1);
-            assert_eq!(wire[d], COMMITTER_DELEGATION_VERSION_V1);
+            assert_eq!(wire[d], COMMITTER_DELEGATION_VERSION_V2);
             assert_eq!(&wire[d + 1..d + 33], &[0xA0; 32]);
-            assert_eq!(usize::from(wire[d + 33]), count);
+            assert_eq!(&wire[d + 33..d + 130], &env.added_mailbox_binding.encode());
+            assert_eq!(usize::from(wire[d + 130]), count);
             assert_eq!(wire.len(), d + HEADER_LEN + count * 185);
             assert_eq!(decode_committer_delegation(&wire).unwrap(), env);
         }
         assert_eq!(COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1.len(), 30);
-        assert_eq!(COMMITTER_DELEGATION_ENVELOPE_MIN_LEN, 30 + 34 + 185);
-        assert_eq!(COMMITTER_DELEGATION_ENVELOPE_MAX_LEN, 30 + 34 + 16 * 185);
+        assert_eq!(COMMITTER_DELEGATION_ENVELOPE_MIN_LEN, 30 + 131 + 185);
+        assert_eq!(COMMITTER_DELEGATION_ENVELOPE_MAX_LEN, 30 + 131 + 16 * 185);
         assert_eq!(
             compose_committer_delegation(&envelope(1)).unwrap().len(),
             COMMITTER_DELEGATION_ENVELOPE_MIN_LEN
@@ -338,7 +361,7 @@ mod tests {
                 Err(CommitterDelegationError::BadCount(count))
             );
             let mut wire = compose_committer_delegation(&envelope(1)).unwrap();
-            let at = COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1.len() + 33;
+            let at = COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1.len() + 130;
             wire[at] = u8::try_from(count).unwrap();
             wire.truncate(at + 1);
             wire.extend(core::iter::repeat_n(0u8, count * 185));
@@ -377,11 +400,23 @@ mod tests {
 
     #[test]
     fn the_version_is_checked_before_the_length() {
-        let mut wire = COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1.to_vec();
-        wire.push(0x02);
+        for version in [0x01, 0x03] {
+            let mut wire = COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1.to_vec();
+            wire.push(version);
+            assert_eq!(
+                decode_committer_delegation(&wire),
+                Err(CommitterDelegationError::UnknownVersion(version))
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_binding_is_refused() {
+        let mut wire = compose_committer_delegation(&envelope(1)).unwrap();
+        wire[COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1.len() + 33] = 0x07;
         assert_eq!(
             decode_committer_delegation(&wire),
-            Err(CommitterDelegationError::UnknownVersion(0x02))
+            Err(CommitterDelegationError::BadBinding)
         );
     }
 
@@ -408,6 +443,7 @@ mod tests {
             "unknownVersion"
         );
         assert_eq!(CommitterDelegationError::BadCount(0).code(), "badCount");
+        assert_eq!(CommitterDelegationError::BadBinding.code(), "badBinding");
         assert_eq!(
             CommitterDelegationError::BadLength {
                 actual: 0,

@@ -188,11 +188,14 @@ mod tests {
 
     fn payload(maximal: bool) -> IntroductionPayload {
         IntroductionPayload {
-            identity_pk: [1; 32],
+            identity_pk: lakko_crypto::signing::SigningKey::from_seed(&[3; 32])
+                .verifying_key()
+                .to_bytes(),
             account_id: [2; 16],
             display_name: maximal.then(|| format!("{}\u{20AC}", "\u{1F600}".repeat(63))),
             username: maximal.then(|| "a".repeat(32)),
             username_certificate: maximal.then(|| vec![9; 153]),
+            mailbox_binding: lakko_contacts::mailbox::MailboxBinding::for_account_seed(&[3; 32]),
             // The shortest record a decoder accepts is grant-less (the
             // Everyone shape): a relayed offer or bundle is only ever parsed
             // structurally, so the pre-filter's range must admit it.
@@ -259,6 +262,9 @@ mod tests {
         lakko_contacts::committer_delegation::compose_committer_delegation(
             &lakko_contacts::committer_delegation::CommitterDelegationEnvelope {
                 added_account_key: [7; 32],
+                added_mailbox_binding: lakko_contacts::mailbox::MailboxBinding::for_account_seed(
+                    &[7; 32],
+                ),
                 delegations: vec![[1; 185]; count],
             },
         )
@@ -350,7 +356,7 @@ mod tests {
         assert_eq!((v_min.len(), v_max.len()), (VISIBILITY_MIN, VISIBILITY_MAX));
         let (d_min, d_max) = (delegation(1), delegation(16));
         assert_eq!((d_min.len(), d_max.len()), (DELEGATION_MIN, DELEGATION_MAX));
-        assert_eq!((DELEGATION_MIN, DELEGATION_MAX), (249, 3024));
+        assert_eq!((DELEGATION_MIN, DELEGATION_MAX), (346, 3121));
         let (r_min, r_max) = (reach_state(false), reach_state(true));
         assert_eq!(
             (r_min.len(), r_max.len()),

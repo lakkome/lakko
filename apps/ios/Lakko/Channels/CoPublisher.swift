@@ -337,27 +337,36 @@ public enum CoPublisher {
                 // ADR-0074 section 3.5a rule 1 — resolved before addressing.
                 // Rule 6 — a refused Welcome re-checks the joiner's address
                 // once.
+                // ADR-0078 — the mailbox is the verified one the reply
+                // grant's binding names (checked against the joiner's
+                // account key when it was kept); the Welcome is one sealed
+                // row of kind `welcomeRendezvous` (the co-publisher join).
                 let resolve: () async throws -> MailboxWriteAttempt = {
-                    let (current, auth) = await MainActor.run {
-                        (ReachCenter.shared.currentAccountKey(of: proposalRef),
-                         ReachCenter.shared.writeAuth(toAccountKey: proposalRef))
+                    let plan = await MainActor.run {
+                        ReachCenter.shared.writePlan(toAccountKey: proposalRef)
                     }
-                    return MailboxWriteAttempt(
-                        mailbox: try IdentityPseudonym.fromIdentity(pubkey: current).asBytes(), auth: auth)
+                    guard let plan else {
+                        NSLog("ADR-0078: no verified mailbox for the co-publisher; its Welcome was not written")
+                        throw MailboxUnknown()
+                    }
+                    return MailboxWriteAttempt(target: plan.target, auth: plan.auth)
                 }
-                let payload = wrapEnvelope(kind: .welcome, body: added.welcome)
+                func publish(_ attempt: MailboxWriteAttempt) async throws {
+                    _ = try await ds.publishMailbox(
+                        pseudonym: attempt.target.address,
+                        payload: try attempt.target.seal(kind: .welcomeRendezvous, body: added.welcome),
+                        writeAuth: attempt.auth)
+                }
                 let first = try await resolve()
                 do {
-                    _ = try await ds.publishMailbox(
-                        pseudonym: first.mailbox, payload: payload, writeAuth: first.auth)
+                    try await publish(first)
                 } catch let error where RefusedMailboxWrite.isRefusal(error) {
                     await PersonAddressRecheck.recheck(accountKey: proposalRef)
                     let second = try? await resolve()
                     guard RefusedMailboxWrite.retries(first: first, rechecked: second), let second else {
                         throw error
                     }
-                    _ = try await ds.publishMailbox(
-                        pseudonym: second.mailbox, payload: payload, writeAuth: second.auth)
+                    try await publish(second)
                 }
             }
         ).run()
@@ -560,15 +569,24 @@ public enum CoPublisher {
         existingSigningSeed: Data? = nil,
         requestKeys: CoPublishRequestKeys.Ports = .live
     ) async throws -> ChannelPublisherKeys? {
-        let mailbox = try IdentityPseudonym.fromIdentity(pubkey: joinerKey).asBytes()
-        let signer = dsMailboxSigner(identity: identity)
+        // ADR-0078 — the account's own mailbox, named by its mailbox key;
+        // every row is opened with that key. The owner seals the co-publisher
+        // Welcome as a `welcomeRendezvous` row; a plain `welcome` row is tried
+        // too (whichever opens this channel's PublisherGroup counts).
+        let mailboxKey = MailboxKey.fromAccountIdentity(accountIdentity: identity)
+        let signer = dsMailboxSigner(accountIdentity: identity)
+        let mailbox = signer.mailboxAddress()
         var candidates: [Data] = []
         var after: Int64 = 0
         for _ in 0..<Self.maxMailboxPages {
             let page = try await ds.fetchMailbox(
                 pseudonym: mailbox, after: after, waitSecs: 0, auth: DsAuth(signer: signer))
             for row in page.messages {
-                if case .welcome(let body) = parseEnvelope(row.payload) { candidates.append(body) }
+                guard let opened = MailboxRows.open(row.payload, key: mailboxKey) else { continue }
+                switch opened.kind {
+                case .welcomeRendezvous, .welcome: candidates.append(opened.body)
+                case .contactRequest, .contactAck: continue
+                }
             }
             guard let last = page.messages.last, page.hasMore, last.id > after else { break }
             after = last.id

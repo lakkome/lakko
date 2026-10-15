@@ -64,6 +64,16 @@ public final class ReachCenter: ObservableObject {
     public private(set) var ownAccountKey: Data?
     private var mailboxSigner: DsProofSigner?
     private var mailboxPseudonym: Data?
+    /// ADR-0078 — this account's own mailbox (derived from the account seed;
+    /// every device derives the same). Moves with a rotation.
+    public private(set) var ownMailbox: MailboxTarget?
+    /// The predecessor-mailbox addresses of this account's own proven old
+    /// keys (ADR-0074 rule 4), from their seeds: a write recorded to one of
+    /// them goes to ``ownMailbox`` instead.
+    private var ownPredecessorMailboxes: Set<Data> = []
+    /// Verified bindings, by `binding | account key`, so the per-write
+    /// lookups do not repeat the same signature check.
+    private var bindingCache: [Data: MailboxTarget?] = [:]
     private var record = ReachRecord()
     private var reachState = FfiReachState(entries: [], updatedAtMs: 0)
     private let ds: ReachDsTransport
@@ -139,6 +149,17 @@ public final class ReachCenter: ObservableObject {
         }
     }
 
+    /// ADR-0078 — the mailbox addresses of this account's own predecessor
+    /// keys, each derived from its predecessor SEED. The default reads the
+    /// predecessor slot; tests inject their own.
+    var ownPredecessorMailboxAddresses: @MainActor (_ accountIdB64: String) -> [Data] = { accountIdB64 in
+        KeychainOwnPredecessorStore().load(accountIdB64: accountIdB64).compactMap { seed in
+            (try? Identity.fromSeed(seed: seed)).map {
+                MailboxKey.fromAccountIdentity(accountIdentity: $0).address()
+            }
+        }
+    }
+
     init(persistence: ReachPersistence = KeychainReachPersistence(), ds: ReachDsTransport = DsClient()) {
         self.persistence = persistence
         self.ds = ds
@@ -152,6 +173,7 @@ public final class ReachCenter: ObservableObject {
             keyResolver = AccountKeyResolver()
             return
         }
+        ownPredecessorMailboxes = Set(ownPredecessorMailboxAddresses(accountIdB64))
         let next = keyResolverProvider(accountIdB64, ownAccountKey)
         guard next != keyResolver else { return }
         let before = keyResolver
@@ -180,19 +202,20 @@ public final class ReachCenter: ObservableObject {
         keyResolver.current(of: accountKey)
     }
 
-    /// The mailbox a write for the person holding `accountKey` goes to: the
-    /// mailbox of their current key.
+    /// The address a write for the person holding `accountKey` goes to
+    /// (ADR-0078: from a verified binding, never derived from the key).
+    /// `nil` when this device knows no mailbox for them.
     public func mailbox(forAccountKey accountKey: Data) -> Data? {
-        MailboxAddress.pseudonym(forAccountKey: accountKey, resolver: keyResolver)
+        writePlan(toAccountKey: accountKey)?.target.address
     }
 
-    /// Re-address a mailbox pseudonym derived earlier (a Welcome recorded in
-    /// the ADR-0040 outbox before the rotation was observed): the mailbox of
-    /// the person's current key when `pseudonym` is a known predecessor's.
-    public func currentMailbox(for pseudonym: Data) -> Data {
-        MailboxAddress.current(of: pseudonym, resolver: keyResolver)
+    /// Re-address a mailbox recorded earlier (a Welcome recorded in the
+    /// ADR-0040 outbox before a rotation was observed): the person's current
+    /// mailbox when `address` is one of their known mailboxes, else
+    /// `address` itself.
+    public func currentMailbox(for address: Data) -> Data {
+        writePlan(toMailbox: address)?.target.address ?? address
     }
-
     /// Every grant held for the person `accountKey` belongs to, whichever of
     /// their keys each was filed under (rule 2): the newest of a class and
     /// scope wins, exactly as ``ReachRules/merging(_:into:)`` decides for one
@@ -214,20 +237,27 @@ public final class ReachCenter: ObservableObject {
         })
     }
 
-    /// The account key (current) of the person whose mailbox `pseudonym` is,
+    /// The account key (current) of the person whose mailbox `address` is,
     /// among the people this device holds a grant or a committer delegation
     /// for, under any of their keys. `nil` for this account's own mailbox and
     /// for a mailbox nothing here names. What a refused write addressed by
     /// its mailbox alone re-checks (rule 6).
-    public func accountKey(forMailbox pseudonym: Data) -> Data? {
-        var candidates = heldPeople()
-        candidates += delegations.values.map { keyResolver.current(of: $0.addedAccountKey) }
-        for person in candidates {
-            for key in keyResolver.allKeys(of: person) where Self.mailbox(of: key) == pseudonym {
-                return keyResolver.isOwn(person) ? nil : person
-            }
+    public func accountKey(forMailbox address: Data) -> Data? {
+        guard !isOwnMailbox(address) else { return nil }
+        return person(forMailbox: address)
+    }
+
+    /// The person (current key) one of whose verified mailboxes is `address`.
+    private func person(forMailbox address: Data) -> Data? {
+        for person in heldPeople() + delegatedPeople()
+        where knownTargets(ofPerson: person).contains(where: { $0.address == address }) {
+            return keyResolver.isOwn(person) ? nil : person
         }
         return nil
+    }
+
+    private func isOwnMailbox(_ address: Data) -> Bool {
+        address == ownMailbox?.address || ownPredecessorMailboxes.contains(address)
     }
 
     /// The distinct people grants are held for, by current account key.
@@ -248,9 +278,11 @@ public final class ReachCenter: ObservableObject {
         self.accountIdB64 = accountIdB64
         accountSeed = accountIdentity.ed25519Seed()
         ownAccountKey = accountIdentity.signaturePublicKey()
-        let signer = dsMailboxSigner(identity: accountIdentity)
+        let signer = dsMailboxSigner(accountIdentity: accountIdentity)
         mailboxSigner = signer
-        mailboxPseudonym = signer.mailboxPseudonym()
+        mailboxPseudonym = signer.mailboxAddress()
+        ownMailbox = MailboxTarget.own(accountIdentity: accountIdentity)
+        bindingCache = [:]
         record = persistence.load(accountIdB64: accountIdB64) ?? ReachRecord()
         if let b64 = record.settingEnvelopeB64, let bytes = Data(base64Encoded: b64),
            let decoded = try? decodeVisibilityEnvelope(plaintext: bytes) {
@@ -302,9 +334,11 @@ public final class ReachCenter: ObservableObject {
         syncAgain = false
         accountSeed = accountIdentity.ed25519Seed()
         ownAccountKey = accountIdentity.signaturePublicKey()
-        let signer = dsMailboxSigner(identity: accountIdentity)
+        let signer = dsMailboxSigner(accountIdentity: accountIdentity)
         mailboxSigner = signer
-        mailboxPseudonym = signer.mailboxPseudonym()
+        mailboxPseudonym = signer.mailboxAddress()
+        ownMailbox = MailboxTarget.own(accountIdentity: accountIdentity)
+        bindingCache = [:]
         record.registeredB64 = []
         record.registeredOpen = nil
         // Section 3.5a rule 5 — the links and the reply grants handed out so
@@ -335,6 +369,9 @@ public final class ReachCenter: ObservableObject {
         ownAccountKey = nil
         mailboxSigner = nil
         mailboxPseudonym = nil
+        ownMailbox = nil
+        ownPredecessorMailboxes = []
+        bindingCache = [:]
         keyResolver = AccountKeyResolver()
         record = ReachRecord()
         reachState = FfiReachState(entries: [], updatedAtMs: 0)
@@ -433,7 +470,7 @@ public final class ReachCenter: ObservableObject {
                 pseudonym: pseudonym, add: diff.add, remove: diff.remove, open: open, signer: signer)
         } catch {
             guard self.accountIdB64 == accountIdB64 else { return false }
-            NSLog("ADR-0060: reach registration failed: \(error)")
+            NSLog("ADR-0060: reach registration failed: \(type(of: error))")
             status = Self.isOffline(error) ? .pendingOffline : .failed
             return false
         }
@@ -463,7 +500,7 @@ public final class ReachCenter: ObservableObject {
             listing = try await ds.fetchReach(pseudonym: pseudonym, signer: signer)
         } catch {
             guard self.accountIdB64 == accountIdB64 else { return false }
-            NSLog("ADR-0060: registered reach keys not read; nothing registered until they are: \(error)")
+            NSLog("ADR-0060: registered reach keys not read; nothing registered until they are: \(type(of: error))")
             status = Self.isOffline(error) ? .pendingOffline : .failed
             return false
         }
@@ -909,6 +946,21 @@ public final class ReachCenter: ObservableObject {
         guard isActive,
               ReachRules.keeps(grant, carrier: carrier, senderResolved: fromAccountKeyB64 != nil),
               let receivedUnder = fromAccountKeyB64 else { return false }
+        // ADR-0078 — a grant names its owner's mailbox through the binding it
+        // carries; it is kept only when that binding verifies against the
+        // account key the sender was resolved to at receipt (C-68). A grant
+        // whose binding was signed by someone else would route the person's
+        // Welcomes to a mailbox they do not read.
+        // A sender still bound to a PROVEN predecessor key (ADR-0074 Stage A)
+        // hands out grants of its new seed: the binding may verify under any
+        // key of the same person, and under no other.
+        guard let senderKey = Data(base64Encoded: receivedUnder),
+              keyResolver.allKeys(of: senderKey).contains(where: { key in
+                  (try? reachGrantMailboxPkVerified(grant: grant, accountPk: key)) != nil
+              }) else {
+            NSLog("ADR-0078: a reach grant whose mailbox binding does not verify was not kept")
+            return false
+        }
         // ADR-0074 section 3.5a rule 2 — filed for the PERSON: a grant that
         // arrived from a leaf still bound to a proven predecessor key belongs
         // to the account's current key.
@@ -974,106 +1026,119 @@ public final class ReachCenter: ObservableObject {
         persist()
     }
 
-    /// How to sign a write to the mailbox of the person with account key
-    /// `accountKey`: this account's own contact seed for its own mailbox, else
-    /// the best grant held for them. `nil` when nothing is held — the write
-    /// then goes unsigned, which only an Everyone mailbox stores.
-    ///
-    /// ADR-0074 section 3.5a — `accountKey` is resolved first: a proven
-    /// predecessor (this account's own old key included) is the person's
-    /// current key, and the write goes to ``mailbox(forAccountKey:)``.
-    public func writeAuth(toAccountKey accountKey: Data, groupIdHex: String? = nil) -> DsMailboxWriteAuth? {
-        if keyResolver.isOwn(accountKey) || accountKey == ownAccountKey, let seed = ownContactSeed() {
-            return DsMailboxWriteAuth(reachSeed: seed)
-        }
-        let held = heldForPerson(accountKey)
-        if let seed = ReachRules.writeSeed(from: held, groupIdHex: groupIdHex) {
-            return DsMailboxWriteAuth(reachSeed: seed)
-        }
-        return continuityAuth(toAccountKey: currentAccountKey(of: accountKey))
+    // MARK: - Where a write goes (ADR-0078)
+
+    public typealias WritePlan = MailboxWritePlan
+
+    /// The verified binding `binding` names under `accountKey`, cached.
+    private func target(binding: Data, accountKey: Data) -> MailboxTarget? {
+        let cacheKey = binding + accountKey
+        if let cached = bindingCache[cacheKey] { return cached }
+        let verified = MailboxTarget.verifiedOrNil(binding: binding, accountKey: accountKey)
+        bindingCache[cacheKey] = verified
+        return verified
     }
 
-    /// The pin store the continuity key is resolved from. Injectable for tests.
-    var continuityPins: () -> [String: PeerPinStore.AccountPubkeyPin] = { PeerPinStore().allPins() }
-
-    /// ADR-0073 R.4 — the continuity key of an account whose reset this
-    /// device ACCEPTED, as a way to sign a Welcome to its new mailbox: tried
-    /// after every grant the person itself issued (once the new identity is
-    /// in a conversation its own grants are used and this key is not), and
-    /// before a committer delegation. `nil` for any other key, and past the
-    /// key's window.
-    func continuityAuth(toAccountKey accountKey: Data) -> DsMailboxWriteAuth? {
-        guard let auth = Continuity.auth(
-            targetAccountKeyB64: accountKey.base64EncodedString(),
-            pins: continuityPins(), nowMs: Int64(Self.nowMs())),
-              let seed = try? continuityReachSeed(accountId: auth.accountId, keyGeneration: auth.keyGeneration)
-        else { return nil }
-        return DsMailboxWriteAuth(reachSeed: seed)
-    }
-
-    /// ``continuityAuth(toAccountKey:)`` for a write addressed by its mailbox
-    /// pseudonym alone.
-    private func continuityAuth(toMailbox pseudonym: Data) -> DsMailboxWriteAuth? {
-        let nowMs = Int64(Self.nowMs())
-        for (accountIdB64, pin) in continuityPins() {
-            guard pin.resetSignedAtMs != nil,
-                  let key = Data(base64Encoded: pin.pinnedSignaturePubkeyB64),
-                  Self.mailbox(of: key) == pseudonym,
-                  let auth = Continuity.auth(
-                    targetAccountKeyB64: pin.pinnedSignaturePubkeyB64,
-                    pins: [accountIdB64: pin], nowMs: nowMs),
-                  let seed = try? continuityReachSeed(accountId: auth.accountId, keyGeneration: auth.keyGeneration)
-            else { continue }
-            return DsMailboxWriteAuth(reachSeed: seed)
+    /// The mailbox a held grant writes to: its binding verified against one
+    /// of the person's account keys (the key it was filed under first).
+    private func target(of grant: ReachRules.HeldGrant, personKeys: [Data]) -> MailboxTarget? {
+        guard let binding = grant.binding else { return nil }
+        for key in personKeys {
+            if let verified = target(binding: binding, accountKey: key) { return verified }
         }
         return nil
     }
 
-    /// ``writeAuth(toAccountKey:groupIdHex:)`` for a write addressed by its
-    /// mailbox pseudonym alone (a Welcome recorded in the ADR-0040 outbox):
-    /// this account's own mailbox, then any person a grant is held for, then a
-    /// committer delegation naming this account. `pseudonym` is the mailbox
-    /// the write GOES to: a caller holding one derived earlier re-addresses it
-    /// first (``currentMailbox(for:)``).
-    public func writeAuth(toMailbox pseudonym: Data, groupIdHex: String? = nil) -> DsMailboxWriteAuth? {
-        if let own = ownAccountKey, Self.mailbox(of: own) == pseudonym, let seed = ownContactSeed() {
-            return DsMailboxWriteAuth(reachSeed: seed)
+    /// Every verified mailbox known for the person `person` (current key),
+    /// from the grants held for them and the committer delegations kept for
+    /// them, best first.
+    private func knownTargets(ofPerson person: Data) -> [MailboxTarget] {
+        var out = grantMailboxes(ofPerson: person, groupIdHex: nil).map(\.target)
+        for target in delegationTargets(ofPerson: person) where !out.contains(target) {
+            out.append(target)
         }
-        for person in heldPeople() {
-            guard Self.mailbox(of: person) == pseudonym,
-                  let seed = ReachRules.writeSeed(from: heldForPerson(person), groupIdHex: groupIdHex)
-            else { continue }
-            return DsMailboxWriteAuth(reachSeed: seed)
-        }
-        return continuityAuth(toMailbox: pseudonym) ?? delegatedAuth(toMailbox: pseudonym)
-    }
-
-    /// ADR-0050 2.5a item 7 — every way this device can sign a write to the
-    /// mailbox `pseudonym`, in the order a sweep's Welcome tries them, moving
-    /// to the next on a `401`: this account's own `contact` key alone for its
-    /// own mailbox (unchanged); otherwise every distinct grant held for the
-    /// person whose mailbox it is (``ReachRules/writeSeeds(from:groupIdHex:)``),
-    /// then a committer delegation naming this account. Empty when nothing is
-    /// held: the caller then keeps the Welcome owed and never writes unsigned.
-    public func writeAuthCandidates(toMailbox pseudonym: Data, groupIdHex: String? = nil) -> [DsMailboxWriteAuth] {
-        if let own = ownAccountKey, Self.mailbox(of: own) == pseudonym {
-            return ownContactSeed().map { [DsMailboxWriteAuth(reachSeed: $0)] } ?? []
-        }
-        var out: [DsMailboxWriteAuth] = []
-        for person in heldPeople() where Self.mailbox(of: person) == pseudonym {
-            out += ReachRules.writeSeeds(from: heldForPerson(person), groupIdHex: groupIdHex)
-                .map { DsMailboxWriteAuth(reachSeed: $0) }
-        }
-        if let continuity = continuityAuth(toMailbox: pseudonym), !out.contains(continuity) {
-            out.append(continuity)
-        }
-        if let delegated = delegatedAuth(toMailbox: pseudonym) { out.append(delegated) }
         return out
     }
 
-    static func mailbox(of accountKey: Data) -> Data? {
-        try? IdentityPseudonym.fromIdentity(pubkey: accountKey).asBytes()
+    private func grantMailboxes(ofPerson person: Data, groupIdHex: String?) -> [(target: MailboxTarget, seeds: [Data])] {
+        let keys = keyResolver.allKeys(of: person)
+        let held = keys.flatMap { record.held[$0.base64EncodedString()] ?? [] }
+        return ReachRules.writeMailboxes(from: held, groupIdHex: groupIdHex) { [self] grant in
+            target(of: grant, personKeys: keys)
+        }
     }
+
+    /// How a write to the person with account key `accountKey` goes: this
+    /// account's own mailbox (signed with its own contact seed) for its own
+    /// key; otherwise the mailbox of the best grant held for the person
+    /// (signed with every seed held for that mailbox), then a committer
+    /// delegation's mailbox. `nil` when no mailbox is known: the caller
+    /// writes nothing (there is no address to derive any more).
+    ///
+    /// ADR-0074 section 3.5a — `accountKey` is resolved first: a proven
+    /// predecessor (this account's own old key included) is the person's
+    /// current key.
+    public func writePlan(toAccountKey accountKey: Data, groupIdHex: String? = nil) -> WritePlan? {
+        if keyResolver.isOwn(accountKey) || accountKey == ownAccountKey {
+            guard let ownMailbox else { return nil }
+            return WritePlan(
+                target: ownMailbox,
+                candidates: ownContactSeed().map { [DsMailboxWriteAuth(reachSeed: $0)] } ?? [])
+        }
+        let person = currentAccountKey(of: accountKey)
+        if let best = grantMailboxes(ofPerson: person, groupIdHex: groupIdHex).first {
+            var candidates = best.seeds.map { DsMailboxWriteAuth(reachSeed: $0) }
+            if let delegated = delegatedAuth(toMailbox: best.target.address) { candidates.append(delegated) }
+            return WritePlan(target: best.target, candidates: candidates)
+        }
+        for target in delegationTargets(ofPerson: person) {
+            if let delegated = delegatedAuth(toMailbox: target.address) {
+                return WritePlan(target: target, candidates: [delegated])
+            }
+        }
+        return nil
+    }
+
+    /// ``writePlan(toAccountKey:groupIdHex:)`` for a write addressed by a
+    /// mailbox recorded earlier (a Welcome in the ADR-0040 outbox): this
+    /// account's own mailbox (a predecessor's included, re-addressed to the
+    /// current one), else the person one of whose known mailboxes it is,
+    /// written to at their CURRENT best mailbox. `nil` for a mailbox nothing
+    /// here names.
+    public func writePlan(toMailbox address: Data, groupIdHex: String? = nil) -> WritePlan? {
+        if isOwnMailbox(address), let own = ownAccountKey {
+            return writePlan(toAccountKey: own, groupIdHex: groupIdHex)
+        }
+        guard let person = person(forMailbox: address) else { return nil }
+        return writePlan(toAccountKey: person, groupIdHex: groupIdHex)
+    }
+
+    /// The first authorisation of ``writePlan(toAccountKey:groupIdHex:)``.
+    public func writeAuth(toAccountKey accountKey: Data, groupIdHex: String? = nil) -> DsMailboxWriteAuth? {
+        writePlan(toAccountKey: accountKey, groupIdHex: groupIdHex)?.candidates.first
+    }
+
+    /// The first authorisation of ``writePlan(toMailbox:groupIdHex:)``.
+    public func writeAuth(toMailbox address: Data, groupIdHex: String? = nil) -> DsMailboxWriteAuth? {
+        writePlan(toMailbox: address, groupIdHex: groupIdHex)?.candidates.first
+    }
+
+    /// ADR-0050 2.5a item 7 — every authorisation for a write recorded to
+    /// `address`, in the order a sweep's Welcome tries them, moving to the
+    /// next on a `401`. Empty when nothing is held: the caller then keeps the
+    /// Welcome owed and never writes unsigned.
+    public func writeAuthCandidates(toMailbox address: Data, groupIdHex: String? = nil) -> [DsMailboxWriteAuth] {
+        writePlan(toMailbox: address, groupIdHex: groupIdHex)?.candidates ?? []
+    }
+
+    // ADR-0073 R.4 / ADR-0078 open question — a peer that accepted a reset
+    // used to write a Welcome to the reset account's new mailbox under the
+    // continuity key, at the address derived from the new identity key. A
+    // mailbox address is no longer derivable from an identity key, and no
+    // carrier yet brings the reset account's new mailbox binding, so the
+    // continuity key authorises no write here (``Continuity`` keeps the
+    // registration side only). A grant the new identity itself hands out is
+    // the only way to its mailbox.
 
     // MARK: - Committer delegations (ADR-0060 section 6)
 
@@ -1084,7 +1149,9 @@ public final class ReachCenter: ObservableObject {
 
     /// Keep a committer-delegation envelope received in a group from the
     /// member whose account key was resolved at receipt. Refused unless every
-    /// delegation in it checks (`checkCommitterDelegations`).
+    /// delegation in it checks (`checkCommitterDelegations`, which also
+    /// verifies the added person's mailbox binding against
+    /// `addedAccountKey`).
     public func keepDelegation(_ envelope: FfiCommitterDelegationEnvelope, fromAccountKeyB64: String?) {
         guard let sender = fromAccountKeyB64,
               (try? checkCommitterDelegations(envelope: envelope)) != nil else { return }
@@ -1092,18 +1159,41 @@ public final class ReachCenter: ObservableObject {
         onGrantKept?(envelope.addedAccountKey.base64EncodedString())
     }
 
-    /// The delegated write authorisation for a Welcome to `pseudonym`: a kept
-    /// envelope for the account whose mailbox it is that names this account,
+    /// The people (current keys) delegations are kept for.
+    private func delegatedPeople() -> [Data] {
+        var seen = Set<Data>()
+        return delegations.values.map { keyResolver.current(of: $0.addedAccountKey) }
+            .filter { seen.insert($0).inserted }
+    }
+
+    /// The mailboxes the kept delegations for `person` name, each binding
+    /// verified against the added account key the envelope carries.
+    private func delegationTargets(ofPerson person: Data) -> [MailboxTarget] {
+        var out: [MailboxTarget] = []
+        for envelope in delegations.values
+        where keyResolver.current(of: envelope.addedAccountKey) == person {
+            guard let verified = target(
+                binding: envelope.addedMailboxBinding, accountKey: envelope.addedAccountKey),
+                  !out.contains(verified) else { continue }
+            out.append(verified)
+        }
+        return out
+    }
+
+    /// The delegated write authorisation for a Welcome to `address`: a kept
+    /// envelope whose added person's mailbox it is that names this account,
     /// signed with this account's own seed (the key the delegation names).
     ///
     /// ADR-0074 section 3.5a — a proposer that has not observed this
     /// account's own rotation names the OLD account key: the delegation is
     /// then found under that key and the write signed with its seed
     /// (``ReachRules/delegationSigner(ownKeys:header:)``).
-    private func delegatedAuth(toMailbox pseudonym: Data) -> DsMailboxWriteAuth? {
+    private func delegatedAuth(toMailbox address: Data) -> DsMailboxWriteAuth? {
         guard let own = ownAccountKey, let seed = accountSeed, let accountIdB64 else { return nil }
         let ownKeys = [(key: own, seed: seed)] + ownPredecessorSigningSeeds(accountIdB64)
-        for envelope in delegations.values where mailbox(forAccountKey: envelope.addedAccountKey) == pseudonym {
+        for envelope in delegations.values {
+            guard target(binding: envelope.addedMailboxBinding, accountKey: envelope.addedAccountKey)?
+                .address == address else { continue }
             if let signer = ReachRules.delegationSigner(ownKeys: ownKeys, header: { key in
                 try? committerDelegationFor(envelope: envelope, ownAccountKey: key)
             }) {
@@ -1121,15 +1211,15 @@ public final class ReachCenter: ObservableObject {
     public func composeDelegations(
         addedAccountKey: Data, candidateAccountKeys: [Data], groupIdHex: String?
     ) -> Data? {
-        // ADR-0074 section 3.5a rule 1 — the delegation is for the added
-        // person's CURRENT mailbox, so the envelope names their current key
-        // (the core refuses an envelope whose delegations name another
-        // mailbox than its key's); each committer candidate is named by its
-        // current key too, the key it signs the delegated write with.
-        let addedAccountKey = keyResolver.current(of: addedAccountKey)
-        guard let issuer = heldSeed(
-            forAccountKeyB64: addedAccountKey.base64EncodedString(), groupIdHex: groupIdHex),
-              let mailbox = Self.mailbox(of: addedAccountKey) else { return nil }
+        // ADR-0074 section 3.5a rule 1 / ADR-0078 — the delegation is for
+        // the mailbox the best grant held for the added person names; the
+        // envelope carries that grant's binding and the account key it
+        // verified under (the core refuses an envelope whose delegations name
+        // another mailbox than its binding's); each committer candidate is
+        // named by its current key, the key it signs the delegated write with.
+        let person = keyResolver.current(of: addedAccountKey)
+        guard let best = grantMailboxes(ofPerson: person, groupIdHex: groupIdHex).first,
+              let issuer = best.seeds.first else { return nil }
         let expires = Self.nowMs() + ReachRules.delegationLifetimeMs
         var blobs: [Data] = []
         var seen = Set<Data>()
@@ -1141,14 +1231,16 @@ public final class ReachCenter: ObservableObject {
                 SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!)
             }) == errSecSuccess else { return nil }
             guard let blob = try? signDelegationBlob(
-                issuerSeed: issuer, mailbox: mailbox, delegatePk: candidate,
+                issuerSeed: issuer, mailbox: best.target.address, delegatePk: candidate,
                 expiresAtMs: expires, nonce: nonce) else { continue }
             blobs.append(blob)
         }
         guard !blobs.isEmpty else { return nil }
         return try? composeCommitterDelegationEnvelope(
             envelope: FfiCommitterDelegationEnvelope(
-                addedAccountKey: addedAccountKey, delegations: blobs))
+                addedAccountKey: best.target.accountKey,
+                addedMailboxBinding: best.target.binding,
+                delegations: blobs))
     }
 
     /// The account keys (b64) this device holds any grant for.
@@ -1160,7 +1252,18 @@ public final class ReachCenter: ObservableObject {
     /// (b64): what a proposer signs committer delegations with, and what local
     /// people search offers a request under.
     public func heldSeed(forAccountKeyB64 key: String, groupIdHex: String?) -> Data? {
-        ReachRules.writeSeed(from: heldForPerson(b64: key), groupIdHex: groupIdHex)
+        heldMailbox(forAccountKeyB64: key, groupIdHex: groupIdHex)?.seed
+    }
+
+    /// ADR-0078 — the best grant held for the person with account key `key`
+    /// (b64) as a seed and the VERIFIED mailbox it writes to; `nil` when no
+    /// held grant's binding verifies.
+    public func heldMailbox(forAccountKeyB64 key: String, groupIdHex: String?) -> (seed: Data, target: MailboxTarget)? {
+        guard let accountKey = Data(base64Encoded: key) else { return nil }
+        let person = keyResolver.current(of: accountKey)
+        guard let best = grantMailboxes(ofPerson: person, groupIdHex: groupIdHex).first,
+              let seed = best.seeds.first else { return nil }
+        return (seed, best.target)
     }
 
 
@@ -1267,7 +1370,7 @@ public final class ReachCenter: ObservableObject {
                     nameTermLookupKeys.append(oprf.lookupKey)
                     recordTermOutputs.append(oprf.output)
                 }
-                guard let identityPk = ownAccountKey,
+                guard let identityPk = ownAccountKey, let binding = ownMailbox?.binding,
                       let accountId = own.accountId, accountId.count == 16,
                       !recordTermOutputs.isEmpty else {
                     NSLog("ADR-0060: Everyone not published: no identity, account id or search term")
@@ -1276,7 +1379,8 @@ public final class ReachCenter: ObservableObject {
                 let payload = FfiIntroductionPayload(
                     identityPk: identityPk, accountId: accountId,
                     displayName: name.isEmpty ? nil : name,
-                    username: username, usernameCertificate: username == nil ? nil : cert, fof: nil)
+                    username: username, usernameCertificate: username == nil ? nil : cert,
+                    mailboxBinding: binding, fof: nil)
                 publicRecord = try composePublicRecord(
                     payload: payload, termOprfs: recordTermOutputs, issuedAtMs: Self.nowMs())
             }
@@ -1307,10 +1411,12 @@ public final class ReachCenter: ObservableObject {
     /// only when the name, the username or the `fof` version changed.
     public func ownIntroductionRecord(discovery: DiscoveryClient = DiscoveryClient()) async -> Data? {
         guard isActive, let fof = fofGrant(), let identityPk = ownAccountKey,
-              let accountIdB64 else { return nil }
+              let binding = ownMailbox?.binding, let accountIdB64 else { return nil }
         let own = ownNameProvider()
         guard let accountId = own.accountId, accountId.count == 16 else { return nil }
-        let cacheKey = "\(fof.version)|\(own.displayName ?? "")|\(own.username ?? "")|"
+        // The binding is in the key: a rotation keeps the version and moves
+        // the mailbox (ADR-0078), and the cached record names the old one.
+        let cacheKey = "\(fof.version)|\(binding.base64EncodedString())|\(own.displayName ?? "")|\(own.username ?? "")|"
             + (ownUsernameCertificate?.base64EncodedString() ?? "")
         if record.ownOfferFofVersion == fof.version, let cached = record.ownOfferB64,
            record.ownOfferCacheKey.first == cacheKey, let bytes = Data(base64Encoded: cached) {
@@ -1340,7 +1446,7 @@ public final class ReachCenter: ObservableObject {
         guard !termOutputs.isEmpty else { return nil }
         let payload = FfiIntroductionPayload(
             identityPk: identityPk, accountId: accountId, displayName: own.displayName,
-            username: username, usernameCertificate: cert, fof: fof)
+            username: username, usernameCertificate: cert, mailboxBinding: binding, fof: fof)
         guard let record = try? composeIntroduction(
             payload: payload, termOprfs: termOutputs, issuedAtMs: Self.nowMs()) else { return nil }
         self.record.ownOfferB64 = record.base64EncodedString()

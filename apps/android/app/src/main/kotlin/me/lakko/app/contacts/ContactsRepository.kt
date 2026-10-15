@@ -542,7 +542,7 @@ public class ContactsRepository(
                     senderProfile = ownProfileForWire(secrets.accountId),
                     mintReply = { key -> reach()?.mintReply(key) },
                     reachFor = { key ->
-                        reach()?.reachAuthFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
+                        reach()?.writeDestFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
                     },
                 )
             }
@@ -1202,7 +1202,7 @@ public class ContactsRepository(
                 // the request leaves, and the grant that lets it in.
                 mintReply = { key -> reach()?.mintReply(key) },
                 reachFor = { key ->
-                    reach()?.reachAuthFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
+                    reach()?.writeDestFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
                 },
             )
             // The request left; the "sent" row is the sending account's.
@@ -1228,16 +1228,19 @@ public class ContactsRepository(
      * username (they are in Everyone). [grantWire] is the grant the search
      * found them under (`encodeReachGrant`), used for this one request and
      * never kept; without one the write takes the grant this device holds
-     * for them, or goes unsigned into their open mailbox.
+     * for them, or goes proofless into their open mailbox, sealed to the
+     * key [mailboxBinding] (their public record's) names (ADR-0078). Either
+     * is verified against the recipient's account key before anything is
+     * written.
      */
     public suspend fun sendFoundContactRequestByUsername(
         recipientUsername: String,
         introMessage: ByteArray,
         grantWire: ByteArray?,
+        mailboxBinding: ByteArray? = null,
     ): SendResult {
         val secrets = authRepo.identitySecrets.value
             ?: throw ContactsError.wrap(IllegalStateException("no identity secrets — please re-enter your password"))
-        val explicit = grantWire?.let(::reachAuthOfGrantWire)
         val bound = sessionBinding.capture()
         return useClientWith(secrets) { client, sender ->
             val result = client.sendContactRequest(
@@ -1249,7 +1252,14 @@ public class ContactsRepository(
                 senderProfile = ownProfileForWire(secrets.accountId),
                 mintReply = { key -> reach()?.mintReply(key) },
                 reachFor = { key ->
-                    explicit ?: reach()?.reachAuthFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
+                    foundRequestDest(
+                        grantWire = grantWire,
+                        mailboxBinding = mailboxBinding,
+                        recipientKey = reach()?.mailboxAccountKey(key) ?: key,
+                        crypto = mailboxCrypto,
+                        authOf = { seed -> me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(seed)) },
+                        decodeGrant = { uniffi.lakko_ffi_uniffi.decodeReachGrant(it) },
+                    ) ?: reach()?.writeDestFor(key, me.lakko.app.reach.WritePurpose.CONTACT_REQUEST)
                 },
             )
             if (bound.isCurrent) recordSent(result.recipientUsername, result, introMessage)
@@ -1270,10 +1280,19 @@ public class ContactsRepository(
         introMessage: ByteArray,
         grantWire: ByteArray?,
         shownUsername: String?,
+        /** ADR-0078 - the mailbox binding a public record carried. */
+        mailboxBinding: ByteArray? = null,
     ): SendResult {
         val secrets = authRepo.identitySecrets.value
             ?: throw ContactsError.wrap(IllegalStateException("no identity secrets — please re-enter your password"))
-        val explicit = grantWire?.let(::reachAuthOfGrantWire)
+        val explicit = foundRequestDest(
+            grantWire = grantWire,
+            mailboxBinding = mailboxBinding,
+            recipientKey = reach()?.mailboxAccountKey(recipientSignaturePubkey) ?: recipientSignaturePubkey,
+            crypto = mailboxCrypto,
+            authOf = { seed -> me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(seed)) },
+            decodeGrant = { uniffi.lakko_ffi_uniffi.decodeReachGrant(it) },
+        )
         val replyGrant = reach()?.mintReply(recipientSignaturePubkey)
         val bound = sessionBinding.capture()
         return useClientWith(secrets) { client, sender ->
@@ -1287,7 +1306,7 @@ public class ContactsRepository(
                 introMessage = introMessage,
                 senderProfile = ownProfileForWire(secrets.accountId),
                 replyGrant = replyGrant,
-                reach = explicit ?: reach()?.reachAuthFor(
+                reach = explicit ?: reach()?.writeDestFor(
                     recipientSignaturePubkey,
                     me.lakko.app.reach.WritePurpose.CONTACT_REQUEST,
                 ),
@@ -1314,10 +1333,9 @@ public class ContactsRepository(
         persistSent()
     }
 
-    private fun reachAuthOfGrantWire(wire: ByteArray): me.lakko.app.ds.DsReachAuth {
-        val grant = uniffi.lakko_ffi_uniffi.decodeReachGrant(wire)
-        return me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(grant.seed))
-    }
+    /** ADR-0078 - the binding check and sealing of mailbox rows; a test
+     *  injects a fake (the host JVM loads no native library). */
+    internal var mailboxCrypto: MailboxCrypto = NativeMailboxCrypto
 
     /**
      * Resolve `@username -> (accountId, signaturePubkey)` through the
@@ -1409,7 +1427,7 @@ public class ContactsRepository(
                     }
                     pollPredecessorWelcomes()
                     val result = client.pollStrangerInbox(
-                        mySignaturePubkey = sender.signaturePubkey,
+                        own = sender.ownMailbox,
                         myX25519Secret = sender.x25519Secret,
                         after = read.after,
                         waitSecs = waitSecs,
@@ -1696,20 +1714,23 @@ public class ContactsRepository(
                     val candidates = reach()
                         ?.reachAuthCandidates(request.fromPubkey, me.lakko.app.reach.WritePurpose.REPLY)
                         .orEmpty()
-                    val send: suspend (me.lakko.app.ds.DsReachAuth?) -> PublishedAck = { auth ->
+                    val send: suspend (MailboxDest?) -> PublishedAck = { dest ->
                         client.sendContactAck(
                             accepterSigningSeed = sender.signingSeed,
                             accepterAccountId = secrets.accountId,
                             accepterX25519Pubkey = sender.x25519Pubkey,
                             originalRequest = request,
-                            // ADR-0060 §6 — the requester's reply key opens their mailbox.
-                            reach = auth,
+                            // ADR-0060 §6 — the requester's reply key opens their
+                            // mailbox. ADR-0078 — with no grant accepted, a
+                            // proofless write to the mailbox a held binding
+                            // names, else nothing (the client refuses `null`).
+                            reach = dest ?: reach()?.mailboxPkFor(request.fromPubkey)?.let { MailboxDest(it, null) },
                         )
                     }
                     when (
                         val outcome = me.lakko.app.reach.firstAcceptedWrite(
                             candidates,
-                            { auth: me.lakko.app.ds.DsReachAuth -> send(auth) },
+                            { dest: MailboxDest -> send(dest) },
                             ::isMailboxRefusal,
                         )
                     ) {
@@ -1905,8 +1926,13 @@ public class ContactsRepository(
             // ADR-0060 §6 — the link grant lets this device write the request
             // (and the 1:1 Welcome) into the inviter's closed mailbox. Used
             // for this flow only and never kept.
+            // ADR-0078: sealed to the mailbox the link grant's binding names,
+            // verified against the capability's owner key (a refused binding
+            // writes nothing).
             val linkReach = try {
-                me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(capability.linkGrant().seed))
+                verifiedGrantDest(capability.linkGrant(), capability.ownerSignaturePubkey(), mailboxCrypto) { seed ->
+                    me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(seed))
+                }
             } catch (_: Throwable) {
                 null
             }
@@ -2362,7 +2388,9 @@ public class ContactsRepository(
                             val secret = identity.x25519SecretKey()
                             try {
                                 val result = client.pollStrangerInbox(
-                                    mySignaturePubkey = identity.signaturePublicKey(),
+                                    // ADR-0078: the predecessor's mailbox derives
+                                    // from the predecessor's own seed.
+                                    own = NativeOwnMailbox.of(identity),
                                     myX25519Secret = secret,
                                     after = previous.mailboxCursor,
                                     waitSecs = 0,
@@ -2428,6 +2456,7 @@ public class ContactsRepository(
                     mailboxSigner = me.lakko.app.ds.FfiDsJournalSigner(
                         uniffi.lakko_ffi_uniffi.dsMailboxSigner(identity),
                     ),
+                    ownMailbox = NativeOwnMailbox.of(identity),
                 )
                 try {
                     block(client, sender)
@@ -2452,8 +2481,10 @@ public class ContactsRepository(
         val signaturePubkey: ByteArray,
         val x25519Secret: ByteArray,
         val x25519Pubkey: ByteArray,
-        /** ADR-0053 / ADR-0060 — the identity proof of this account's mailbox. */
+        /** ADR-0053 / ADR-0060 — the mailbox-key proof of this account's mailbox. */
         val mailboxSigner: me.lakko.app.ds.DsJournalSigner,
+        /** ADR-0078 — this account's own mailbox: its address and opener. */
+        val ownMailbox: OwnMailbox,
     )
 }
 

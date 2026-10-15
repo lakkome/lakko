@@ -3,7 +3,7 @@
 
 /**
  * ADR-0060 section 6 - choosing the key a write to someone's account mailbox
- * is signed with.
+ * is signed with; ADR-0078 phase 1 - and WHERE it goes.
  *
  * Every write to a person's mailbox now needs a key the person registered, or
  * a delegation from one; an unsigned write to a closed mailbox is answered as
@@ -20,23 +20,38 @@
  * 4. **delegation** - a committer delegation a proposer posted for this
  *    person, naming our account key: the proof is signed with our account
  *    seed, next to the delegation header;
- * 5. **none** - unsigned. An Everyone (open) or unclaimed mailbox stores it.
+ * 5. **none** - unsigned, spending one `mailbox-write` token. An Everyone
+ *    (open) or unclaimed mailbox stores it.
+ *
+ * ADR-0078: a mailbox address is no longer a function of the person's
+ * identity key. It is `mailboxAddress(mailbox_pk)` for a mailbox key the
+ * person derives from their account seed, and a writer learns it only from a
+ * MAILBOX BINDING (the mailbox key signed by the person's identity key) that
+ * travels with every grant, link, introduction and public record. So each
+ * candidate carries its own target: before the write the binding is verified
+ * against the account key this device holds pinned for the person (the key
+ * itself and the proven predecessors of its chain), the row is sealed to the
+ * verified key and addressed to its address. A binding that does not verify
+ * refuses that candidate (fail closed; logged without identifiers). Nothing
+ * here derives an address from an identity key or an account id.
  */
 import type { ReachGrant as WasmReachGrant } from "../../wasm/lakko_ffi_wasm";
 import type { MailboxWriteAuth } from "../ds/client";
 import { journalHex, type ProofSigner } from "../ds/access";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { acceptedResetOfKey } from "../contacts/local-store";
+import type { MailboxTarget } from "../contacts/mailbox-row";
 import { continuityKeyUsable } from "./continuity";
 import { loadWasm } from "../wasm";
-import { personKeysHex, resolveAccountKey } from "../contacts/address-resolver";
+import { personKeysHex } from "../contacts/address-resolver";
 import {
-  bestGrantForPerson,
   delegationsForPerson,
   grantsInOrderForPerson,
   type HeldGrant,
 } from "./received-grants";
 import { reachSession, reachSignerForGrant, reachSignerForGrantWire } from "./reach-service";
+
+export type { MailboxTarget } from "../contacts/mailbox-row";
 
 /** Which rule authorised a write. */
 export type WriteAuthKind = "own" | "explicit" | "kept" | "continuity" | "delegation" | "none";
@@ -44,9 +59,12 @@ export type WriteAuthKind = "own" | "explicit" | "kept" | "continuity" | "delega
 /**
  * ADR-0073 R.4 - the continuity reach key of an account whose reset this
  * device ACCEPTED: derived from the account id and the attested generation,
- * registered by the resetting device on its new mailbox. A Welcome to the
- * new identity is signed with it when no grant issued by the new identity
- * is held yet.
+ * registered by the resetting device on its new mailbox.
+ *
+ * ADR-0078 open question: a Welcome under this key needs the reset account's
+ * NEW mailbox, and no carrier names it (the address is no longer derivable
+ * from the account id or the identity key). Until one exists the write is a
+ * recorded no-op (see {@link planWriteToPerson}).
  */
 export interface ContinuityAuth {
   /** The 16-byte account id the reset was accepted for. */
@@ -69,16 +87,25 @@ export function chooseWriteAuth(facts: {
   return "none";
 }
 
-/** A resolved authorisation; `release()` frees the signer. */
+/** A resolved authorisation and where it writes; `release()` frees the
+ *  signer. */
 export interface ResolvedWriteAuth {
   readonly kind: WriteAuthKind;
+  /** The verified mailbox key the row is sealed to, and its address. */
+  readonly target: MailboxTarget;
   readonly auth: MailboxWriteAuth;
   release(): void;
 }
 
-function released(kind: WriteAuthKind, signer: ProofSigner | null, delegation: string | null): ResolvedWriteAuth {
+function released(
+  kind: WriteAuthKind,
+  target: MailboxTarget,
+  signer: ProofSigner | null,
+  delegation: string | null,
+): ResolvedWriteAuth {
   return {
     kind,
+    target,
     auth: { signer, delegation },
     release: () => {
       try {
@@ -90,20 +117,92 @@ function released(kind: WriteAuthKind, signer: ProofSigner | null, delegation: s
   };
 }
 
-/** The account mailbox pseudonym of an account key. */
-export async function accountMailboxOf(accountKey: Uint8Array): Promise<Uint8Array> {
-  const wasm = await loadWasm();
-  // ADR-0074 section 3.5a rule 1 - resolve before you address: a proven
-  // predecessor names the person's CURRENT key, and so their current
-  // mailbox. An unproven change is never resolved (`address-resolver.ts`).
-  return wasm.IdentityPseudonym.fromIdentity(resolveAccountKey(accountKey)).asBytes();
+// ----------------------------------------------------------------------------
+// The mailbox binding (ADR-0078)
+// ----------------------------------------------------------------------------
+
+/** Log a refused binding. No identifier of any kind is logged. */
+function noteRefusedBinding(kind: WriteAuthKind): void {
+  // eslint-disable-next-line no-console
+  console.warn(`ADR-0078: a ${kind} mailbox write was refused; its mailbox binding did not verify`);
 }
 
-/** The mailbox of exactly this key, with no resolution: for READING a
- *  mailbox this device holds the key of, never for addressing a person. */
-export async function mailboxOfExactKey(accountKey: Uint8Array): Promise<Uint8Array> {
+/** The person's keys as bytes: `targetAccountKey` itself first, then the
+ *  proven keys of their chain (`personKeysHex`), each once. With `exact`,
+ *  the given key alone. */
+export function personKeysOf(targetAccountKey: Uint8Array, exact = false): Uint8Array[] {
+  if (exact) return [targetAccountKey];
+  const out: Uint8Array[] = [targetAccountKey];
+  const seen = new Set<string>([journalHex(targetAccountKey)]);
+  for (const hex of personKeysHex(journalHex(targetAccountKey))) {
+    if (seen.has(hex)) continue;
+    seen.add(hex);
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    out.push(bytes);
+  }
+  return out;
+}
+
+/**
+ * The target a grant writes to: its binding verified against one of the
+ * person's pinned keys (`personKeys`), or `null` when it verifies against
+ * none (or the grant does not decode). Never throws.
+ */
+export async function verifiedTargetOfGrant(
+  grant: WasmReachGrant | string,
+  personKeys: readonly Uint8Array[],
+): Promise<MailboxTarget | null> {
   const wasm = await loadWasm();
-  return wasm.IdentityPseudonym.fromIdentity(accountKey).asBytes();
+  let decoded: WasmReachGrant;
+  let owned = false;
+  if (typeof grant === "string") {
+    try {
+      decoded = wasm.decodeReachGrant(base64Decode(grant));
+      owned = true;
+    } catch {
+      return null;
+    }
+  } else {
+    decoded = grant;
+  }
+  try {
+    for (const key of personKeys) {
+      try {
+        const mailboxPk = decoded.mailboxPkVerified(key);
+        return { mailboxPk, address: wasm.mailboxAddress(mailboxPk) };
+      } catch {
+        /* not this key */
+      }
+    }
+    return null;
+  } finally {
+    if (owned) {
+      try {
+        decoded.free();
+      } catch {
+        /* already freed */
+      }
+    }
+  }
+}
+
+/** The target a bare 97-byte binding names, verified against one of the
+ *  person's pinned keys, or `null`. Never throws. */
+export async function verifiedTargetOfBinding(
+  binding: Uint8Array,
+  personKeys: readonly Uint8Array[],
+): Promise<MailboxTarget | null> {
+  const wasm = await loadWasm();
+  for (const key of personKeys) {
+    try {
+      const mailboxPk = wasm.verifyMailboxBinding(binding, key);
+      return { mailboxPk, address: wasm.mailboxAddress(mailboxPk) };
+    } catch {
+      /* not this key */
+    }
+  }
+  return null;
 }
 
 /**
@@ -116,84 +215,17 @@ export async function accountKeyOfKeyPackage(keyPackage: Uint8Array): Promise<Ui
   return wasm.keyPackageAccountKey(keyPackage) ?? wasm.keyPackageSignatureKey(keyPackage);
 }
 
-/**
- * Resolve how to authorise a write to `targetAccountKey`'s mailbox.
- *
- * @param options.scope    the group or channel id the write is about (prefers
- *                         that scope's kept grant; allows the `member` key)
- * @param options.explicit a grant held for exactly this write, as a wasm grant
- *                         (not consumed) or a kept grant wire (base64)
- * @param options.allowMember a Welcome into `scope` may use the `member` key
- */
-export async function resolveWriteAuth(
-  targetAccountKey: Uint8Array,
-  options: {
-    readonly scope?: Uint8Array;
-    readonly explicit?: WasmReachGrant | string | null;
-    readonly allowMember?: boolean;
-  } = {},
-): Promise<ResolvedWriteAuth> {
-  const session = reachSession();
-  // ADR-0074 section 3.5a rules 1 and 2: the write goes to the CURRENT key's
-  // mailbox (the caller derives it with `accountMailboxOf`, which resolves
-  // the same way), and the grants are the person's, under any key they had.
-  const personHexes = personKeysHex(journalHex(targetAccountKey));
-  const targetHex = personHexes[0] ?? journalHex(targetAccountKey);
-  const isOwnAccount = session !== null && session.accountKeyHex === targetHex;
-  const kept =
-    session === null
-      ? null
-      : bestGrantForPerson(session.receivedGrants(), personHexes, {
-          ...(options.scope === undefined ? {} : { scopeHex: journalHex(options.scope) }),
-          allowMember: options.allowMember === true,
-        });
-  const delegation = session === null ? null : await delegationFor(personHexes);
-  const delegationHeader = delegation?.header ?? null;
-  const kind = chooseWriteAuth({
-    isOwnAccount,
-    hasExplicit: options.explicit !== undefined && options.explicit !== null,
-    kept,
-    hasDelegation: delegationHeader !== null,
-  });
-  switch (kind) {
-    case "own": {
-      const grant = session!.grant("contact");
-      try {
-        return released(kind, await reachSignerForGrant(grant), null);
-      } finally {
-        grant.free();
-      }
-    }
-    case "explicit": {
-      const explicit = options.explicit!;
-      const signer =
-        typeof explicit === "string"
-          ? await reachSignerForGrantWire(explicit)
-          : await reachSignerForGrant(explicit);
-      return released(kind, signer, null);
-    }
-    case "kept":
-      return released(kind, await reachSignerForGrantWire(kept!.wireB64), null);
-    case "delegation":
-      return released(kind, await delegation!.signer(), delegationHeader);
-    // `chooseWriteAuth` never answers `continuity`: that key is a candidate
-    // of `planWriteToPerson` only.
-    case "continuity":
-    case "none":
-      return released("none", null, null);
-  }
-}
-
 // ----------------------------------------------------------------------------
 // A Welcome that must not be written unsigned (ADR-0050 section 2.5a item 7)
 // ----------------------------------------------------------------------------
 
 /**
  * No authorisation this account holds reaches the person's mailbox: every
- * kept grant (and delegation) was refused, or there was none. Nothing was
- * written unsigned: an unsigned write to a closed mailbox is answered as
- * stored and silently dropped, which is how a sweep used to count a Welcome
- * delivered that nobody could ever read. The caller keeps the Welcome owed.
+ * kept grant (and delegation) was refused, or there was none, or no binding
+ * verified. Nothing was written unsigned: an unsigned write to a closed
+ * mailbox is answered as stored and silently dropped, which is how a sweep
+ * used to count a Welcome delivered that nobody could ever read. The caller
+ * keeps the Welcome owed.
  */
 export class MailboxUnreachableError extends Error {
   override name = "MailboxUnreachableError";
@@ -206,11 +238,12 @@ export class MailboxUnreachableError extends Error {
   }
 }
 
-/** One authorisation to try, resolved lazily so a signer is derived only when
- *  it is about to be used. */
+/** One authorisation to try, resolved lazily so a signer is derived (and a
+ *  binding verified) only when it is about to be used. `null`: the
+ *  candidate's mailbox binding did not verify, and it is skipped. */
 export interface WriteCandidate {
   readonly kind: WriteAuthKind;
-  resolve(): Promise<ResolvedWriteAuth>;
+  resolve(): Promise<ResolvedWriteAuth | null>;
 }
 
 /** `true` for the DS refusal that means "this key does not open the
@@ -219,22 +252,27 @@ export function isWriteRefusal(err: unknown): boolean {
   return err !== null && typeof err === "object" && (err as { status?: unknown }).status === 401;
 }
 
+/** The write a candidate performs: to `target`, under `auth`. */
+export type MailboxWrite<T> = (target: MailboxTarget, auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>;
+
 /**
- * Try `candidates` in order, moving to the next only on a `401`; any other
- * failure (offline, a 5xx) is thrown as is, since another key would fare no
- * better. With none left, throws {@link MailboxUnreachableError}; with none at
- * all, nothing is written. Each signer is released after its attempt.
+ * Try `candidates` in order, moving to the next only on a `401` (or when a
+ * candidate's binding does not verify); any other failure (offline, a 5xx) is
+ * thrown as is, since another key would fare no better. With none left,
+ * throws {@link MailboxUnreachableError}; with none at all, nothing is
+ * written. Each signer is released after its attempt.
  */
 export async function writeThroughCandidates<T>(
   candidates: readonly WriteCandidate[],
-  write: (auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>,
+  write: MailboxWrite<T>,
 ): Promise<T> {
   let tried = 0;
   for (const candidate of candidates) {
     const resolved = await candidate.resolve();
+    if (resolved === null) continue;
     tried += 1;
     try {
-      return await write(resolved.auth, resolved.kind);
+      return await write(resolved.target, resolved.auth, resolved.kind);
     } catch (err) {
       if (!isWriteRefusal(err)) throw err;
     } finally {
@@ -248,11 +286,9 @@ export async function writeThroughCandidates<T>(
 // A refused write re-checks the address once (ADR-0074 section 3.5a rule 6)
 // ----------------------------------------------------------------------------
 
-/** Where a write goes and what it may be signed with, as resolved NOW. */
+/** What a write may be signed with, as resolved NOW; each candidate carries
+ *  the mailbox its binding names. */
 export interface WritePlan {
-  /** The mailbox pseudonym of the person's current key, as this device
-   *  knows it. */
-  readonly mailbox: Uint8Array;
   readonly candidates: readonly WriteCandidate[];
 }
 
@@ -263,16 +299,18 @@ export interface WritePlan {
  * A `401` means "this key does not open this mailbox". Either the grant is
  * dead, or the ADDRESS is: the person rotated their account keys, their
  * re-sent profile reached this device before the proven change did, and the
- * new grant is being offered to the mailbox that was left. So on the first
- * refusal `recheck` runs (it fetches the person's identity bundle through
- * the fail-closed gate, which records a proven predecessor), the plan is
- * resolved AGAIN (a new address, the same grants in a new order) and every
- * candidate of that plan is tried, moving on only on `401`.
+ * new grant is being offered under a key this device does not yet pin. So on
+ * the first refusal `recheck` runs (it fetches the person's identity bundle
+ * through the fail-closed gate, which records a proven predecessor), the plan
+ * is resolved AGAIN (the same grants, verified against the keys now pinned,
+ * in a new order) and every candidate of that plan is tried, moving on only
+ * on `401`.
  *
  *   - any failure other than `401` is thrown as is, at once;
  *   - `recheck` runs at most once per write, and a failing one is ignored
  *     (the second plan is then the first one, minus nothing);
  *   - with `recheck` `null` the candidates are simply tried in order;
+ *   - a candidate whose binding does not verify is skipped, never written;
  *   - with nothing left: the last refusal, or {@link MailboxUnreachableError}
  *     when `unreachable` is asked for (a Welcome, which then stays owed).
  *
@@ -280,7 +318,7 @@ export interface WritePlan {
  */
 export async function writeWithAddressRecheck<T>(
   plan: () => Promise<WritePlan>,
-  write: (mailbox: Uint8Array, auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>,
+  write: MailboxWrite<T>,
   options: {
     readonly recheck: (() => Promise<void>) | null;
     /** Throw {@link MailboxUnreachableError} rather than the refusal. */
@@ -295,9 +333,10 @@ export async function writeWithAddressRecheck<T>(
     let again = false;
     for (const candidate of current.candidates) {
       const resolved = await candidate.resolve();
+      if (resolved === null) continue;
       tried += 1;
       try {
-        return await write(current.mailbox, resolved.auth, resolved.kind);
+        return await write(resolved.target, resolved.auth, resolved.kind);
       } catch (err) {
         if (!isWriteRefusal(err)) throw err;
         refusal = err;
@@ -322,17 +361,41 @@ export async function writeWithAddressRecheck<T>(
   }
 }
 
+/** A candidate over one grant: verified against `personKeys` when resolved. */
+function grantCandidate(
+  kind: WriteAuthKind,
+  grant: WasmReachGrant | string,
+  personKeys: readonly Uint8Array[],
+): WriteCandidate {
+  return {
+    kind,
+    resolve: async () => {
+      const target = await verifiedTargetOfGrant(grant, personKeys);
+      if (target === null) {
+        noteRefusedBinding(kind);
+        return null;
+      }
+      const signer =
+        typeof grant === "string" ? await reachSignerForGrantWire(grant) : await reachSignerForGrant(grant);
+      return released(kind, target, signer, null);
+    },
+  };
+}
+
 /**
- * The plan for a write to the person `targetAccountKey` names: their CURRENT
- * mailbox (rule 1) and, in order,
+ * The plan for a write to the person `targetAccountKey` names, in order:
  *
  *   - this account's own mailbox: its own `contact` key, alone;
  *   - an explicit grant for exactly this write, alone;
  *   - otherwise every grant kept for the person under any key they have had
  *     (rule 2), the ones of before a rotation last and only while the old
  *     address stands (rule 6), then a committer delegation;
- *   - and, with none of those and unless `neverUnsigned`, the unsigned write
- *     (which only an Everyone mailbox stores).
+ *   - and, with none of those, unless `neverUnsigned`, and only when the
+ *     caller holds the person's mailbox binding (`openBinding`: from the
+ *     public record of a person in Everyone), the unsigned write.
+ *
+ * Every candidate's binding is verified against the person's pinned keys
+ * (`exactKey`: against `targetAccountKey` alone) when it is resolved.
  */
 export async function planWriteToPerson(
   targetAccountKey: Uint8Array,
@@ -341,37 +404,49 @@ export async function planWriteToPerson(
     readonly explicit?: WasmReachGrant | string | null;
     readonly allowMember?: boolean;
     readonly neverUnsigned?: boolean;
-    /** ADR-0073 R.4: tried after every grant the person itself issued (once
-     *  the new identity is in a conversation its own grants are used and
-     *  this key is not), before a committer delegation. */
+    /** The person's 97-byte mailbox binding from a public record, for the
+     *  unsigned write to an open mailbox. */
+    readonly openBinding?: Uint8Array | null;
+    /** Verify bindings against `targetAccountKey` alone (a contact request is
+     *  sealed to the keys in hand). */
+    readonly exactKey?: boolean;
+    /** ADR-0073 R.4 / ADR-0078 open question: see {@link ContinuityAuth}. */
     readonly continuity?: ContinuityAuth | null;
   } = {},
 ): Promise<WritePlan> {
   // A Welcome (`allowMember`) to the new identity of an account whose reset
-  // this device accepted resolves the continuity key by itself, so every
-  // Welcome path (a direct add, the sweep, the outbox replay) signs alike.
+  // this device accepted used to be signed with the continuity key and
+  // addressed to a mailbox derived from the identity key. ADR-0078 open
+  // question: no carrier names the reset account's new mailbox, so that
+  // write is a recorded no-op. The kept grants of the new identity (once it
+  // re-sends its profile) still reach it.
   const continuity =
     options.continuity !== undefined
       ? options.continuity
       : options.allowMember === true
         ? continuityFor(targetAccountKey, Date.now())
         : null;
+  if (continuity !== null) noteContinuitySkipped();
   const session = reachSession();
-  const mailbox = await accountMailboxOf(targetAccountKey);
+  const personKeys = personKeysOf(targetAccountKey, options.exactKey === true);
   const personHexes = personKeysHex(journalHex(targetAccountKey));
   const targetHex = personHexes[0] ?? journalHex(targetAccountKey);
   const isOwnAccount = session !== null && session.accountKeyHex === targetHex;
   const explicit = options.explicit ?? null;
   if (isOwnAccount) {
     return {
-      mailbox,
       candidates: [
         {
           kind: "own",
           resolve: async () => {
             const grant = session.grant("contact");
             try {
-              return released("own", await reachSignerForGrant(grant), null);
+              const target = await verifiedTargetOfGrant(grant, [session.accountKey]);
+              if (target === null) {
+                noteRefusedBinding("own");
+                return null;
+              }
+              return released("own", target, await reachSignerForGrant(grant), null);
             } finally {
               grant.free();
             }
@@ -380,24 +455,7 @@ export async function planWriteToPerson(
       ],
     };
   }
-  if (explicit !== null) {
-    return {
-      mailbox,
-      candidates: [
-        {
-          kind: "explicit",
-          resolve: async () =>
-            released(
-              "explicit",
-              typeof explicit === "string"
-                ? await reachSignerForGrantWire(explicit)
-                : await reachSignerForGrant(explicit),
-              null,
-            ),
-        },
-      ],
-    };
-  }
+  if (explicit !== null) return { candidates: [grantCandidate("explicit", explicit, personKeys)] };
   const candidates: WriteCandidate[] = [];
   if (session !== null) {
     // ADR-0073 R.7 case 3 - a Welcome into the successor of a conversation
@@ -416,36 +474,55 @@ export async function planWriteToPerson(
       })) {
         if (offered.has(held.wireB64)) continue;
         offered.add(held.wireB64);
-        candidates.push({
-          kind: "kept",
-          resolve: async () => released("kept", await reachSignerForGrantWire(held.wireB64), null),
-        });
+        candidates.push(grantCandidate("kept", held.wireB64, personKeys));
       }
     }
     const delegation = await delegationFor(personHexes);
-    if (continuity !== null) candidates.push(continuityCandidate(continuity));
     if (delegation !== null) {
       candidates.push({
         kind: "delegation",
-        resolve: async () => released("delegation", await delegation.signer(), delegation.header),
+        resolve: async () => {
+          const target = await verifiedTargetOfBinding(delegation.binding, personKeys);
+          if (target === null) {
+            noteRefusedBinding("delegation");
+            return null;
+          }
+          return released("delegation", target, await delegation.signer(), delegation.header);
+        },
       });
     }
   }
-  // With no reach session (nothing kept, no delegation) the continuity key is
-  // still derivable: it needs nothing this account holds.
-  if (session === null && continuity !== null) candidates.push(continuityCandidate(continuity));
-  if (candidates.length === 0 && options.neverUnsigned !== true) {
-    candidates.push({ kind: "none", resolve: () => Promise.resolve(released("none", null, null)) });
+  const openBinding = options.openBinding ?? null;
+  if (candidates.length === 0 && options.neverUnsigned !== true && openBinding !== null) {
+    candidates.push({
+      kind: "none",
+      resolve: async () => {
+        const target = await verifiedTargetOfBinding(openBinding, personKeys);
+        if (target === null) {
+          noteRefusedBinding("none");
+          return null;
+        }
+        return released("none", target, null, null);
+      },
+    });
   }
-  return { mailbox, candidates };
+  return { candidates };
+}
+
+/** Log the ADR-0078 continuity no-op. No identifier is logged. */
+function noteContinuitySkipped(): void {
+  // eslint-disable-next-line no-console
+  console.info(
+    "ADR-0078: a Welcome under the continuity key was skipped; no carrier names a reset account's new mailbox",
+  );
 }
 
 /**
- * The continuity key a Welcome to `targetAccountKey` may be signed with
- * (R.4), or `null`: only when that key is the one an accepted reset re-pinned
- * this device to, and only inside the key's window, counted from the
- * attestation's `signed_at` this device verified. Reads the pin store;
- * never throws.
+ * The continuity key a Welcome to `targetAccountKey` would have been signed
+ * with (R.4), or `null`: only when that key is the one an accepted reset
+ * re-pinned this device to, and only inside the key's window, counted from
+ * the attestation's `signed_at` this device verified. Reads the pin store;
+ * never throws. ADR-0078: used only to record the skipped write.
  */
 export function continuityFor(targetAccountKey: Uint8Array, nowMs: number): ContinuityAuth | null {
   try {
@@ -455,23 +532,6 @@ export function continuityFor(targetAccountKey: Uint8Array, nowMs: number): Cont
   } catch {
     return null;
   }
-}
-
-/** The continuity key as one write candidate; the seed is derived only when
- *  the candidate is about to be tried, and wiped after. */
-function continuityCandidate(continuity: ContinuityAuth): WriteCandidate {
-  return {
-    kind: "continuity",
-    resolve: async () => {
-      const wasm = await loadWasm();
-      const seed = wasm.continuityReachSeed(continuity.accountId, BigInt(continuity.keyGeneration));
-      try {
-        return released("continuity", wasm.DsProofSigner.forReach(seed), null);
-      } finally {
-        seed.fill(0);
-      }
-    },
-  };
 }
 
 /** The earlier groups of the conversation a scope continues, as hex, or
@@ -509,9 +569,10 @@ export function installAddressRecheck(recheck: AddressRecheck | null): void {
 }
 
 /**
- * A write to a person's account mailbox: resolved (rule 1), authorised with
- * what is held for the person (rule 2), and re-checked once on a refusal
- * (rule 6). `write` receives the mailbox to write to.
+ * A write to a person's account mailbox: authorised with what is held for
+ * the person (rule 2), each candidate's mailbox binding verified first
+ * (ADR-0078), and re-checked once on a refusal (rule 6). `write` receives the
+ * verified target to seal to and address.
  */
 export async function writeToPerson<T>(
   targetAccountKey: Uint8Array,
@@ -523,10 +584,14 @@ export async function writeToPerson<T>(
      *  {@link MailboxUnreachableError} so the caller keeps it owed. */
     readonly neverUnsigned?: boolean;
     readonly recheck?: AddressRecheck | null;
+    /** See {@link planWriteToPerson}. */
+    readonly openBinding?: Uint8Array | null;
+    /** See {@link planWriteToPerson}. */
+    readonly exactKey?: boolean;
     /** ADR-0073 R.4: see {@link planWriteToPerson}. */
     readonly continuity?: ContinuityAuth | null;
   },
-  write: (mailbox: Uint8Array, auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>,
+  write: MailboxWrite<T>,
 ): Promise<T> {
   const recheck = options.recheck === undefined ? installedRecheck : options.recheck;
   return writeWithAddressRecheck(() => planWriteToPerson(targetAccountKey, options), write, {
@@ -540,10 +605,9 @@ export async function writeToPerson<T>(
  * unsigned (ADR-0050 section 2.5a item 7):
  *
  *   - this account's own mailbox and an explicit grant: one candidate;
- *   - otherwise every kept grant for that account in {@link resolveWriteAuth}'s
- *     order (contact, the scopes' `group`, their `channel`, then this group's
- *     `member`), then a committer delegation naming this account, moving to
- *     the next on `401`;
+ *   - otherwise every kept grant for that account in order (contact, the
+ *     scopes' `group`, their `channel`, then this group's `member`), then a
+ *     committer delegation naming this account, moving to the next on `401`;
  *   - with nothing left, {@link MailboxUnreachableError} and no write.
  *
  * The web client cannot tell whether a person's mailbox is open (Everyone):
@@ -552,7 +616,7 @@ export async function writeToPerson<T>(
  * until one arrives; it is never written unsigned.
  *
  * ADR-0074 section 3.5a rule 6: with `recheck`, the first refusal re-checks
- * the person's address once. `write` receives the mailbox to write to.
+ * the person's address once. `write` receives the verified target.
  */
 export async function writeWelcome<T>(
   targetAccountKey: Uint8Array,
@@ -561,7 +625,7 @@ export async function writeWelcome<T>(
     readonly explicit?: WasmReachGrant | string | null;
     readonly recheck?: AddressRecheck | null;
   },
-  write: (mailbox: Uint8Array, auth: MailboxWriteAuth, kind: WriteAuthKind) => Promise<T>,
+  write: MailboxWrite<T>,
 ): Promise<T> {
   return writeToPerson(
     targetAccountKey,
@@ -579,7 +643,9 @@ export async function writeWelcome<T>(
 /**
  * The delegation a kept committer-delegation envelope holds for one of this
  * account's keys, for an add of the person `addedHexes` names (every key
- * they have had), with the signer of the key it names.
+ * they have had), with the signer of the key it names and the added person's
+ * mailbox binding the envelope carries (ADR-0078; verified by the caller
+ * against the person's pinned keys before any write).
  *
  * ADR-0074 section 3.5a: a proposer names the committer's account key as IT
  * knows it. One that has observed this account's proven rotation names the
@@ -589,7 +655,7 @@ export async function writeWelcome<T>(
  */
 async function delegationFor(
   addedHexes: readonly string[],
-): Promise<{ readonly header: string; signer(): Promise<ProofSigner> } | null> {
+): Promise<{ readonly header: string; readonly binding: Uint8Array; signer(): Promise<ProofSigner> } | null> {
   const session = reachSession();
   if (session === null) return null;
   const envelopes = delegationsForPerson(session.receivedGrants(), addedHexes);
@@ -604,9 +670,10 @@ async function delegationFor(
       continue;
     }
     try {
+      const binding = env.addedMailboxBinding;
       for (const delegate of delegates) {
         const header = wasm.committerDelegationFor(env, delegate.accountKey);
-        if (header !== undefined) return { header, signer: () => delegate.signer() };
+        if (header !== undefined) return { header, binding, signer: () => delegate.signer() };
       }
     } catch {
       /* a malformed envelope authorises nothing */

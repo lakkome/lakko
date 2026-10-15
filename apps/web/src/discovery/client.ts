@@ -104,6 +104,14 @@ export interface LookupResult {
   /** Raw 16-byte account_id, or `null` if the username is not
    *  registered. */
   account: Uint8Array | null;
+  /** ADR-0078 - for a person in Everyone: the 97-byte mailbox binding their
+   *  public record carries (opened with this round's OPRF output), else
+   *  `null`. NOT trusted here: a writer verifies it against the account key
+   *  it pins before addressing anything to it. */
+  mailboxBinding?: Uint8Array | null;
+  /** The identity key the opened public record names, for the caller's
+   *  check against the published bundle; `null` with no record. */
+  publicRecordIdentityPk?: Uint8Array | null;
 }
 
 /** Result of `DiscoveryClient.registerChannelName` (G4-5,
@@ -1721,9 +1729,8 @@ export class DiscoveryClient {
 
     // ADR-0060 section 5: discovery receives the lookup key only; the raw
     // OPRF output stays on this device (it keys sealed records).
-    const lookupKeyB64 = base64Encode(
-      finalizeOprf(blinder, oprfResp.evaluated).lookupKey,
-    );
+    const pair = finalizeOprf(blinder, oprfResp.evaluated);
+    const lookupKeyB64 = base64Encode(pair.lookupKey);
 
     const lookupResp = await this.lookupRaw({
       oprf_hash: lookupKeyB64,
@@ -1731,10 +1738,29 @@ export class DiscoveryClient {
     if (lookupResp === null) {
       return { normalisedUsername, account: null };
     }
-    return {
-      normalisedUsername,
-      account: base64Decode(lookupResp.account_id),
-    };
+    const account = base64Decode(lookupResp.account_id);
+    // ADR-0078 - a person in Everyone publishes a sealed public record that
+    // carries their mailbox binding: where an unsigned request goes.
+    let mailboxBinding: Uint8Array | null = null;
+    let publicRecordIdentityPk: Uint8Array | null = null;
+    if (lookupResp.public_record_b64 !== undefined) {
+      try {
+        const payload = wasm.openPublicRecord(base64Decode(lookupResp.public_record_b64), pair.output);
+        if (payload !== undefined) {
+          try {
+            if (base64Encode(payload.accountId) === base64Encode(account)) {
+              mailboxBinding = payload.mailboxBinding;
+              publicRecordIdentityPk = payload.identityPk;
+            }
+          } finally {
+            payload.free();
+          }
+        }
+      } catch {
+        /* a record that does not open names nothing */
+      }
+    }
+    return { normalisedUsername, account, mailboxBinding, publicRecordIdentityPk };
   }
 
   // -----------------------------------------------------------------

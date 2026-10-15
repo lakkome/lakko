@@ -5,9 +5,10 @@
 //!
 //! A grant arrives inside a profile envelope any group member can craft,
 //! and inside an introduction record. Fixed length, so the parser is the
-//! length gate and the class byte. Asserted: no panic, round-trip
-//! stability, and that deriving the public key of any decoded seed is
-//! total.
+//! length gate, the class byte and the mailbox binding's layout (ADR-0078).
+//! Asserted: no panic, round-trip stability, and that deriving the public
+//! key of any decoded seed and verifying its binding against a fixed
+//! account key are total.
 
 #![no_main]
 
@@ -26,4 +27,5 @@ fuzz_target!(|data: &[u8]| {
         "the encoding must be canonical"
     );
     let _ = grant.verifying_key();
+    let _ = grant.mailbox_pk_verified(&[0x58; 32]);
 });

@@ -84,8 +84,13 @@ function deps(messages: unknown[], withDispatcher = true) {
 const wake = { deviceHex: "dd".repeat(32), groupHex: GROUP_HEX, pointer: 42 };
 
 function committerDelegation(): Uint8Array {
-  const added = realWasm.reachVerifyingKey(new Uint8Array(32).fill(9));
-  const mailbox = realWasm.IdentityPseudonym.fromIdentity(added).asBytes();
+  // ADR-0078: the envelope carries the added person's mailbox binding, and
+  // each delegation names that binding's address.
+  const person = realWasm.Identity.fromSeed(new Uint8Array(64).fill(9));
+  const added = person.signaturePublicKey;
+  const binding = realWasm.signMailboxBinding(person);
+  person.free();
+  const mailbox = realWasm.mailboxAddress(realWasm.verifyMailboxBinding(binding, added));
   const delegate = realWasm.reachVerifyingKey(new Uint8Array(32).fill(1));
   const blob = realWasm.signDelegationBlob(
     new Uint8Array(32).fill(0x44),
@@ -95,7 +100,7 @@ function committerDelegation(): Uint8Array {
     new Uint8Array(16).fill(3),
   );
   return realWasm.composeCommitterDelegationEnvelope(
-    new realWasm.CommitterDelegationEnvelope(added, [blob]),
+    new realWasm.CommitterDelegationEnvelope(added, binding, [blob]),
   );
 }
 

@@ -215,3 +215,17 @@ path = "fuzz_targets/committer_delegation_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "mailbox_row_open"
+path = "fuzz_targets/mailbox_row_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mailbox_binding_decode"
+path = "fuzz_targets/mailbox_binding_decode.rs"
+test = false
+doc = false
+bench = false

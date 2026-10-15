@@ -22,8 +22,8 @@ thiserror.workspace = true
 # rest of the core signs with; no new cryptography enters here.
 lakko-crypto.workspace = true
 
-# `IdentityPseudonym::from_identity` - the one derivation that says which
-# public key a mailbox is named after, defined once and used here rather
+# `lakko_contacts::mailbox` - the one derivation that says which mailbox
+# key a mailbox is named after (ADR-0078), defined once and used here rather
 # than copied (a copied domain string would drift silently and fail closed
 # on every mailbox claim).
 lakko-contacts.workspace = true

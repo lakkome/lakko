@@ -85,7 +85,7 @@
 //! u16be        label_len
 //! [label_len]  label_bytes (UTF-8, ≤ MAX_LABEL_LEN)
 //! [16 bytes]   link_id                            — random, the reach scope of this link
-//! [37 bytes]   link_grant                         — ReachGrant, class `link` (SECRET)
+//! [134 bytes]  link_grant                         — ReachGrant, class `link` (SECRET)
 //! [64 bytes]   signature                          — Ed25519 over the above
 //! ```
 //!
@@ -106,6 +106,14 @@
 //! key. Same rules as [`crate::invite`]: inside the signature and the link
 //! seal, class `link` or refused, the owner registers the public key
 //! (expiring with the link) before sharing it.
+//!
+//! **The grant's mailbox binding is NOT verified here** (ADR-0078). A `/c/`
+//! capability is signed by the owner's device leaf key, not the account
+//! identity key that signs the binding, so this decoder has no key to check
+//! it against. The joiner (the writer) must call
+//! `link_grant.mailbox_pk_verified(owner_account_key)` with the account key
+//! the capability's one-time KeyPackage binds its leaf to (the ADR-0050
+//! device binding) before it writes to the owner's mailbox.
 //!
 //! The way back is the joiner's: its `ContactRequest` carries its own
 //! `reply` grant ([`crate::request`]), with which the owner (or the call's

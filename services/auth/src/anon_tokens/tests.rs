@@ -186,6 +186,10 @@ fn quota_variables_are_named_after_the_contexts() {
         quota_var(TokenContext::BlobRead),
         "LAKKO_ANON_TOKEN_QUOTA_BLOB_READ"
     );
+    assert_eq!(
+        quota_var(TokenContext::MailboxWrite),
+        "LAKKO_ANON_TOKEN_QUOTA_MAILBOX_WRITE"
+    );
     // Every context has exactly one default, in wire order.
     let listed: Vec<TokenContext> = DEFAULT_QUOTAS.iter().map(|(c, _)| *c).collect();
     assert_eq!(listed, TokenContext::ALL);
@@ -211,6 +215,7 @@ fn the_default_quotas_are_the_documented_ones() {
     assert_eq!(default_quota(TokenContext::VaultClaim), 100);
     assert_eq!(default_quota(TokenContext::BlobUpload), 96);
     assert_eq!(default_quota(TokenContext::BlobRead), 96);
+    assert_eq!(default_quota(TokenContext::MailboxWrite), 50);
 }
 
 #[test]

@@ -35,6 +35,11 @@ public struct FoundPerson: Equatable, Identifiable {
     /// The reach seed that authorises a request to them; `nil` for a person in
     /// Everyone, whose mailbox is open.
     public let writeSeed: Data?
+    /// ADR-0078 — the VERIFIED mailbox the request goes to: the binding a
+    /// public record, an introduction or a held grant carried, checked
+    /// against the person's key. `nil` when none verified (no request can be
+    /// sent then).
+    public let mailbox: MailboxTarget?
     public let reach: PersonReach
 
     public var id: Data { accountKey }
@@ -46,7 +51,7 @@ public struct FoundPerson: Equatable, Identifiable {
 
     public init(
         accountKey: Data, accountId: Data?, displayName: String?, username: String?, writeSeed: Data?,
-        reach: PersonReach? = nil
+        reach: PersonReach? = nil, mailbox: MailboxTarget? = nil
     ) {
         let resolved = reach ?? (writeSeed == nil ? .open : .grant)
         self.accountKey = accountKey
@@ -54,6 +59,7 @@ public struct FoundPerson: Equatable, Identifiable {
         self.displayName = displayName
         self.username = PeopleSearch.shownUsername(username, reach: resolved)
         self.writeSeed = resolved == .grant ? writeSeed : nil
+        self.mailbox = mailbox
         self.reach = resolved
     }
 }
@@ -72,16 +78,19 @@ public struct KnownPerson: Equatable {
     public var isContact: Bool
     /// The best grant seed kept for them, `nil` for none.
     public var keptSeed: Data?
+    /// ADR-0078 — the verified mailbox that seed writes to.
+    public var keptMailbox: MailboxTarget?
 
     public init(
         name: String?, fallbackName: String? = nil, verifiedUsername: String?, isContact: Bool,
-        keptSeed: Data?
+        keptSeed: Data?, keptMailbox: MailboxTarget? = nil
     ) {
         self.name = name
         self.fallbackName = fallbackName
         self.verifiedUsername = verifiedUsername
         self.isContact = isContact
         self.keptSeed = keptSeed
+        self.keptMailbox = keptMailbox
     }
 
     /// The name a local listing shows: the held name, else the fallback.
@@ -136,8 +145,9 @@ public struct PeopleSearchPorts {
     public var nameLookup: (Data) async throws -> [PublicAccountHit]
     /// account id -> the identity (account) public key, verified.
     public var identityKey: (Data) async throws -> Data?
-    /// Is the key of `seed` still registered on the mailbox of `accountKey`?
-    public var reachCheck: (Data, Data) async throws -> Bool
+    /// Is the key of `seed` still registered on the mailbox given (ADR-0078:
+    /// a verified one)?
+    public var reachCheck: (MailboxTarget, Data) async throws -> Bool
     /// Verify a username certificate for `(certificate, lookupKey, accountId)`
     /// — the certificate binds the LOOKUP KEY, never the output.
     public var verifyCertificate: (Data, Data, Data) async -> Bool
@@ -153,7 +163,7 @@ public struct PeopleSearchPorts {
         nameTermOprf: @escaping (String) async throws -> OprfResult,
         nameLookup: @escaping (Data) async throws -> [PublicAccountHit],
         identityKey: @escaping (Data) async throws -> Data?,
-        reachCheck: @escaping (Data, Data) async throws -> Bool,
+        reachCheck: @escaping (MailboxTarget, Data) async throws -> Bool,
         verifyCertificate: @escaping (Data, Data, Data) async -> Bool
     ) {
         self.lookupUsername = lookupUsername
@@ -218,7 +228,8 @@ public enum PeopleSearch {
         let reach: PersonReach = c.known.isContact ? .contact : (c.known.keptSeed != nil ? .grant : .none)
         return FoundPerson(
             accountKey: c.accountKey, accountId: c.accountId, displayName: name,
-            username: c.known.verifiedUsername, writeSeed: c.known.keptSeed, reach: reach)
+            username: c.known.verifiedUsername, writeSeed: c.known.keptSeed, reach: reach,
+            mailbox: c.known.keptMailbox)
     }
 
     /// The local half (web `localPeople`): the people this device already
@@ -268,7 +279,8 @@ public enum PeopleSearch {
                     accountKey: held.accountKey, accountId: held.accountId ?? p.accountId,
                     displayName: held.displayName, username: held.username ?? p.username,
                     writeSeed: reach == .grant ? (stronger.writeSeed ?? held.writeSeed ?? p.writeSeed) : nil,
-                    reach: reach)
+                    reach: reach,
+                    mailbox: stronger.mailbox ?? held.mailbox ?? p.mailbox)
             }
         }
         return order.compactMap { byKey[$0] }
@@ -305,13 +317,23 @@ public enum PeopleSearch {
     /// fingerprint, and a person with no name at all is dropped.
     static func result(
         key: Data, accountId: Data?, known: KnownPerson, foundReach: PersonReach,
-        foundName: String?, foundUsername: String?, seed: Data?
+        foundName: String?, foundUsername: String?, seed: Data?, mailbox: MailboxTarget? = nil
     ) -> FoundPerson? {
         let reach: PersonReach = known.isContact ? .contact : foundReach
         guard let name = known.name ?? foundName ?? known.fallbackName else { return nil }
         return FoundPerson(
             accountKey: key, accountId: accountId, displayName: name,
-            username: foundUsername ?? known.verifiedUsername, writeSeed: seed, reach: reach)
+            username: foundUsername ?? known.verifiedUsername, writeSeed: seed, reach: reach,
+            // A grant's seed opens only the mailbox its own binding names.
+            mailbox: foundReach == .grant ? mailbox : (mailbox ?? known.keptMailbox))
+    }
+
+    /// ADR-0078 — the mailbox a public record or an introduction names: its
+    /// binding verified against the identity key the payload carries (the
+    /// core verified it when it opened; checked again where it is used).
+    static func mailbox(of payload: FfiIntroductionPayload?) -> MailboxTarget? {
+        guard let payload else { return nil }
+        return MailboxTarget.verifiedOrNil(binding: payload.mailboxBinding, accountKey: payload.identityPk)
     }
 
     /// The network half (web `searchPeople`). `records` are the introduction
@@ -345,14 +367,16 @@ public enum PeopleSearch {
                    let key = try await ports.identityKey(hit.accountId), key.count == 32 {
                     // The public record's name counts only when it names the
                     // account and the key the verified identity bundle serves.
-                    let published = await Self.openPublic(
+                    let record = await Self.openPublic(
                         hit.publicRecord, output: oprf.output, accountId: hit.accountId,
-                        identityKey: key, ports: ports)?.displayName
+                        identityKey: key, ports: ports)
+                    let published = record?.displayName
                     // Discovery itself resolved this username to this account:
                     // that is the binding a certificate would prove.
                     if let r = result(
                         key: key, accountId: hit.accountId, known: known(key), foundReach: .open,
-                        foundName: published ?? "@\(canonical)", foundUsername: canonical, seed: nil) {
+                        foundName: published ?? "@\(canonical)", foundUsername: canonical, seed: nil,
+                        mailbox: Self.mailbox(of: record)) {
                         byUsername.append(r)
                     }
                 }
@@ -378,15 +402,17 @@ public enum PeopleSearch {
                     guard let key = try await ports.identityKey(hit.accountId), key.count == 32 else {
                         continue
                     }
-                    let published = await Self.openPublic(
+                    let record = await Self.openPublic(
                         hit.publicRecord, output: oprf.output, accountId: hit.accountId,
-                        identityKey: key, ports: ports)?.displayName
+                        identityKey: key, ports: ports)
+                    let published = record?.displayName
                     let k = known(key)
                     guard let name = k.name ?? published ?? k.fallbackName,
                           nameMatchesQuery(displayName: name, query: query),
                           let r = result(
                               key: key, accountId: hit.accountId, known: k, foundReach: .open,
-                              foundName: published, foundUsername: nil, seed: nil) else { continue }
+                              foundName: published, foundUsername: nil, seed: nil,
+                              mailbox: Self.mailbox(of: record)) else { continue }
                     byName.append(r)
                 }
             } catch {
@@ -440,7 +466,8 @@ public enum PeopleSearch {
                 ?? displayFingerprint(personKey)
             if let r = result(
                 key: personKey, accountId: payload.accountId, known: known(personKey),
-                foundReach: .grant, foundName: name, foundUsername: verified, seed: fof.seed) {
+                foundReach: .grant, foundName: name, foundUsername: verified, seed: fof.seed,
+                mailbox: MailboxTarget.verifiedOrNil(grant: fof, accountKey: payload.identityPk)) {
                 byIntroduction.append(r)
             }
         }
@@ -454,9 +481,9 @@ public enum PeopleSearch {
                 found.append(p)
                 continue
             }
-            guard let seed = p.writeSeed else { continue }
+            guard let seed = p.writeSeed, let mailbox = p.mailbox else { continue }
             do {
-                if try await ports.reachCheck(p.accountKey, seed) { found.append(p) }
+                if try await ports.reachCheck(mailbox, seed) { found.append(p) }
             } catch {
                 failed = true
             }
@@ -542,12 +569,13 @@ enum PeopleSearchWiring {
         let isContact = contactKeys.contains(keyB64)
         let resolved = ProfileDirectory.shared.resolve(signatureKeyB64: keyB64)
         let named = resolved?.source == .localRename || resolved?.source == .profileName
+        let held = ReachCenter.shared.heldMailbox(forAccountKeyB64: keyB64, groupIdHex: nil)
         return KnownPerson(
             name: named ? resolved?.name : nil,
             fallbackName: isContact && !named ? resolved.map(contactFallbackName) : nil,
             verifiedUsername: resolved?.verifiedUsername,
             isContact: isContact,
-            keptSeed: ReachCenter.shared.heldSeed(forAccountKeyB64: keyB64, groupIdHex: nil))
+            keptSeed: held?.seed, keptMailbox: held?.target)
     }
 
     /// A contact's name of last resort: their verified username when one is

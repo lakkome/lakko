@@ -119,11 +119,15 @@ enum ChannelMemberCards {
     ) async -> Bool? {
         let cacheKey = "\(authorAccountKey.base64EncodedString())|\(channelId)|\(grant.seed.base64EncodedString())"
         if let cached = verifiedGrants[cacheKey] { return cached }
-        // ADR-0074 section 3.5a rule 1 — resolved before addressing.
-        guard let mailbox = await MainActor.run(body: {
-            ReachCenter.shared.mailbox(forAccountKey: authorAccountKey)
-        }),
-              let ok = try? await DsClient().reachCheck(pseudonym: mailbox, reachSeed: grant.seed)
+        // ADR-0078 — the mailbox the card's own grant names, its binding
+        // verified against the key the card's account binding verified under.
+        // A grant whose binding does not verify is never checked, and never
+        // filed: it answers `false`.
+        guard let target = MailboxTarget.verifiedOrNil(grant: grant, accountKey: authorAccountKey) else {
+            verifiedGrants[cacheKey] = false
+            return false
+        }
+        guard let ok = try? await DsClient().reachCheck(pseudonym: target.address, reachSeed: grant.seed)
         else { return nil }
         verifiedGrants[cacheKey] = ok
         return ok

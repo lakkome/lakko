@@ -17,9 +17,10 @@
  *
  *   `{ v: 1, cursor, pending: [{ messageId, payloadB64, createdAt }] }`
  *
- * `pending` holds the RAW mailbox rows, not decoded requests. A row's payload
- * is the envelope exactly as the DS served it: a signed ContactRequest whose
- * intro and profile are sealed to this account's X25519 key. So nothing here
+ * `pending` holds the mailbox rows' request bodies, not decoded requests.
+ * ADR-0078: a mailbox row is sealed to the account's mailbox key; the payload
+ * kept here is the OPENED body, a signed ContactRequest whose intro and
+ * profile are still sealed to this account's X25519 key. So nothing here
  * is plaintext the network did not already carry; the decoded intro never
  * reaches `localStorage`. The clear parts of a request (the sender's public
  * key, account id and pseudonym) are the same class of data the accepted

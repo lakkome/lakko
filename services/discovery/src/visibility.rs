@@ -56,8 +56,8 @@ pub(crate) const MAX_NAME_TERMS: usize = 64;
 pub(crate) const MAX_NAME_RESULTS: usize = 20;
 
 /// The longest public record accepted: the longest introduction record the
-/// codec composes. `migrations/0025_public_records.sql` sizes its column to
-/// it (pinned by a test).
+/// codec composes. `migrations/0029_public_record_mailbox_binding.sql` sizes
+/// its column to it (pinned by a test).
 pub(crate) const MAX_PUBLIC_RECORD_LEN: usize = INTRODUCTION_RECORD_MAX_LEN;
 
 /// Dev / e2e override of the certificate signing seed (64 hex characters),
@@ -458,8 +458,8 @@ mod tests {
 
     #[test]
     fn the_public_record_column_fits_the_longest_record() {
-        assert_eq!(MAX_PUBLIC_RECORD_LEN, 6550);
-        let migration = include_str!("../migrations/0025_public_records.sql");
+        assert_eq!(MAX_PUBLIC_RECORD_LEN, 6744);
+        let migration = include_str!("../migrations/0029_public_record_mailbox_binding.sql");
         assert!(
             migration.contains(&format!("VARBINARY({MAX_PUBLIC_RECORD_LEN})")),
             "the migration sizes public_records.record to MAX_PUBLIC_RECORD_LEN"
@@ -684,11 +684,14 @@ mod tests {
     fn public_record(account: [u8; 16], terms: &[[u8; 64]]) -> Vec<u8> {
         use lakko_contacts::introduction::{compose_public_record, IntroductionPayload};
         let payload = IntroductionPayload {
-            identity_pk: [7; 32],
+            identity_pk: lakko_crypto::signing::SigningKey::from_seed(&[7; 32])
+                .verifying_key()
+                .to_bytes(),
             account_id: account,
             display_name: Some("Anna Weber".to_string()),
             username: None,
             username_certificate: None,
+            mailbox_binding: lakko_contacts::mailbox::MailboxBinding::for_account_seed(&[7; 32]),
             fof: None,
         };
         let terms = if terms.is_empty() {

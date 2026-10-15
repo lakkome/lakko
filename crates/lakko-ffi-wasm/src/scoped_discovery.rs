@@ -133,6 +133,22 @@ impl From<IntroductionError> for Refusal {
     }
 }
 
+impl From<lakko_contacts::mailbox::MailboxError> for Refusal {
+    fn from(e: lakko_contacts::mailbox::MailboxError) -> Self {
+        Self::new("mailboxError", e.code(), e.to_string())
+    }
+}
+
+/// Decode a 97-byte mailbox binding (layout only), or throw with
+/// `property` / `badBinding`.
+fn binding_of(
+    bytes: &[u8],
+    property: &'static str,
+) -> Result<lakko_contacts::mailbox::MailboxBinding, Refusal> {
+    lakko_contacts::mailbox::MailboxBinding::decode(bytes)
+        .map_err(|e| Refusal::new(property, "badBinding", e.to_string()))
+}
+
 impl From<VisibilityError> for Refusal {
     fn from(e: VisibilityError) -> Self {
         Self::new("visibilityError", e.code(), e.to_string())
@@ -246,9 +262,13 @@ impl From<RustReachClass> for ReachClass {
     }
 }
 
-/// A reach key handed to someone: class, version, seed. **The seed is
-/// secret.** Mirror of `lakko_contacts::reach::ReachGrant` (whose `Debug`
-/// redacts the seed).
+/// A reach key handed to someone: class, version, seed, and the owner's
+/// 97-byte mailbox binding (ADR-0078). **The seed is secret.** Mirror of
+/// `lakko_contacts::reach::ReachGrant` (whose `Debug` redacts the seed).
+///
+/// **A writer verifies the binding before every write**
+/// (`mailboxPkVerified(ownerAccountPk)`): a grant whose binding does not
+/// verify must not be written under.
 #[wasm_bindgen]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReachGrant {
@@ -264,12 +284,18 @@ impl ReachGrant {
         Self { inner }
     }
 
-    fn new_inner(class: ReachClass, version: u32, seed: &[u8]) -> Result<Self, Refusal> {
+    fn new_inner(
+        class: ReachClass,
+        version: u32,
+        seed: &[u8],
+        binding: &[u8],
+    ) -> Result<Self, Refusal> {
         Ok(Self {
             inner: RustReachGrant {
                 class: class.into(),
                 version,
                 seed: SecretBytes::new(seed32(seed, "reach grant seed")?),
+                binding: binding_of(binding, "reachError")?,
             },
         })
     }
@@ -277,14 +303,39 @@ impl ReachGrant {
 
 #[wasm_bindgen]
 impl ReachGrant {
-    /// Build a grant from its three fields.
+    /// Build a grant from its four fields.
     ///
     /// # Errors
     ///
-    /// Throws with `reachError` `seedLength` when `seed` is not 32 bytes.
+    /// Throws with `reachError` `seedLength` when `seed` is not 32 bytes,
+    /// `badBinding` when `binding` is not a well-formed 97-byte binding.
     #[wasm_bindgen(constructor)]
-    pub fn new(class: ReachClass, version: u32, seed: &[u8]) -> Result<ReachGrant, JsValue> {
-        js(Self::new_inner(class, version, seed))
+    pub fn new(
+        class: ReachClass,
+        version: u32,
+        seed: &[u8],
+        binding: &[u8],
+    ) -> Result<ReachGrant, JsValue> {
+        js(Self::new_inner(class, version, seed, binding))
+    }
+
+    /// The owner's 97-byte mailbox binding, not verified.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn binding(&self) -> Vec<u8> {
+        self.inner.binding.encode().to_vec()
+    }
+
+    /// The 32-byte mailbox key this grant writes to, after verifying its
+    /// binding against `ownerAccountPk`, the owner's 32-byte account key as
+    /// the writer holds it pinned (ADR-0078). Call before every write.
+    ///
+    /// # Errors
+    ///
+    /// Throws with `mailboxError` `badBinding` / `badKey`, or `keyLength`.
+    #[wasm_bindgen(js_name = mailboxPkVerified)]
+    pub fn mailbox_pk_verified(&self, owner_account_pk: &[u8]) -> Result<Vec<u8>, JsValue> {
+        js(self.mailbox_pk_verified_inner(owner_account_pk))
     }
 
     /// Who the key is for.
@@ -313,6 +364,21 @@ impl ReachGrant {
     #[must_use]
     pub fn verifying_key(&self) -> Vec<u8> {
         self.inner.verifying_key().to_vec()
+    }
+}
+
+impl ReachGrant {
+    fn mailbox_pk_verified_inner(&self, owner_account_pk: &[u8]) -> Result<Vec<u8>, Refusal> {
+        let account = <[u8; REACH_SEED_LEN]>::try_from(owner_account_pk).map_err(|_| {
+            length_refusal(
+                "mailboxError",
+                "keyLength",
+                "account key",
+                REACH_SEED_LEN,
+                owner_account_pk.len(),
+            )
+        })?;
+        Ok(self.inner.mailbox_pk_verified(&account)?.to_vec())
     }
 }
 
@@ -421,8 +487,8 @@ pub fn reach_verifying_key(seed: &[u8]) -> Result<Vec<u8>, JsValue> {
     js(seed32(seed, "reach seed").map(|s| rust_reach_verifying_key(&s).to_vec()))
 }
 
-/// Encode a grant as its 37-byte wire. Holds the seed: seal it before it
-/// leaves the device.
+/// Encode a grant as its 134-byte wire (`class || version || seed ||
+/// binding`). Holds the seed: seal it before it leaves the device.
 #[wasm_bindgen(js_name = encodeReachGrant)]
 #[must_use]
 pub fn encode_reach_grant(grant: &ReachGrant) -> Vec<u8> {
@@ -439,7 +505,8 @@ fn decode_reach_grant_inner(bytes: &[u8]) -> Result<ReachGrant, Refusal> {
 ///
 /// # Errors
 ///
-/// Throws with `reachError` `badLength` or `unknownClass`.
+/// Throws with `reachError` `badLength`, `unknownClass` or `badBinding`. The
+/// binding's signature is not checked (`mailboxPkVerified` does).
 #[wasm_bindgen(js_name = decodeReachGrant)]
 pub fn decode_reach_grant(bytes: &[u8]) -> Result<ReachGrant, JsValue> {
     js(decode_reach_grant_inner(bytes))
@@ -452,7 +519,7 @@ pub fn reach_seed_len() -> usize {
     REACH_SEED_LEN
 }
 
-/// Wire length of a reach grant: 37.
+/// Wire length of a reach grant: 134.
 #[wasm_bindgen(js_name = reachGrantLen)]
 #[must_use]
 pub fn reach_grant_len() -> usize {
@@ -486,6 +553,7 @@ impl IntroductionPayload {
         display_name: Option<String>,
         username: Option<String>,
         username_certificate: Option<Vec<u8>>,
+        mailbox_binding: lakko_contacts::mailbox::MailboxBinding,
         fof: Option<&ReachGrant>,
     ) -> Result<Self, Refusal> {
         let identity_pk = <[u8; IDENTITY_PK_LEN]>::try_from(identity_pk).map_err(|_| {
@@ -513,6 +581,7 @@ impl IntroductionPayload {
                 display_name,
                 username,
                 username_certificate,
+                mailbox_binding,
                 fof: fof.map(|g| g.inner.clone()),
             },
         })
@@ -521,9 +590,10 @@ impl IntroductionPayload {
 
 #[wasm_bindgen]
 impl IntroductionPayload {
-    /// Build a contacts-of-contacts payload carrying its `Fof` grant. The
-    /// field rules (name, username, certificate, a `Fof` grant) are checked
-    /// by `composeIntroduction`.
+    /// Build a contacts-of-contacts payload carrying its `Fof` grant; the
+    /// payload's mailbox binding (ADR-0078) is the grant's. The field rules
+    /// (name, username, certificate, a `Fof` grant, a binding that verifies
+    /// under `identityPk`) are checked by `composeIntroduction`.
     ///
     /// # Errors
     ///
@@ -544,17 +614,20 @@ impl IntroductionPayload {
             display_name,
             username,
             username_certificate,
+            fof.inner.binding,
             Some(fof),
         ))
     }
 
     /// Build the payload of an Everyone public record (ADR-0060 section 5):
-    /// the same fields with no grant. Pass it to `composePublicRecord`.
+    /// the same fields with no grant, and the owner's 97-byte mailbox binding
+    /// (`signMailboxBinding`, ADR-0078) so a finder knows where to write.
+    /// Pass it to `composePublicRecord`.
     ///
     /// # Errors
     ///
-    /// Throws with `introductionError` `identityPkLength` or
-    /// `accountIdLength`.
+    /// Throws with `introductionError` `identityPkLength`,
+    /// `accountIdLength` or `badBinding`.
     #[wasm_bindgen(js_name = forPublicRecord)]
     pub fn for_public_record(
         identity_pk: &[u8],
@@ -562,15 +635,29 @@ impl IntroductionPayload {
         display_name: Option<String>,
         username: Option<String>,
         username_certificate: Option<Vec<u8>>,
+        mailbox_binding: &[u8],
     ) -> Result<IntroductionPayload, JsValue> {
-        js(Self::new_inner(
-            identity_pk,
-            account_id,
-            display_name,
-            username,
-            username_certificate,
-            None,
-        ))
+        js(
+            binding_of(mailbox_binding, "introductionError").and_then(|binding| {
+                Self::new_inner(
+                    identity_pk,
+                    account_id,
+                    display_name,
+                    username,
+                    username_certificate,
+                    binding,
+                    None,
+                )
+            }),
+        )
+    }
+
+    /// The owner's 97-byte mailbox binding (ADR-0078), verified against
+    /// `identityPk` when the payload was composed or opened.
+    #[wasm_bindgen(getter, js_name = mailboxBinding)]
+    #[must_use]
+    pub fn mailbox_binding(&self) -> Vec<u8> {
+        self.inner.mailbox_binding.encode().to_vec()
     }
 
     /// The 32-byte identity (account) public key.
@@ -1514,7 +1601,12 @@ impl CommitterDelegationEnvelope {
         Self { inner }
     }
 
-    fn new_inner(added_account_key: &[u8], delegations: &[Vec<u8>]) -> Result<Self, Refusal> {
+    fn new_inner(
+        added_account_key: &[u8],
+        added_mailbox_binding: &[u8],
+        delegations: &[Vec<u8>],
+    ) -> Result<Self, Refusal> {
+        let added_mailbox_binding = binding_of(added_mailbox_binding, "committerDelegationError")?;
         let added_account_key = <[u8; ADDED_ACCOUNT_KEY_LEN]>::try_from(added_account_key)
             .map_err(|_| {
                 length_refusal(
@@ -1542,6 +1634,7 @@ impl CommitterDelegationEnvelope {
         Ok(Self {
             inner: RustCommitterDelegationEnvelope {
                 added_account_key,
+                added_mailbox_binding,
                 delegations,
             },
         })
@@ -1551,19 +1644,34 @@ impl CommitterDelegationEnvelope {
 #[wasm_bindgen]
 impl CommitterDelegationEnvelope {
     /// Build an envelope from the added person's 32-byte account signature
-    /// key and the raw 185-byte delegation blobs (`Uint8Array[]`).
+    /// key, their 97-byte mailbox binding (ADR-0078; the `binding` of the
+    /// grant the proposer holds for them) and the raw 185-byte delegation
+    /// blobs (`Uint8Array[]`).
     ///
     /// # Errors
     ///
     /// Throws with `reachError` `keyLength`, or `committerDelegationError`
-    /// `delegationMalformed` for a blob that is not 185 bytes.
+    /// `badBinding` / `delegationMalformed` for a blob that is not 185 bytes.
     #[wasm_bindgen(constructor)]
     pub fn new(
         added_account_key: &[u8],
+        added_mailbox_binding: &[u8],
         delegations: Vec<js_sys::Uint8Array>,
     ) -> Result<CommitterDelegationEnvelope, JsValue> {
         let owned: Vec<Vec<u8>> = delegations.into_iter().map(|a| a.to_vec()).collect();
-        js(Self::new_inner(added_account_key, &owned))
+        js(Self::new_inner(
+            added_account_key,
+            added_mailbox_binding,
+            &owned,
+        ))
+    }
+
+    /// The added person's 97-byte mailbox binding (ADR-0078), not verified
+    /// here (`checkCommitterDelegations` verifies it).
+    #[wasm_bindgen(getter, js_name = addedMailboxBinding)]
+    #[must_use]
+    pub fn added_mailbox_binding(&self) -> Vec<u8> {
+        self.inner.added_mailbox_binding.encode().to_vec()
     }
 
     /// The added person's 32-byte account signature key.
@@ -1597,7 +1705,7 @@ pub struct WasmDelegation {
 
 #[wasm_bindgen(js_class = Delegation)]
 impl WasmDelegation {
-    /// The 32-byte mailbox pseudonym the write may go to.
+    /// The 32-byte mailbox address the write may go to (ADR-0078).
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn mailbox(&self) -> Vec<u8> {
@@ -1909,7 +2017,10 @@ mod tests {
     fn a_committer_finds_its_own_delegation() {
         let account = |b: u8| SigningKey::from_seed(&[b; 32]).verifying_key().to_bytes();
         let added = account(9);
-        let mailbox = lakko_ds_proof::mailbox_pseudonym(&VerifyingKey::from_bytes(&added).unwrap());
+        let mailbox = lakko_ds_proof::MailboxKey::from_account_seed(&[9; 32]).address();
+        let binding = lakko_contacts::mailbox::MailboxBinding::for_account_seed(&[9; 32])
+            .encode()
+            .to_vec();
         let (owner, admin) = (account(1), account(2));
         let blob = |mb: &[u8; 32], delegate: [u8; 32], n: u8| {
             lakko_ds_proof::sign_delegation(&[0x44; 32], mb, &delegate, 1_000, [n; 16])
@@ -1918,6 +2029,7 @@ mod tests {
         };
         let env = CommitterDelegationEnvelope::new_inner(
             &added,
+            &binding,
             &[blob(&mailbox, owner, 1), blob(&mailbox, admin, 2)],
         )
         .unwrap();
@@ -1942,8 +2054,20 @@ mod tests {
             None
         );
 
+        // A binding the added account never signed refuses the envelope.
+        let foreign = lakko_contacts::mailbox::MailboxBinding::for_account_seed(&[8; 32])
+            .encode()
+            .to_vec();
+        let forged =
+            CommitterDelegationEnvelope::new_inner(&added, &foreign, &[blob(&mailbox, owner, 1)])
+                .unwrap();
+        assert_eq!(
+            check_committer_delegations_inner(&forged).unwrap_err().code,
+            "badMailboxBinding"
+        );
         let bad = CommitterDelegationEnvelope::new_inner(
             &added,
+            &binding,
             &[blob(&mailbox, owner, 1), blob(&[0x11; 32], admin, 2)],
         )
         .unwrap();
@@ -1951,7 +2075,7 @@ mod tests {
         assert_eq!(refusal.property, "committerDelegationError");
         assert_eq!(refusal.code, "wrongMailbox");
         let refusal = compose_committer_delegation_inner(
-            &CommitterDelegationEnvelope::new_inner(&added, &[]).unwrap(),
+            &CommitterDelegationEnvelope::new_inner(&added, &binding, &[]).unwrap(),
         )
         .unwrap_err();
         assert_eq!(refusal.code, "badCount");
@@ -2022,7 +2146,30 @@ mod tests {
         let wire = encode_reach_grant(&grant);
         assert_eq!(wire.len(), reach_grant_len());
         assert_eq!(decode_reach_grant(&wire).unwrap(), grant);
-        assert_eq!(ReachGrant::new(ReachClass::Group, 3, &seed).unwrap(), grant);
+        assert_eq!(
+            ReachGrant::new(ReachClass::Group, 3, &seed, &grant.binding()).unwrap(),
+            grant
+        );
+        assert_eq!(reach_grant_len(), 134);
+        // ADR-0078: the grant names the owner's mailbox, verified only under
+        // the owner's account key.
+        let owner = SigningKey::from_seed(&ACCOUNT_SEED)
+            .verifying_key()
+            .to_bytes();
+        assert_eq!(
+            grant.mailbox_pk_verified_inner(&owner).unwrap(),
+            lakko_contacts::mailbox::MailboxKey::from_account_seed(&ACCOUNT_SEED)
+                .public()
+                .to_vec()
+        );
+        let stranger = SigningKey::from_seed(&[0x43; 32])
+            .verifying_key()
+            .to_bytes();
+        let refusal = grant.mailbox_pk_verified_inner(&stranger).unwrap_err();
+        assert_eq!(
+            (refusal.property, refusal.code.as_str()),
+            ("mailboxError", "badBinding")
+        );
         // The numeric values are the core's wire bytes.
         for class in RustReachClass::ALL {
             assert_eq!(ReachClass::from(class) as u8, class.to_byte());
@@ -2044,17 +2191,25 @@ mod tests {
             "badLength"
         );
         assert_eq!(
-            ReachGrant::new_inner(ReachClass::Fof, 1, &[0; 3])
+            ReachGrant::new_inner(ReachClass::Fof, 1, &[0; 3], &[0; 97])
                 .unwrap_err()
                 .code,
             "seedLength"
+        );
+        assert_eq!(
+            ReachGrant::new_inner(ReachClass::Fof, 1, &[0; 32], &[0; 97])
+                .unwrap_err()
+                .code,
+            "badBinding"
         );
     }
 
     fn payload() -> IntroductionPayload {
         let fof = derive_reach_grant(&ACCOUNT_SEED, ReachClass::Fof, &[], 1).unwrap();
         IntroductionPayload::new(
-            &[1; 32],
+            &SigningKey::from_seed(&ACCOUNT_SEED)
+                .verifying_key()
+                .to_bytes(),
             &[2; 16],
             Some("Anna Weber".to_string()),
             Some("anna".to_string()),
@@ -2094,15 +2249,18 @@ mod tests {
 
     #[test]
     fn a_public_record_carries_no_grant() {
-        let public = IntroductionPayload::new_inner(
-            &[1; 32],
+        let public = IntroductionPayload::for_public_record(
+            &SigningKey::from_seed(&ACCOUNT_SEED)
+                .verifying_key()
+                .to_bytes(),
             &[2; 16],
             Some("Anna Weber".to_string()),
             Some("anna".to_string()),
             None,
-            None,
+            &lakko_contacts::mailbox::MailboxBinding::for_account_seed(&ACCOUNT_SEED).encode(),
         )
         .unwrap();
+        assert_eq!(public.mailbox_binding(), payload().mailbox_binding());
         let terms = vec![vec![5u8; 64], vec![6u8; 64]];
         let record = compose_public_record_inner(&public, &terms, 3).unwrap();
         let opened = open_public_record_inner(&record, &terms[0])
@@ -2148,6 +2306,7 @@ mod tests {
             Some("a\nb".into()),
             None,
             None,
+            fof.rust().binding,
             Some(&fof),
         )
         .unwrap();
@@ -2157,9 +2316,17 @@ mod tests {
             ("profileError", "displayName.lineBreak")
         );
         assert_eq!(
-            IntroductionPayload::new_inner(&[1; 31], &[2; 16], None, None, None, Some(&fof))
-                .unwrap_err()
-                .code,
+            IntroductionPayload::new_inner(
+                &[1; 31],
+                &[2; 16],
+                None,
+                None,
+                None,
+                fof.rust().binding,
+                Some(&fof)
+            )
+            .unwrap_err()
+            .code,
             "identityPkLength"
         );
         assert_eq!(

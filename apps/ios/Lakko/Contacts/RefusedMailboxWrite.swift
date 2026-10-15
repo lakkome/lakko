@@ -74,26 +74,34 @@ public enum RefusedMailboxWrite {
     }
 }
 
-/// One attempt at a mailbox write: where it goes and how it is signed.
+/// One attempt at a mailbox write: the verified mailbox it goes to
+/// (ADR-0078) and how it is signed.
 public struct MailboxWriteAttempt: Equatable {
-    public let mailbox: Data
+    public let target: MailboxTarget
     public let auth: DsMailboxWriteAuth?
 
-    public init(mailbox: Data, auth: DsMailboxWriteAuth?) {
-        self.mailbox = mailbox
+    public init(target: MailboxTarget, auth: DsMailboxWriteAuth?) {
+        self.target = target
         self.auth = auth
     }
+
+    /// The address the row is posted under.
+    public var mailbox: Data { target.address }
 }
 
-/// One attempt at a sweep Welcome: where it goes and every key tried.
+/// One attempt at a sweep Welcome: the verified mailbox it goes to and every
+/// key tried (empty when no mailbox is known: nothing is written).
 public struct SweepWelcomeAttempt: Equatable {
-    public let mailbox: Data
+    public let target: MailboxTarget?
     public let candidates: [DsMailboxWriteAuth]
 
-    public init(mailbox: Data, candidates: [DsMailboxWriteAuth]) {
-        self.mailbox = mailbox
+    public init(target: MailboxTarget?, candidates: [DsMailboxWriteAuth]) {
+        self.target = target
         self.candidates = candidates
     }
+
+    /// The address the row is posted under, `nil` when no mailbox is known.
+    public var mailbox: Data? { target?.address }
 }
 
 /// The production re-check of rule 6.
@@ -173,8 +181,8 @@ public enum PersonAddressRecheck {
     /// ``recheck(accountKey:accountIdHint:)`` for a write addressed by its
     /// mailbox alone: the person is whoever this device holds a grant or a
     /// delegation for at that mailbox.
-    public static func recheck(mailbox pseudonym: Data) async {
-        guard let person = ReachCenter.shared.accountKey(forMailbox: pseudonym) else { return }
+    public static func recheck(mailbox address: Data) async {
+        guard let person = ReachCenter.shared.accountKey(forMailbox: address) else { return }
         await recheck(accountKey: person)
     }
 }

@@ -151,6 +151,9 @@ internal suspend fun publishIntroductions(
                 username = username,
                 usernameCertificate = if (username == null) null else inputs.certificate,
                 fof = grant,
+                // ADR-0078: the owner's mailbox binding, the same one the
+                // `fof` grant carries.
+                mailboxBinding = grant.binding,
             )
             val record = ops.composeIntroduction(payload, outputs, inputs.nowMs.coerceAtLeast(0L).toULong())
             save(state.copy(ownOffer = StoredOwnOffer(key, reachHex(record)), offerSentTo = emptyMap()))

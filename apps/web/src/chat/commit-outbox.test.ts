@@ -273,7 +273,7 @@ describe("commit-outbox store — round-trip", () => {
         groupId: "g1",
         secondArtifactB64: "V0VMQ09NRQ==",
         secondArtifactKind: "welcome",
-        secondArtifactMailboxB64: "TUFJTA==",
+        secondArtifactAccountKeyB64: "QUNDVA==",
       }),
     );
     const loaded = await loadUnacked("g1");
@@ -281,7 +281,7 @@ describe("commit-outbox store — round-trip", () => {
     expect(e).toBeDefined();
     expect(e?.secondArtifactKind).toBe("welcome");
     expect(e?.secondArtifactB64).toBe("V0VMQ09NRQ==");
-    expect(e?.secondArtifactMailboxB64).toBe("TUFJTA==");
+    expect(e?.secondArtifactAccountKeyB64).toBe("QUNDVA==");
   });
 });
 

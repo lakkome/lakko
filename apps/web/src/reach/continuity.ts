@@ -17,8 +17,13 @@
  *   * the RESETTING device registers the key's public half on its new
  *     account mailbox in its reset order, with an expiry (this module's
  *     marker; `reach-service.ts` keeps it registered until then);
- *   * a PEER signs its Welcome with `DsProofSigner.forReach(seed)`
- *     (`mailbox-write.ts`).
+ *   * a PEER signed its Welcome with `DsProofSigner.forReach(seed)`
+ *     (`mailbox-write.ts`) to the mailbox derived from the new identity key.
+ *     ADR-0078 open question: a mailbox address is no longer derivable from
+ *     the identity key or the account id, and no carrier names the reset
+ *     account's new mailbox, so that write is a recorded no-op on the peer
+ *     side until one exists. The registration on the resetting device's own
+ *     mailbox is kept; it does no harm and is what a carrier would rely on.
  *
  * It is a write permission, not a secret that protects content: anyone who
  * knows the account id and the generation can derive it (R.4 "What it

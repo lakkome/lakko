@@ -39,13 +39,16 @@ import LakkoCore
 /// A CLAIMED journal answers only a request carrying an
 /// `x-lakko-ds-proof` header signed with a key the journal was claimed
 /// under: a per-epoch access key every member derives from the MLS group
-/// for a group journal, the identity key for a mailbox read. The caller
+/// for a group journal, the account's mailbox key for a mailbox read
+/// (ADR-0078). The caller
 /// passes a ``DsAuth``; the client signs the service path, the raw query
 /// and the exact body, and retries a `401` once under the previous epoch
 /// and once after the owner's lazy claim (ADR-0057; a member has none).
 /// Epoch keys are registered by ownership statements
-/// (``putStatement(_:)``), which carry their own signature. Writing to another account's mailbox
-/// and every rendezvous mailbox stay unsigned. No session token is ever
+/// (``putStatement(_:)``), which carry their own signature. A write to
+/// another account's mailbox is a sealed row signed with a reach key, or
+/// unsigned with a `mailbox-write` anonymous token; a rendezvous stays
+/// unsigned. No session token is ever
 /// sent here (invariant #5).
 ///
 /// ## Default base URL
@@ -81,8 +84,10 @@ public final class DsClient {
 
     // MARK: - Publish
 
-    /// `POST /ds/mailbox/{pseudonym_hex}/messages` — a write to someone's
-    /// personal mailbox.
+    /// `POST /ds/mailbox/{address_hex}/messages` — a write to someone's
+    /// personal mailbox. `payload` is a sealed mailbox row (ADR-0078,
+    /// ``MailboxTarget/seal(kind:body:)``); anything else is refused here
+    /// before it leaves the device, exactly as the DS would refuse it.
     ///
     /// ADR-0060 section 2 — a claimed mailbox is CLOSED unless its owner chose
     /// Everyone, and a closed mailbox stores a write only when it is signed
@@ -91,6 +96,10 @@ public final class DsClient {
     /// proof to a closed mailbox is answered `201` and DROPPED, exactly as an
     /// unclaimed mailbox answers, so this call cannot tell a delivered write
     /// from a dropped one; a proof that does not verify is `401`.
+    ///
+    /// ADR-0078 — a write with no proof spends one `mailbox-write` anonymous
+    /// token and travels on the anonymous session; a write with a proof
+    /// spends none.
     public func publishMailbox(
         pseudonym: Data,
         payload: Data,
@@ -101,30 +110,58 @@ public final class DsClient {
                 "pseudonym must be \(Self.pseudonymLength) bytes"
             )
         }
-        guard !payload.isEmpty else {
-            throw DsClientError.argument("payload must be non-empty")
+        guard isWellFormedMailboxRow(row: payload) else {
+            throw DsClientError.argument("payload must be a sealed mailbox row")
+        }
+        let endpoint = "/ds/mailbox/\(Self.pseudonymHex(pseudonym))/messages"
+        guard let writeAuth else {
+            let (data, http) = try await AnonTokenRoute.send(
+                context: .mailboxWrite, tokens: tokens
+            ) { tokenHeader in
+                try await send(
+                    method: "POST",
+                    endpoint: endpoint,
+                    body: payload,
+                    contentType: "application/octet-stream",
+                    extraHeaders: [AnonTokenRoute.headerName: tokenHeader],
+                    auth: nil,
+                    over: anonymousSession,
+                    acceptAnyStatus: true
+                )
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                throw DsClientError.http(
+                    status: http.statusCode,
+                    endpoint: endpoint,
+                    body: Self.truncate(String(data: data, encoding: .utf8) ?? "<binary>")
+                )
+            }
+            let parsed: PublishWireResponse
+            do {
+                parsed = try decoder.decode(PublishWireResponse.self, from: data)
+            } catch {
+                throw DsClientError.http(
+                    status: http.statusCode, endpoint: endpoint, body: "decode failed: \(error)")
+            }
+            return PublishResult(id: parsed.id, createdAt: parsed.createdAt)
         }
         var headers: [String: String] = [:]
-        var auth: DsAuth?
-        if let writeAuth {
-            let signer: DsProofSigner
-            do {
-                signer = try DsProofSigner.forReach(reachSeed: writeAuth.reachSeed)
-            } catch {
-                throw DsClientError.argument("reach seed must be 32 bytes")
-            }
-            auth = DsAuth(signer: signer)
-            if let delegation = writeAuth.delegationHeader {
-                headers[Self.delegationHeaderName] = delegation
-            }
+        let signer: DsProofSigner
+        do {
+            signer = try DsProofSigner.forReach(reachSeed: writeAuth.reachSeed)
+        } catch {
+            throw DsClientError.argument("reach seed must be 32 bytes")
+        }
+        if let delegation = writeAuth.delegationHeader {
+            headers[Self.delegationHeaderName] = delegation
         }
         let parsed: PublishWireResponse = try await sendDecoding(
             method: "POST",
-            endpoint: "/ds/mailbox/\(Self.pseudonymHex(pseudonym))/messages",
+            endpoint: endpoint,
             body: payload,
             contentType: "application/octet-stream",
             extraHeaders: headers,
-            auth: auth
+            auth: DsAuth(signer: signer)
         )
         return PublishResult(id: parsed.id, createdAt: parsed.createdAt)
     }
@@ -172,7 +209,8 @@ public final class DsClient {
 
     /// `PUT /ds/mailbox/{hex}/reach` — register and unregister reach public
     /// keys on this account's own mailbox, and set the Everyone flag. Signed
-    /// by the identity key the mailbox is named after (`dsMailboxSigner`).
+    /// by the account's mailbox key (`dsMailboxSigner(accountIdentity:)`,
+    /// ADR-0078).
     /// Idempotent: re-adding a key replaces its expiry, removing an absent key
     /// changes nothing.
     public func updateReach(
@@ -201,8 +239,8 @@ public final class DsClient {
 
     /// `GET /ds/mailbox/{hex}/reach` — the reach keys registered on this
     /// account's own mailbox and its Everyone flag (ADR-0060 section 1,
-    /// "Versions after a restore"). Signed by the identity key the mailbox is
-    /// named after, exactly like the owner's message read; anything else is a
+    /// "Versions after a restore"). Signed by the mailbox key (ADR-0078),
+    /// exactly like the owner's message read; anything else is a
     /// uniform `401`, which throws. Public keys only (invariant #2).
     public func fetchReach(pseudonym: Data, signer: DsRequestSigner) async throws -> DsReachListing {
         guard pseudonym.count == Self.pseudonymLength else {
@@ -315,10 +353,11 @@ public final class DsClient {
 
     /// `GET /ds/mailbox/{pseudonym_hex}/messages?...`.
     ///
-    /// ADR-0053 — reading a claimed mailbox needs a proof under the identity
-    /// key the mailbox is named after (`dsMailboxSigner(identity:)`). Only
-    /// this device's own mailboxes are ever read signed; a rendezvous mailbox
-    /// stays unclaimed and is read with `auth == nil`.
+    /// ADR-0053 / ADR-0078 — reading a claimed mailbox needs a proof under
+    /// the account's mailbox key (`dsMailboxSigner(accountIdentity:)`). Only
+    /// this account's own mailbox (and, for 30 days, its predecessor
+    /// mailboxes) is ever read. Every row is a sealed mailbox row the caller
+    /// opens with `openMailboxRow`.
     public func fetchMailbox(
         pseudonym: Data,
         after: Int64? = nil,
@@ -466,10 +505,10 @@ public final class DsClient {
         }
     }
 
-    /// `PUT /ds/mailbox/{pseudonym_hex}/access` — claim a mailbox under the
-    /// identity key it is named after. `bodyJson` is the mailbox signer's
-    /// `mailboxClaimBodyJson()`. Unsigned: the key is public and the claim
-    /// grants the claimant nothing.
+    /// `PUT /ds/mailbox/{address_hex}/access` — claim a mailbox under the
+    /// mailbox key it is named after (ADR-0078). `bodyJson` is the mailbox
+    /// signer's `mailboxClaimBodyJson()` (`{"mailbox_pk_b64"}`). Unsigned:
+    /// the key is public and the claim grants the claimant nothing.
     public func claimMailbox(pseudonym: Data, bodyJson: String) async throws {
         guard pseudonym.count == Self.pseudonymLength else {
             throw DsClientError.argument(

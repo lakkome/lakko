@@ -42,11 +42,14 @@ beforeAll(async () => {
   await init({ module_or_path: readFileSync(wasmPath) });
 });
 
+const TARGET_BOX = { address: new Uint8Array(32).fill(1), mailboxPk: new Uint8Array(32).fill(1) };
+
 function candidate(name: string, released: string[]): WriteCandidate {
   return {
     kind: "kept",
     resolve: async (): Promise<ResolvedWriteAuth> => ({
       kind: "kept" as WriteAuthKind,
+      target: TARGET_BOX,
       auth: { signer: { name } as never, delegation: null },
       release: () => released.push(name),
     }),
@@ -61,7 +64,7 @@ describe("trying every grant", () => {
     const tried: string[] = [];
     const out = await writeThroughCandidates(
       [candidate("contact", released), candidate("group", released), candidate("member", released)],
-      async (auth) => {
+      async (_target, auth) => {
         const name = (auth.signer as unknown as { name: string }).name;
         tried.push(name);
         if (name === "contact") throw refused();
@@ -83,8 +86,8 @@ describe("trying every grant", () => {
     ).rejects.toBeInstanceOf(MailboxUnreachableError);
     expect(write).toHaveBeenCalledTimes(2);
     // Never a third, unsigned attempt.
-    for (const call of write.mock.calls as unknown as Array<[{ signer: unknown }]>) {
-      expect(call[0].signer).not.toBeNull();
+    for (const call of write.mock.calls as unknown as Array<[unknown, { signer: unknown }]>) {
+      expect(call[1].signer).not.toBeNull();
     }
   });
 
@@ -138,6 +141,7 @@ describe("the own keys a committer delegation may name (ADR-0074 section 3.5a)",
     const between = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x53));
     const session = await ReachSession.open("acc", account.ed25519Seed, account.signaturePublicKey, {
       ds: {} as unknown as DsClient,
+      accountMailbox: new Uint8Array(32).fill(0xaa),
     });
     try {
       expect(session.delegateKeys().map((k) => Array.from(k.accountKey))).toEqual([
@@ -176,6 +180,7 @@ describe("an owed Welcome is retried when a grant arrives", () => {
     const account = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x44));
     const session = await ReachSession.open("acc", account.ed25519Seed, account.signaturePublicKey, {
       ds: {} as unknown as DsClient,
+      accountMailbox: new Uint8Array(32).fill(0xaa),
     });
     const listener = vi.fn();
     const off = onReceivedGrantsChanged(listener);
@@ -207,11 +212,11 @@ describe("an owed Welcome is retried when a grant arrives", () => {
   });
 });
 
-// ---- ADR-0073 R.4: the continuity key as a Welcome candidate ----------------
+// ---- ADR-0073 R.4 under ADR-0078: the continuity write is a recorded no-op --
 
 import { planWriteToPerson } from "./mailbox-write";
 
-describe("the continuity key (ADR-0073 R.4)", () => {
+describe("the continuity key (ADR-0073 R.4) under ADR-0078", () => {
   let TARGET: Uint8Array;
   beforeAll(() => {
     const id = wasm.Identity.fromSeed(new Uint8Array(32).fill(0x42));
@@ -220,34 +225,48 @@ describe("the continuity key (ADR-0073 R.4)", () => {
   });
   const CONTINUITY = { accountId: new Uint8Array(16).fill(7), keyGeneration: 2 };
 
-  it("is a candidate for a Welcome, signed by the key the owner registered", async () => {
-    const plan = await planWriteToPerson(TARGET, {
-      allowMember: true,
-      neverUnsigned: true,
-      continuity: CONTINUITY,
-    });
-    expect(plan.candidates.map((c) => c.kind)).toEqual(["continuity"]);
-    const resolved = await plan.candidates[0]!.resolve();
+  it("is NOT a candidate: no carrier names the reset account's new mailbox, so the write is skipped and logged without identifiers", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
     try {
-      const registered = wasm.reachVerifyingKey(wasm.continuityReachSeed(CONTINUITY.accountId, 2n));
-      expect(resolved.auth.delegation).toBeNull();
-      expect(Array.from((resolved.auth.signer as { verifyingKey(): Uint8Array }).verifyingKey())).toEqual(
-        Array.from(registered),
-      );
+      const plan = await planWriteToPerson(TARGET, {
+        allowMember: true,
+        neverUnsigned: true,
+        continuity: CONTINUITY,
+      });
+      // Nothing to try: the Welcome stays owed (an exhausted Welcome write
+      // throws MailboxUnreachableError and nothing is published).
+      expect(plan.candidates).toEqual([]);
+      const lines = info.mock.calls.map((c) => String(c[0]));
+      expect(lines.some((l) => l.includes("ADR-0078") && l.includes("continuity"))).toBe(true);
+      // No identifier reaches the log line.
+      const hex = Array.from(TARGET, (b) => b.toString(16).padStart(2, "0")).join("");
+      for (const l of lines) {
+        expect(l).not.toContain(hex);
+        expect(l).not.toContain(Buffer.from(CONTINUITY.accountId).toString("base64"));
+      }
+      // And no address is derived from the identity key or the account id.
+      const publish = vi.fn(async () => 1);
+      await expect(
+        writeWelcome(TARGET, { scope: new Uint8Array(32).fill(1) }, publish),
+      ).rejects.toBeInstanceOf(MailboxUnreachableError);
+      expect(publish).not.toHaveBeenCalled();
     } finally {
-      resolved.release();
+      info.mockRestore();
     }
   });
 
-  it("is never offered when the caller rules it out, and never for a non-Welcome write", async () => {
-    const ruledOut = await planWriteToPerson(TARGET, {
-      allowMember: true,
-      neverUnsigned: true,
-      continuity: null,
-    });
-    expect(ruledOut.candidates).toEqual([]);
-    // No pin names TARGET as a reset's new key, so nothing is resolved either.
-    const unresolved = await planWriteToPerson(TARGET, { allowMember: true, neverUnsigned: true });
-    expect(unresolved.candidates).toEqual([]);
+  it("logs nothing when the caller rules it out, and offers nothing either", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      const ruledOut = await planWriteToPerson(TARGET, {
+        allowMember: true,
+        neverUnsigned: true,
+        continuity: null,
+      });
+      expect(ruledOut.candidates).toEqual([]);
+      expect(info).not.toHaveBeenCalled();
+    } finally {
+      info.mockRestore();
+    }
   });
 });

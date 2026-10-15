@@ -65,7 +65,9 @@ export interface ProofSigner {
   sign(method: string, path: string, query: string, body: Uint8Array): string;
   mailboxClaimBodyJson(): string;
   verifyingKey(): Uint8Array;
-  mailboxPseudonym(): Uint8Array;
+  /** The 32-byte address of the mailbox a mailbox signer's key names
+   *  (ADR-0078: derived from the mailbox key, never the identity key). */
+  mailboxAddress(): Uint8Array;
   free(): void;
 }
 
@@ -327,11 +329,12 @@ export class DsAccessRegistry {
     };
   }
 
-  /** Install the signer of one of this device's own mailboxes (the account
-   *  mailbox and the device mailbox). Replaces a signer for the same
-   *  pseudonym; the registry owns it. */
+  /** Install the signer of one of this account's own mailboxes (the account
+   *  mailbox and the mailboxes of own predecessor keys; ADR-0078 removed the
+   *  device mailbox). Replaces a signer for the same address; the registry
+   *  owns it. */
   setMailboxSigner(signer: ProofSigner): string {
-    const hex = journalHex(signer.mailboxPseudonym());
+    const hex = journalHex(signer.mailboxAddress());
     const prior = this.mailboxes.get(hex);
     if (prior !== undefined && prior !== signer) freeQuietly(prior);
     this.mailboxes.set(hex, signer);

@@ -39,7 +39,8 @@ export interface ReceivedProfile {
    *  is shown (`verifyUsernameBinding`). */
   readonly usernameCertificate?: Uint8Array | null;
   /** ADR-0060 profile v3 — the reach grants the envelope carried, as
-   *  37-byte grant wires in base64 with their class byte and version.
+   *  134-byte grant wires (ADR-0078: each carries the sender's mailbox
+   *  binding) in base64 with their class byte and version.
    *  SECRET (each lets its holder write to the sender's mailbox): kept only
    *  under the rules of `reach/grant-rules.ts`, never logged. */
   readonly grants?: readonly ReceivedGrantWire[];
@@ -50,7 +51,7 @@ export interface ReceivedGrantWire {
   /** The class wire byte (1 contact .. 7 fof). */
   readonly classByte: number;
   readonly version: number;
-  /** Standard base64 of the 37-byte grant wire. */
+  /** Standard base64 of the 134-byte grant wire (ADR-0078). */
   readonly wireB64: string;
 }
 
@@ -70,7 +71,7 @@ export interface ProfileDecoder {
     readonly grants?: readonly { readonly class: number; readonly version: number; free?(): void }[];
     free?(): void;
   };
-  /** Encodes a grant to its 37-byte wire (`encodeReachGrant`); absent in a
+  /** Encodes a grant to its 134-byte wire (`encodeReachGrant`); absent in a
    *  decoder that never sees grants. */
   encodeReachGrant?(grant: never): Uint8Array;
 }

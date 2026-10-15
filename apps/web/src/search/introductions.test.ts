@@ -16,18 +16,24 @@ import initWasm, * as core from "../../wasm/lakko_ffi_wasm";
 import { base64Encode } from "../auth/account-id";
 import { openMatchingIntroductions, recordsOf, type KeptIntroductions } from "./introductions";
 
+// ADR-0078: an introduction carries its owner's mailbox binding (the Fof
+// grant's), verified against the record's identity key: a real identity.
+let OWNER: core.Identity;
+let IDENTITY: Uint8Array;
+
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
   await initWasm({ module_or_path: readFileSync(path) });
+  OWNER = core.Identity.fromSeed(new Uint8Array(64).fill(0x21));
+  IDENTITY = OWNER.signaturePublicKey;
 });
 
 const oprf = (fill: number): Uint8Array => new Uint8Array(64).fill(fill);
-const IDENTITY = new Uint8Array(32).fill(0x21);
 const ACCOUNT = new Uint8Array(16).fill(0x31);
 const FOF_SEED = new Uint8Array(32).fill(0x41);
 
 function record(name: string, termOprfs: Uint8Array[]): Uint8Array {
-  const grant = new core.ReachGrant(core.ReachClass.Fof, 3, FOF_SEED);
+  const grant = new core.ReachGrant(core.ReachClass.Fof, 3, FOF_SEED, core.signMailboxBinding(OWNER));
   const payload = new core.IntroductionPayload(IDENTITY, ACCOUNT, name, undefined, undefined, grant);
   try {
     return core.composeIntroduction(payload, termOprfs, 1_700_000_000_000n);
@@ -58,6 +64,13 @@ describe("introductions", () => {
     try {
       expect(grant.class).toBe(core.ReachClass.Fof);
       expect(grant.seed).toEqual(FOF_SEED);
+      // ADR-0078: the grant names the owner's mailbox, verified under their key.
+      const key = core.MailboxKey.fromAccountIdentity(OWNER);
+      try {
+        expect(grant.mailboxPkVerified(IDENTITY)).toEqual(key.publicKey());
+      } finally {
+        key.free();
+      }
     } finally {
       grant.free();
     }

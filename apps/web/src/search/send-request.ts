@@ -47,6 +47,9 @@ export interface SendDeps {
     x25519Pub: Uint8Array,
     intro: Uint8Array,
     grantWireB64: string | null,
+    /** ADR-0078 - the person's mailbox binding from their public record
+     *  (standard base64), for an unsigned request to someone in Everyone. */
+    openBindingB64?: string | null,
   ): Promise<void>;
   /** Whether a send failure means the person can no longer be reached this
    *  way (the username no longer resolves: they left Everyone). */
@@ -92,7 +95,14 @@ export async function sendFoundRequest(
     ) {
       return { kind: "refused" };
     }
-    await deps.sendToBundle(accountId, bundle.signaturePub, bundle.x25519Pub, intro, grant);
+    await deps.sendToBundle(
+      accountId,
+      bundle.signaturePub,
+      bundle.x25519Pub,
+      intro,
+      grant,
+      person.reach === "open" ? (person.openBindingB64 ?? null) : null,
+    );
     return { kind: "sent" };
   } catch (err) {
     if (deps.isRefusal(err)) return { kind: "refused" };

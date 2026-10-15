@@ -36,6 +36,7 @@
  * "share this with the owner" step.
  */
 
+import { callLinkGrantVerifies, type LinkGrantCapability } from "./link-grant";
 import { loadWasm } from "../wasm";
 import {
   DiscoveryClient,
@@ -222,6 +223,12 @@ export async function acceptCallInviteFromSlug(
     }
     if (isDiscoveryRateLimited(err)) return { kind: "rateLimited" };
     throw err; // bubble up network / non-404 HTTP errors
+  }
+  // ADR-0078 - the link grant's mailbox binding must verify against the
+  // owner's account key; a capability whose grant names another mailbox is
+  // refused as damaged.
+  if (!callLinkGrantVerifies(wasm, capability as unknown as LinkGrantCapability)) {
+    return { kind: "damaged" };
   }
   // The PLAINTEXT wire the joiner tag is computed over, never the sealed blob.
   const capabilityBytes = capability.wire;

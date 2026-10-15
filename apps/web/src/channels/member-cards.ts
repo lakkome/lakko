@@ -27,7 +27,7 @@ import { DiscoveryClient } from "../discovery/client";
 import { DsClient } from "../ds/client";
 import { journalHex, type ProofSigner } from "../ds/access";
 import { acceptReceivedGrant } from "../reach/grant-rules";
-import { accountMailboxOf } from "../reach/mailbox-write";
+import { verifiedTargetOfGrant } from "../reach/mailbox-write";
 import { reachSession, reachSignerForGrant } from "../reach/reach-service";
 import {
   fileScopedGrant,
@@ -299,9 +299,16 @@ async function verifyGrant(
     for (let i = 0; i < accountKey.length; i++) {
       accountKey[i] = Number.parseInt(accountKeyHex.slice(i * 2, i * 2 + 2), 16);
     }
-    const mailbox = await accountMailboxOf(accountKey);
+    // ADR-0078 - the mailbox is the one the grant's binding names, verified
+    // against the account key the card's binding verified under. A grant
+    // whose binding does not verify is not kept (refused, not "unknown").
+    const target = await verifiedTargetOfGrant(grant, [accountKey]);
+    if (target === null) {
+      verifiedGrants.set(cacheKey, false);
+      return false;
+    }
     signer = await reachSignerForGrant(grant);
-    const ok = await ds.reachCheck(mailbox, signer);
+    const ok = await ds.reachCheck(target.address, signer);
     verifiedGrants.set(cacheKey, ok);
     return ok;
   } catch {

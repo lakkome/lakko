@@ -104,13 +104,13 @@ final class AnonTokenPoolTests: XCTestCase {
 
     func testContextNamesAreTheCoresInWireOrder() {
         XCTAssertEqual(AnonTokenContext.allCases.map(\.rawValue), anonTokenContexts())
-        // The ten names as literals too, so a rename on either side shows up
+        // The eleven names as literals too, so a rename on either side shows up
         // here as a named difference (source of truth:
         // `crates/lakko-anon-token/src/context.rs`, `TokenContext::ALL`).
         XCTAssertEqual(anonTokenContexts(), [
             "discovery-lookup", "discovery-register", "invite-consume", "ds-knock",
             "push-register", "channel-subscribe", "directory-search",
-            "vault-claim", "blob-upload", "blob-read",
+            "vault-claim", "blob-upload", "blob-read", "mailbox-write",
         ])
         XCTAssertEqual(AnonTokenRoute.headerName, "x-lakko-anon-token")
     }
@@ -149,6 +149,7 @@ final class AnonTokenPoolTests: XCTestCase {
             .discoveryLookup: 8, .pushRegister: 4, .inviteConsume: 2, .dsKnock: 2, .discoveryRegister: 1,
             .channelSubscribe: 2, .directorySearch: 1,
             .vaultClaim: 4, .blobUpload: 2, .blobRead: 2,
+            .mailboxWrite: 2,
         ]
         XCTAssertEqual(Set(expected.keys), Set(AnonTokenContext.allCases), "every context has a pinned policy")
         for (context, batch) in expected {

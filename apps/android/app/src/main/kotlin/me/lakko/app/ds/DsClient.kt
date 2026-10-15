@@ -71,8 +71,9 @@ import me.lakko.app.auth.base64Encode
  * group request and every mailbox read with the signer the call site passes
  * or, failing that, the one [DsSignerRegistry] holds for the journal; a
  * journal no signer is known for goes out unsigned (an unclaimed journal
- * accepts that, a rendezvous mailbox is never claimed). Mailbox WRITES are
- * never signed: the cold inbox stays open. The non-member's one act is the
+ * accepts that, a rendezvous mailbox is never claimed). A mailbox write is
+ * signed by a reach grant, or spends one `mailbox-write` anonymous token
+ * (ADR-0078). The non-member's one act is the
  * [knock], which spends one `ds-knock` anonymous token (ADR-0054) and goes
  * out on a separate client with its own connection pool.
  *
@@ -149,8 +150,12 @@ public class DsClient(
      * Rendezvous traffic (pairing, recovery, the welcome courier, the state
      * bundle) does NOT come here: it goes to [publishRendezvous].
      *
-     * @param pseudonym 32-byte recipient pseudonym.
-     * @param payload   non-empty bytes to deliver.
+     * ADR-0078: [payload] is a sealed mailbox row (the DS refuses anything
+     * else with `400`), and a write with no [reach] spends one
+     * `mailbox-write` anonymous token on the anonymous client.
+     *
+     * @param pseudonym 32-byte mailbox address.
+     * @param payload   one sealed mailbox row.
      * @param reach     the grant (or delegation) authorising the write.
      */
     public suspend fun publishMailbox(
@@ -166,7 +171,28 @@ public class DsClient(
         }
         val endpoint = "/ds/mailbox/${pseudonymHex(pseudonym)}/messages"
         if (reach == null) {
-            return doPublish(endpoint = endpoint, payload = payload, journal = null)
+            // ADR-0078: a write with no reach proof (to an Everyone mailbox,
+            // an unclaimed one, or a closed one, where it is dropped) spends
+            // one `mailbox-write` token, on the anonymous client.
+            val response = anonTokens.sendWithToken(AnonTokenContext.MAILBOX_WRITE) { name, value ->
+                try {
+                    anonClient.request("$baseUrl$endpoint") {
+                        method = HttpMethod.Post
+                        header(name, value)
+                        contentType(ContentType.Application.OctetStream)
+                        setBody(payload)
+                    }
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (cause: Throwable) {
+                    throw DsNetworkError(endpoint, cause)
+                }
+            }
+            if (!response.status.isSuccess()) {
+                throw DsHttpError(response.status.value, endpoint, response.safeReadBody())
+            }
+            val parsed: PublishWireResponse = response.body()
+            return PublishResult(id = parsed.id, createdAt = parsed.created_at)
         }
         val response = send(
             method = HttpMethod.Post,
@@ -466,8 +492,9 @@ public class DsClient(
     }
 
     /**
-     * `PUT /ds/mailbox/{hex}/access` claiming the mailbox [signer]'s identity
-     * key names ([pseudonym]). Unsigned by design. Throws on a refusal.
+     * `PUT /ds/mailbox/{hex}/access` claiming the mailbox [signer]'s mailbox
+     * key names ([pseudonym], ADR-0078; the body is `{"mailbox_pk_b64"}`).
+     * Unsigned by design. Throws on a refusal.
      */
     public suspend fun claimMailbox(pseudonym: ByteArray, signer: DsJournalSigner) {
         if (pseudonym.size != PSEUDONYM_LEN) {

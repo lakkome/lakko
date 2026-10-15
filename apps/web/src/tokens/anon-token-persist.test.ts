@@ -198,6 +198,8 @@ describe("batch sizes follow how often the action happens", () => {
     ["vault-claim", 4, 1],
     ["blob-upload", 2, 1],
     ["blob-read", 2, 1],
+    // ADR-0078: a proofless mailbox write. Chosen, not measured.
+    ["mailbox-write", 2, 1],
   ];
 
   it("names a policy for every context", () => {

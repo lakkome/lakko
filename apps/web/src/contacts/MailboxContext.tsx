@@ -195,7 +195,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const client = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
     // ADR-0050: requests, acks and the account mailbox are the person's;
-    // groups and the device mailbox are this device's.
+    // groups are this device's (ADR-0078: there is no device mailbox).
     accountIdentityProvider: () => chats.accountIdentity(),
     onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
     ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
@@ -727,9 +727,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   }
 
   // ADR-0060 section 6 — one inbound mailbox per person: every Welcome is
-  // addressed to the ACCOUNT mailbox (the device mailbox is claimed and
-  // closed, and no longer polled; its cursor key `lakko.contacts.device-
-  // mailbox.v1` is left unread).
+  // addressed to the ACCOUNT mailbox. ADR-0078 removed the device mailbox:
+  // nothing claims or polls one (its old cursor key `lakko.contacts.device-
+  // mailbox.v1` is only wiped).
 
   function isHidden(): boolean {
     return globalThis.document?.visibilityState === "hidden";

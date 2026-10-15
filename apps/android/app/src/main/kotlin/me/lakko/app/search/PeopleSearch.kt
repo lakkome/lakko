@@ -80,6 +80,8 @@ public class OpenedPublicRecord(
     public val identityPk: ByteArray,
     public val accountId: ByteArray,
     public val displayName: String?,
+    /** ADR-0078 - the 97-byte mailbox binding the record carries. */
+    public val mailboxBinding: ByteArray? = null,
 )
 
 /** A channel the typed handle names. */
@@ -173,7 +175,23 @@ public fun acceptPublicRecord(
     /** ADR-0074 3.5a - a record sealed under a proven predecessor of the
      *  bundle's key is the same person's. */
     provenPredecessor: (foundKey: ByteArray, publishedKey: ByteArray) -> Boolean = { _, _ -> false },
-): String? {
+): String? =
+    acceptedPublicRecord(open, hit, oprfOutput, bundleKey, provenPredecessor)
+        ?.displayName?.trim()?.takeIf { it.isNotEmpty() }
+
+/**
+ * The opened public record of a lookup hit when it counts (the same checks
+ * as [acceptPublicRecord]), or `null`. Its [OpenedPublicRecord.mailboxBinding]
+ * is what a request to the person is sealed to (ADR-0078), after the binding
+ * verifies against their account key at send time. Never throws.
+ */
+public fun acceptedPublicRecord(
+    open: (ByteArray, ByteArray) -> OpenedPublicRecord?,
+    hit: LookupHit,
+    oprfOutput: ByteArray,
+    bundleKey: ByteArray,
+    provenPredecessor: (foundKey: ByteArray, publishedKey: ByteArray) -> Boolean = { _, _ -> false },
+): OpenedPublicRecord? {
     val record = hit.publicRecord ?: return null
     val opened = try {
         open(record, oprfOutput)
@@ -182,8 +200,13 @@ public fun acceptPublicRecord(
     } ?: return null
     if (!opened.accountId.contentEquals(hit.accountId)) return null
     if (!foundKeyIsPublished(opened.identityPk, bundleKey, provenPredecessor)) return null
-    return opened.displayName?.trim()?.takeIf { it.isNotEmpty() }
+    return opened
 }
+
+private fun recordName(record: OpenedPublicRecord?): String? = record?.displayName?.trim()?.takeIf { it.isNotEmpty() }
+
+private fun recordBindingB64(record: OpenedPublicRecord?): String? =
+    record?.mailboxBinding?.let { java.util.Base64.getEncoder().encodeToString(it) }
 
 /** A result built from what is known locally, over a network finding. */
 private fun resultFor(
@@ -195,6 +218,7 @@ private fun resultFor(
     foundName: String?,
     foundUsername: String?,
     grantWireB64: String?,
+    bindingB64: String? = null,
 ): PersonResult? {
     val k = deps.known(keyB64)
     val reach = if (k.isContact) PersonReach.CONTACT else foundReach
@@ -207,6 +231,7 @@ private fun resultFor(
         username = shownUsername(foundUsername ?: k.verifiedUsername, reach),
         reach = reach,
         grantWireB64 = if (reach == PersonReach.GRANT) grantWireB64 else null,
+        mailboxBindingB64 = bindingB64,
     )
 }
 
@@ -279,14 +304,15 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
             val key = identityKey(deps, hit.accountId)
             legs += LegOutcome.ANSWERED
             if (key == null) return@async emptyList()
-            val published =
-                acceptPublicRecord(deps::openPublicRecord, hit, round.output, key.bytes, deps::isProvenPredecessor)
+            val record =
+                acceptedPublicRecord(deps::openPublicRecord, hit, round.output, key.bytes, deps::isProvenPredecessor)
+            val published = recordName(record)
             // Discovery itself resolved this username to this account: that
             // is the binding a certificate would prove, so the username shows.
             listOfNotNull(
                 resultFor(
                     deps, key.b64, key.hex, searchHex(hit.accountId), PersonReach.OPEN,
-                    published ?: "@$username", username, null,
+                    published ?: "@$username", username, null, recordBindingB64(record),
                 ),
             )
         } catch (cancel: CancellationException) {
@@ -309,13 +335,14 @@ public suspend fun searchPeople(query: String, deps: PeopleSearchDeps): PeopleSe
                 // A name this device holds, else the one the person published
                 // (also for a contact held only by fingerprint); an unnamed
                 // hit is dropped.
-                val published =
-                    acceptPublicRecord(deps::openPublicRecord, hit, round.output, key.bytes, deps::isProvenPredecessor)
+                val record =
+                    acceptedPublicRecord(deps::openPublicRecord, hit, round.output, key.bytes, deps::isProvenPredecessor)
+                val published = recordName(record)
                 val name = deps.known(key.b64).name ?: published ?: continue
                 if (!deps.nameMatches(name, query)) continue
                 resultFor(
                     deps, key.b64, key.hex, searchHex(hit.accountId), PersonReach.OPEN,
-                    published, null, null,
+                    published, null, null, recordBindingB64(record),
                 )?.let { out += it }
             }
             legs += LegOutcome.ANSWERED

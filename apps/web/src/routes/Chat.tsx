@@ -3098,7 +3098,9 @@ function ChatView(props: {
     }
     void (async () => {
       try {
-        const attrs = await contacts.fetchJoinAttributions(gid);
+        const attrs = await contacts.fetchJoinAttributions(gid, (leaf) =>
+          props.entry.group.pendingExternalJoinAccountKey(leaf),
+        );
         // The view closed while the journal was being read. The gate is shared
         // across mounts of this group, and telling it "fetched" here would be
         // an answer for a map nobody shows: a view opened meanwhile starts

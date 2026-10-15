@@ -86,18 +86,17 @@ export interface PendingCommitEntry {
   targetEpoch: string;
   /** base64 of the EXACT commit wire-bytes the core create-commit produced. */
   commitB64: string;
-  /** base64 of the second artifact's EXACT publishable wire-bytes — the
-   *  `wrapEnvelope(KIND_WELCOME, welcome)` mailbox envelope. Absent for
-   *  remove / role (they publish only the commit). */
+  /** base64 of the second artifact: the RAW MLS Welcome. ADR-0078: a
+   *  mailbox row is sealed to the mailbox key the write resolves, so the row
+   *  is built at (re)publish, not here. Absent for remove / role (they
+   *  publish only the commit). */
   secondArtifactB64?: string;
   /** Discriminates the second artifact's re-publish destination. */
   secondArtifactKind?: SecondArtifactKind;
-  /** base64 of the recipient mailbox pseudonym — the `ds.publishMailbox`
-   *  target for the second artifact. Absent when there is no second artifact. */
-  secondArtifactMailboxB64?: string;
-  /** ADR-0060 — base64 of the ACCOUNT key the second artifact's mailbox is
-   *  named after, so a re-publish can sign the write with the key that
-   *  reaches that account (the mailbox pseudonym is one-way). */
+  /** ADR-0060 — base64 of the ACCOUNT key the second artifact goes to: a
+   *  re-publish finds a grant held for that account, verifies its mailbox
+   *  binding against this key (ADR-0078), seals to the key it names and
+   *  signs with the grant. */
   secondArtifactAccountKeyB64?: string;
   /**
    * ADR-0045 — this entry belongs to a STAGED sweep, so its commit is on the
@@ -128,7 +127,7 @@ export interface PendingCommitEntry {
    * what marks the entry as a SWEEP entry, and the ADR-0040 legacy re-publish
    * loop skips on it. Clearing it would hand a welcome-owed entry to a loop
    * that re-publishes the commit, finds no singular
-   * `secondArtifactMailboxB64`, publishes no Welcome at all, and then ACKS —
+   * `secondArtifactAccountKeyB64`, publishes no Welcome at all, and then ACKS —
    * destroying the record. The two flags are read together:
    * `sweepVerdictPending && !sweepWelcomesOwed` is verdict-owed,
    * `sweepWelcomesOwed` is fan-out-owed.
@@ -139,7 +138,7 @@ export interface PendingCommitEntry {
    * one per member the sweep adds.
    *
    * A list, where the direct add path has the singular
-   * `secondArtifactMailboxB64`, because one sweep commit can carry several adds
+   * `secondArtifactAccountKeyB64`, because one sweep commit can carry several adds
    * under a single Welcome. Empty when the sweep carried no add.
    */
   welcomeMailboxesB64?: string[];

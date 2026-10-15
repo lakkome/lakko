@@ -7,14 +7,16 @@ import android.util.Base64
 import me.lakko.app.chat.GroupNotAcceptingRequests
 import me.lakko.app.chat.JournalHeadEpoch
 import me.lakko.app.chat.runLinkJoinKnock
-import me.lakko.app.contacts.KIND_WELCOME
-import me.lakko.app.contacts.ParsedEnvelope
-import me.lakko.app.contacts.parseEnvelope
-import me.lakko.app.contacts.wrapEnvelope
+import me.lakko.app.contacts.MailboxCrypto
+import me.lakko.app.contacts.MailboxRowKind
+import me.lakko.app.contacts.NativeMailboxCrypto
+import me.lakko.app.contacts.NativeOwnMailbox
+import me.lakko.app.contacts.sealFor
+import me.lakko.app.contacts.verifiedGrantDest
+import me.lakko.app.contacts.welcomeBodyOf
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsJournalSigner
 import me.lakko.app.ds.FfiDsJournalSigner
-import uniffi.lakko_ffi_uniffi.IdentityPseudonym
 import uniffi.lakko_ffi_uniffi.dsMailboxSigner
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.GroupInviteCapability
@@ -52,6 +54,11 @@ import uniffi.lakko_ffi_uniffi.sealSubscriberSeedEnvelope
  * (no deployed environment), the same posture as every other live-channel gate.
  */
 public object CoPublisher {
+
+    /** ADR-0078 - the binding check and sealing of mailbox rows; a test
+     *  injects a fake (the host JVM loads no native library). */
+    @Volatile
+    internal var mailboxCrypto: MailboxCrypto = NativeMailboxCrypto
     /** Path prefix every `/g/` co-publisher invite URL starts with. */
     public const val URL_PREFIX: String = "/g/"
 
@@ -302,6 +309,11 @@ public object CoPublisher {
     ) {
         val groupId = publisherGroup.groupId()
         val signerBeforeCommit = signerOf(publisherGroup, identity)
+        // ADR-0078: the joiner's account key. A PublisherGroup leaf carries
+        // no device binding: the co-publisher joins under its account
+        // identity, so the proposal's leaf key IS that account key. The reply
+        // grant's binding is verified against it before the Welcome is sealed.
+        val joinerAccount = proposalRef
         val added = publisherGroup.approveExternalJoin(identity, proposalRef)
         // ADR-0057 — register epoch N+1's key with the owner's root before the
         // commit is published. A refusal throws: the
@@ -317,15 +329,23 @@ public object CoPublisher {
         )
         ds.publishGroup(groupId, added.commit, signer = commitSigner)
         // ADR-0053 client contract point 8 — the Welcome goes to the joiner's
-        // own mailbox (the pseudonym of the key its proposal carried), in the
-        // same envelope a direct add uses; nothing is written to the journal
-        // for a non-member to read.
-        val joinerMailbox = IdentityPseudonym.fromIdentity(proposalRef).use { it.asBytes() }
-        // ADR-0060 §6 — written with the reply key the joiner's attribution
-        // carried: its mailbox is claimed and closed.
-        val reach = joinerReplyGrants[me.lakko.app.reach.reachHex(proposalRef)]
-            ?.let { me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(it.seed)) }
-        ds.publishMailbox(joinerMailbox, wrapEnvelope(KIND_WELCOME, added.welcome), reach = reach)
+        // own mailbox; nothing is written to the journal for a non-member to
+        // read. ADR-0060 §6 — written with the reply key the joiner's
+        // attribution carried. ADR-0078 — sealed as a WELCOME_RENDEZVOUS row
+        // to the mailbox that grant's binding names, verified against the
+        // joiner's account; with no verified grant nothing is written (the
+        // reseal below still runs: the commit is on the wire).
+        val dest = joinerReplyGrants[me.lakko.app.reach.reachHex(proposalRef)]?.let { grant ->
+            verifiedGrantDest(grant, joinerAccount, mailboxCrypto) { seed ->
+                me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(seed))
+            }
+        }
+        if (dest != null) {
+            val sealed = mailboxCrypto.sealFor(dest, MailboxRowKind.WELCOME_RENDEZVOUS, added.welcome)
+            ds.publishMailbox(sealed.address, sealed.row, reach = dest.auth)
+        } else {
+            android.util.Log.w("CoPublisher", "ADR-0078: no verified reply grant for the joiner; Welcome not written")
+        }
         resealSubscribers(channelsClient, identity, publisherGroup, channelIdHex)
         // ADR-0059 — appoint the newcomer's co-publisher key so its own
         // rotation fanout can read the subscriber list. After the
@@ -518,8 +538,9 @@ public object CoPublisher {
         // the read is signed under the identity key. Paged to the end: the
         // Welcome is among the newest rows.
         val mailboxSigner = dsMailboxSigner(identity)
-        val pseudonym = mailboxSigner.mailboxPseudonym()
+        val pseudonym = mailboxSigner.mailboxAddress()
         val signer = FfiDsJournalSigner(mailboxSigner)
+        val own = NativeOwnMailbox.of(identity)
         val candidates = ArrayList<ByteArray>()
         JournalHeadEpoch.scan<Unit>(
             fetchPage = { after, limit ->
@@ -530,8 +551,11 @@ public object CoPublisher {
                 )
             },
             visit = { row ->
-                val env = parseEnvelope(row.payload)
-                if (env is ParsedEnvelope.Welcome) candidates += env.body
+                // ADR-0078: every row is sealed to this mailbox; one that does
+                // not open is dropped. The owner's approve writes a
+                // WELCOME_RENDEZVOUS row; a chat WELCOME sharing the mailbox
+                // is tried too (it simply fails to join below).
+                welcomeBodyOf(own.open(row.payload))?.let { candidates += it }
                 null
             },
         )
@@ -650,7 +674,7 @@ public object CoPublisher {
         )
         val mailboxSigner = dsMailboxSigner(identity)
         ds.putMailboxReach(
-            pseudonym = mailboxSigner.mailboxPseudonym(),
+            pseudonym = mailboxSigner.mailboxAddress(),
             signer = FfiDsJournalSigner(mailboxSigner),
             add = listOf(
                 me.lakko.app.ds.DsReachKeyAdd(

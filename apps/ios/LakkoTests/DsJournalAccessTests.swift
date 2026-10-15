@@ -223,7 +223,9 @@ final class DsJournalAccessTests: XCTestCase {
             .init(status: 201, body: Data(#"{"id":1,"created_at":"x"}"#.utf8)),
         ])
         _ = try await DsAccessURLProtocol.client(scope).publishMailbox(
-            pseudonym: Data(repeating: 1, count: 32), payload: Data([9]))
+            pseudonym: Data(repeating: 1, count: 32),
+            // The smallest well-formed sealed row (ADR-0078): version byte, 1 KiB bucket, 48 bytes of seal.
+            payload: Data([1]) + Data(count: 1072))
         XCTAssertNil(DsAccessURLProtocol.requests(scope).first?.proof)
     }
 
@@ -810,21 +812,20 @@ final class DsJournalAccessTests: XCTestCase {
 
     // MARK: Point 1 — every mailbox poller is signed for the mailbox it reads
 
-    /// The account and the device mailbox: the pseudonym the signer is named
-    /// after IS the pseudonym the poller fetches, and the fetch is signed.
+    /// ADR-0078 — the account mailbox is named by the MAILBOX key derived from
+    /// the account seed, not by the identity key: the address the signer names
+    /// IS the address the poller fetches, and the fetch is signed.
     func testEachMailboxPollerIsSignedForTheMailboxItFetches() async throws {
         for byte: UInt8 in [4, 5] {
             let id = try identity(byte)
-            let signer = dsMailboxSigner(identity: id)
-            let expected = try IdentityPseudonym.fromIdentity(pubkey: id.signaturePublicKey()).asBytes()
-            XCTAssertEqual(signer.mailboxPseudonym(), expected)
+            let signer = dsMailboxSigner(accountIdentity: id)
+            let expected = MailboxKey.fromAccountIdentity(accountIdentity: id).address()
+            XCTAssertEqual(signer.mailboxAddress(), expected)
+            XCTAssertEqual(try mailboxAddress(mailboxPk: MailboxKey.fromAccountIdentity(accountIdentity: id).publicKey()), expected)
 
             let scope = DsAccessURLProtocol.freshScope()
             let client = ContactsClient(ds: DsAccessURLProtocol.client(scope))
-            _ = try await client.pollStrangerInbox(
-                mySignaturePubkey: id.signaturePublicKey(),
-                myX25519Secret: id.x25519SecretKey(),
-                mailboxSigner: signer)
+            _ = try await client.pollStrangerInbox(accountIdentity: id)
             let seen = try XCTUnwrap(DsAccessURLProtocol.requests(scope).first)
             XCTAssertEqual(
                 seen.url.path, "/native/ds/ds/mailbox/\(DsClient.pseudonymHex(expected))/messages")
@@ -832,21 +833,36 @@ final class DsJournalAccessTests: XCTestCase {
         }
     }
 
-    /// The mailbox claim body names the key the mailbox is named after.
+    /// The mailbox claim body names the mailbox key (`mailbox_pk_b64`), and
+    /// the claim goes to that key's own address.
     func testTheMailboxClaimGoesToTheSignersOwnMailbox() async throws {
         let id = try identity(6)
-        let signer = dsMailboxSigner(identity: id)
+        let signer = dsMailboxSigner(accountIdentity: id)
         let scope = DsAccessURLProtocol.freshScope()
         DsAccessURLProtocol.script(scope, [.init(status: 204, body: Data())])
         try await DsAccessURLProtocol.client(scope).claimMailbox(
-            pseudonym: signer.mailboxPseudonym(), bodyJson: signer.mailboxClaimBodyJson())
+            pseudonym: signer.mailboxAddress(), bodyJson: signer.mailboxClaimBodyJson())
         let seen = try XCTUnwrap(DsAccessURLProtocol.requests(scope).first)
         XCTAssertEqual(seen.method, "PUT")
         XCTAssertEqual(
             seen.url.path,
-            "/native/ds/ds/mailbox/\(DsClient.pseudonymHex(signer.mailboxPseudonym()))/access")
+            "/native/ds/ds/mailbox/\(DsClient.pseudonymHex(signer.mailboxAddress()))/access")
         XCTAssertNil(seen.proof, "a mailbox claim is unsigned")
         XCTAssertEqual(seen.body, Data(signer.mailboxClaimBodyJson().utf8))
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: seen.body) as? [String: Any])
+        XCTAssertEqual(
+            body["mailbox_pk_b64"] as? String,
+            MailboxKey.fromAccountIdentity(accountIdentity: id).publicKey().base64EncodedString())
+    }
+
+    /// ADR-0078 — device mailboxes are gone: a session claims the account's
+    /// one mailbox and nothing else, and none before bootstrap.
+    func testOnlyTheAccountMailboxIsClaimed() throws {
+        let account = try identity(8)
+        let signers = ChatRepository.ownMailboxSigners(accountIdentity: account)
+        XCTAssertEqual(signers.map { $0.mailboxAddress() },
+                       [MailboxKey.fromAccountIdentity(accountIdentity: account).address()])
+        XCTAssertTrue(ChatRepository.ownMailboxSigners(accountIdentity: nil).isEmpty)
     }
 
     /// The real FFI signer's header names its epoch, so the server can pick the

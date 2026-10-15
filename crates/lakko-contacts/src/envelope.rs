@@ -64,11 +64,37 @@ const HKDF_INFO_NONCE: &[u8] = b"lakko-contacts/v1/sealed-box/nonce";
 /// Returns `ContactError::Crypto` on AEAD seal failure (essentially
 /// impossible with valid inputs, but surfaced for completeness).
 pub fn seal(recipient_pub: &PublicKey, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    seal_labeled(&CONTACT_LABELS, recipient_pub, aad, plaintext)
+}
+
+/// The two HKDF `info` prefixes one use of the sealed box derives its AEAD
+/// key and nonce under. A use with its own labels (the ADR-0078 mailbox
+/// envelope) can never open a box sealed for another use, even to the same
+/// recipient key with the same AAD.
+#[derive(Clone, Copy)]
+pub(crate) struct SealLabels {
+    pub(crate) key: &'static [u8],
+    pub(crate) nonce: &'static [u8],
+}
+
+/// The labels [`seal`] / [`open`] use (the contact request's seal).
+const CONTACT_LABELS: SealLabels = SealLabels {
+    key: HKDF_INFO_KEY,
+    nonce: HKDF_INFO_NONCE,
+};
+
+/// [`seal`] under `labels` instead of the contact-request labels.
+pub(crate) fn seal_labeled(
+    labels: &SealLabels,
+    recipient_pub: &PublicKey,
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
     let eph_priv = SecretKey::generate();
     let eph_pub = eph_priv.public_key();
     let shared = eph_priv.diffie_hellman(recipient_pub);
 
-    let (key, nonce) = derive_key_and_nonce(&shared, &eph_pub)?;
+    let (key, nonce) = derive_key_and_nonce(labels, &shared, &eph_pub)?;
     let ciphertext = aead::seal(ALG, &key, &nonce, aad, plaintext)?;
 
     let mut out = Vec::with_capacity(EPH_PUB_LEN + ciphertext.len());
@@ -92,6 +118,16 @@ pub fn seal(recipient_pub: &PublicKey, aad: &[u8], plaintext: &[u8]) -> Result<V
 ///   indistinguishable on a sealed box, which is the expected
 ///   security property.
 pub fn open(recipient_priv: &SecretKey, aad: &[u8], wire: &[u8]) -> Result<Vec<u8>> {
+    open_labeled(&CONTACT_LABELS, recipient_priv, aad, wire)
+}
+
+/// [`open`] under `labels` instead of the contact-request labels.
+pub(crate) fn open_labeled(
+    labels: &SealLabels,
+    recipient_priv: &SecretKey,
+    aad: &[u8],
+    wire: &[u8],
+) -> Result<Vec<u8>> {
     if wire.len() < EPH_PUB_LEN + TAG_LEN {
         return Err(ContactError::InvalidEncoding(format!(
             "sealed envelope too short: {} bytes (need ≥ {})",
@@ -105,7 +141,7 @@ pub fn open(recipient_priv: &SecretKey, aad: &[u8], wire: &[u8]) -> Result<Vec<u
     let eph_pub = PublicKey::from_bytes(&eph_arr).map_err(ContactError::Crypto)?;
 
     let shared = recipient_priv.diffie_hellman(&eph_pub);
-    let (key, nonce) = derive_key_and_nonce(&shared, &eph_pub)?;
+    let (key, nonce) = derive_key_and_nonce(labels, &shared, &eph_pub)?;
     aead::open(ALG, &key, &nonce, aad, ciphertext).map_err(|_| ContactError::WrongRecipient)
 }
 
@@ -113,17 +149,21 @@ pub fn open(recipient_priv: &SecretKey, aad: &[u8], wire: &[u8]) -> Result<Vec<u
 /// ephemeral public key is mixed into the `info` so two envelopes
 /// against the same recipient — even with the (astronomically
 /// unlikely) same shared secret — derive distinct AEAD nonces.
-fn derive_key_and_nonce(shared: &SecretBytes<32>, eph_pub: &PublicKey) -> Result<(AeadKey, Nonce)> {
-    let mut info_key = Vec::with_capacity(HKDF_INFO_KEY.len() + EPH_PUB_LEN);
-    info_key.extend_from_slice(HKDF_INFO_KEY);
+fn derive_key_and_nonce(
+    labels: &SealLabels,
+    shared: &SecretBytes<32>,
+    eph_pub: &PublicKey,
+) -> Result<(AeadKey, Nonce)> {
+    let mut info_key = Vec::with_capacity(labels.key.len() + EPH_PUB_LEN);
+    info_key.extend_from_slice(labels.key);
     info_key.extend_from_slice(&eph_pub.to_bytes());
     let derived_key: SecretBytes<KEY_LEN> = kdf::hkdf_sha256(shared.as_bytes(), &[], &info_key)?;
     let mut key_bytes = [0u8; KEY_LEN];
     key_bytes.copy_from_slice(derived_key.as_bytes());
     let key = AeadKey::new(key_bytes);
 
-    let mut info_nonce = Vec::with_capacity(HKDF_INFO_NONCE.len() + EPH_PUB_LEN);
-    info_nonce.extend_from_slice(HKDF_INFO_NONCE);
+    let mut info_nonce = Vec::with_capacity(labels.nonce.len() + EPH_PUB_LEN);
+    info_nonce.extend_from_slice(labels.nonce);
     info_nonce.extend_from_slice(&eph_pub.to_bytes());
     let derived_nonce: SecretBytes<NONCE_LEN> =
         kdf::hkdf_sha256(shared.as_bytes(), &[], &info_nonce)?;

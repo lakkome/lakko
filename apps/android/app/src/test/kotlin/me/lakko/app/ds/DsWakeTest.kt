@@ -95,14 +95,20 @@ class DsWakeTest {
             val (status, body) = replies[index++]
             respond(body, status, headersOf(HttpHeaders.ContentType, "application/json"))
         }
-        return DsClient(baseUrl = "https://test.invalid", engine = engine, signers = registry)
+        return DsClient(
+            baseUrl = "https://test.invalid",
+            engine = engine,
+            signers = registry,
+            // ADR-0078: a proofless mailbox write spends a `mailbox-write` token.
+            anonTokens = me.lakko.app.anon.FakeAnonTokenSource(),
+        )
     }
 
     private class Signer : DsJournalSigner {
         override val epoch: ULong = 1uL
         override fun sign(method: String, path: String, query: String, body: ByteArray): String = "proof"
         override val verifyingKey: ByteArray = ByteArray(32)
-        override fun mailboxClaimBody(): String = """{"identity_pk_b64":"k"}"""
+        override fun mailboxClaimBody(): String = """{"mailbox_pk_b64":"k"}"""
     }
 
     private val published = """{"id":7,"created_at":"t"}"""

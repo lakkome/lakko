@@ -16,8 +16,9 @@
 //!   every commit: the signer carries the epoch it was made at, and the server
 //!   keeps the two newest, so a signer one epoch behind still opens the
 //!   journal while a peer is applying the commit, and one two behind does not.
-//! - [`ds_mailbox_signer`] - the identity key at [`ds_mailbox_epoch`], for the
-//!   device's own mailbox.
+//! - [`ds_mailbox_signer`] - the account's mailbox key (ADR-0078, derived from
+//!   the account seed; never the identity key) at [`ds_mailbox_epoch`], for
+//!   the account's own mailbox.
 //! - [`DsProofSigner::for_reach`] - a reach key (ADR-0060 §2) at
 //!   [`ds_reach_epoch`], for a write to someone else's closed mailbox; a
 //!   delegate signs with it too, over its own delegate seed, next to the
@@ -129,14 +130,15 @@ impl DsProofSigner {
     }
 
     /// The JSON body of `PUT /ds/mailbox/{hex}/access` claiming the mailbox
-    /// a mailbox signer's identity key names.
+    /// a mailbox signer's key names: `{"mailbox_pk_b64": ...}` (ADR-0078).
     pub fn mailbox_claim_body_json(&self) -> String {
         self.inner.mailbox_claim_body_json()
     }
 
-    /// The 32-byte pseudonym of the mailbox a mailbox signer's key names.
-    pub fn mailbox_pseudonym(&self) -> Vec<u8> {
-        self.inner.mailbox_pseudonym().to_vec()
+    /// The 32-byte address of the mailbox a mailbox signer's key names
+    /// (ADR-0078): the path segment of `/ds/mailbox/{hex}/...`.
+    pub fn mailbox_address(&self) -> Vec<u8> {
+        self.inner.mailbox_address().to_vec()
     }
 }
 
@@ -174,7 +176,7 @@ pub fn max_delegation_ttl_ms() -> u64 {
 
 /// Sign a delegation (ADR-0060 §2): the holder of the reach seed
 /// `issuer_seed` authorises ONE write by `delegate_pk` to the 32-byte
-/// `mailbox` pseudonym until `expires_at_ms`, under a fresh 16-byte `nonce`
+/// `mailbox` address until `expires_at_ms`, under a fresh 16-byte `nonce`
 /// the DS consumes. Returns the [`delegation_header_name`] header value.
 /// The delegate sends it with a proof signed by
 /// `DsProofSigner.forReach(delegateSeed)`. A delegation issued for longer
@@ -237,7 +239,7 @@ fn signed_delegation(
             issuer_seed.len()
         ))
     })?;
-    let mailbox = key32(mailbox, "mailbox pseudonym")?;
+    let mailbox = key32(mailbox, "mailbox address")?;
     let delegate = key32(delegate_pk, "delegate key")?;
     let nonce = <[u8; NONCE_LEN]>::try_from(nonce).map_err(|_| {
         FfiError::Reach(format!(
@@ -254,13 +256,15 @@ fn signed_delegation(
     ))
 }
 
-/// The signer for `identity`'s own mailbox: its identity key at
-/// [`ds_mailbox_epoch`]. The claim body it produces names that key, and the
-/// server accepts the claim only when the mailbox pseudonym derives from it.
+/// The signer for the own mailbox of the account whose identity is
+/// `account_identity`: its **mailbox key** (ADR-0078, derived from the
+/// account seed; never the identity key) at [`ds_mailbox_epoch`]. The claim
+/// body it produces names that key, and the server accepts the claim only
+/// when the mailbox address derives from it.
 #[uniffi::export]
-pub fn ds_mailbox_signer(identity: &Identity) -> Arc<DsProofSigner> {
+pub fn ds_mailbox_signer(account_identity: &Identity) -> Arc<DsProofSigner> {
     Arc::new(DsProofSigner {
-        inner: Inner::for_mailbox(&identity.inner.ed25519_seed_bytes()),
+        inner: Inner::for_account_mailbox(&account_identity.inner.ed25519_seed_bytes()),
     })
 }
 
@@ -403,15 +407,26 @@ mod tests {
     }
 
     #[test]
-    fn the_mailbox_signer_names_the_identity_mailbox() {
+    fn the_mailbox_signer_names_the_accounts_mailbox_with_the_mailbox_key() {
         let identity = Identity::new("m".into()).unwrap();
         let signer = ds_mailbox_signer(&identity);
         assert_eq!(signer.epoch(), ds_mailbox_epoch());
         let vk = lakko_ds_proof::VerifyingKey::from_bytes(&signer.verifying_key()).unwrap();
-        let pseudonym: [u8; 32] = signer.mailbox_pseudonym().try_into().unwrap();
-        assert!(lakko_ds_proof::mailbox_owner_matches(&pseudonym, &vk));
+        let address: [u8; 32] = signer.mailbox_address().try_into().unwrap();
+        assert!(lakko_ds_proof::mailbox_owner_matches(&address, &vk));
+        // ADR-0078: the mailbox key, never the identity key.
+        let mailbox =
+            lakko_ds_proof::MailboxKey::from_account_seed(&identity.inner.ed25519_seed_bytes());
+        assert_eq!(signer.verifying_key(), mailbox.public().to_vec());
+        assert_ne!(
+            signer.verifying_key(),
+            lakko_ds_proof::SigningKey::from_seed(&identity.inner.ed25519_seed_bytes())
+                .verifying_key()
+                .to_bytes()
+                .to_vec()
+        );
         assert!(signer
             .mailbox_claim_body_json()
-            .starts_with("{\"identity_pk_b64\":\""));
+            .starts_with("{\"mailbox_pk_b64\":\""));
     }
 }

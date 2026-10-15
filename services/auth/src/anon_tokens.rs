@@ -84,6 +84,12 @@ use crate::AppState;
 /// - `ds-knock`: ADR-0064 has a signed-in device knock once per conversation
 ///   it is not in yet, so the earlier 20 a day left most of an account's
 ///   conversations without a knock.
+/// - `mailbox-write` (ADR-0078 section 1): spent only by a write with no
+///   reach proof to a personal mailbox that is open (Everyone) or not yet
+///   claimed - in practice a contact request to someone found in Everyone.
+///   Writes under a reach key or a delegation spend none. 50 a day is chosen,
+///   not measured: well above the requests a person sends, low enough that
+///   one account is a poor source for flooding open mailboxes.
 const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::DiscoveryLookup, 100),
     (TokenContext::DiscoveryRegister, 10),
@@ -95,6 +101,7 @@ const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::VaultClaim, 100),
     (TokenContext::BlobUpload, 96),
     (TokenContext::BlobRead, 96),
+    (TokenContext::MailboxWrite, 50),
 ];
 
 /// How many contexts exist; the quota table has one row per context.

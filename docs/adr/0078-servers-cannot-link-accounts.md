@@ -5,8 +5,12 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0078: Lakko's servers cannot link accounts: sealed senders, anonymous admission, unlinkable ids
 
-- **Status:** Proposed (2026-10-14). The maintainer accepts or amends it; the
-  decision points are collected at the end.
+- **Status:** Proposed (2026-10-14). The maintainer decided seven of the
+  eight decision points on 2026-10-15 (recorded in "Decisions" at the end
+  and folded into the sections); the eighth, how a person reaches their
+  contacts, groups and history after losing the recovery phrase, stays
+  open, and with it a new requirement the maintainer stated that day: the
+  backup must stay available to its owner after the phrase is lost.
 - **Date:** 2026-10-14
 - **Context:** security model, invariant #5 (the social graph is not
   materialised on the server)
@@ -25,8 +29,9 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   [ADR-0009](0009-link-based-call-invitations.md) (invite ledgers),
   [ADR-0064](0064-conversation-backup-and-device-re-entry.md) (external
   commits on re-entry, not built yet)
-- **Related:** [ADR-0055](0055-websocket-delivery.md) (proposed; conflicts
-  with section 11), [ADR-0065](0065-attachment-lifetime-and-access.md)
+- **Related:** [ADR-0055](0055-websocket-delivery.md) (proposed; kept by
+  decision 6, its per-connection journal set accepted as a class (c)
+  residual, section 12), [ADR-0065](0065-attachment-lifetime-and-access.md)
   (anonymous blob passes)
 
 ## Context
@@ -282,9 +287,102 @@ users and no persisted data to migrate.
   "resolve before you address", and the ADR-0073 R.4 continuity key, which
   is derivable from account id and generation precisely so that peers can
   reach a reset account. The continuity path needs a new carrier for the new
-  address; see the decision points. (ii) An open (Everyone) mailbox takes
+  address; this is the open question at the end. (ii) An open (Everyone) mailbox takes
   proofless writes today; under sealed sender nothing about the writer is
   visible, so such writes should spend an anonymous token (new context).
+
+#### Phase 1 as designed (2026-10-15)
+
+A recon of the tree on 2026-10-15 found the mailbox side worse than the
+inventory above: the claim route `PUT /ds/mailbox/{hex}/access` takes no
+proof and stores the identity key in the clear (`ds_mailbox_access.identity_pk`);
+the request carries the sender's identity key and account id outside its
+seal; the ack (185 bytes) is not sealed at all; a Welcome is a bare MLS
+message behind a clear kind byte (`0x01` request, `0x02` Welcome, `0x03` ack,
+defined in each client, not in Rust); device mailboxes are still claimed but
+no client reads them; and no background reader (the iOS NSE, Android's
+background decrypt, the web service worker) touches a mailbox. The call
+Welcome ferry and the KeyPackage forward ride the SFU signal relay, not a
+mailbox, and are out of this phase. The maintainer decided three points the
+same day (marked).
+
+- **The mailbox key.** `mailbox_seed = BLAKE3-derive-key("lakko/mailbox/v1",
+  account_seed)`, the account seed being the 32-byte input the reach seeds
+  take. The Ed25519 key pair from that seed signs the claim, every read and
+  every reach-key registration; the X25519 key a writer seals to is its
+  birational conversion (`lakko-crypto` `to_x25519_secret` /
+  `to_x25519_public`, already used for channel subscribers). No generation
+  input: the account seed changes on an ADR-0073 reset and an ADR-0074
+  rotation, and the mailbox with it. Every device of the account derives
+  the same key.
+- **The address.** `BLAKE3-derive-key("lakko/mailbox/address/v1",
+  mailbox_pk)`. The claim body is `{mailbox_pk_b64}`; the DS checks that the
+  key hashes to the address (first claim wins, as now) and stores
+  `mailbox_pk`. No column, route or log line of the DS holds the identity
+  key any more.
+- **The binding (decided: an identity-key signature).** A writer has to
+  learn that a mailbox key belongs to the person it means to reach, else a
+  member of a shared group could hand out its own mailbox under that
+  person's name and swallow their Welcomes and requests. The binding is
+  `version(1) ‖ mailbox_pk(32) ‖ sig(64)` = 97 bytes, the signature by the
+  account identity key over `"lakko/mailbox/binding/v1\0" ‖ mailbox_pk`,
+  and a writer verifies it against the account key it holds pinned before it
+  writes. It travels with every mailbox key, whatever the carrier.
+- **The reach grant grows by the binding.** `class(1) ‖ version(4 BE) ‖
+  seed(32) ‖ binding(97)` = 134 bytes (was 37), in every carrier: the
+  contact request's reply grant, the profile envelope, the `/i/` and `/c/`
+  capabilities, the join attribution, the introduction record. The ADR-0060
+  public record of a person in Everyone carries the binding instead of the
+  identity-derived address. A committer delegation names the added
+  account's mailbox address and carries its binding, verified against the
+  added account's key in the roster (it named `mailbox_pseudonym(account key)`).
+- **The mailbox envelope.** Every mailbox row is `version(1)=0x01 ‖
+  eph_x25519_pk(32) ‖ AEAD(plaintext)` built with the `lakko-contacts`
+  sealed-box construction, AAD `"lakko/mailbox-envelope/v1\0" ‖ version ‖
+  address`. The plaintext is `kind(1) ‖ body_len(4 BE) ‖ body ‖ zeros`,
+  padded to a size bucket (powers of two from 1 KiB to 64 KiB, then 64 KiB
+  steps up to the DS message cap; chosen, not measured). Kinds: `0x01`
+  contact request, `0x02` Welcome, `0x03` contact ack, `0x04` Welcome
+  rendezvous (the co-publisher join). An unknown kind is dropped. The inner
+  request and ack wires are unchanged, so their signature checks do not
+  move; the request keeps its own inner seal.
+- **Writes to an open mailbox (decided: an anonymous token).** A write with
+  no reach proof, to a mailbox that is open (Everyone) or not yet claimed,
+  spends one token of a new context `mailbox-write` (wire byte 11). A write
+  with a reach proof spends none, as now.
+- **Device mailboxes are removed.** No client claims or reads one.
+- **The reply-key pool is moved to phase 5 (decided)** with the Welcome
+  delay: both are timing defences. Until it lands the DS can still match a
+  reply-key registration to the request row it precedes by time, but no
+  longer reads either row.
+
+#### Phase 1, the Rust half as built (2026-10-15)
+
+Built in `lakko-contacts` (`mailbox.rs`, the 134-byte reach grant in every
+carrier, introduction payload v3 and committer-delegation envelope v2, each
+carrying the mailbox binding), `lakko-ds-proof` (no identity-derived
+mailbox left), `lakko-anon-token` (`mailbox-write`, wire byte 11; auth's
+default quota 50 a day, `LAKKO_ANON_TOKEN_QUOTA_MAILBOX_WRITE`, chosen, not
+measured), `services/ds` (migration `0010_sealed_mailbox.sql`), `services/discovery`
+(migrations `0029`, `0030`: wider public-record and sealed-link columns) and
+the three FFI surfaces; host-tested only, no client built against it yet.
+Two points differ from the design above:
+
+- **A proofless write to a closed mailbox spends a token too,** before the
+  silent drop. Otherwise a writer could tell a closed mailbox from an open
+  one by whether its token came back unspent.
+- **The DS refuses a mailbox POST that is not a well-formed row** (version
+  byte and a bucket-sized length) with `400`, before reading any state, so
+  the refusal reveals nothing and spends no token.
+
+A row is its bucket plus 49 bytes (smallest 1073); the largest body is
+983035 bytes. The core verifies the binding where it holds the key to
+verify against (the `/i/` capability's owner, the request's reply grant
+against `from_pubkey`, the introduction and public-record payload against
+its `identity_pk`); the other carriers leave it to the client: the `/c/`
+link grant, the join-attribution reply grant, profile grants (against the
+sender's account key resolved at receipt), and every write under a stored
+grant.
 
 ### 2. Calls admitted anonymously (finding 2, 11)
 
@@ -309,9 +407,14 @@ users and no persisted data to migrate.
   already knows the account at issuance, so the "fresh account" signal moves
   there: young accounts get a small `call-join` quota per epoch. The SFU (or
   auth at JWT time) caps admissions per `room` per window with no account
-  id. `call_admission_events` is dropped. Whether issuance uses a separate
-  key family for fresh accounts (which leaks one bit at spend) is a decision
-  point.
+  id. `call_admission_events` is dropped. **Decided (2):** one issuer key
+  family for every account, quota only. A separate family for young
+  accounts was rejected: it shows "young" at spend, beside the room, and
+  while few accounts are young that bit nearly names the joiner. Cost
+  accepted: the per-room cap must admit genuine large calls, so fresh
+  accounts can fill a room up to it, and ADR-0033's "end the call on a
+  burst of new accounts" goes; account creation stays rationed by the one
+  signup proof of ADR-0054.
 - **The call-state probe needs no identity.** The SFU names a room by
   `room = BLAKE3-derive-key("lakko/sfu/room/v1", call_id)`. The `call_id` is
   16 random bytes that today reach a server only inside the JWT; under this
@@ -381,8 +484,15 @@ users and no persisted data to migrate.
   side.
 - Clients send a Welcome after a random delay in `[0, T]`, and all mailbox
   rows are padded to the same buckets so a Welcome, a request and an ack are
-  not told apart by size. `T` trades a new member's first-message latency
-  for anonymity; see the decision points.
+  not told apart by size. **Decided (3):** `T` is a few seconds, and clients
+  also write **dummy Welcomes**: sealed rows of Welcome size, indistinguishable
+  from a real one on the DS, which the recipient drops after opening. A delay
+  of seconds alone blurs little when traffic is light; the dummies are what
+  makes "a Welcome-sized row arrived" stop meaning "someone joined a group".
+  How often a client writes one, and to which mailboxes, is not designed yet:
+  a dummy needs a mailbox the client may write to (it holds a reach grant for
+  it), and the rate costs DS storage and bandwidth. The constants are chosen,
+  not measured, and are tuned against live traffic.
 - Hiding `content_type` and `epoch` behind an outer group wrap was
   considered and rejected: the epoch-key registration discloses epoch
   changes regardless.
@@ -408,12 +518,38 @@ users and no persisted data to migrate.
   devices from their DeviceGroup roster, which needs no directory fetch.
 - When a KeyPackage of another account is needed (adding a contact to a
   group), it is fetched once, at that moment, never on a schedule.
-- The ADR-0073 R.2 scheduled identity check moves to an in-group signal:
-  the person whose key changed announces it in each chat, and a peer fetches
-  once on that signal. ADR-0073 defines no such announcement today (its
-  successor groups and Welcomes are the visible effect of a reset); adding
-  one is part of this phase, and whether a signal-only check is enough for
-  R.2 is a decision point.
+- **Decided (7):** the ADR-0073 R.2 scheduled identity check is replaced by
+  a **broadcast of resets** that every client downloads alike, so no
+  request names an account. A plain list does not scale: at a billion
+  accounts and an assumed (not measured) 1% resetting per year, about
+  27 000 entries a day at about 1 KB each with an inclusion proof (some 30
+  hashes of 32 bytes) is tens of MB a day per client. The broadcast is
+  therefore a **compact filter per period** (a binary fuse / xor filter over
+  `account_username_hash(account_id)` of every entry flagged `is_reset` in
+  that period, roughly 9 bits an entry, so tens of KB a day under the same
+  assumption). The filter's hash is committed in the signed, witnessed root,
+  so a server cannot drop a reset for one client without forking the log
+  (ADR-0020 / ADR-0039). A client checks each roster person it knows against
+  the filter locally and fetches the one bundle only on a hit (a real reset
+  or a rare false positive), so the server learns interest in an account only
+  when that account reset. The lazy R.2 triggers stay (opening a one-to-one,
+  before a send in one). Needs a `services/transparency` route serving the
+  filter for a period; a client back after a long absence downloads one
+  filter per missed period.
+- **The primary path, once the open question is settled:** the person who
+  reset carries the proof. If the backup survives the reset (open question
+  at the end), the reset device writes to each contact and knocks on each
+  group itself, and puts its `key_reset_attest`, the KT inclusion proof and
+  the witnessed root inside the sealed message; the peer verifies them
+  locally and asks no server anything. The filter then remains as the
+  fallback for a peer that never receives such a message.
+- The in-group announcement first proposed here was rejected: a key changes
+  only through a reset, a reset happens only when the person has lost
+  everything, and such a person is in no chat to announce anything.
+- Bucketing the reset list by hash prefix was rejected: a client's set of
+  buckets is stable from day to day and fingerprints its contact list.
+  Keyword PIR scales without a broadcast but is heavy on the server; it is
+  kept as a later option.
 - A username lookup returns everything a contact add needs in one response
   (identity, mailbox address, a KeyPackage), so no second request names the
   account.
@@ -435,8 +571,14 @@ users and no persisted data to migrate.
   person wrote", not which group.
 - Cost: leaving one group cannot revoke that group's key without rotating
   the class key everywhere (re-distribution through the profile envelope in
-  every remaining group). Whether to accept that, or keep per-scope keys and
-  accept the label, is a decision point.
+  every remaining group). **Decided (4):** one key per class. The client
+  rotates the class key automatically when the person leaves a group or
+  changes the ADR-0060 setting, and republishes the profile in every
+  remaining group. Messages inside groups travel through group journals and
+  are not affected; until a member receives the new profile, its write to
+  the mailbox (a contact request, a Welcome for a new device of the person)
+  is refused and retried when the profile arrives. The person's own devices
+  hold the account seed and derive the current key themselves.
 
 ### 10. Invite ledgers without owners (finding 13)
 
@@ -456,8 +598,9 @@ users and no persisted data to migrate.
   spans record the route template, not the URI.
 - Enforcement: a test or lint that fails CI when a `tracing` macro names a
   denied field, plus a capture layer in service integration tests that fails
-  on any 16- or 32-byte identifier in output. Which of the two is a decision
-  point.
+  on any 16- or 32-byte identifier in output. **Decided (5):** both. The
+  capture layer carries an allow-list for values that are not identifiers
+  (hashes and nonces in diagnostics), reviewed like code.
 - nginx access logs off and error logs at `crit` (the parallel infra
   change); coturn logging reviewed on the same terms.
 
@@ -477,9 +620,13 @@ the request:
   own request, so a batched multi-journal poll is excluded.
 - **What OHTTP does not cover:** WebSocket and long poll (one connection
   spans many requests), and SFU media. ADR-0055's single foreground socket
-  subscribing to every journal of a device would hand the DS the device's
-  journal set per connection; it conflicts with this ADR unless subscriptions
-  ride separate connections through a relay. SFU media exposes every
+  subscribing to every journal of a device hands the DS the device's
+  journal set per connection. **Decided (6):** ADR-0055 is kept and this is
+  accepted as a class (c) residual: polling from one address already lets
+  the DS infer the same set, and the socket turns that inference into a
+  fact inside the DS process. The network-phase ADR has to address it
+  (subscriptions on separate connections through a relay, or another
+  shape), and nothing in the DS may persist a connection's journal set. SFU media exposes every
   participant's address to the SFU; an independently operated TURN relay
   with relay-only ICE moves that to a party that does not see rooms.
 - **Tor** (or the ADR-0026 tunnels operated by a third party) is the
@@ -495,7 +642,13 @@ its own network edge can still reconstruct much of the graph by timing.
 ### Phasing
 
 Each phase lands with a test per finding that asserts the server-side data
-or request no longer carries the link.
+or request no longer carries the link. **Decided (8):** phases 1 to 8
+(sections 1 to 11) are a release gate in the sense of ADR-0046: no build
+reaches users while any of them is open. Class (c) (section 12) is a later
+phase with its own ADR, and until it lands the product documents state
+plainly that an operator watching its own network edge can still link
+devices by address and timing. The gate sits beside G-39, and these phases
+should land before the external review so it examines the final shape.
 
 1. **Sealed sender (section 1).** `lakko-contacts` (mailbox envelope, request
    and ack inside it, reach-grant wire), both FFI surfaces, the three clients'
@@ -517,17 +670,22 @@ or request no longer carries the link.
 4. **Knocks (section 4).** `lakko-contacts::group_invite`, the clients' knock
    paths, admin key distribution. Test: a stored knock row decodes to no
    account key.
-5. **Welcome timing (section 5).** Clients. Test: the Welcome send path
-   applies the delay; size buckets are equal across kinds.
+5. **Welcome timing (section 5) and the reply-key pool (section 1, moved here 2026-10-15).** Clients. Tests: a contact request uses a reply key registered earlier from the pool; the Welcome send path
+   applies the delay; size buckets are equal across kinds; a dummy Welcome
+   is indistinguishable on the DS from a real one and is dropped by the
+   recipient without effect.
 6. **Deterministic ids (section 6).** `lakko-mls` (`DeviceGroup::group_id_for`,
    `publisher_group_id_bytes`); invariant #3 applies: property tests. Test:
    the id is not computable from the account id or channel id alone.
-7. **Discovery sweep (section 7).** Clients. Test: no scheduled caller of the
-   by-id discovery routes remains.
+7. **Discovery sweep (section 7).** Clients, `services/transparency` (the
+   reset-broadcast route). Tests: no scheduled caller of the by-id discovery
+   routes remains; the filter request names no account; a filter whose hash
+   is not in the witnessed root is refused.
 8. **Tokens, reach keys, ledgers, logs (sections 8 to 11).** Tests: no
-   ledger table has an owner or issuer column; the log lint or capture test
-   (decision point 5) is in CI; the token pool refills on a timer, not on a
-   low-water mark.
+   ledger table has an owner or issuer column; the log lint and the capture
+   test (decision 5) are both in CI; the token pool refills on a timer, not
+   on a low-water mark; leaving a group rotates the class reach key and
+   republishes the profile.
 
 ## Alternatives
 
@@ -583,26 +741,86 @@ or request no longer carries the link.
   class (c) as out of reach of server-side changes.
 - **`docs/PRODUCT-READINESS.md`:** a privacy row stating what is true today.
 
-## Open questions (decision points for the maintainer)
+## Decisions (2026-10-15, maintainer)
 
-1. **ADR-0073 continuity after a key reset.** Peers reach a reset account
-   through a mailbox derivable from account id and generation. Under
-   section 1 the new mailbox address needs another carrier: the in-group
-   reset announcement, or accept that the continuity mailbox is linkable
-   during its window and retire it after.
-2. **Fresh-account signal for calls.** A separate issuer key family for
-   young accounts makes the throttle precise again at the cost of one bit at
-   spend; or keep one family and rely on quota alone.
-3. **Welcome delay bound `T`.**
-4. **Per-group reach keys:** one key per class (unlinkable, weak revocation)
-   or per scope (revocable, labelled).
-5. **Log enforcement:** a source lint, a runtime capture test, or both.
-6. **ADR-0055:** withdraw the single subscription socket, or keep it and
-   accept the per-connection journal set until the class (c) phase.
-7. **R.2 on a signal only** (section 7): whether an in-group announcement
-   replaces the scheduled identity check, or a rare randomised check stays.
-8. **How many of sections 1 to 11 must land before any build reaches users**
-   (a release gate like ADR-0046), or whether phase 1 alone is the gate.
+Seven of the eight decision points of the first draft, as answered; each is
+also written into its section above.
+
+2. **Fresh-account signal for calls:** one issuer key family, quota only
+   (section 2).
+3. **Welcome delay:** a few seconds, plus dummy Welcomes (section 5).
+4. **Reach keys:** one per class, rotated automatically on leaving a group
+   or changing the setting (section 9).
+5. **Log enforcement:** both the source lint and the runtime capture test
+   (section 11).
+6. **ADR-0055:** kept; the per-connection journal set is accepted as a class
+   (c) residual (section 12).
+7. **R.2:** a per-period compact filter of resets every client downloads
+   alike, committed in the witnessed root, plus the lazy triggers; once the
+   open question is settled the reset person carries the proof and the
+   filter is the fallback (section 7).
+8. **Release gate:** sections 1 to 11; class (c) later, stated in the
+   product documents (Phasing).
+
+## Open question: losing the phrase must not lose the conversations
+
+The first draft asked how peers reach a person after an ADR-0073 key reset,
+since under section 1 they can no longer compute the new mailbox address
+from the account id. The options it carried were a continuity mailbox
+derivable from account id and generation (linkable to the account for its
+window) or no automatic return at all.
+
+The maintainer rejected the premise on 2026-10-15: **the backup must stay
+available to its owner after the recovery phrase is lost**, so that a
+contact, group or chat that was quiet for a long time but matters is not
+lost with the phrase. Today it can be: the backup envelope key is
+`argon2id_kek(phrase, salt)` (ADR-0072 fact 3) and the ADR-0064 vault keys
+derive from the account seed, which comes from the phrase. A mail-protected
+account (ADR-0075, the default: no phrase saved) gets the phrase back from
+the email vault, at the cost of the stated exception to invariant #2. The
+gap is for the other accounts: a phrase-protected account whose owner lost
+the phrase, every device and a key-carrying passkey, and an account with
+neither a saved phrase nor an email that lost its devices and passkey. Such
+a person can only reset (ADR-0073) and keeps none of their contacts,
+groups, channels or history.
+
+If the backup survives the reset, the reach question answers itself: the
+reset device reads the contact list, its reach grants and the group ids
+from the backup, writes to each contact and knocks on each group itself,
+and no mailbox derivable from the account id is needed.
+
+What opens the backup without the phrase is not decided. Three candidates
+were put to the maintainer and none was accepted:
+
+- a synced passkey enabled by default (ADR-0072 decision 6, opt-in today);
+  the operator learns nothing, but it rests on Apple / Google passkey sync
+  and fails a person who lost that account too;
+- a second wrap of the backup key under a key derived from the OPAQUE
+  export key (the password); the server never sees the key, but whoever
+  holds the auth database can guess the password offline at the cost of
+  one Argon2id per guess, so the backup is only as strong as the password;
+- the same password wrap over the social part only (contacts, groups,
+  channels, history keys, no identity seed), so a cracked password exposes
+  the conversations but cannot become the person.
+
+Three more were put the same day and rejected too: trusted contacts holding
+shares of the backup key with the person's PIN as a required extra share
+("guardians do not work in the real world"), a server-side enclave with a
+guess counter in the manner of Signal's SVR, and a password hardened by an
+OPRF split across independent operators. Handing history over from peers on
+re-admission was put beside them and is not chosen either.
+
+The constraint any answer has to meet: to open the backup without the
+phrase, the person must still hold something the operator does not, in
+their head, at a third party, with other people, or in hardware the
+operator cannot open; anything the person still holds that the operator
+also holds lets the operator open the backup.
+
+An email address cannot be a key factor without the server holding the key.
+Whatever is chosen must keep invariant #2 (no key material the server can
+use) and invariant #5 (the server must not read the contact list), amends
+ADR-0072 and ADR-0073, and is designed in its own ADR before this one is
+accepted.
 
 ## References
 

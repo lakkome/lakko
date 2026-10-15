@@ -8,7 +8,8 @@
 //! header signed with a key it was claimed under; this module hands the web
 //! client one [`DsProofSigner`] per journal per epoch (`Group.dsAccessSigner`
 //! / `DeviceGroup.dsAccessSigner` / `PublisherGroup.dsAccessSigner`, or
-//! [`ds_mailbox_signer`] for the device's own mailbox) and the two claim
+//! [`ds_mailbox_signer`] for the account's own mailbox, signed by its
+//! ADR-0078 mailbox key, never the identity key) and the two claim
 //! bodies, so `DsClient` neither derives a key nor spells a field name.
 //! `DsProofSigner.forReach(seed)` signs a write to someone else's closed
 //! mailbox under a reach key (ADR-0060 §2), and `signDelegation` hands one
@@ -136,16 +137,17 @@ impl DsProofSigner {
     }
 
     /// The JSON body of `PUT /ds/mailbox/{hex}/access` claiming the mailbox
-    /// a mailbox signer's identity key names.
+    /// a mailbox signer's key names: `{"mailbox_pk_b64": ...}` (ADR-0078).
     #[wasm_bindgen(js_name = mailboxClaimBodyJson)]
     pub fn mailbox_claim_body_json(&self) -> String {
         self.inner.mailbox_claim_body_json()
     }
 
-    /// The 32-byte pseudonym of the mailbox a mailbox signer's key names.
-    #[wasm_bindgen(js_name = mailboxPseudonym)]
-    pub fn mailbox_pseudonym(&self) -> Vec<u8> {
-        self.inner.mailbox_pseudonym().to_vec()
+    /// The 32-byte address of the mailbox a mailbox signer's key names
+    /// (ADR-0078): the path segment of `/ds/mailbox/{hex}/...`.
+    #[wasm_bindgen(js_name = mailboxAddress)]
+    pub fn mailbox_address(&self) -> Vec<u8> {
+        self.inner.mailbox_address().to_vec()
     }
 }
 
@@ -210,7 +212,7 @@ fn signed_delegation(
     let seed = <[u8; 32]>::try_from(issuer_seed)
         .map_err(|_| ("seedLength", "issuer seed", 32, issuer_seed.len()))?;
     let mailbox = <[u8; 32]>::try_from(mailbox)
-        .map_err(|_| ("keyLength", "mailbox pseudonym", 32, mailbox.len()))?;
+        .map_err(|_| ("keyLength", "mailbox address", 32, mailbox.len()))?;
     let delegate = <[u8; 32]>::try_from(delegate_pk)
         .map_err(|_| ("keyLength", "delegate key", 32, delegate_pk.len()))?;
     let nonce = <[u8; NONCE_LEN]>::try_from(nonce)
@@ -268,13 +270,14 @@ pub fn sign_delegation_blob(
         .map_err(|(code, what, want, got)| reach_len_refusal(code, what, want, got))
 }
 
-/// The signer for `identity`'s own mailbox: its identity key at
-/// `dsMailboxEpoch()`.
+/// The signer for the own mailbox of the account whose identity is
+/// `accountIdentity`: its **mailbox key** (ADR-0078, derived from the account
+/// seed; never the identity key) at `dsMailboxEpoch()`.
 #[wasm_bindgen(js_name = dsMailboxSigner)]
 #[must_use]
-pub fn ds_mailbox_signer(identity: &Identity) -> DsProofSigner {
+pub fn ds_mailbox_signer(account_identity: &Identity) -> DsProofSigner {
     DsProofSigner {
-        inner: Inner::for_mailbox(&identity.mls_identity().ed25519_seed_bytes()),
+        inner: Inner::for_account_mailbox(&account_identity.mls_identity().ed25519_seed_bytes()),
     }
 }
 
@@ -384,17 +387,20 @@ mod tests {
     }
 
     #[test]
-    fn the_mailbox_signer_names_the_identity_mailbox() {
+    fn the_mailbox_signer_names_the_accounts_mailbox_with_the_mailbox_key() {
         let identity = MlsIdentity::generate("m").unwrap();
-        let expected = Inner::for_mailbox(&identity.ed25519_seed_bytes());
+        let expected = Inner::for_account_mailbox(&identity.ed25519_seed_bytes());
         let signer = DsProofSigner {
             inner: expected.clone(),
         };
         assert_eq!(signer.epoch(), ds_mailbox_epoch());
         assert_eq!(
-            signer.mailbox_pseudonym(),
-            expected.mailbox_pseudonym().to_vec()
+            signer.mailbox_address(),
+            expected.mailbox_address().to_vec()
         );
+        let mailbox = lakko_ds_proof::MailboxKey::from_account_seed(&identity.ed25519_seed_bytes());
+        assert_eq!(signer.verifying_key(), mailbox.public().to_vec());
+        assert_eq!(signer.mailbox_address(), mailbox.address().to_vec());
         assert_eq!(ds_proof_header_name(), "x-lakko-ds-proof");
     }
 }

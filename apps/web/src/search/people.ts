@@ -89,9 +89,13 @@ export interface PersonResult {
   /** A VERIFIED username, already passed through `shownUsername`. */
   readonly username: string | null;
   readonly reach: PersonReach;
-  /** For `grant`: the 37-byte grant wire (standard base64) the reach check
+  /** For `grant`: the 134-byte grant wire (standard base64) the reach check
    *  and the request are signed with. Secret. */
   readonly grantWireB64: string | null;
+  /** For `open`: the person's 97-byte mailbox binding from their public
+   *  record (standard base64; ADR-0078), where an unsigned request goes.
+   *  Verified against their key before any write. Absent when not known. */
+  readonly openBindingB64?: string;
 }
 
 /**
@@ -207,6 +211,9 @@ export function mergePeople(
         reach,
         grantWireB64:
           reach === "grant" ? (stronger.grantWireB64 ?? held.grantWireB64 ?? p.grantWireB64) : null,
+        ...(reach === "open" && (held.openBindingB64 ?? p.openBindingB64) !== undefined
+          ? { openBindingB64: (held.openBindingB64 ?? p.openBindingB64)! }
+          : {}),
       });
     }
   }

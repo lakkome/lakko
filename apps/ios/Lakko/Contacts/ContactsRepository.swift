@@ -254,6 +254,7 @@ public final class ContactsRepository: ObservableObject {
             senderSigningSeed: identity.ed25519Seed(),
             senderAccountId: secrets.accountId,
             senderSignaturePubkey: identity.signaturePublicKey(),
+            senderMailboxAddress: MailboxKey.fromAccountIdentity(accountIdentity: identity).address(),
             recipientUsername: recipientUsername,
             profile: ProfileDirectory.shared.ownProfileForRequest(),
             introMessage: Data(introMessage.utf8),
@@ -307,7 +308,7 @@ public final class ContactsRepository: ObservableObject {
             recipientSignaturePubkey: bundle.signaturePubkey,
             recipientX25519Pubkey: bundle.x25519Pubkey,
             introMessage: Data(introMessage.utf8),
-            linkSeed: person.writeSeed)
+            link: person.mailbox.map { RequestLink(seed: person.writeSeed, target: $0) })
         guard bound.isCurrent else { return result }
         state = state.with(sent: SentRequests.adding(
             SentContactRequest(
@@ -335,7 +336,7 @@ public final class ContactsRepository: ObservableObject {
         recipientSignaturePubkey: Data,
         recipientX25519Pubkey: Data,
         introMessage: Data,
-        linkSeed: Data?
+        link: RequestLink?
     ) async throws -> SendResult {
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         func send(reach: ContactRequestReach) async throws -> SendResult {
@@ -343,6 +344,7 @@ public final class ContactsRepository: ObservableObject {
                 senderSigningSeed: identity.ed25519Seed(),
                 senderAccountId: secrets.accountId,
                 senderSignaturePubkey: identity.signaturePublicKey(),
+                senderMailboxAddress: MailboxKey.fromAccountIdentity(accountIdentity: identity).address(),
                 recipientAccountId: recipientAccountId,
                 recipientSignaturePubkey: recipientSignaturePubkey,
                 recipientX25519Pubkey: recipientX25519Pubkey,
@@ -351,7 +353,7 @@ public final class ContactsRepository: ObservableObject {
                 reach: reach)
         }
         do {
-            return try await send(reach: Self.requestReach(linkSeed: linkSeed))
+            return try await send(reach: Self.requestReach(link: link))
         } catch ContactsError.requestRefused {
             await PersonAddressRecheck.recheck(
                 accountKey: recipientSignaturePubkey, accountIdHint: recipientAccountId)
@@ -377,11 +379,9 @@ public final class ContactsRepository: ObservableObject {
             identityKey: { accountId in
                 try await factory().resolveVerifiedBundle(accountId: accountId).signaturePubkey
             },
-            reachCheck: { accountKey, seed in
-                // ADR-0074 section 3.5a rule 1 — resolved before addressing.
-                let current = await MainActor.run { ReachCenter.shared.currentAccountKey(of: accountKey) }
-                let mailbox = try IdentityPseudonym.fromIdentity(pubkey: current).asBytes()
-                return try await DsClient().reachCheck(pseudonym: mailbox, reachSeed: seed)
+            reachCheck: { target, seed in
+                // ADR-0078 — the mailbox the result's verified binding names.
+                try await DsClient().reachCheck(pseudonym: target.address, reachSeed: seed)
             },
             verifyCertificate: { cert, lookupKey, accountId in
                 await ProfileDirectory.shared.verifyCertificate(
@@ -399,17 +399,28 @@ public final class ContactsRepository: ObservableObject {
 
     /// ADR-0060 section 6 — an outgoing request carries a fresh `reply` grant
     /// (registered first, retired when the recipient answers) and is written
-    /// with whatever grant this device holds for the recipient. `linkSeed` is
-    /// a link grant used for this one request and never kept.
-    static func requestReach(linkSeed: Data? = nil) -> ContactRequestReach {
+    /// with whatever grant this device holds for the recipient. `link` is a
+    /// mailbox the request found its recipient through (a link grant, a
+    /// search result's record, with the seed that opens it or none for an
+    /// Everyone mailbox), used for this one request and never kept.
+    ///
+    /// ADR-0078 — the mailbox is the VERIFIED one the link or a held grant
+    /// names; with neither nothing is sent.
+    static func requestReach(link: RequestLink? = nil) -> ContactRequestReach {
         ContactRequestReach(
             replyGrant: { recipientAccountId in
                 try await ReachCenter.shared.newReplyGrant(
                     purpose: ReplyPurpose.contact(recipientAccountId))
             },
-            writeAuth: { recipientKey in
-                if let linkSeed { return DsMailboxWriteAuth(reachSeed: linkSeed) }
-                return ReachCenter.shared.writeAuth(toAccountKey: recipientKey)
+            plan: { recipientKey in
+                if let link {
+                    return MailboxWritePlan(
+                        target: link.target,
+                        candidates: link.seed.map { [DsMailboxWriteAuth(reachSeed: $0)] } ?? [])
+                }
+                return await MainActor.run {
+                    ReachCenter.shared.writePlan(toAccountKey: recipientKey)
+                }
             })
     }
 
@@ -491,18 +502,17 @@ public final class ContactsRepository: ObservableObject {
         // say so.
         let welcomeJoinFailure: String? = nil
         // ADR-0060 section 6 — one inbound mailbox per person: every Welcome,
-        // for any of this account's devices, lands in the ACCOUNT mailbox. The
-        // device mailbox stays claimed and closed and is no longer polled.
+        // for any of this account's devices, lands in the ACCOUNT mailbox.
+        // ADR-0078 — device mailboxes are gone (none is claimed or read).
         do {
             let client = clientFactory()
             let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+            // ADR-0053 / ADR-0078 — the account mailbox is named by the
+            // account's mailbox key, derived from its seed.
             let pollResult = try await client.pollStrangerInbox(
-                mySignaturePubkey: identity.signaturePublicKey(),
-                myX25519Secret: identity.x25519SecretKey(),
+                accountIdentity: identity,
                 after: state.cursor,
-                waitSecs: waitSecs,
-                // ADR-0053 — the account mailbox is named by the account key.
-                mailboxSigner: dsMailboxSigner(identity: identity)
+                waitSecs: waitSecs
             )
             // ADR-0073 R.3 — the requests that were waiting, unshown, for an
             // identity verdict are judged again first; one whose sender is no
@@ -712,12 +722,12 @@ public final class ContactsRepository: ObservableObject {
                 keysB64: [keyB64], accountIdB64: accountIdB64, nowMs: now, adoptions: adoptions
             ).isEmpty else { continue }
             do {
+                // ADR-0078 — the predecessor mailbox is the mailbox key of
+                // the predecessor SEED.
                 let result = try await clientFactory().pollStrangerInbox(
-                    mySignaturePubkey: identity.signaturePublicKey(),
-                    myX25519Secret: identity.x25519SecretKey(),
+                    accountIdentity: identity,
                     after: cursors.cursor(accountIdB64: accountIdB64, keyB64: keyB64),
-                    waitSecs: 0,
-                    mailboxSigner: dsMailboxSigner(identity: identity)
+                    waitSecs: 0
                 )
                 guard boundAccountIdB64 == accountIdB64 else { return }
                 for event in result.events {
@@ -831,7 +841,7 @@ public final class ContactsRepository: ObservableObject {
     /// it on the contact record. Mirror of the web `foundOneToOneWith`.
     ///
     /// The creation itself is the one call every contact flow makes
-    /// (``ChatRepository/startGroupWith(recipientAccountId:recipientSignaturePubkey:kind:recipientWriteAuth:)``
+    /// (``ChatRepository/startGroupWith(recipientAccountId:recipientSignaturePubkey:kind:recipientPlan:)``
     /// with the one-to-one kind, as Accept and the invite-link accept do):
     /// ADR-0062, a contact's conversation is a one-to-one for good. This adds
     /// the link, for a caller whose contact is already in the accepted list:
@@ -1130,9 +1140,7 @@ public final class ContactsRepository: ObservableObject {
         // same proven-predecessor store the re-check writes).
         return try await RefusedMailboxWrite.write(
             resolve: {
-                AckAttempt(
-                    accountKey: ReachCenter.shared.currentAccountKey(of: request.fromPubkey),
-                    auth: ReachCenter.shared.writeAuth(toAccountKey: request.fromPubkey))
+                AckAttempt(plan: ReachCenter.shared.writePlan(toAccountKey: request.fromPubkey))
             },
             recheck: {
                 await PersonAddressRecheck.recheck(
@@ -1144,14 +1152,13 @@ public final class ContactsRepository: ObservableObject {
                     accepterAccountId: secrets.accountId,
                     accepterX25519Pubkey: identity.x25519PublicKey(),
                     originalRequest: request,
-                    writeAuth: attempt.auth)
+                    plan: attempt.plan)
             })
     }
 
     /// One attempt at an ack: who it is addressed to and how it is signed.
     private struct AckAttempt: Equatable {
-        let accountKey: Data
-        let auth: DsMailboxWriteAuth?
+        let plan: MailboxWritePlan?
     }
 
     /// Compute the Signal-style safety number (Phase 1.9b3 —
@@ -1453,7 +1460,7 @@ public final class ContactsRepository: ObservableObject {
                     recipientAccountId: recipient,
                     recipientSignaturePubkey: bundle.signaturePubkey,
                     recipientX25519Pubkey: bundle.x25519Pubkey,
-                    introMessage: Data(intro.utf8), linkSeed: nil)
+                    introMessage: Data(intro.utf8), link: nil)
                 replacement = SentContactRequest(
                     recipientUsername: "", recipientAccountIdB64: base64Encode(recipient),
                     messageId: result.messageId, createdAt: result.createdAt, intro: intro)
@@ -1646,6 +1653,13 @@ public final class ContactsRepository: ObservableObject {
         let inviterAccountId = capability.ownerAccountId()
         let inviterSigPubkey = capability.ownerSignaturePubkey()
         let inviterX25519Pubkey = capability.ownerX25519Pubkey()
+        // ADR-0078 — the link grant carries the owner's mailbox binding (the
+        // core verified it against the owner's key when the capability
+        // opened); verified again here against the key the request is sealed
+        // to, so the request and the Welcome go to the mailbox the owner reads.
+        let linkGrant = capability.linkGrant()
+        let inviteLink = MailboxTarget.verifiedOrNil(grant: linkGrant, accountKey: inviterSigPubkey)
+            .map { RequestLink(seed: linkGrant.seed, target: $0) }
 
         // The link carries its owner's keys and this flow never fetches the
         // bundle, so it never passes the pin gate. Ask the same question of
@@ -1716,7 +1730,7 @@ public final class ContactsRepository: ObservableObject {
                 recipientSignaturePubkey: inviterSigPubkey,
                 recipientX25519Pubkey: inviterX25519Pubkey,
                 introMessage: Data(),
-                linkSeed: capability.linkGrant().seed)
+                link: inviteLink)
         } catch {
             return .failed(
                 message: (error as? LocalizedError)?.errorDescription
@@ -1739,8 +1753,11 @@ public final class ContactsRepository: ObservableObject {
                     recipientAccountId: inviterAccountId,
                     recipientSignaturePubkey: inviterSigPubkey,
                     kind: .oneToOne,
-                    recipientWriteAuth: DsMailboxWriteAuth(
-                        reachSeed: capability.linkGrant().seed)
+                    recipientPlan: inviteLink.map {
+                        MailboxWritePlan(
+                            target: $0.target,
+                            candidates: $0.seed.map { [DsMailboxWriteAuth(reachSeed: $0)] } ?? [])
+                    }
                 )
             } catch {
                 groupIdHex = nil
@@ -2143,5 +2160,18 @@ public enum ContactRekey {
             }
         }
         return out
+    }
+}
+
+/// ADR-0078 — a mailbox a contact request found its recipient through (a link
+/// grant, a search result's record), VERIFIED, with the reach seed that opens
+/// it (`nil` for an Everyone mailbox, written with a `mailbox-write` token).
+public struct RequestLink: Equatable {
+    public let seed: Data?
+    public let target: MailboxTarget
+
+    public init(seed: Data?, target: MailboxTarget) {
+        self.seed = seed
+        self.target = target
     }
 }

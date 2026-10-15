@@ -408,10 +408,13 @@ public struct SweepPorts {
     public var journal: SweepJournalPort
     public var outbox: SweepOutboxPort
     public var cursor: SweepCursorRef
-    /// Derive a member's mailbox pseudonym from their 32-byte signature key.
+    /// The mailbox address a member's Welcome is recorded under, from their
+    /// 32-byte signature key (ADR-0078: a verified mailbox when one is
+    /// known, else the key itself, resolved once the sweep merged).
     public var welcomeMailbox: (Data) throws -> Data
-    /// Wrap the raw Welcome in the stranger-inbox envelope the recipient's
-    /// mailbox poll expects (`wrapEnvelope(kind: .welcome, body:)`).
+    /// The bytes recorded for the Welcome. ADR-0078: the raw Welcome; the
+    /// publish port seals it as a `.welcome` mailbox row to the verified
+    /// mailbox at publish time.
     public var wrapWelcome: (Data) -> Data
     /// Echo-suppress a row this device published, so its own next poll drops it
     /// instead of hitting `CannotDecryptOwnMessage`.

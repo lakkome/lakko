@@ -207,7 +207,10 @@ public enum StateBundle {
             return nil
         }
         let accountId = carried.accountIdHex.flatMap { hexDecode($0) }.flatMap { $0.count == 16 ? $0 : nil }
-        let pseudonym = (try? IdentityPseudonym.fromIdentity(pubkey: pubkey).asBytes()) ?? Data()
+        // A carried contact is already accepted: its request routes nothing
+        // (ADR-0078: no mailbox is derived from an identity key), so the
+        // pseudonym slot carries zeros, as a restored contact's does.
+        let pseudonym = Data(count: 32)
         var id: UInt64 = 0
         for byte in pubkey.prefix(7) { id = (id << 8) | UInt64(byte) }
         let createdAt = ISO8601DateFormatter().string(

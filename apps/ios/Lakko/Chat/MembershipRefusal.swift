@@ -457,7 +457,9 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 // ADR-0075 the email vault and the recovery-email address.
                 .EmailVaultNotOpened, .EmailVault, .RecoveryEmail,
                 // The conversation-backup vault (main's ADR-0064).
-                .Vault:
+                .Vault,
+                // ADR-0078 sealed mailbox rows and bindings.
+                .Mailbox:
                 return nil
             }
         }

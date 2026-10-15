@@ -16,7 +16,7 @@ import uniffi.lakko_ffi_uniffi.FfiReachGrant
  *  whose tags are `"tag:" + output` and whose records open under one output. */
 class IntroductionsTest {
 
-    private val fof = FfiReachGrant(FfiReachClass.FOF, 1u, ByteArray(32) { 7 })
+    private val fof = FfiReachGrant(FfiReachClass.FOF, 1u, ByteArray(32) { 7 }, ByteArray(97) { 8 })
 
     private fun payload(withGrant: Boolean = true) = FfiIntroductionPayload(
         identityPk = ByteArray(32) { 1 },
@@ -25,6 +25,7 @@ class IntroductionsTest {
         username = "anna",
         usernameCertificate = null,
         fof = if (withGrant) fof else null,
+        mailboxBinding = ByteArray(97) { 8 },
     )
 
     /** record name -> (the one output it opens under, what it opens to, or a

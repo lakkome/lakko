@@ -2,23 +2,24 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0053 contract points 1 + 2 for the device's OWN mailboxes.
+ * ADR-0053 contract points 1 + 2 for the account's OWN mailboxes.
  *
- * A session holds two identities (ADR-0050): the phrase-seeded ACCOUNT
- * identity, whose mailbox receives contact requests and acks, and the DEVICE
- * identity, whose mailbox receives the Welcomes sealed to this device's
- * KeyPackages. Each mailbox is named after its identity key, and since
- * ADR-0053 a claimed one answers a read only when it is proven under that key.
+ * ADR-0078: a person has ONE inbound mailbox, named after the account's
+ * MAILBOX key (derived from the account seed, so every device of the account
+ * derives the same key and address), and a claimed one answers a read only
+ * when it is proven under that key. There is no device mailbox any more:
+ * nothing claims or reads one. The mailboxes of own predecessor keys (after
+ * an ADR-0074 rotation) are read too, each derived from its own seed.
  *
- * `installMailboxAccess` is called whenever either identity is set (every
+ * `installMailboxAccess` is called whenever an account identity is set (every
  * session landing: login, signup, restore, recover, guest) and:
  *
  *   1. installs the identity's mailbox signer in the registry, so the DS client
  *      signs reads of that mailbox, and drops the signer of the identity it
  *      replaced;
- *   2. claims the mailbox (`PUT /ds/mailbox/<hex>/access`), fired and not
- *      awaited: a failed claim is logged and retried by the next refused read,
- *      and never blocks the UI.
+ *   2. claims the mailbox (`PUT /ds/mailbox/<hex>/access`, body
+ *      `{"mailbox_pk_b64"}`), fired and not awaited: a failed claim is logged
+ *      and retried by the next refused read, and never blocks the UI.
  */
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { loadWasm } from "../wasm";
@@ -28,11 +29,11 @@ import { DsClient } from "./client";
 /** `predecessor` (ADR-0074 section 3.5): the mailbox of the account key the
  *  conversation leaves are still bound to after a proven key rotation. It is
  *  read for as long as leaves name it. */
-type Slot = "account" | "device" | "predecessor";
+type Slot = "account" | "predecessor";
 
-const SLOTS: readonly Slot[] = ["account", "device", "predecessor"];
-const installed: Record<Slot, string | null> = { account: null, device: null, predecessor: null };
-const generation: Record<Slot, number> = { account: 0, device: 0, predecessor: 0 };
+const SLOTS: readonly Slot[] = ["account", "predecessor"];
+const installed: Record<Slot, string | null> = { account: null, predecessor: null };
+const generation: Record<Slot, number> = { account: 0, predecessor: 0 };
 
 /** ADR-0074 section 3.5a - the mailboxes of the INTERMEDIATE own
  *  predecessors (the keys held between two rotations), read inside their own
@@ -51,16 +52,17 @@ function dropSlot(slot: Slot): void {
   const hex = installed[slot];
   installed[slot] = null;
   if (hex === null) return;
-  // The device identity falls back to a second instance of the account seed
-  // when no device key exists, so both slots can name one mailbox: keep the
-  // signer while the other slot still uses it.
+  // A predecessor and the chain can name one mailbox for a moment during a
+  // rotation: keep the signer while another slot still uses it.
   if (stillUsed(hex, slot)) return;
   dsAccess.dropMailbox(hex);
 }
 
 /**
  * Install (or, with `null`, remove) the mailbox signer of one of the session's
- * identities, and claim that mailbox. Never throws.
+ * ACCOUNT identities (the current one or the conversation predecessor), and
+ * claim that mailbox. Never pass a device identity: ADR-0078 removed device
+ * mailboxes. Never throws.
  */
 export function installMailboxAccess(slot: Slot, identity: WasmIdentity | null): void {
   generation[slot] += 1;
@@ -77,7 +79,7 @@ export function installMailboxAccess(slot: Slot, identity: WasmIdentity | null):
       installed[slot] = dsAccess.setMailboxSigner(signer);
       // `claimMailbox` takes the registry's own signer by reference; it is
       // used synchronously inside the call, before any await.
-      const held = dsAccess.mailboxSigner(signer.mailboxPseudonym());
+      const held = dsAccess.mailboxSigner(signer.mailboxAddress());
       if (held === null) return;
       await new DsClient().claimMailbox(held);
     } catch (err) {
@@ -109,7 +111,7 @@ export function installPredecessorChainAccess(identities: readonly WasmIdentity[
         if (chainGeneration !== mine) return;
         const signer = wasm.dsMailboxSigner(identity);
         chainInstalled.push(dsAccess.setMailboxSigner(signer));
-        const held = dsAccess.mailboxSigner(signer.mailboxPseudonym());
+        const held = dsAccess.mailboxSigner(signer.mailboxAddress());
         if (held === null) continue;
         try {
           await new DsClient().claimMailbox(held);

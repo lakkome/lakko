@@ -93,7 +93,8 @@ class DsClientTest {
                 headers = headersOf(HttpHeaders.ContentType, "application/json"),
             )
         }
-        return DsClient(baseUrl = "http://test.invalid", engine = engine)
+        // ADR-0078: a proofless mailbox write spends a `mailbox-write` token.
+        return DsClient(baseUrl = "http://test.invalid", engine = engine, anonTokens = me.lakko.app.anon.FakeAnonTokenSource())
     }
 
     // ===================================================================

@@ -695,11 +695,16 @@ mod rename_tests {
             let mut body = json!({ "public": public });
             if public {
                 let payload = IntroductionPayload {
-                    identity_pk: [7; 32],
+                    identity_pk: lakko_crypto::signing::SigningKey::from_seed(&[7; 32])
+                        .verifying_key()
+                        .to_bytes(),
                     account_id: account,
                     display_name: Some("Anna Weber".to_string()),
                     username: None,
                     username_certificate: None,
+                    mailbox_binding: lakko_contacts::mailbox::MailboxBinding::for_account_seed(
+                        &[7; 32],
+                    ),
                     fof: None,
                 };
                 let record = compose_public_record(&payload, &[random::<64>()], 1).unwrap();

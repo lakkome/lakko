@@ -42,7 +42,9 @@ public interface SendDeps {
      *  of [publishedKey] ([PeopleSearchDeps.isProvenPredecessor]). */
     public fun isProvenPredecessor(foundKey: ByteArray, publishedKey: ByteArray): Boolean = false
 
-    public suspend fun sendByUsername(username: String, intro: ByteArray, grantWireB64: String?)
+    /** [bindingB64] (ADR-0078) is the mailbox binding a public record
+     *  carried, for a person found in Everyone. */
+    public suspend fun sendByUsername(username: String, intro: ByteArray, grantWireB64: String?, bindingB64: String?)
 
     public suspend fun sendToBundle(
         accountId: ByteArray,
@@ -50,6 +52,7 @@ public interface SendDeps {
         x25519Pub: ByteArray,
         intro: ByteArray,
         grantWireB64: String?,
+        bindingB64: String?,
     )
 
     /** Whether a send failure means the person can no longer be reached this
@@ -81,7 +84,7 @@ public suspend fun sendFoundRequest(person: PersonResult, intro: ByteArray, deps
         }
         val username = person.username
         if (person.reach == PersonReach.OPEN && username != null) {
-            deps.sendByUsername(username, intro, grant)
+            deps.sendByUsername(username, intro, grant, person.mailboxBindingB64)
             return SendOutcome.Sent
         }
         val accountId = hexToBytes(accountIdHex) ?: return SendOutcome.Refused
@@ -93,7 +96,7 @@ public suspend fun sendFoundRequest(person: PersonResult, intro: ByteArray, deps
         if (bundle == null || !foundKeyIsPublished(key, bundle.signaturePub, deps::isProvenPredecessor)) {
             return SendOutcome.Refused
         }
-        deps.sendToBundle(accountId, bundle.signaturePub, bundle.x25519Pub, intro, grant)
+        deps.sendToBundle(accountId, bundle.signaturePub, bundle.x25519Pub, intro, grant, person.mailboxBindingB64)
         SendOutcome.Sent
     } catch (cancel: CancellationException) {
         throw cancel

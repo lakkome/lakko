@@ -1167,10 +1167,10 @@ public final class ChatRepository: ObservableObject {
     ///      produces a `(commit, welcome)` pair. Per MLS the
     ///      commit would be broadcast, but our group is
     ///      one-of-one before this call, so we drop it.
-    ///   4. Wrap the welcome with `.welcome` kind and post it to
-    ///      the recipient's stranger inbox via
-    ///      ``DsClient/publishMailbox(pseudonym:payload:)`` keyed
-    ///      by `IdentityPseudonym.fromIdentity(pubkey:)`.
+    ///   4. Seal the welcome as a `.welcome` mailbox row (ADR-0078) to
+    ///      the recipient's VERIFIED mailbox (a grant's or a link's
+    ///      binding) and post it via
+    ///      ``DsClient/publishMailbox(pseudonym:payload:writeAuth:)``.
     ///   5. Persist the MLS snapshot.
     ///
     /// Returns the new group's hex id so the caller can hand it
@@ -1184,7 +1184,7 @@ public final class ChatRepository: ObservableObject {
         recipientAccountId: Data,
         recipientSignaturePubkey: Data,
         kind: GroupKind,
-        recipientWriteAuth: DsMailboxWriteAuth? = nil
+        recipientPlan: MailboxWritePlan? = nil
     ) async throws -> String {
         guard let identity = canonicalIdentity else {
             throw ChatError.argument(
@@ -1200,6 +1200,14 @@ public final class ChatRepository: ObservableObject {
         // group founded under it must never be filed into the next account's
         // list, nor claimed and announced once its account has signed out.
         let bound = binding.capture()
+        // ADR-0078 — the Welcome goes to the recipient's VERIFIED mailbox (the
+        // link's or a held grant's binding). With none known nothing is
+        // created: there is no address to derive any more.
+        guard let recipientTarget = recipientPlan
+                ?? ReachCenter.shared.writePlan(toAccountKey: recipientSignaturePubkey) else {
+            NSLog("ADR-0078: no verified mailbox for the recipient; the chat was not created")
+            throw ChatError.wrapped("no mailbox known for the recipient", underlying: MailboxUnknown())
+        }
         // ADR-0073 R.2 / ADR-0074 3.5 — the identity gate for the account,
         // then only the devices bound to the key the caller expects this
         // person to have or a proven predecessor of it
@@ -1264,10 +1272,9 @@ public final class ChatRepository: ObservableObject {
         // Welcome goes to each added ACCOUNT's mailbox (the recipient's, and
         // this account's own when it has other devices), one write per
         // account, signed with the grant that reaches it.
-        let welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
-        var targets: [(accountKey: Data, auth: DsMailboxWriteAuth?)] = [
-            (recipientSignaturePubkey,
-             recipientWriteAuth ?? ReachCenter.shared.writeAuth(toAccountKey: recipientSignaturePubkey))
+        let welcome = addResult.welcome
+        var targets: [(accountKey: Data, plan: MailboxWritePlan?)] = [
+            (recipientSignaturePubkey, recipientTarget)
         ]
         // ADR-0074 section 3.5a rule 1 — each account key is resolved before
         // its mailbox is derived: a contact stored under a key they have
@@ -1277,7 +1284,7 @@ public final class ChatRepository: ObservableObject {
         if devices.count > recipientDevices.count,
            let own = ReachCenter.shared.ownAccountKey,
            !ReachCenter.shared.keyResolver.samePerson(own, recipientSignaturePubkey) {
-            targets.append((own, ReachCenter.shared.writeAuth(toAccountKey: own)))
+            targets.append((own, ReachCenter.shared.writePlan(toAccountKey: own)))
         }
 
         let groupId = try group.groupId()
@@ -1293,7 +1300,7 @@ public final class ChatRepository: ObservableObject {
         do {
             for target in targets {
                 try await deliverWelcome(
-                    welcomeEnvelope: welcomeEnvelope, toAccountKey: target.accountKey, auth: target.auth)
+                    welcome: welcome, toAccountKey: target.accountKey, plan: target.plan)
                 delivered += 1
                 try bound.require()
             }
@@ -1333,23 +1340,28 @@ public final class ChatRepository: ObservableObject {
         return groupIdHex
     }
 
-    /// Write one Welcome envelope to one account's mailbox.
+    /// Write one Welcome to one account's mailbox, as a sealed `.welcome`
+    /// row (ADR-0078) to the verified mailbox `plan` names (a link's, handed
+    /// in by the caller) or, when the caller has none, the one a held grant
+    /// names. No mailbox known: nothing is written, and it throws.
     ///
     /// ADR-0074 section 3.5a rule 6 — a refused Welcome re-checks the
     /// person's address once. After the re-check a grant held for the person
     /// goes first: one the caller handed in (a link's) opened the mailbox it
     /// was issued for only.
     func deliverWelcome(
-        welcomeEnvelope: Data, toAccountKey accountKey: Data, auth: DsMailboxWriteAuth?
+        welcome: Data, toAccountKey accountKey: Data, plan: MailboxWritePlan?
     ) async throws {
         do {
             var rechecked = false
             _ = try await RefusedMailboxWrite.write(
                 resolve: { [self] in
-                    let held = ReachCenter.shared.writeAuth(toAccountKey: accountKey)
-                    return MailboxWriteAttempt(
-                        mailbox: try resolvedMailbox(ofAccountKey: accountKey),
-                        auth: rechecked ? (held ?? auth) : auth)
+                    let held = ReachCenter.shared.writePlan(toAccountKey: accountKey)
+                    guard let chosen = rechecked ? (held ?? plan) : (plan ?? held) else {
+                        NSLog("ADR-0078: no verified mailbox for a Welcome; it was not written")
+                        throw MailboxUnknown()
+                    }
+                    return MailboxWriteAttempt(target: chosen.target, auth: chosen.auth)
                 },
                 recheck: { [self] in
                     rechecked = true
@@ -1359,8 +1371,8 @@ public final class ChatRepository: ObservableObject {
                 },
                 publish: { [self] attempt in
                     try await dsClient.publishMailbox(
-                        pseudonym: attempt.mailbox,
-                        payload: welcomeEnvelope,
+                        pseudonym: attempt.target.address,
+                        payload: try attempt.target.seal(kind: .welcome, body: welcome),
                         writeAuth: attempt.auth
                     )
                 })
@@ -3058,7 +3070,10 @@ public final class ChatRepository: ObservableObject {
                 // the new member's stranger inbox, addressed by their pubkey
                 // pseudonym.
                 let entryId = newOutboxEntryId()
-                let welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
+                // ADR-0078 — the outbox keeps the raw Welcome and the ADDRESS
+                // it goes to; the row is sealed at publish time to the
+                // verified mailbox the address resolves to.
+                let welcomeEnvelope = addResult.welcome
                 let recipientPseudonym: Data
                 do {
                     // ADR-0060 section 6 (amending ADR-0050 2.7) — the Welcome
@@ -3067,11 +3082,16 @@ public final class ChatRepository: ObservableObject {
                     // ADR-0074 section 3.5a rule 1 — the binding names the key
                     // the leaf was bound under, which a proven rotation left
                     // behind: the mailbox is the CURRENT key's.
+                    // ADR-0078 — the mailbox is the verified one a grant held
+                    // for that person names; with none, nothing is committed.
                     let accountKey = try keyPackageAccountKey(keyPackage: keyPackageBytes)
                         ?? keyPackageSignatureKey(keyPackage: keyPackageBytes)
-                    recipientPseudonym = try resolvedMailbox(ofAccountKey: accountKey)
+                    guard let target = ReachCenter.shared.writePlan(toAccountKey: accountKey)?.target else {
+                        throw MailboxUnknown()
+                    }
+                    recipientPseudonym = target.address
                 } catch {
-                    throw ChatError.wrapped("IdentityPseudonym derivation failed", underlying: error)
+                    throw ChatError.wrapped("no verified mailbox for the added member", underlying: error)
                 }
                 // Persist the outbox entry (commit + Welcome, BOTH artifacts) +
                 // the N+1 snapshot BEFORE any publish, FAIL-CLOSED. A throw
@@ -6168,7 +6188,7 @@ public final class ChatRepository: ObservableObject {
     }
 
     /// A founder's state, written before its Welcome is published
-    /// (``startGroupWith(recipientAccountId:recipientSignaturePubkey:kind:recipientWriteAuth:)``):
+    /// (``startGroupWith(recipientAccountId:recipientSignaturePubkey:kind:recipientPlan:)``):
     /// the MLS snapshot holding the new group, durably, then the group's row
     /// in the known groups, so the next start of the account loads it.
     /// Throws when either is refused or fails, or when no account is bound
@@ -6858,16 +6878,23 @@ public final class ChatRepository: ObservableObject {
             // recorded and resolved through the roster once the sweep merged
             // (``publishSweepWelcome``).
             welcomeMailbox: { [weak self] key in
-                if let self, let accountKey = self.resolveAddedAccountKey(record: record, leafKey: key) {
-                    // ADR-0074 section 3.5a rule 1 — resolved before addressing.
-                    return try self.resolvedMailbox(ofAccountKey: accountKey)
+                // ADR-0074 section 3.5a rule 1 / ADR-0078 — resolved before
+                // addressing, to the verified mailbox a grant held for the
+                // person names. With none known yet the leaf key is recorded
+                // and resolved through the roster once the sweep merged.
+                if let self, let accountKey = self.resolveAddedAccountKey(record: record, leafKey: key),
+                   let target = ReachCenter.shared.writePlan(toAccountKey: accountKey)?.target {
+                    return target.address
                 }
                 return key
             },
             // ADR-0053 point 8 — every added leaf, a `/g/` joiner included, gets
             // its Welcome in its own mailbox; no `WelcomeRendezvous` is written
             // to the group journal any more.
-            wrapWelcome: { welcome in wrapEnvelope(kind: .welcome, body: welcome) },
+            // ADR-0078 — the Welcome is recorded raw; it is sealed as a
+            // `.welcome` row at publish time, to the verified mailbox
+            // (``publishSweepWelcome``).
+            wrapWelcome: { welcome in welcome },
             markOwnPublished: { [weak self] id in
                 guard bound.isCurrent else { return }
                 self?.chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: id)
@@ -8360,16 +8387,6 @@ public final class ChatRepository: ObservableObject {
         return senderKey != AuthorIdentity.own(group: record.group)
     }
 
-    /// ADR-0074 section 3.5a rule 1 — the mailbox of the person holding
-    /// `accountKey`: the key is resolved through the proven-predecessor
-    /// resolver first (this account's own old keys included), so a key left
-    /// behind by a PROVEN rotation addresses the current key's mailbox. An
-    /// unproven change is in no map and resolves to itself.
-    func resolvedMailbox(ofAccountKey accountKey: Data) throws -> Data {
-        try IdentityPseudonym
-            .fromIdentity(pubkey: ReachCenter.shared.currentAccountKey(of: accountKey)).asBytes()
-    }
-
     /// An added leaf's account key, when this device can tell before the
     /// merge: a pending `/g/` joiner's retained KeyPackage, or a KeyPackage it
     /// fetched itself.
@@ -8408,15 +8425,15 @@ public final class ChatRepository: ObservableObject {
         let memberAccountKey = (try? record.group.members())?
             .first(where: { $0.signaturePublicKey == target })?.accountKey
         func resolve() throws -> SweepWelcomeAttempt {
-            var pseudonym = ReachCenter.shared.currentMailbox(for: target)
-            if let memberAccountKey { pseudonym = try resolvedMailbox(ofAccountKey: memberAccountKey) }
-            return SweepWelcomeAttempt(
-                mailbox: pseudonym,
-                candidates: ReachCenter.shared.writeAuthCandidates(
-                    toMailbox: pseudonym, groupIdHex: groupIdHex))
+            let plan = memberAccountKey.flatMap {
+                ReachCenter.shared.writePlan(toAccountKey: $0, groupIdHex: groupIdHex)
+            } ?? ReachCenter.shared.writePlan(toMailbox: target, groupIdHex: groupIdHex)
+            // ADR-0078 — no verified mailbox, no write: the Welcome stays
+            // owed (``SweepWelcomeUndeliverable`` with no key tried).
+            return SweepWelcomeAttempt(target: plan?.target, candidates: plan?.candidates ?? [])
         }
         let digest = base64Encode(Data(SHA256.hash(data: bytes)))
-        let dedupe = digest + "|" + base64Encode(try resolve().mailbox)
+        let dedupe = digest + "|" + base64Encode(try resolve().mailbox ?? target)
         guard sweepWelcomeWrites.insert(dedupe).inserted else { return 0 }
         do {
             let client = dsClient
@@ -8438,14 +8455,18 @@ public final class ChatRepository: ObservableObject {
                     }
                 },
                 publish: { attempt in
+                    guard let mailboxTarget = attempt.target else {
+                        throw SweepWelcomeUndeliverable(triedKeys: 0)
+                    }
+                    let row = try mailboxTarget.seal(kind: .welcome, body: bytes)
                     let id = try await deliverSweepWelcome(
                         candidates: attempt.candidates,
                         publish: { auth in
                             try await client.publishMailbox(
-                                pseudonym: attempt.mailbox, payload: bytes, writeAuth: auth
+                                pseudonym: mailboxTarget.address, payload: row, writeAuth: auth
                             ).id
                         })
-                    delivered = attempt.mailbox
+                    delivered = mailboxTarget.address
                     return id
                 })
             // Delivered to the re-checked mailbox: a later sweep resolving
@@ -8466,18 +8487,27 @@ public final class ChatRepository: ObservableObject {
         recorded: Data, payload: Data, groupIdHex: String
     ) async throws -> PublishResult {
         let client = dsClient
-        func resolve() -> MailboxWriteAttempt {
-            let mailbox = ReachCenter.shared.currentMailbox(for: recorded)
-            return MailboxWriteAttempt(
-                mailbox: mailbox,
-                auth: ReachCenter.shared.writeAuth(toMailbox: mailbox, groupIdHex: groupIdHex))
+        // ADR-0078 — the recorded address resolves to the verified mailbox of
+        // whoever it names (their current one); `payload` is the raw Welcome,
+        // sealed here as a `.welcome` row. No mailbox known: nothing is
+        // written and the entry stays un-acked.
+        func resolve() throws -> MailboxWriteAttempt {
+            guard let plan = ReachCenter.shared.writePlan(toMailbox: recorded, groupIdHex: groupIdHex) else {
+                NSLog("ADR-0078: no verified mailbox for a recorded Welcome; it stays owed")
+                throw MailboxUnknown()
+            }
+            return MailboxWriteAttempt(target: plan.target, auth: plan.auth)
         }
         return try await RefusedMailboxWrite.write(
             resolve: resolve,
-            recheck: { await PersonAddressRecheck.recheck(mailbox: resolve().mailbox) },
+            recheck: {
+                await PersonAddressRecheck.recheck(mailbox: (try? resolve().mailbox) ?? recorded)
+            },
             publish: { attempt in
                 try await client.publishMailbox(
-                    pseudonym: attempt.mailbox, payload: payload, writeAuth: attempt.auth)
+                    pseudonym: attempt.target.address,
+                    payload: try attempt.target.seal(kind: .welcome, body: payload),
+                    writeAuth: attempt.auth)
             })
     }
 
@@ -8500,17 +8530,13 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// ADR-0053 point 2 — claim this device's two mailboxes: the account
-    /// mailbox (contact requests and acks) and the device mailbox (Welcomes
-    /// sealed to this device's KeyPackages). Unsigned: the identity key is
-    /// public and a claim grants nothing. Every session start, i.e. after
-    /// every login, restore and signup. Best effort.
+    /// ADR-0053 point 2 / ADR-0078 — claim the account's ONE mailbox (contact
+    /// requests, acks and every Welcome), under the mailbox key derived from
+    /// the account seed. Device mailboxes are gone: none is claimed or read.
+    /// Unsigned: the mailbox key is public and a claim grants nothing. Every
+    /// session start, i.e. after every login, restore and signup. Best effort.
     public func claimOwnMailboxes() {
-        var signers: [DsProofSigner] = []
-        if let account = accountIdentity { signers.append(dsMailboxSigner(identity: account)) }
-        if let device = canonicalIdentity, device !== accountIdentity {
-            signers.append(dsMailboxSigner(identity: device))
-        }
+        let signers: [DsProofSigner] = Self.ownMailboxSigners(accountIdentity: accountIdentity)
         let client = dsClient
         // ADR-0060 — the hooks the reach registration reads, wired before the
         // claim so the sync below sees this account's groups.
@@ -8539,10 +8565,11 @@ public final class ChatRepository: ObservableObject {
                 guard bound.isCurrent else { return }
                 do {
                     try await client.claimMailbox(
-                        pseudonym: signer.mailboxPseudonym(),
+                        pseudonym: signer.mailboxAddress(),
                         bodyJson: signer.mailboxClaimBodyJson())
                 } catch {
-                    NSLog("ADR-0053: mailbox claim failed, retried on the next session: \(error)")
+                    // No error text: it names the mailbox address (ADR-0078).
+                    NSLog("ADR-0053: mailbox claim failed, retried on the next session: \(type(of: error))")
                 }
             }
             // ADR-0060 section 2 — a claimed mailbox starts CLOSED. Register
@@ -8551,6 +8578,13 @@ public final class ChatRepository: ObservableObject {
             await MainActor.run { ReachCenter.shared.sync() }
             await self.sendIntroductions()
         }
+    }
+
+    /// The mailbox signers ``claimOwnMailboxes()`` claims under: the account's
+    /// mailbox key alone (ADR-0078; no device mailbox), none before
+    /// bootstrap.
+    nonisolated static func ownMailboxSigners(accountIdentity: Identity?) -> [DsProofSigner] {
+        accountIdentity.map { [dsMailboxSigner(accountIdentity: $0)] } ?? []
     }
 
     /// ADR-0060 section 4 — contacts of contacts. In each one-to-one
@@ -8636,12 +8670,6 @@ public final class ChatRepository: ObservableObject {
     /// `group` reach scopes).
     public func allGroupIds() -> [Data] {
         groups.values.map(\.groupId)
-    }
-
-    /// ADR-0053 point 1 — the signer of this device's DEVICE mailbox (named by
-    /// ``ownDeviceLeafKey``), for the Welcome poll. `nil` before bootstrap.
-    public var ownDeviceMailboxSigner: DsProofSigner? {
-        canonicalIdentity.map { dsMailboxSigner(identity: $0) }
     }
 
     /// ADR-0053 point 7 — whether this device reads the knock queue: the
@@ -10204,7 +10232,7 @@ final class GroupRecord {
 }
 
 /// What a founder does with its new group's known-groups row when delivering
-/// the Welcome fails (``ChatRepository/startGroupWith(recipientAccountId:recipientSignaturePubkey:kind:recipientWriteAuth:)``).
+/// the Welcome fails (``ChatRepository/startGroupWith(recipientAccountId:recipientSignaturePubkey:kind:recipientPlan:)``).
 /// The row is written before the first Welcome; pure so the rule is testable.
 enum FoundingRollback {
     /// `true` when no Welcome went out: nobody else holds the group, and the

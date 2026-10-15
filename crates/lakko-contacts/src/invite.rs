@@ -73,7 +73,7 @@
 //! u16be        label_len
 //! [label_len]  label_bytes (UTF-8, ≤ MAX_LABEL_LEN)
 //! [16 bytes]   link_id                            — random, the reach scope of this link
-//! [37 bytes]   link_grant                         — ReachGrant, class `link` (SECRET)
+//! [134 bytes]  link_grant                         — ReachGrant, class `link` (SECRET)
 //! [64 bytes]   signature                          — Ed25519 over the above
 //! ```
 //!
@@ -110,6 +110,12 @@
 //! * **A grant of another class is refused** by [`decode_and_verify`] (and
 //!   by [`compose`]): a capability that handed out a `contact` or `group`
 //!   key would give a link holder reach it was never meant to have.
+//! * **The grant's mailbox binding must be the owner's** (ADR-0078):
+//!   [`decode_and_verify`] (and [`compose`]) verify it under
+//!   `owner_signature_pubkey`, the owner's account identity key the
+//!   capability is signed with, so the link holder writes to the owner's
+//!   own mailbox. (A `/c/` call capability is signed by a device leaf key
+//!   instead and cannot check this itself; see [`crate::call_invite`].)
 //!
 //! All multi-byte integers are big-endian to match the rest of
 //! Lakko's wire formats.
@@ -186,6 +192,15 @@ pub(crate) fn check_link_grant(grant: &ReachGrant) -> Result<()> {
             grant.class.to_byte(),
         )))
     }
+}
+
+/// The grant's mailbox binding verified under the owner's account key
+/// (ADR-0078). Only for a capability signed by the account key (`/i/`).
+fn check_link_grant_binding(grant: &ReachGrant, owner_pk: &VerifyingKey) -> Result<()> {
+    grant
+        .mailbox_pk_verified(&owner_pk.to_bytes())
+        .map(|_| ())
+        .map_err(|e| ContactError::InvalidArgument(format!("link grant binding: {}", e.code())))
 }
 
 /// Decode the link grant of a capability wire, fail-closed: a grant that
@@ -672,6 +687,7 @@ pub fn compose(
     }
     check_link_grant(link_grant)?;
     let owner_pubkey = owner_signing.verifying_key();
+    check_link_grant_binding(link_grant, &owner_pubkey)?;
     let mut wire = encode_signing_prefix(
         &owner_pubkey,
         owner_account_id,
@@ -783,6 +799,10 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<InviteCapability> {
     owner_signature_pubkey
         .verify(&signed_prefix, &signature)
         .map_err(|_| ContactError::BadSignature)?;
+    // ADR-0078: the grant writes to the owner's own mailbox. Checked after
+    // the signature, so a tampered capability reports as such.
+    check_link_grant_binding(&link_grant, &owner_signature_pubkey)
+        .map_err(|_| ContactError::InvalidEncoding("link grant names another mailbox".into()))?;
 
     Ok(InviteCapability {
         owner_signature_pubkey,
@@ -863,6 +883,12 @@ mod tests {
         ReachGrant::derive(&[0x5E; 32], ReachClass::Link, &TEST_LINK_ID, 0).unwrap()
     }
 
+    /// The test link grant of the account `signing` is the identity key of:
+    /// its mailbox binding verifies under the capability's owner key.
+    fn link_grant_of(signing: &SigningKey) -> ReachGrant {
+        ReachGrant::derive(&signing.to_seed(), ReachClass::Link, &TEST_LINK_ID, 0).unwrap()
+    }
+
     /// The pre-ADR-0060 argument list, with the test link id and grant.
     fn compose_t(
         signing: &SigningKey,
@@ -882,7 +908,7 @@ mod tests {
             bootstrap_referral,
             label,
             &TEST_LINK_ID,
-            &test_link_grant(),
+            &link_grant_of(signing),
         )
     }
 
@@ -908,7 +934,7 @@ mod tests {
     fn the_link_id_and_grant_round_trip_inside_the_signature() {
         let (signing, account_id, x25519_pub) = fixture();
         let link_id = generate_link_id();
-        let grant = ReachGrant::derive(&[7; 32], ReachClass::Link, &link_id, 3).unwrap();
+        let grant = ReachGrant::derive(&signing.to_seed(), ReachClass::Link, &link_id, 3).unwrap();
         let wire = compose(
             &signing,
             &account_id,
@@ -946,7 +972,7 @@ mod tests {
                 continue;
             }
             let scope: &[u8] = if class.is_account_wide() { b"" } else { b"s" };
-            let grant = ReachGrant::derive(&[7; 32], class, scope, 1).unwrap();
+            let grant = ReachGrant::derive(&signing.to_seed(), class, scope, 1).unwrap();
             assert!(matches!(
                 compose(
                     &signing,
@@ -976,11 +1002,33 @@ mod tests {
             Err(ContactError::InvalidEncoding(_))
         ));
         // A well-formed hand-signed wire decodes (the helper is sound).
-        let good = hand_signed_with_grant(&signing, SCHEMA_VERSION, &test_link_grant().encode());
+        let good =
+            hand_signed_with_grant(&signing, SCHEMA_VERSION, &link_grant_of(&signing).encode());
         assert_eq!(
             decode_and_verify(&good).unwrap().link_grant,
-            test_link_grant()
+            link_grant_of(&signing)
         );
+        // A well-signed capability whose grant names another account's
+        // mailbox (ADR-0078) is refused by decode and by compose.
+        let foreign = hand_signed_with_grant(&signing, SCHEMA_VERSION, &test_link_grant().encode());
+        assert!(matches!(
+            decode_and_verify(&foreign),
+            Err(ContactError::InvalidEncoding(_))
+        ));
+        assert!(matches!(
+            compose(
+                &signing,
+                &account_id,
+                &x25519_pub,
+                0,
+                0,
+                false,
+                "",
+                &TEST_LINK_ID,
+                &test_link_grant(),
+            ),
+            Err(ContactError::InvalidArgument(_))
+        ));
     }
 
     #[test]
@@ -1355,7 +1403,7 @@ mod tests {
             false,
             "",
             &TEST_LINK_ID,
-            &test_link_grant(),
+            &link_grant_of(&signing_real),
         );
         let bad_sig = signing_attacker.sign(&wire);
         wire.extend_from_slice(&bad_sig.to_bytes());

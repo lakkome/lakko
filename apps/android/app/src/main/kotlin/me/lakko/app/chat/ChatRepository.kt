@@ -18,6 +18,8 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.lakko.app.BindingEpoch
+import me.lakko.app.contacts.ownMailboxIdentities
+import me.lakko.app.contacts.sealFor
 import me.lakko.app.launchBound
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -34,8 +36,6 @@ import me.lakko.app.push.PushRoutingPorts
 import me.lakko.app.push.PushRoutingSecretStore
 import me.lakko.app.auth.IdentitySecrets
 import uniffi.lakko_ffi_uniffi.derivePushGid
-import me.lakko.app.contacts.KIND_WELCOME
-import me.lakko.app.contacts.wrapEnvelope
 import me.lakko.app.discovery.ConsumeInviteResult
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.ds.DsClient
@@ -1180,10 +1180,10 @@ public class ChatRepository(
      *      — produces a `(commit, welcome)` pair. Per MLS the
      *      commit would be broadcast, but our group is
      *      one-of-one before this call, so we drop it.
-     *   4. Wrap the welcome with [KIND_WELCOME] and post it to
-     *      the recipient's stranger inbox via
-     *      `DsClient.publishMailbox` keyed by
-     *      `IdentityPseudonym.fromIdentity(recipientPubkey)`.
+     *   4. Seal the welcome as a mailbox row (ADR-0078) to the
+     *      recipient's account mailbox, whose key comes from a binding
+     *      verified against their account key, and post it via
+     *      `DsClient.publishMailbox`.
      *   5. Persist the MLS snapshot.
      *
      * Returns the new group's hex id so the caller can hand it
@@ -1198,10 +1198,10 @@ public class ChatRepository(
         kind: GroupKind,
         /** ADR-0060 §6 — what authorises the Welcome into the recipient's
          *  closed mailbox when the caller holds it for this flow only (the
-         *  link grant of an `/i/` link). `null` picks from the grants this
-         *  device holds for the recipient (their reply key after an accept,
-         *  their contact key). */
-        recipientReach: DsReachAuth? = null,
+         *  link grant of an `/i/` link, its binding already verified, ADR-0078).
+         *  `null` picks from the grants this device holds for the recipient
+         *  (their reply key after an accept, their contact key). */
+        recipientReach: me.lakko.app.contacts.MailboxDest? = null,
     ): String =
         forSession {
             startGroupWithOnMlsThread(
@@ -1216,7 +1216,7 @@ public class ChatRepository(
         recipientAccountId: ByteArray,
         recipientSignaturePubkey: ByteArray,
         kind: GroupKind,
-        recipientReach: DsReachAuth?,
+        recipientReach: me.lakko.app.contacts.MailboxDest?,
     ): String {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException(
@@ -1244,9 +1244,12 @@ public class ChatRepository(
         for (account in created.recipientAccounts) {
             val explicit =
                 if (mailboxAccountKeyOf(account).contentEquals(recipientCurrent)) recipientReach else null
-            val mailbox = welcomeMailboxFor(account)
-            if (!writtenMailboxes.add(DsClient.pseudonymHex(mailbox))) continue
             try {
+                // ADR-0078: the address comes from a verified binding (the
+                // explicit grant's, else one held for the person); none known
+                // stops the creation like a refused write.
+                val mailbox = explicit?.let { welcomeMailboxForDest(account, it) } ?: welcomeMailboxFor(account)
+                if (!writtenMailboxes.add(DsClient.pseudonymHex(mailbox))) continue
                 publishWelcomeToMailbox(
                     mailbox,
                     created.welcomeEnvelope,
@@ -1388,7 +1391,8 @@ public class ChatRepository(
                 group.close()
                 throw ChatError("addMembersFromWire failed", e)
             }
-            val welcomeEnvelope = wrapEnvelope(KIND_WELCOME, addResult.welcome)
+            // ADR-0078: the raw Welcome; it is sealed per mailbox when written.
+            val welcomeEnvelope = addResult.welcome
             // ADR-0060 §6 — one Welcome write per added ACCOUNT, into its
             // account mailbox (ADR-0050 §2.7 as amended): the recipient's and,
             // when this account has other devices, this account's own.
@@ -1503,10 +1507,28 @@ public class ChatRepository(
      */
     private fun welcomeMailboxFor(accountKey: ByteArray): ByteArray {
         val current = mailboxAccountKeyOf(accountKey)
-        val mailbox = uniffi.lakko_ffi_uniffi.IdentityPseudonym.fromIdentity(current).use { it.asBytes() }
+        // ADR-0078: the mailbox key comes from a binding verified against the
+        // person's current account key; none known writes nothing.
+        val mailbox = try {
+            me.lakko.app.reach.ReachManager.get(applicationContext).mailboxAddressFor(current)
+        } catch (_: Throwable) {
+            null
+        } ?: throw me.lakko.app.contacts.MailboxUnknown()
         welcomeTargetAccounts[DsClient.pseudonymHex(mailbox)] = current
         return mailbox
     }
+
+    /** [welcomeMailboxFor] when the caller holds a verified [dest] for the
+     *  person (an `/i/` link grant): its address, remembered the same way. */
+    private fun welcomeMailboxForDest(accountKey: ByteArray, dest: me.lakko.app.contacts.MailboxDest): ByteArray {
+        val mailbox = mailboxCrypto.address(dest.mailboxPk)
+        welcomeTargetAccounts[DsClient.pseudonymHex(mailbox)] = mailboxAccountKeyOf(accountKey)
+        return mailbox
+    }
+
+    /** ADR-0078 - the binding check and sealing of mailbox rows. A test
+     *  injects a fake (the host JVM loads no native library). */
+    internal var mailboxCrypto: me.lakko.app.contacts.MailboxCrypto = me.lakko.app.contacts.NativeMailboxCrypto
 
     /**
      * ADR-0060 §2 / §6 — write a Welcome into an account mailbox, signed with
@@ -1532,7 +1554,7 @@ public class ChatRepository(
         mailbox: ByteArray,
         bytes: ByteArray,
         groupIdHex: String?,
-        explicit: DsReachAuth? = null,
+        explicit: me.lakko.app.contacts.MailboxDest? = null,
         requireGrant: Boolean = false,
         /** The added person's account id when the caller holds it (rule 6). */
         accountIdHint: ByteArray? = null,
@@ -1559,7 +1581,11 @@ public class ChatRepository(
                 } else {
                     false
                 }
-                val next = welcomeMailboxFor(account)
+                val next = try {
+                    welcomeMailboxFor(account)
+                } catch (_: me.lakko.app.contacts.MailboxUnknown) {
+                    target
+                }
                 val moved = !next.contentEquals(target)
                 target = next
                 checked || moved
@@ -1589,42 +1615,46 @@ public class ChatRepository(
     @Volatile
     public var spendPreRotationGrants: (suspend () -> Boolean)? = null
 
-    /** One attempt of [publishWelcomeToMailbox]. */
+    /** One attempt of [publishWelcomeToMailbox]. [bytes] is the raw Welcome:
+     *  it is sealed here (ADR-0078) to the mailbox key the authorising
+     *  grant's binding names, verified against the person's current account
+     *  key, and posted to that key's address. */
     private suspend fun publishWelcomeOnce(
         mailbox: ByteArray,
         bytes: ByteArray,
         groupIdHex: String?,
-        explicit: DsReachAuth?,
+        explicit: me.lakko.app.contacts.MailboxDest?,
         requireGrant: Boolean,
     ): PublishResult {
         // Called once per recipient, each after the previous publish: the
         // grants below are the ones the signed-in account holds, and a
         // Welcome is written with the sender's own.
         ensureSession()
-        if (explicit != null) return dsClient.publishMailbox(mailbox, bytes, reach = explicit)
+        if (explicit != null) return writeSealedWelcome(explicit, bytes)
+        // ADR-0078: no account behind the address means no binding to seal
+        // to: nothing is written (never an unsealed or guessed write).
         val account = welcomeTargetAccounts[DsClient.pseudonymHex(mailbox)]
-        if (account == null) {
-            android.util.Log.i("ChatRepository", "ADR-0060: Welcome written without a reach grant")
-            return dsClient.publishMailbox(mailbox, bytes, reach = null)
-        }
+            ?: throw me.lakko.app.contacts.MailboxUnknown()
         val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
         if (account.contentEquals(reach.ownAccountKey() ?: ByteArray(0))) {
             // Another device of this account: its own `contact` key, as before.
-            return dsClient.publishMailbox(
-                mailbox,
-                bytes,
-                reach = reach.reachAuthFor(account, me.lakko.app.reach.WritePurpose.WELCOME, groupIdHex),
-            )
+            val own = reach.reachAuthFor(account, me.lakko.app.reach.WritePurpose.WELCOME, groupIdHex)
+                ?: throw me.lakko.app.contacts.MailboxUnknown()
+            return writeSealedWelcome(own, bytes)
         }
         val accountHex = DsClient.pseudonymHex(account)
         return try {
             writeWelcomeWithGrants(
                 candidates = reach.reachAuthCandidates(account, me.lakko.app.reach.WritePurpose.WELCOME, groupIdHex),
-                write = { auth ->
-                    if (auth == null) {
+                write = { dest ->
+                    val target = dest ?: run {
                         android.util.Log.i("ChatRepository", "ADR-0060: Welcome written without a reach grant")
+                        me.lakko.app.contacts.MailboxDest(
+                            reach.mailboxPkFor(account) ?: throw me.lakko.app.contacts.MailboxUnknown(),
+                            null,
+                        )
                     }
-                    dsClient.publishMailbox(mailbox, bytes, reach = auth)
+                    writeSealedWelcome(target, bytes)
                 },
                 isRefusal = { it is me.lakko.app.ds.DsReachRefusedError },
                 requireGrant = requireGrant,
@@ -1680,13 +1710,29 @@ public class ChatRepository(
      */
     private val sweepWelcomesWritten = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
+    /** Seal the raw Welcome [welcome] to [dest] and post it (ADR-0078). */
+    private suspend fun writeSealedWelcome(dest: me.lakko.app.contacts.MailboxDest, welcome: ByteArray): PublishResult {
+        val sealed = mailboxCrypto.sealFor(dest, me.lakko.app.contacts.MailboxRowKind.WELCOME, welcome)
+        return dsClient.publishMailbox(sealed.address, sealed.row, reach = dest.auth)
+    }
+
     /** The sweep's mailbox write: [publishWelcomeToMailbox] with a grant
-     *  required, once per mailbox and bytes per session. */
-    private suspend fun publishSweepWelcome(mailbox: ByteArray, bytes: ByteArray, groupIdHex: String): Long {
-        val key = DsClient.pseudonymHex(mailbox) + ":" + DsClient.pseudonymHex(
+     *  required, once per added account and bytes per session. [account] is
+     *  the added ACCOUNT key (ADR-0078: its mailbox is resolved here, from a
+     *  verified binding; none known keeps the Welcome owed). */
+    private suspend fun publishSweepWelcome(account: ByteArray, bytes: ByteArray, groupIdHex: String): Long {
+        val key = DsClient.pseudonymHex(account) + ":" + DsClient.pseudonymHex(
             java.security.MessageDigest.getInstance("SHA-256").digest(bytes),
         )
         sweepWelcomesWritten[key]?.let { return it }
+        val mailbox = try {
+            welcomeMailboxFor(account)
+        } catch (_: me.lakko.app.contacts.MailboxUnknown) {
+            undeliveredWelcomeGroups.getOrPut(DsClient.pseudonymHex(mailboxAccountKeyOf(account))) {
+                java.util.concurrent.ConcurrentHashMap.newKeySet()
+            }.add(groupIdHex)
+            throw WelcomeUndeliverable(DsClient.pseudonymHex(account))
+        }
         val id = publishWelcomeToMailbox(mailbox, bytes, groupIdHex, requireGrant = true).id
         sweepWelcomesWritten[key] = id
         return id
@@ -1748,6 +1794,10 @@ public class ChatRepository(
             } catch (_: Throwable) {
                 null
             } ?: attr.joinerSignatureKey
+            // ADR-0078: the reply grant must name the joiner's own mailbox
+            // (its binding verifies against the account the proposal's leaf
+            // resolves to); one that does not is not kept.
+            if (!me.lakko.app.contacts.grantBindsTo(attr.replyGrant, account, mailboxCrypto)) continue
             reach.keepHeld(account, attr.replyGrant, scopeHex = "")
         }
     }
@@ -3139,7 +3189,7 @@ public class ChatRepository(
                 //
                 // ADR-0040 F1 residual (lakko-security) — reset-guard the WHOLE
                 // pre-persist region (second-artifact compute + entry build): any throw
-                // here (wrapEnvelope / IdentityPseudonym.fromIdentity / requireAccountId
+                // here (welcomeMailboxFor, which throws when no binding is known / requireAccountId
                 // / group.epoch()) runs AFTER the eager merge (N -> N+1) and BEFORE
                 // runCrashSafeCommit, and would else strand the in-memory group at the
                 // un-published N+1. No outbox entry exists yet -> reset the group
@@ -3147,7 +3197,8 @@ public class ChatRepository(
                 val (welcomeEnvelope, recipientPseudonym, entry) = withPrePersistReset(
                     reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
                 ) {
-                    val welcomeEnvelope = wrapEnvelope(KIND_WELCOME, addResult.welcome)
+                    // ADR-0078: the raw Welcome, sealed per mailbox when written.
+                    val welcomeEnvelope = addResult.welcome
                     // ADR-0060 §6 (amending ADR-0050 §2.7): the Welcome goes to
                     // the added leaf's ACCOUNT mailbox, resolved through the
                     // leaf's device binding; every device of that account reads
@@ -5092,6 +5143,7 @@ public class ChatRepository(
                             certificate = certificate,
                             identityPk = reach.ownAccountKey(),
                             accountId = account.accountId,
+                            mailboxBinding = reach.ownMailboxBinding(),
                         ),
                         ops = me.lakko.app.reach.EveryoneOps(
                             nameSearchTerms = { uniffi.lakko_ffi_uniffi.nameSearchTerms(it) },
@@ -5451,6 +5503,11 @@ public class ChatRepository(
                 ) {
                     continue
                 }
+                // ADR-0078: a grant whose mailbox binding does not verify
+                // against the sender's account key (resolved at receipt,
+                // C-68, then to its current key) would route writes to a
+                // mailbox the sender does not read: not kept.
+                if (!me.lakko.app.contacts.grantBindsTo(grant, reach.mailboxAccountKey(senderBytes), mailboxCrypto)) continue
                 reach.keepHeld(senderBytes, grant, scopeHex = groupIdHex)
             }
         } catch (cause: Throwable) {
@@ -7235,20 +7292,28 @@ public class ChatRepository(
                         null
                     }
                 } ?: return false
-                val written = HashSet<String>()
-                for (targetB64 in prepared.targetKeysB64) {
-                    val accountKey = try {
-                        java.util.Base64.getDecoder().decode(targetB64)
+                val targets = prepared.targetKeysB64.mapNotNull {
+                    try {
+                        java.util.Base64.getDecoder().decode(it)
                     } catch (_: IllegalArgumentException) {
-                        continue
+                        null
                     }
-                    // One write per PERSON; a Welcome to the new identity of
-                    // an accepted reset is signed with the continuity key
-                    // (R.4), which the reach manager offers as a candidate.
-                    val mailbox = welcomeMailboxFor(accountKey)
-                    if (!written.add(DsClient.pseudonymHex(mailbox))) continue
-                    publishWelcomeToMailbox(mailbox, welcome, successorGroupIdHex)
                 }
+                // One write per PERSON. ADR-0078: a person whose mailbox this
+                // device holds no verified binding for (the new identity of
+                // an accepted reset, before they hand one out) is a recorded
+                // no-op - see [me.lakko.app.reach.deliverSuccessorWelcomes].
+                me.lakko.app.reach.deliverSuccessorWelcomes(
+                    targets = targets,
+                    mailboxOf = { accountKey ->
+                        try {
+                            welcomeMailboxFor(accountKey)
+                        } catch (_: me.lakko.app.contacts.MailboxUnknown) {
+                            null
+                        }
+                    },
+                    publish = { mailbox -> publishWelcomeToMailbox(mailbox, welcome, successorGroupIdHex) },
+                )
                 // Kept as the mark "this device founded it"; the Welcome is
                 // dropped.
                 updateClaims(oldGroupIdHex) {
@@ -11063,11 +11128,13 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0053 client contract point 2 — the two mailboxes this session owns:
-     * the ACCOUNT identity's (the stranger inbox contact requests arrive in)
-     * and this DEVICE's (where Welcomes sealed to its KeyPackages arrive).
-     * Installs their signers so every read is signed, and claims both. Called
-     * at every bootstrap, i.e. after every signup, login and restore.
+     * ADR-0053 client contract point 2 — the mailbox this session owns: the
+     * ACCOUNT's (contact requests, acks and Welcomes arrive there). ADR-0078:
+     * its key derives from the account seed (`dsMailboxSigner`), the claim
+     * registers that key, and there is no device mailbox any more (none is
+     * claimed or read). Installs the signer so every read is signed, and
+     * claims it. Called at every bootstrap, i.e. after every signup, login
+     * and restore.
      */
     private fun claimOwnMailboxesBestEffort() {
         // ADR-0074 part 3: and the mailbox of the PUBLISHED account key when
@@ -11079,11 +11146,13 @@ public class ChatRepository(
         // registered there. Past the window it is left alone.
         val published = publishedAccountIdentity.get()
         val conversation = accountIdentity.get()?.takeIf { published == null || predecessorMailboxStillRead(it) }
-        val identities = listOfNotNull(conversation, published, canonicalIdentity.get())
+        // ADR-0078: account identities only (a predecessor's mailbox derives
+        // from the predecessor's seed); the device identity has no mailbox.
+        val identities = ownMailboxIdentities(conversation, published)
         for (identity in identities) {
             val (pseudonym, signer) = try {
                 val ffi = uniffi.lakko_ffi_uniffi.dsMailboxSigner(identity)
-                ffi.mailboxPseudonym() to FfiDsJournalSigner(ffi)
+                ffi.mailboxAddress() to FfiDsJournalSigner(ffi)
             } catch (cause: Throwable) {
                 android.util.Log.w("ChatRepository", "ADR-0053: mailbox signer unavailable", cause)
                 continue
@@ -12203,7 +12272,7 @@ public class ChatRepository(
                 // ADR-0050 section 2.5a item 7 — never unsigned: with no
                 // grant accepted the Welcome stays owed.
                 override suspend fun publishMailbox(pseudonym: ByteArray, bytes: ByteArray): Long =
-                    publishSweepWelcome(pseudonym, bytes, groupIdHex)
+                    publishSweepWelcome(account = pseudonym, bytes = bytes, groupIdHex = groupIdHex)
             },
             outbox = object : SweepOutboxPort {
                 override fun newEntryId(): String = newOutboxEntryId()
@@ -12356,11 +12425,12 @@ public class ChatRepository(
                 } catch (_: Throwable) {
                     emptyList()
                 }
+                // ADR-0078: the ACCOUNT keys; each one's mailbox is resolved
+                // from a verified binding when it is written.
                 welcomeAccounts(leafKeys) { leaf ->
                     roster.firstOrNull { it.signaturePublicKey.contentEquals(leaf) }?.accountKey
-                }.map { account -> welcomeMailboxFor(account) }
+                }
             },
-            wrapWelcome = { welcome -> wrapEnvelope(KIND_WELCOME, welcome) },
             // Only into the echo filter of the session that published: the
             // filter is keyed by journal and row id, and the next account on
             // this phone can be a member of the same group. A row marked

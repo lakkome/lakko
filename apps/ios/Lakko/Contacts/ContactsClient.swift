@@ -13,32 +13,24 @@ import LakkoCore
 ///   * `apps/web/src/contacts/client.ts` (1.17e5)
 ///   * `apps/android/.../contacts/ContactsClient.kt` (1.15e5)
 ///
-/// Three operations:
+/// Three operations (ADR-0078: every mailbox row is sealed to a VERIFIED
+/// mailbox key, with its kind inside the seal):
 ///
-///   * ``sendContactRequest(senderSigningSeed:senderAccountId:senderSignaturePubkey:recipientUsername:introMessage:)``
-///     — resolve `@username` → `account_id` via
-///     ``DiscoveryClient/lookup(username:)`` → fetch identity
-///     bundle → derive recipient mailbox pseudonym from their
-///     Ed25519 pubkey → compose envelope via UniFFI
-///     `composeContactRequest` → publish to recipient's mailbox via
-///     ``DsClient/publishMailbox(pseudonym:payload:)``, wrapped
-///     with ``EnvelopeKind/contactRequest``.
+///   * ``sendContactRequest(senderSigningSeed:senderAccountId:senderSignaturePubkey:senderMailboxAddress:recipientUsername:profile:introMessage:reach:)``
+///     — resolve `@username` → `account_id` → identity bundle, compose
+///     the request via UniFFI `composeContactRequest`, seal it as a
+///     contact-request row to the mailbox the reach plan names, and
+///     publish it.
 ///
-///   * ``sendContactRequestToBundle(senderSigningSeed:senderAccountId:senderSignaturePubkey:recipientAccountId:recipientSignaturePubkey:recipientX25519Pubkey:introMessage:)``
+///   * ``sendContactRequestToBundle(senderSigningSeed:senderAccountId:senderSignaturePubkey:senderMailboxAddress:recipientAccountId:recipientSignaturePubkey:recipientX25519Pubkey:profile:introMessage:reach:)``
 ///     — same compose+publish path but skipping the lookup +
 ///     identityFetch round-trips when the caller already has the
-///     recipient's bundle in hand (the invite-link flow in 1.14e8).
+///     recipient's bundle in hand (the invite-link flow).
 ///
-///   * ``pollStrangerInbox(mySignaturePubkey:myX25519Secret:after:waitSecs:)``
-///     — fetch the user's own
-///     `IdentityPseudonym.fromIdentity`-derived mailbox via
-///     ``DsClient/fetchMailbox(pseudonym:after:limit:waitSecs:)``,
-///     parse each envelope's kind byte, decode + verify each
-///     ContactRequest, surface a mixed list of
-///     ``IncomingMailboxEvent`` entries + a fresh cursor. Welcome
-///     envelopes pass through as
-///     ``IncomingMailboxEvent/welcome(messageId:welcomeBytes:createdAt:)``
-///     for the chat surface (1.14f) to consume.
+///   * ``pollStrangerInbox(accountIdentity:after:waitSecs:)`` — fetch the
+///     account's own mailbox (named by its mailbox key), open each row,
+///     dispatch by the kind inside the seal, surface a mixed list of
+///     ``IncomingMailboxEvent`` entries + a fresh cursor.
 public final class ContactsClient {
 
     private let discovery: DiscoveryClient
@@ -886,6 +878,7 @@ public final class ContactsClient {
         senderSigningSeed: Data,
         senderAccountId: Data,
         senderSignaturePubkey: Data,
+        senderMailboxAddress: Data,
         recipientUsername: String,
         profile: FfiProfile? = nil,
         introMessage: Data,
@@ -932,12 +925,13 @@ public final class ContactsClient {
             senderSigningSeed: senderSigningSeed,
             senderAccountId: senderAccountId,
             senderSignaturePubkey: senderSignaturePubkey,
+            senderMailboxAddress: senderMailboxAddress,
             recipientSignaturePubkey: recipientSignaturePub,
             recipientX25519Pubkey: recipientX25519Pub,
             profile: profile,
             introMessage: introMessage,
             replyGrant: try await reach.replyGrant(recipientAccountId),
-            writeAuth: reach.writeAuth(recipientSignaturePub)
+            plan: await reach.plan(recipientSignaturePub)
         )
 
         return SendResult(
@@ -961,6 +955,7 @@ public final class ContactsClient {
         senderSigningSeed: Data,
         senderAccountId: Data,
         senderSignaturePubkey: Data,
+        senderMailboxAddress: Data,
         recipientAccountId: Data,
         recipientSignaturePubkey: Data,
         recipientX25519Pubkey: Data,
@@ -985,12 +980,13 @@ public final class ContactsClient {
             senderSigningSeed: senderSigningSeed,
             senderAccountId: senderAccountId,
             senderSignaturePubkey: senderSignaturePubkey,
+            senderMailboxAddress: senderMailboxAddress,
             recipientSignaturePubkey: recipientSignaturePubkey,
             recipientX25519Pubkey: recipientX25519Pubkey,
             profile: profile,
             introMessage: introMessage,
             replyGrant: try await reach.replyGrant(recipientAccountId),
-            writeAuth: reach.writeAuth(recipientSignaturePubkey)
+            plan: await reach.plan(recipientSignaturePubkey)
         )
         return SendResult(
             recipientUsername: "",
@@ -1008,26 +1004,26 @@ public final class ContactsClient {
         senderSigningSeed: Data,
         senderAccountId: Data,
         senderSignaturePubkey: Data,
+        senderMailboxAddress: Data,
         recipientSignaturePubkey: Data,
         recipientX25519Pubkey: Data,
         profile: FfiProfile?,
         introMessage: Data,
         replyGrant: FfiReachGrant?,
-        writeAuth: DsMailboxWriteAuth?
+        plan: MailboxWritePlan?
     ) async throws -> PublishedRequest {
-        let recipientPseudonym: Data
-        let senderPseudonym: Data
-        do {
-            // Both callers hand in the recipient's CURRENT key (a bundle the
-            // gate just verified, or one re-resolved above), so the mailbox
-            // of the key the envelope is sealed for is the current mailbox.
-            recipientPseudonym = try IdentityPseudonym
-                .fromIdentity(pubkey: recipientSignaturePubkey).asBytes()
-            senderPseudonym = try IdentityPseudonym
-                .fromIdentity(pubkey: senderSignaturePubkey).asBytes()
-        } catch {
-            throw ContactsError.wrap(error)
+        // ADR-0078 — the recipient's mailbox comes from a binding verified
+        // against the key the envelope is sealed for (a link's grant, a
+        // search result's record, a grant held for them); with none there is
+        // nowhere to write, and nothing is sent.
+        guard let plan, plan.target.accountKey == recipientSignaturePubkey else {
+            NSLog("ADR-0078: no verified mailbox for the recipient; the request was not sent")
+            throw ContactsError.requestRefused
         }
+        // The request's `fromPseudonym` is matched by the ack it answers; it
+        // routes nothing (the ack goes back under the reply grant's binding).
+        // The sender's own mailbox address is the value it carries.
+        let senderPseudonym = senderMailboxAddress
 
         let validAfterMs = UInt64(Date().timeIntervalSince1970 * 1000)
 
@@ -1071,16 +1067,19 @@ public final class ContactsClient {
             throw ContactsError.wrap(error)
         }
 
-        let envelope = wrapEnvelope(kind: .contactRequest, body: wireBytes)
         let publish: PublishResult
         do {
+            // ADR-0078 — the request is one sealed row of kind contact
+            // request, to the verified mailbox.
+            let row = try plan.target.seal(kind: .contactRequest, body: wireBytes)
             // ADR-0060 section 2 — signed with the grant that lets this
             // device reach the recipient (a link grant, a search result's
-            // grant, a co-member's); unsigned only for an Everyone mailbox.
+            // grant, a co-member's); unsigned (a `mailbox-write` token) only
+            // for an Everyone mailbox.
             publish = try await ds.publishMailbox(
-                pseudonym: recipientPseudonym,
-                payload: envelope,
-                writeAuth: writeAuth
+                pseudonym: plan.target.address,
+                payload: row,
+                writeAuth: plan.auth
             )
         } catch {
             if case .http(401, _, _)? = error as? DsClientError {
@@ -1105,26 +1104,21 @@ public final class ContactsClient {
     ///
     /// **Routing:** the ack body carries
     /// `ackToPseudonym = original.fromPseudonym`. The publish
-    /// target is the sender's stranger-inbox mailbox — derived
-    /// from `original.fromPubkey` via
-    /// `IdentityPseudonym.fromIdentity`.
+    /// target is the verified mailbox `plan` names (the requester's
+    /// `reply` grant's binding, ADR-0078).
     public func sendContactAck(
         accepterSigningSeed: Data,
         accepterAccountId: Data,
         accepterX25519Pubkey: Data,
         originalRequest: IncomingContactRequest,
-        writeAuth: DsMailboxWriteAuth? = nil
+        plan: MailboxWritePlan?
     ) async throws -> PublishedAck {
-        let senderMailbox: Data
-        do {
-            // ADR-0074 section 3.5a rule 1 — the requester may have rotated
-            // its keys by proof since it asked: the ack goes to the mailbox
-            // of its current key.
-            senderMailbox = try IdentityPseudonym
-                .fromIdentity(pubkey: mailboxResolver().current(of: originalRequest.fromPubkey))
-                .asBytes()
-        } catch {
-            throw ContactsError.wrap(error)
+        // ADR-0078 — the ack goes to the mailbox the requester's `reply`
+        // grant names (its binding verified under the requester's key when
+        // it was kept); with none there is nowhere to write.
+        guard let plan else {
+            NSLog("ADR-0078: no verified mailbox for the requester; the ack was not sent")
+            throw ContactsError.wrap(MailboxUnknown())
         }
 
         let acceptedAtMs = UInt64(Date().timeIntervalSince1970 * 1000)
@@ -1142,14 +1136,14 @@ public final class ContactsClient {
             throw ContactsError.wrap(error)
         }
 
-        let envelope = wrapEnvelope(kind: .contactAck, body: wireBytes)
         let publish: PublishResult
         do {
             // ADR-0060 section 6 — written with the requester's `reply` grant.
+            let row = try plan.target.seal(kind: .contactAck, body: wireBytes)
             publish = try await ds.publishMailbox(
-                pseudonym: senderMailbox,
-                payload: envelope,
-                writeAuth: writeAuth
+                pseudonym: plan.target.address,
+                payload: row,
+                writeAuth: plan.auth
             )
         } catch {
             throw ContactsError.wrap(error)
@@ -1167,58 +1161,69 @@ public final class ContactsClient {
     /// skipped (the cursor still advances, so we won't re-process
     /// the same row).
     public func pollStrangerInbox(
-        mySignaturePubkey: Data,
-        myX25519Secret: Data,
+        accountIdentity: Identity,
         after: Int64 = 0,
-        waitSecs: Int = 0,
-        mailboxSigner: DsRequestSigner? = nil
+        waitSecs: Int = 0
     ) async throws -> PollResult {
-        let myPseudonym: Data
-        do {
-            myPseudonym = try IdentityPseudonym
-                .fromIdentity(pubkey: mySignaturePubkey).asBytes()
-        } catch {
-            throw ContactsError.wrap(error)
-        }
+        // ADR-0078 — the mailbox is named by the account's mailbox key
+        // (derived from the account seed; every device derives the same), not
+        // by the identity key; reads are signed with it and every row is
+        // opened with it.
+        let mailboxKey = MailboxKey.fromAccountIdentity(accountIdentity: accountIdentity)
+        let signer = dsMailboxSigner(accountIdentity: accountIdentity)
+        let myX25519Secret = accountIdentity.x25519SecretKey()
+        let myAddress = signer.mailboxAddress()
 
         let raw: FetchResult
         do {
             // ADR-0053 point 1 — reading a claimed mailbox needs a proof under
-            // the identity key it is named after.
+            // the key it is named after.
             // ADR-0060 section 2 — an unclaimed mailbox answers a read `401`
             // too, so a refusal claims it (claim-on-open) and retries once.
             let ds = self.ds
             raw = try await ds.fetchMailbox(
-                pseudonym: myPseudonym,
+                pseudonym: myAddress,
                 after: after,
                 waitSecs: waitSecs,
-                auth: mailboxSigner.map { signer in
-                    DsAuth(signer: signer, reclaim: {
-                        guard let proof = signer as? DsProofSigner else { return nil }
-                        do {
-                            try await ds.claimMailbox(
-                                pseudonym: myPseudonym, bodyJson: proof.mailboxClaimBodyJson())
-                        } catch {
-                            return nil
-                        }
-                        return signer
-                    })
-                }
+                auth: DsAuth(signer: signer, reclaim: {
+                    do {
+                        try await ds.claimMailbox(
+                            pseudonym: myAddress, bodyJson: signer.mailboxClaimBodyJson())
+                    } catch {
+                        return nil
+                    }
+                    return signer
+                })
             )
         } catch {
             throw ContactsError.wrap(error)
         }
+        return Self.dispatch(
+            rows: raw.messages, after: after, hasMore: raw.hasMore,
+            mailboxKey: mailboxKey, myX25519Secret: myX25519Secret)
+    }
 
+    /// ADR-0078 — open every fetched row with the own mailbox key and
+    /// dispatch it by the kind inside the seal. A row that does not open is
+    /// dropped (it may be garbage); a Welcome rendezvous (the channel
+    /// co-publisher join) is not this poll's to act on and is skipped. The
+    /// cursor moves past every row either way.
+    static func dispatch(
+        rows: [MailboxMessage], after: Int64, hasMore: Bool,
+        mailboxKey: MailboxKey, myX25519Secret: Data
+    ) -> PollResult {
         var events: [IncomingMailboxEvent] = []
         var cursor = after
-        for message in raw.messages {
+        for message in rows {
             cursor = message.id
-            switch parseEnvelope(message.payload) {
-            case .unknown:
-                // Future / unknown kind byte — cursor advances so
-                // we don't re-process. No logger plumbed yet.
+            guard let opened = MailboxRows.open(message.payload, key: mailboxKey) else { continue }
+            let body = opened.body
+            switch opened.kind {
+            case .welcomeRendezvous:
+                // The co-publisher join reads its own rows
+                // (``CoPublisher/pollForCoPublishWelcome``).
                 continue
-            case .welcome(let body):
+            case .welcome:
                 events.append(
                     .welcome(
                         messageId: message.id,
@@ -1226,7 +1231,7 @@ public final class ContactsClient {
                         createdAt: message.createdAt
                     )
                 )
-            case .contactAck(let body):
+            case .contactAck:
                 // 1.9b1: signature is verified inside the UniFFI
                 // surface; bad-signature / malformed-wire entries
                 // drop silently and the cursor still advances.
@@ -1246,7 +1251,7 @@ public final class ContactsClient {
                     createdAt: message.createdAt
                 )
                 events.append(.contactAck(ack))
-            case .contactRequest(let body):
+            case .contactRequest:
                 let parsed: ContactRequest
                 do {
                     parsed = try ContactRequest.decodeAndVerify(wire: body)
@@ -1300,7 +1305,7 @@ public final class ContactsClient {
                 events.append(.contactRequest(req, replyGrant: replyGrant))
             }
         }
-        return PollResult(events: events, cursor: cursor, hasMore: raw.hasMore)
+        return PollResult(events: events, cursor: cursor, hasMore: hasMore)
     }
 }
 
@@ -1312,19 +1317,21 @@ public final class ContactsClient {
 public struct ContactRequestReach {
     /// Mint the `reply` grant for a request to the account id given.
     public var replyGrant: (Data) async throws -> FfiReachGrant?
-    /// The authorisation to write to the recipient with account key given.
-    public var writeAuth: (Data) -> DsMailboxWriteAuth?
+    /// Where the request to the recipient with the account key given goes
+    /// and how it is signed (ADR-0078: a VERIFIED mailbox); `nil` sends
+    /// nothing.
+    public var plan: (Data) async -> MailboxWritePlan?
 
     public init(
         replyGrant: @escaping (Data) async throws -> FfiReachGrant?,
-        writeAuth: @escaping (Data) -> DsMailboxWriteAuth?
+        plan: @escaping (Data) async -> MailboxWritePlan?
     ) {
         self.replyGrant = replyGrant
-        self.writeAuth = writeAuth
+        self.plan = plan
     }
 
-    /// No reply grant and an unsigned write (tests, and an Everyone mailbox).
-    public static let none = ContactRequestReach(replyGrant: { _ in nil }, writeAuth: { _ in nil })
+    /// No reply grant and no known mailbox: nothing can be sent (tests).
+    public static let none = ContactRequestReach(replyGrant: { _ in nil }, plan: { _ in nil })
 }
 
 // MARK: - Result types

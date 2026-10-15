@@ -61,6 +61,10 @@ internal class EveryoneIdentity(
     val identityPk: ByteArray?,
     /** The auth account id (16 bytes). */
     val accountId: ByteArray?,
+    /** ADR-0078 - the account's 97-byte mailbox binding: the record carries
+     *  it so a searcher can address the open mailbox; `null` publishes
+     *  nothing. */
+    val mailboxBinding: ByteArray? = null,
 )
 
 /** The native and network steps, passed in. */
@@ -107,7 +111,8 @@ internal suspend fun publishEveryone(
     val identityPk = who.identityPk
     val accountId = who.accountId?.takeIf { it.size == ACCOUNT_ID_LEN }
     val terms = name?.let(ops.nameSearchTerms).orEmpty()
-    if (identityPk == null || accountId == null || (terms.isEmpty() && username == null)) {
+    val binding = who.mailboxBinding
+    if (identityPk == null || accountId == null || binding == null || (terms.isEmpty() && username == null)) {
         return EveryoneOutcome.NOTHING_TO_PUBLISH
     }
     val recordTermOutputs = mutableListOf<ByteArray>()
@@ -125,6 +130,7 @@ internal suspend fun publishEveryone(
         username = username,
         usernameCertificate = if (username != null) who.certificate else null,
         fof = null,
+        mailboxBinding = binding,
     )
     val record = ops.composePublicRecord(payload, recordTermOutputs, nowMs.coerceAtLeast(0L).toULong())
     ops.putVisibility(true, lookupKeys, record)

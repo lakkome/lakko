@@ -36,14 +36,31 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const sealSubscriberSeedEnvelope = vi.fn(() => new Uint8Array([0xaa]));
-// ADR-0053 — the Welcome goes to the joiner's mailbox, addressed by the
-// pseudonym of its signature key.
-const IdentityPseudonym = {
-  fromIdentity: vi.fn(() => ({ asBytes: () => new Uint8Array(32).fill(0x3d) })),
-};
+// ADR-0078 — the Welcome goes to the joiner's mailbox as a SEALED row; the
+// fake seal marks its bytes.
+const MailboxKind = { ContactRequest: 1, Welcome: 2, ContactAck: 3, WelcomeRendezvous: 4 };
+const sealMailboxRow = vi.fn((_pk: Uint8Array, kind: number, body: Uint8Array) =>
+  new Uint8Array([0xee, kind, ...body]),
+);
 
 vi.mock("../wasm", () => ({
-  loadWasm: async () => ({ sealSubscriberSeedEnvelope, IdentityPseudonym }),
+  loadWasm: async () => ({ sealSubscriberSeedEnvelope, MailboxKind, sealMailboxRow }),
+}));
+
+// The joiner's target (a reply grant's verified binding) is resolved by
+// `writeToPerson`, which has its own suites; here it is a fixed target.
+vi.mock("../reach/mailbox-write", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../reach/mailbox-write")>()),
+  writeToPerson: async (
+    _key: Uint8Array,
+    _options: unknown,
+    write: (target: unknown, auth: unknown, kind: string) => Promise<unknown>,
+  ) =>
+    write(
+      { address: new Uint8Array(32).fill(0x3d), mailboxPk: new Uint8Array(32).fill(0x3e) },
+      { signer: null, delegation: null },
+      "explicit",
+    ),
 }));
 
 const fetchEpoch = vi.fn(async () => ({ epoch: 1 }));

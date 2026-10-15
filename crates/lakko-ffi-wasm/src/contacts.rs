@@ -2027,6 +2027,21 @@ impl CallInviteCapability {
         ReachGrant::from_rust(self.inner.link_grant.clone())
     }
 
+    /// The owner's mailbox key the link grant names, verified against the
+    /// owner's ACCOUNT key (the one-time KeyPackage's device binding, or the
+    /// leaf key of an unbound leaf) — ADR-0078 phase 1. A joiner writes under
+    /// the link grant only to this key; a throw means the link is damaged.
+    ///
+    /// # Errors
+    ///
+    /// Throws when the KeyPackage or either binding does not verify.
+    #[wasm_bindgen(js_name = verifiedLinkGrantMailboxPk)]
+    pub fn verified_link_grant_mailbox_pk(&self) -> Result<Vec<u8>, JsError> {
+        lakko_calls::link_invite::verified_link_grant_mailbox_pk(&self.inner)
+            .map(|pk| pk.to_vec())
+            .map_err(|e| JsError::new(&format!("call link grant: {e}")))
+    }
+
     /// `true` iff the capability has not expired at `nowMs`.
     #[wasm_bindgen(js_name = isValidNow)]
     pub fn is_valid_now(&self, now_ms: u64) -> bool {
@@ -3703,10 +3718,12 @@ mod tests {
 
     const TEST_LINK_ID: [u8; 16] = [0x1C; 16];
 
+    /// Derived from the tests' capability owner seed (`[9; 32]`): its mailbox
+    /// binding must verify under the owner's key (ADR-0078).
     fn test_link_grant() -> ReachGrant {
         ReachGrant::from_rust(
             lakko_contacts::reach::ReachGrant::derive(
-                &[0x6E; 32],
+                &[9; 32],
                 lakko_contacts::reach::ReachClass::Link,
                 &TEST_LINK_ID,
                 0,
@@ -3715,10 +3732,11 @@ mod tests {
         )
     }
 
+    /// Derived from the tests' request sender seed (`[7; 32]`).
     fn test_reply_grant() -> ReachGrant {
         ReachGrant::from_rust(
             lakko_contacts::reach::ReachGrant::derive(
-                &[0x6F; 32],
+                &[7; 32],
                 lakko_contacts::reach::ReachClass::Reply,
                 &[0x9A; 16],
                 0,
@@ -3892,11 +3910,12 @@ mod tests {
             compose_bundle, compose_introduction, compose_introduction_offer, IntroductionRecord,
         };
         let rust_payload = lakko_contacts::introduction::IntroductionPayload {
-            identity_pk: [1; 32],
+            identity_pk: Ed25519::from_seed(&[3; 32]).verifying_key().to_bytes(),
             account_id: [2; 16],
             display_name: Some("Anna".into()),
             username: None,
             username_certificate: None,
+            mailbox_binding: lakko_contacts::mailbox::MailboxBinding::for_account_seed(&[3; 32]),
             fof: Some(
                 lakko_contacts::reach::ReachGrant::derive(
                     &[3; 32],
@@ -4138,7 +4157,7 @@ mod tests {
 
     #[test]
     fn invite_capability_never_expires_sentinel() {
-        let owner_seed = [3u8; 32];
+        let owner_seed = [9u8; 32];
         let owner_account_id = [0x11u8; 16];
         let owner_x25519 = X25519SecretKey::from_bytes([0x22; 32])
             .public_key()

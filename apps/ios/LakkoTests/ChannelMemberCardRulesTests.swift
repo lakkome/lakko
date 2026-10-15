@@ -82,11 +82,16 @@ final class ChannelMemberCardRulesTests: XCTestCase {
 
     func testWithdrawingRemovesOnlyThatChannelsGrant() throws {
         let c = try center()
-        let keyB64 = author.base64EncodedString()
+        // ADR-0078 — a kept grant's mailbox binding verifies under its author.
+        let realAuthor = try Identity.fromSeed(seed: Data(repeating: 0xA1, count: 32))
+        let keyB64 = realAuthor.signaturePublicKey().base64EncodedString()
         let other = String(repeating: "ef", count: 16)
-        XCTAssertTrue(c.keep(try channelGrant(), carrier: .channelMemberCard,
+        let grant = try deriveReachGrant(
+            accountSeed: realAuthor.ed25519Seed(), class: .channel,
+            scopeId: Data(repeating: 0xCD, count: 16), version: 3)
+        XCTAssertTrue(c.keep(grant, carrier: .channelMemberCard,
                              fromAccountKeyB64: keyB64, scopeHex: channelHex))
-        XCTAssertTrue(c.keep(try channelGrant(), carrier: .channelMemberCard,
+        XCTAssertTrue(c.keep(grant, carrier: .channelMemberCard,
                              fromAccountKeyB64: keyB64, scopeHex: other))
         XCTAssertTrue(c.holdsGrant(.channel, fromAccountKeyB64: keyB64, scopeHex: channelHex))
         XCTAssertTrue(c.withdrawHeld(.channel, fromAccountKeyB64: keyB64, scopeHex: channelHex))

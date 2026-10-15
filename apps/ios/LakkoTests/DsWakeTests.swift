@@ -202,7 +202,11 @@ final class DsWakeTests: XCTestCase {
     func testAMailboxPublishNeverCarriesAWake() async throws {
         let scope = WakeRecordingDsURLProtocol.freshScope()
         let ds = WakeRecordingDsURLProtocol.client(scope)
-        _ = try await ds.publishMailbox(pseudonym: Data(repeating: 7, count: 32), payload: Data([1]))
+        // ADR-0078 — a sealed row, signed with a reach key (no token spent).
+        let target = MailboxTarget.own(accountIdentity: try Identity.fromSeed(seed: Data(repeating: 7, count: 32)))
+        _ = try await ds.publishMailbox(
+            pseudonym: target.address, payload: try target.seal(kind: .welcome, body: Data([1])),
+            writeAuth: DsMailboxWriteAuth(reachSeed: Data(repeating: 3, count: 32)))
         let seen = try XCTUnwrap(WakeRecordingDsURLProtocol.requests(scope).first)
         XCTAssertNil(seen.wake)
     }

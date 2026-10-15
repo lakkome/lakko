@@ -32,16 +32,18 @@ vi.mock("../chat/commit-outbox", () => ({
   loadUnacked: (...a: unknown[]) => loadUnacked(...(a as [])),
 }));
 
-// `addMemberToGroup` computes the Welcome pseudonym via
-// `loadWasm().IdentityPseudonym.fromIdentity(...).asBytes()`. Stub it so the
-// reorder is exercised without the real wasm core. The `hoisted` flag lets a test
-// force the ARTIFACT-COMPUTE (not the persist) to throw AFTER the eager-merge —
-// the ADR-0040 F1 pre-persist residual — so we can assert the reset still fires.
+// `addMemberToGroup` computes the Welcome's account key via
+// `loadWasm().keyPackageAccountKey(...)`. Stub it so the reorder is exercised
+// without the real wasm core. The `hoisted` flag lets a test force the
+// ARTIFACT-COMPUTE (not the persist) to throw AFTER the eager-merge — the
+// ADR-0040 F1 pre-persist residual — so we can assert the reset still fires.
 //
 // ADR-0045 S7 removed the second such artifact: the external-join approve no
 // longer computes a `WelcomeRendezvous` here, because it no longer commits.
+// ADR-0078: a mailbox row is sealed to the target's mailbox key; the fake
+// seal marks its bytes so a test can see what was sealed, and to what kind.
 const hoisted = vi.hoisted(() => ({
-  fromIdentityThrows: false,
+  artifactComputeThrows: false,
 }));
 vi.mock("../wasm", () => ({
   loadWasm: async () => ({
@@ -50,18 +52,32 @@ vi.mock("../wasm", () => ({
     // ADR-0073 R.2: `addMemberToGroup` adds only a device whose binding names
     // the expected account key. The first byte of the fake KeyPackage is the
     // account key's fill, so a test can serve another account's device.
-    keyPackageAccountKey: (kp: Uint8Array) => new Uint8Array(32).fill(kp[0] ?? 0),
-    IdentityPseudonym: {
-      fromIdentity: (_pk: Uint8Array) => ({
-        asBytes: (): Uint8Array => {
-          if (hoisted.fromIdentityThrows) {
-            throw new Error("IdentityPseudonym.fromIdentity failed (artifact compute)");
-          }
-          return new Uint8Array(32).fill(7);
-        },
-      }),
+    keyPackageAccountKey: (kp: Uint8Array) => {
+      if (hoisted.artifactComputeThrows) {
+        throw new Error("keyPackageAccountKey failed (artifact compute)");
+      }
+      return new Uint8Array(32).fill(kp[0] ?? 0);
     },
+    MailboxKind: { ContactRequest: 1, Welcome: 2, ContactAck: 3, WelcomeRendezvous: 4 },
+    sealMailboxRow: (pk: Uint8Array, kind: number, body: Uint8Array) =>
+      new Uint8Array([0xee, pk[0] ?? 0, kind, ...body]),
   }),
+}));
+
+// ADR-0078: the replay resolves the Welcome's target through
+// `writeToPerson` (a grant held for the account, its binding verified). The
+// grant machinery has its own suites; here it is a fixed verified target.
+const TARGET = {
+  address: new Uint8Array(32).fill(7),
+  mailboxPk: new Uint8Array(32).fill(0x55),
+};
+vi.mock("../reach/mailbox-write", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../reach/mailbox-write")>()),
+  writeToPerson: async (
+    _key: Uint8Array,
+    _options: unknown,
+    write: (target: typeof TARGET, auth: unknown, kind: string) => Promise<unknown>,
+  ) => write(TARGET, { signer: null, delegation: null }, "kept"),
 }));
 
 import { ContactsClient, ContactsError } from "./client";
@@ -146,7 +162,7 @@ function makeClient(
 
 afterEach(() => {
   vi.clearAllMocks();
-  hoisted.fromIdentityThrows = false;
+  hoisted.artifactComputeThrows = false;
 });
 
 describe("ADR-0040 — commit path persist-before-publish (fail-closed)", () => {
@@ -292,10 +308,10 @@ describe("ADR-0040 — restart sweep re-publishes + re-arms the echo filter", ()
     expect(markAcked).toHaveBeenCalledWith("e1", 500, undefined);
   });
 
-  it("re-publishes an add-style entry: commit to the journal, Welcome to the mailbox (no echo re-arm for the mailbox)", async () => {
+  it("re-publishes an add-style entry: commit to the journal, Welcome SEALED to the mailbox (no echo re-arm for the mailbox)", async () => {
     const commitBytes = new Uint8Array([1, 1]);
-    const welcomeEnvelope = new Uint8Array([2, 2, 2]);
-    const mailbox = new Uint8Array(32).fill(7);
+    const welcome = new Uint8Array([2, 2, 2]);
+    const accountKey = new Uint8Array(32).fill(3);
     loadUnacked.mockResolvedValueOnce([
       {
         id: "e2",
@@ -303,9 +319,9 @@ describe("ADR-0040 — restart sweep re-publishes + re-arms the echo filter", ()
         groupId: groupIdB64,
         targetEpoch: "6",
         commitB64: base64Encode(commitBytes),
-        secondArtifactB64: base64Encode(welcomeEnvelope),
+        secondArtifactB64: base64Encode(welcome),
         secondArtifactKind: "welcome",
-        secondArtifactMailboxB64: base64Encode(mailbox),
+        secondArtifactAccountKeyB64: base64Encode(accountKey),
         acked: false,
       },
     ] as unknown[]);
@@ -331,8 +347,10 @@ describe("ADR-0040 — restart sweep re-publishes + re-arms the echo filter", ()
     expect(publishGroup).toHaveBeenCalledTimes(1);
     expect(publishGroup.mock.calls[0]?.[1]).toEqual(commitBytes);
     expect(publishMailbox).toHaveBeenCalledTimes(1);
-    expect(publishMailbox.mock.calls[0]?.[0]).toEqual(mailbox);
-    expect(publishMailbox.mock.calls[0]?.[1]).toEqual(welcomeEnvelope);
+    // ADR-0078: to the verified target's address, the RAW Welcome sealed as
+    // a Welcome row (kind 2) to the target's mailbox key; no clear kind byte.
+    expect(publishMailbox.mock.calls[0]?.[0]).toEqual(TARGET.address);
+    expect(publishMailbox.mock.calls[0]?.[1]).toEqual(new Uint8Array([0xee, 0x55, 2, 2, 2, 2]));
     // ONLY the commit id is echo re-armed — the mailbox Welcome never echoes
     // back to the committer's group poll.
     expect(rearmed).toEqual([600]);
@@ -542,6 +560,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
   // ARTIFACT-COMPUTE (not the persist) to throw and assert the reset still fires.
 
   it("addMemberToGroup: the Welcome-artifact compute throws AFTER the merge -> epoch rolls back to N; neither artifact reaches the DS", async () => {
+    let armArtifactThrow = false;
     const N = 5n;
     let epoch = N;
     const group = {
@@ -554,6 +573,8 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
       dsAccessSigner: fakeAccessSigner(() => epoch),
       addMember: vi.fn((_id: unknown, _kp: Uint8Array) => {
         epoch += 1n; // eager merge N -> N+1
+        // The artifact compute after the merge throws.
+        hoisted.artifactComputeThrows = armArtifactThrow;
         return {
           commit: new Uint8Array([1, 2, 3]),
           welcome: new Uint8Array([4, 4]),
@@ -587,9 +608,9 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
       },
     );
 
-    // The merge advances 5 -> 6, then `IdentityPseudonym.fromIdentity(...).asBytes()`
-    // throws BEFORE the persist runs — the residual. The op must STILL reset to N.
-    hoisted.fromIdentityThrows = true;
+    // The merge advances 5 -> 6, then `keyPackageAccountKey(...)` throws BEFORE
+    // the persist runs — the residual. The op must STILL reset to N.
+    armArtifactThrow = true;
     await expect(
       client.addMemberToGroup(
         null,

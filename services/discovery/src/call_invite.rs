@@ -76,9 +76,9 @@ use crate::AppState;
 
 /// Server-side ceiling on the sealed blob: the longest sealed `/c/` link
 /// the codec can produce (`lakko_contacts::call_invite::MAX_SEALED_LEN`,
-/// 4391 bytes with a 4 KiB embedded KeyPackage), derived rather than written
+/// 4488 bytes with a 4 KiB embedded KeyPackage), derived rather than written
 /// as a literal. Pinned to `call_invites.sealed_capability` in
-/// `migrations/0024_link_grant_sealed_width.sql` by a test.
+/// `migrations/0030_link_grant_mailbox_binding_width.sql` by a test.
 const MAX_SEALED_BYTES: usize = MAX_SEALED_LEN;
 
 /// Sentinel for "unlimited" `max_uses` — matches
@@ -627,16 +627,17 @@ mod tests {
 
     /// The `MAX_SEALED_BYTES` constant pins the
     /// `call_invites.sealed_capability` width declared in
-    /// `0024_link_grant_sealed_width.sql` (ADR-0060 §6 widened it).
+    /// `0030_link_grant_mailbox_binding_width.sql` (ADR-0060 §6 and ADR-0078
+    /// widened it).
     #[test]
     fn max_sealed_bytes_matches_column_width() {
-        let migration = include_str!("../migrations/0024_link_grant_sealed_width.sql");
+        let migration = include_str!("../migrations/0030_link_grant_mailbox_binding_width.sql");
         let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             normalised.contains(&format!("sealed_capability VARBINARY({MAX_SEALED_BYTES})")),
             "MAX_SEALED_BYTES ({MAX_SEALED_BYTES}) must match call_invites.sealed_capability",
         );
-        assert_eq!(MAX_SEALED_BYTES, 4391);
+        assert_eq!(MAX_SEALED_BYTES, 4488);
     }
 
     #[test]

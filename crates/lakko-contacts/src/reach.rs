@@ -49,6 +49,21 @@
 //! its Welcome with it. It is known to anyone who knows the account id and
 //! the generation; it is a reach key, not a credential.
 //!
+//! ## A grant carries its mailbox ([ADR-0078] section 1)
+//!
+//! Since ADR-0078 a mailbox is addressed by a mailbox key that is not the
+//! identity key ([`crate::mailbox`]), so a grant holder could not tell where
+//! to write from the seed alone. A grant therefore carries the owner's
+//! [`MailboxBinding`]: the mailbox public key signed by the owner's account
+//! identity key. **Decoding a grant does not verify the binding** (the
+//! decoder does not know the owner); a writer calls
+//! [`ReachGrant::mailbox_pk_verified`] with the account key it holds pinned
+//! for the owner, and writes only when that succeeds. A carrier that itself
+//! names the owner's account key (a link capability, a contact request)
+//! verifies it at decode; every other carrier leaves it to the writer.
+//!
+//! [ADR-0078]: ../../../docs/adr/0078-servers-cannot-link-accounts.md
+//!
 //! ## A grant is a secret
 //!
 //! A [`ReachGrant`] carries the **seed**, not the public key: whoever holds it
@@ -65,6 +80,8 @@ use lakko_crypto::hash::blake3_derive_key_from_material;
 use lakko_crypto::signing::SigningKey;
 use lakko_crypto::SecretBytes;
 use thiserror::Error;
+
+use crate::mailbox::{mailbox_address, MailboxBinding, MailboxError, MAILBOX_BINDING_LEN};
 
 /// BLAKE3 derive-key context for reach seeds. Frozen: changing it changes
 /// every reach key of every account.
@@ -84,8 +101,9 @@ pub const REACH_SEED_LEN: usize = 32;
 /// or request id).
 pub const MAX_REACH_SCOPE_ID_LEN: usize = 64;
 
-/// Wire length of a [`ReachGrant`]: `class(1) || version(4, BE) || seed(32)`.
-pub const REACH_GRANT_LEN: usize = 1 + 4 + REACH_SEED_LEN;
+/// Wire length of a [`ReachGrant`]: `class(1) || version(4, BE) || seed(32)
+/// || binding(97)` = 134.
+pub const REACH_GRANT_LEN: usize = 1 + 4 + REACH_SEED_LEN + MAILBOX_BINDING_LEN;
 
 /// Who a reach key is handed to (ADR-0060 §1). The byte values are frozen:
 /// they enter the key derivation and every wire that names a class.
@@ -208,6 +226,9 @@ pub enum ReachError {
         /// The length received.
         actual: usize,
     },
+    /// The grant's mailbox binding does not decode (layout or version).
+    #[error("reach grant carries a malformed mailbox binding")]
+    BadBinding,
 }
 
 impl ReachError {
@@ -220,6 +241,7 @@ impl ReachError {
             Self::ScopeIdNotEmpty => "scopeIdNotEmpty",
             Self::ScopeIdEmpty => "scopeIdEmpty",
             Self::BadLength { .. } => "badLength",
+            Self::BadBinding => "badBinding",
         }
     }
 }
@@ -297,7 +319,8 @@ pub fn reach_verifying_key(seed: &[u8; REACH_SEED_LEN]) -> [u8; REACH_SEED_LEN] 
     SigningKey::from_seed(seed).verifying_key().to_bytes()
 }
 
-/// A reach key handed to someone: its class, its version, and the seed.
+/// A reach key handed to someone: its class, its version, the seed, and the
+/// owner's mailbox binding (ADR-0078).
 ///
 /// The scope is implicit in where the grant travels (the group a profile is
 /// published in, the channel a member card belongs to), so it is not on the
@@ -310,6 +333,9 @@ pub struct ReachGrant {
     pub version: u32,
     /// The Ed25519 seed. Secret: whoever holds it can write to the mailbox.
     pub seed: SecretBytes<REACH_SEED_LEN>,
+    /// The owner's mailbox binding: where the key writes to. Not verified on
+    /// decode; see [`ReachGrant::mailbox_pk_verified`].
+    pub binding: MailboxBinding,
 }
 
 impl fmt::Debug for ReachGrant {
@@ -318,6 +344,7 @@ impl fmt::Debug for ReachGrant {
             .field("class", &self.class)
             .field("version", &self.version)
             .field("seed", &"<redacted>")
+            .field("binding", &self.binding)
             .finish()
     }
 }
@@ -338,7 +365,37 @@ impl ReachGrant {
             class,
             version,
             seed: reach_seed(account_seed, class, scope_id, version)?,
+            binding: MailboxBinding::for_account_seed(account_seed),
         })
+    }
+
+    /// The mailbox key this grant writes to, after verifying its binding
+    /// against `account_pk`, the owner's account identity key as the writer
+    /// holds it pinned. A writer calls this before every write and writes
+    /// nothing when it fails: a binding signed by anyone else would route the
+    /// write to a mailbox the owner does not read.
+    ///
+    /// # Errors
+    ///
+    /// Every error of [`MailboxBinding::verify`].
+    pub fn mailbox_pk_verified(
+        &self,
+        account_pk: &[u8; REACH_SEED_LEN],
+    ) -> CoreResult<[u8; REACH_SEED_LEN], MailboxError> {
+        self.binding.verify(account_pk)
+    }
+
+    /// The mailbox address this grant writes to, after the same check as
+    /// [`ReachGrant::mailbox_pk_verified`].
+    ///
+    /// # Errors
+    ///
+    /// Every error of [`MailboxBinding::verify`].
+    pub fn mailbox_address_verified(
+        &self,
+        account_pk: &[u8; REACH_SEED_LEN],
+    ) -> CoreResult<[u8; REACH_SEED_LEN], MailboxError> {
+        Ok(mailbox_address(&self.mailbox_pk_verified(account_pk)?))
     }
 
     /// The public key the holder signs mailbox writes under.
@@ -347,7 +404,7 @@ impl ReachGrant {
         reach_verifying_key(self.seed.as_bytes())
     }
 
-    /// Encode as `class(1) || version(4, BE) || seed(32)`.
+    /// Encode as `class(1) || version(4, BE) || seed(32) || binding(97)`.
     ///
     /// The output holds the seed; the caller seals it before it leaves the
     /// device.
@@ -356,7 +413,8 @@ impl ReachGrant {
         let mut out = [0u8; REACH_GRANT_LEN];
         out[0] = self.class.to_byte();
         out[1..5].copy_from_slice(&self.version.to_be_bytes());
-        out[5..].copy_from_slice(self.seed.as_bytes());
+        out[5..5 + REACH_SEED_LEN].copy_from_slice(self.seed.as_bytes());
+        out[5 + REACH_SEED_LEN..].copy_from_slice(&self.binding.encode());
         out
     }
 
@@ -366,6 +424,8 @@ impl ReachGrant {
     ///
     /// * [`ReachError::BadLength`] — not exactly the grant length.
     /// * [`ReachError::UnknownClass`] — the class byte is not a class.
+    /// * [`ReachError::BadBinding`] — the binding's layout is malformed (its
+    ///   signature is not checked here).
     pub fn decode(bytes: &[u8]) -> CoreResult<Self, ReachError> {
         if bytes.len() != REACH_GRANT_LEN {
             return Err(ReachError::BadLength {
@@ -377,13 +437,18 @@ impl ReachGrant {
             actual: bytes.len(),
         })?;
         let seed: [u8; REACH_SEED_LEN] =
-            bytes[5..].try_into().map_err(|_| ReachError::BadLength {
-                actual: bytes.len(),
-            })?;
+            bytes[5..5 + REACH_SEED_LEN]
+                .try_into()
+                .map_err(|_| ReachError::BadLength {
+                    actual: bytes.len(),
+                })?;
+        let binding = MailboxBinding::decode(&bytes[5 + REACH_SEED_LEN..])
+            .map_err(|_| ReachError::BadBinding)?;
         Ok(Self {
             class,
             version: u32::from_be_bytes(version_bytes),
             seed: SecretBytes::new(seed),
+            binding,
         })
     }
 }
@@ -557,11 +622,12 @@ mod tests {
                 assert_eq!(wire.len(), REACH_GRANT_LEN);
                 assert_eq!(wire[0], class.to_byte());
                 assert_eq!(&wire[1..5], &version.to_be_bytes());
-                assert_eq!(&wire[5..], grant.seed.as_bytes());
+                assert_eq!(&wire[5..37], grant.seed.as_bytes());
+                assert_eq!(&wire[37..], &grant.binding.encode());
                 assert_eq!(ReachGrant::decode(&wire).unwrap(), grant);
             }
         }
-        assert_eq!(REACH_GRANT_LEN, 37);
+        assert_eq!(REACH_GRANT_LEN, 134);
     }
 
     #[test]
@@ -589,6 +655,40 @@ mod tests {
             ReachGrant::decode(&bad_class),
             Err(ReachError::UnknownClass(0))
         );
+        let mut bad_binding = good;
+        bad_binding[37] = 2;
+        assert_eq!(
+            ReachGrant::decode(&bad_binding),
+            Err(ReachError::BadBinding)
+        );
+    }
+
+    #[test]
+    fn a_derived_grant_names_the_owners_mailbox_and_verifies_only_under_the_owner() {
+        let grant = ReachGrant::derive(&ACCOUNT, ReachClass::Contact, b"", 0).unwrap();
+        let owner = SigningKey::from_seed(&ACCOUNT).verifying_key().to_bytes();
+        let mailbox = crate::mailbox::MailboxKey::from_account_seed(&ACCOUNT);
+        assert_eq!(grant.mailbox_pk_verified(&owner), Ok(mailbox.public()));
+        assert_eq!(
+            grant.mailbox_address_verified(&owner),
+            Ok(mailbox.address())
+        );
+        let stranger = SigningKey::from_seed(&[0x43; 32])
+            .verifying_key()
+            .to_bytes();
+        assert_eq!(
+            grant.mailbox_pk_verified(&stranger),
+            Err(MailboxError::BadBinding)
+        );
+        // A grant whose binding was swapped for another account's decodes
+        // (decode cannot know the owner) but does not verify under the owner.
+        let mut swapped = grant.clone();
+        swapped.binding = MailboxBinding::for_account_seed(&[0x43; 32]);
+        let decoded = ReachGrant::decode(&swapped.encode()).unwrap();
+        assert_eq!(
+            decoded.mailbox_pk_verified(&owner),
+            Err(MailboxError::BadBinding)
+        );
     }
 
     #[test]
@@ -597,9 +697,11 @@ mod tests {
             class: ReachClass::Group,
             version: 1,
             seed: SecretBytes::new([0xAB; 32]),
+            binding: MailboxBinding::for_account_seed(&ACCOUNT),
         };
         let dbg = format!("{grant:?}");
-        assert!(!dbg.contains("ab") && !dbg.contains("AB") && !dbg.contains("171"));
+        // The binding (a public key) is printed; the seed never is.
+        assert!(!dbg.contains("abab") && !dbg.contains("ABAB") && !dbg.contains("171, 171"));
         assert!(dbg.contains("redacted"));
     }
 

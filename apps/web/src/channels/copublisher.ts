@@ -70,7 +70,7 @@ import {
   registerBeforePublish,
   takeSigner,
 } from "../ds/access";
-import { KIND_WELCOME, parseEnvelope, wrapEnvelope } from "../contacts/envelope";
+import { openOwnRow, sealRowFor } from "../contacts/mailbox-row";
 import { takeKnockReadSlot } from "../chat/knock-cursor";
 import { base64Encode } from "../auth/account-id";
 import { withGroupMlsLock } from "../mls/group-lock";
@@ -97,8 +97,13 @@ import {
 } from "../contacts/invite-link";
 import { parseGroupInviteSlug, splitGroupInviteLink } from "../contacts/group-invite";
 import { reachSession } from "../reach/reach-service";
-import { accountMailboxOf, mailboxOfExactKey, writeToPerson } from "../reach/mailbox-write";
-import { forgetJoinReply, joinReplyFor, rememberJoinReply } from "../reach/join-replies";
+import { writeToPerson } from "../reach/mailbox-write";
+import {
+  forgetJoinReply,
+  joinReplyBindingVerifies,
+  joinReplyFor,
+  rememberJoinReply,
+} from "../reach/join-replies";
 import { journalHex } from "../ds/access";
 import { KeyedError } from "../l10n/keyed-error";
 
@@ -408,18 +413,19 @@ export async function approveCoPublisher(
       }
       await ds.publishGroup(groupId, added.commit, { signer: signerN });
       // ADR-0053 contract point 8 — the Welcome goes to the joiner's own
-      // mailbox (named after the joiner's signature key, `proposalRef`), the
-      // way a direct add delivers one; never to the journal. ADR-0060
-      // section 6: the mailbox is closed, so the write is signed under the
-      // `reply` grant the joiner's attribution carried (kept by the poll).
-      // ADR-0074 section 3.5a rule 1 - resolved to the joiner's CURRENT
-      // mailbox when the key named is a proven predecessor.
+      // account mailbox, the way a direct add delivers one; never to the
+      // journal. ADR-0060 section 6: the mailbox is closed, so the write is
+      // signed under the `reply` grant the joiner's attribution carried (kept
+      // by the poll). ADR-0078: the row is sealed as a Welcome to the mailbox
+      // key that grant's binding names, verified against the joiner's account
+      // key (`proposalRef`: a co-publisher's leaf IS its account key).
       // Rule 6: a refused write re-checks the address once.
-      const welcome = wrapEnvelope(KIND_WELCOME, added.welcome);
+      const wasm = await loadWasm();
+      const welcome = added.welcome;
       await writeToPerson(
         proposalRef,
         { explicit: joinReplyFor(proposalRef) },
-        (mailbox, auth) => ds.publishMailbox(mailbox, welcome, auth),
+        (target, auth) => ds.publishMailbox(target.address, sealRowFor(wasm, target, "welcome-rendezvous", welcome), auth),
       );
       forgetJoinReply(proposalRef);
     } finally {
@@ -540,11 +546,20 @@ export async function requestToCoPublish(
  *  resealed to — so the derived `channelSeed` matches. Returns the keys on
  *  success, or `null` if no Welcome has arrived yet (keep polling).
  *
- *  ADR-0053 — the Welcome is in the mailbox named after `joinerKey` (the
- *  account identity's key: the PublisherGroup lives in its provider), read
- *  under that identity's proof. Both carriers a sending client may use are
- *  accepted: the ordinary Welcome envelope a direct add sends, and a
- *  `WelcomeRendezvous` bound to this joiner's key. */
+ *  ADR-0078 — the Welcome is in the account mailbox of `identity` (the
+ *  identity whose provider holds the PublisherGroup), named after the
+ *  mailbox key that identity's seed derives and read under that key's
+ *  proof. Every row is opened with that key; a row that does not open is
+ *  dropped. Both carriers a sending client may use are accepted: a Welcome
+ *  row (what a direct add sends) and a Welcome-rendezvous row bound to this
+ *  joiner's key. `joinerKey` is `identity`'s key.
+ *
+ *  ADR-0074 section 3.5a - an owner that has observed this account's proven
+ *  rotation writes the Welcome to the CURRENT account mailbox; one that has
+ *  not writes to the mailbox of `identity` (after a rotation: the
+ *  predecessor the PublisherGroup's provider is bound to). `currentIdentity`
+ *  (the current account identity, when it is another instance) is read too,
+ *  first. Reads only. */
 export async function pollForCoPublishWelcome(
   ds: DsClient,
   identity: Identity,
@@ -552,38 +567,41 @@ export async function pollForCoPublishWelcome(
   joinerKey: Uint8Array,
   channelIdHex: string,
   existingSigningSeed?: Uint8Array,
+  currentIdentity?: Identity | null,
 ): Promise<ChannelPublisherKeys | null> {
   const wasm = await loadWasm();
-  // ADR-0074 section 3.5a - an owner that has observed this account's proven
-  // rotation writes the Welcome to the CURRENT mailbox; one that has not
-  // writes to the mailbox of `joinerKey` (after a rotation: the predecessor
-  // the PublisherGroup's provider is bound to). Both are this account's and
-  // both are read, the current one first. Reads only.
-  const mailboxes = [await accountMailboxOf(joinerKey)];
-  const exact = await mailboxOfExactKey(joinerKey);
-  if (journalHex(exact) !== journalHex(mailboxes[0] ?? exact)) mailboxes.push(exact);
+  const owners: Identity[] = [];
+  if (currentIdentity !== undefined && currentIdentity !== null && currentIdentity !== identity) {
+    owners.push(currentIdentity);
+  }
+  owners.push(identity);
   // Paged to the end: the Welcome is among the newest rows.
   const candidates: Uint8Array[] = [];
   let scanned = 0;
   let scanError: unknown = null;
-  for (const mailbox of mailboxes) {
+  for (const owner of owners) {
+    const key = wasm.MailboxKey.fromAccountIdentity(owner);
     try {
+      const address = key.address();
       await scanJournal<never>(
-        (after, limit) => ds.fetchMailbox(mailbox, { after, limit, waitSecs: 0 }),
+        (after, limit) => ds.fetchMailbox(address, { after, limit, waitSecs: 0 }),
         (m) => {
-          const rendezvous = wasm.welcomeRendezvousFor(m.payload, joinerKey);
-          if (rendezvous !== undefined) {
-            candidates.push(rendezvous);
-            return undefined;
+          const row = openOwnRow(wasm, key, m.payload);
+          if (row === null) return undefined;
+          if (row.kind === "welcome-rendezvous") {
+            const rendezvous = wasm.welcomeRendezvousFor(row.body, joinerKey);
+            if (rendezvous !== undefined) candidates.push(rendezvous);
+          } else if (row.kind === "welcome") {
+            candidates.push(row.body);
           }
-          const env = parseEnvelope(m.payload);
-          if (env.kind === KIND_WELCOME) candidates.push(env.body);
           return undefined;
         },
       );
       scanned += 1;
     } catch (err) {
       scanError = err;
+    } finally {
+      key.free();
     }
   }
   // One mailbox that cannot be read (its 30 days are over, its signer is
@@ -697,6 +715,11 @@ function rememberAttributionReply(wasm: Wasm, groupId: Uint8Array, payload: Uint
     if (base64Encode(attr.groupId) !== base64Encode(groupId)) return;
     const reply = attr.replyGrant;
     try {
+      // ADR-0078 - the reply grant's mailbox binding must verify against the
+      // joiner's account key, which for a co-publisher IS the key the
+      // attribution is self-signed with. A grant naming someone else's
+      // mailbox is not kept (fail closed).
+      if (!joinReplyBindingVerifies(reply, attr.joinerSignatureKey)) return;
       rememberJoinReply(attr.joinerSignatureKey, session.encodeGrant(reply));
     } finally {
       reply.free();

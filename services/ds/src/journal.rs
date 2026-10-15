@@ -567,12 +567,22 @@ pub(crate) async fn post_mailbox(
             ),
         ));
     }
+    // ADR-0078 section 1: every mailbox row is a sealed envelope padded to a
+    // size bucket. Checked first, before any state is read, so a malformed
+    // row is refused alike whatever the mailbox's state and never costs a
+    // token.
+    if !lakko_ds_proof::is_well_formed_mailbox_row(&body) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "a mailbox row must be a sealed, bucket-padded envelope".to_string(),
+        ));
+    }
     // ADR-0060 section 2: a claimed, closed mailbox takes a write only under
-    // a reach key (or a delegation from one). An unclaimed mailbox - the
-    // rendezvous inboxes - and an open one (Everyone) take any proofless
-    // write, as ADR-0053 left them. A proofless write to a closed mailbox is
-    // answered as if stored and dropped; a proof that fails is the uniform
-    // 401 whatever the mailbox's state.
+    // a reach key (or a delegation from one). An open mailbox (Everyone) and
+    // an unclaimed one take a proofless write that spends one `mailbox-write`
+    // anonymous token (ADR-0078). A proofless write to a closed mailbox
+    // spends one too and is answered as if stored and dropped; a proof that
+    // fails is the uniform 401 whatever the mailbox's state.
     let resp =
         match crate::reach::gate_mailbox_write(&state, &owner, &method, &uri, &headers, &body)
             .await?
@@ -580,7 +590,23 @@ pub(crate) async fn post_mailbox(
             crate::reach::MailboxWrite::Store => {
                 publish(&state.db, &state.notifiers, Queue::Mailbox, &owner, &body).await?
             },
-            crate::reach::MailboxWrite::Drop => publish_dropped(&state.db, &owner).await?,
+            decision @ (crate::reach::MailboxWrite::StoreAfterToken
+            | crate::reach::MailboxWrite::DropAfterToken) => {
+                // Spent for a closed mailbox too, so whether the token came
+                // back unspent never tells a closed mailbox from another.
+                if let Err(refused) = state
+                    .anon_tokens
+                    .spend_header(&headers, lakko_anon_token::TokenContext::MailboxWrite)
+                    .await
+                {
+                    return Ok(refused.into_response());
+                }
+                if decision == crate::reach::MailboxWrite::StoreAfterToken {
+                    publish(&state.db, &state.notifiers, Queue::Mailbox, &owner, &body).await?
+                } else {
+                    publish_dropped(&state.db, &owner).await?
+                }
+            },
         };
     Ok((StatusCode::CREATED, resp).into_response())
 }

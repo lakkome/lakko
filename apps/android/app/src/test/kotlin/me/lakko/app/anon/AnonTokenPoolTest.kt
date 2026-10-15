@@ -152,15 +152,17 @@ class AnonTokenPoolTest {
                 AnonTokenContext.VAULT_CLAIM to 4,
                 AnonTokenContext.BLOB_UPLOAD to 2,
                 AnonTokenContext.BLOB_READ to 2,
+                // ADR-0078; chosen, not measured.
+                AnonTokenContext.MAILBOX_WRITE to 2,
             ),
             firstBatch,
         )
     }
 
     @Test
-    fun theContextListIsTheCoresTenNamesInWireOrder() {
+    fun theContextListIsTheCoresElevenNamesInWireOrder() {
         // The source of truth is `TokenContext::ALL` / `TokenContext::name` in
-        // `crates/lakko-anon-token/src/context.rs` (wire bytes 1..=10), which
+        // `crates/lakko-anon-token/src/context.rs` (wire bytes 1..=11), which
         // `anonTokenContexts()` in `crates/lakko-ffi-uniffi/src/anon_token.rs`
         // returns in that order. The host JVM cannot load the native library,
         // so the names are pinned here as literals: a context added to or
@@ -178,6 +180,7 @@ class AnonTokenPoolTest {
                 "vault-claim",
                 "blob-upload",
                 "blob-read",
+                "mailbox-write",
             ),
             AnonTokenContext.entries.map { it.wire },
         )

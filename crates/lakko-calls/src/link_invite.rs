@@ -401,6 +401,34 @@ pub fn join_call_from_welcome(
     Ok(JoinedCall { group, session })
 }
 
+/// The owner's mailbox key a `/c/` link's `link` reach grant names, verified
+/// against the owner's **account** key ([ADR-0078](../../../docs/adr/0078-servers-cannot-link-accounts.md)
+/// phase 1).
+///
+/// A `/c/` capability is signed by the owner's device key, so its signer does
+/// not say which account the grant's mailbox binding must belong to. The
+/// account comes from the capability's one-time KeyPackage: its ADR-0050 device
+/// binding names the account key, and an unbound (Phase 1) leaf is the account
+/// key itself. The grant is used only when its binding verifies against that
+/// key; otherwise a joiner would write its cold start to a mailbox the owner
+/// cannot show is theirs. Written here, once, so the three clients do not each
+/// keep a copy of the rule.
+///
+/// # Errors
+///
+/// [`Error::Crypto`] when the KeyPackage does not parse, its device binding
+/// does not verify, or the grant's mailbox binding does not verify against the
+/// owner's account key.
+pub fn verified_link_grant_mailbox_pk(capability: &CallInviteCapability) -> Result<[u8; 32]> {
+    let owner_account_key = lakko_mls::key_package::account_key(&capability.one_time_key_package)
+        .map_err(|e| Error::Crypto(format!("call link KeyPackage: {e}")))?
+        .ok_or_else(|| Error::Crypto("call link KeyPackage binding does not verify".into()))?;
+    capability
+        .link_grant
+        .mailbox_pk_verified(&owner_account_key)
+        .map_err(|e| Error::Crypto(format!("call link grant: {e}")))
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -447,6 +475,59 @@ mod tests {
         id[0] = 0x10;
         id[15] = 0x10;
         id
+    }
+
+    // -------------------------------------------------------------------------
+    // verified_link_grant_mailbox_pk (ADR-0078 phase 1)
+    // -------------------------------------------------------------------------
+
+    fn capability_with_grant(
+        owner: &MlsIdentity,
+        grant: &lakko_contacts::reach::ReachGrant,
+    ) -> CallInviteCapability {
+        let kp = owner.create_key_package().unwrap();
+        let kp_bytes = lakko_mls::key_package::serialize(&kp).unwrap();
+        let wire = compose(
+            &signing_for(owner),
+            &fixture_account_id(),
+            &fixture_call_id(),
+            0,
+            0,
+            CallInviteMedia::audio_video(),
+            &kp_bytes,
+            "standup",
+            &TEST_LINK_ID,
+            grant,
+        )
+        .unwrap();
+        lakko_contacts::call_invite::decode_and_verify(&wire).unwrap()
+    }
+
+    #[test]
+    fn link_grant_from_the_owner_verifies_to_the_owner_mailbox() {
+        let owner = MlsIdentity::generate("owner").unwrap();
+        let seed = owner.ed25519_seed_bytes();
+        let grant = lakko_contacts::reach::ReachGrant::derive(
+            &seed,
+            lakko_contacts::reach::ReachClass::Link,
+            &TEST_LINK_ID,
+            0,
+        )
+        .unwrap();
+        let cap = capability_with_grant(&owner, &grant);
+        let pk = verified_link_grant_mailbox_pk(&cap).unwrap();
+        assert_eq!(
+            pk,
+            lakko_contacts::mailbox::MailboxKey::from_account_seed(&seed).public()
+        );
+    }
+
+    #[test]
+    fn link_grant_bound_to_another_account_is_refused() {
+        let owner = MlsIdentity::generate("owner").unwrap();
+        // A grant whose mailbox binding is signed by a different account.
+        let cap = capability_with_grant(&owner, &test_link_grant());
+        assert!(verified_link_grant_mailbox_pk(&cap).is_err());
     }
 
     // -------------------------------------------------------------------------

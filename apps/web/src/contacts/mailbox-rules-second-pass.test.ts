@@ -187,18 +187,26 @@ describe("a contact request to a key in hand, after the gate (rule 1)", () => {
 
 const refused = (): Error => Object.assign(new Error("HTTP 401"), { status: 401 });
 
-function candidate(name: string, released: string[]): WriteCandidate {
+const box = (n: number): Uint8Array => new Uint8Array(32).fill(n);
+
+/** A candidate whose verified binding names the mailbox `mailbox` (ADR-0078:
+ *  each candidate carries its own target). */
+function candidate(name: string, released: string[], mailbox: Uint8Array = box(1)): WriteCandidate {
   return {
     kind: "kept",
     resolve: async (): Promise<ResolvedWriteAuth> => ({
       kind: "kept",
+      target: { address: mailbox, mailboxPk: mailbox },
       auth: { signer: { name } as never, delegation: null },
       release: () => released.push(name),
     }),
   };
 }
 
-const box = (n: number): Uint8Array => new Uint8Array(32).fill(n);
+/** A candidate whose binding did not verify: resolves to `null`. */
+function refusedBinding(): WriteCandidate {
+  return { kind: "kept", resolve: async () => null };
+}
 const nameOf = (auth: { signer?: unknown }): string => (auth.signer as { name: string }).name;
 
 describe("a refused write re-checks the address once", () => {
@@ -207,8 +215,8 @@ describe("a refused write re-checks the address once", () => {
     let known = false;
     const plan = vi.fn(async (): Promise<WritePlan> =>
       known
-        ? { mailbox: box(2), candidates: [candidate("new", released)] }
-        : { mailbox: box(1), candidates: [candidate("new", released), candidate("old", released)] },
+        ? { candidates: [candidate("new", released, box(2))] }
+        : { candidates: [candidate("new", released), candidate("old", released)] },
     );
     const recheck = vi.fn(async () => {
       known = true;
@@ -216,10 +224,10 @@ describe("a refused write re-checks the address once", () => {
     const seen: string[] = [];
     const out = await writeWithAddressRecheck(
       plan,
-      async (mailbox, auth) => {
-        seen.push(`${mailbox[0]}:${nameOf(auth)}`);
+      async (target, auth) => {
+        seen.push(`${target.address[0]}:${nameOf(auth)}`);
         // The new grant opens only the new mailbox.
-        if (mailbox[0] === 1 && nameOf(auth) === "new") throw refused();
+        if (target.address[0] === 1 && nameOf(auth) === "new") throw refused();
         return 7;
       },
       { recheck },
@@ -234,7 +242,6 @@ describe("a refused write re-checks the address once", () => {
   it("when the re-check learns nothing, the grant kept from before the rotation still opens the old mailbox", async () => {
     const released: string[] = [];
     const plan = async (): Promise<WritePlan> => ({
-      mailbox: box(1),
       candidates: [candidate("new", released), candidate("old", released)],
     });
     const recheck = vi.fn(async () => {
@@ -243,8 +250,8 @@ describe("a refused write re-checks the address once", () => {
     const seen: string[] = [];
     const out = await writeWithAddressRecheck(
       plan,
-      async (mailbox, auth) => {
-        seen.push(`${mailbox[0]}:${nameOf(auth)}`);
+      async (target, auth) => {
+        seen.push(`${target.address[0]}:${nameOf(auth)}`);
         if (nameOf(auth) === "new") throw refused();
         return "stored";
       },
@@ -264,7 +271,7 @@ describe("a refused write re-checks the address once", () => {
     });
     await expect(
       writeWithAddressRecheck(
-        async () => ({ mailbox: box(1), candidates: [candidate("a", []), candidate("b", [])] }),
+        async () => ({ candidates: [candidate("a", []), candidate("b", [])] }),
         write,
         { recheck },
       ),
@@ -277,7 +284,7 @@ describe("a refused write re-checks the address once", () => {
   it("a Welcome that nothing opens is kept owed, not thrown as a refusal", async () => {
     await expect(
       writeWithAddressRecheck(
-        async () => ({ mailbox: box(1), candidates: [candidate("a", [])] }),
+        async () => ({ candidates: [candidate("a", [])] }),
         async () => {
           throw refused();
         },
@@ -288,7 +295,7 @@ describe("a refused write re-checks the address once", () => {
     const recheck = vi.fn(async () => undefined);
     const write = vi.fn(async () => 1);
     await expect(
-      writeWithAddressRecheck(async () => ({ mailbox: box(1), candidates: [] }), write, {
+      writeWithAddressRecheck(async () => ({ candidates: [] }), write, {
         recheck,
         unreachable: true,
       }),
@@ -302,7 +309,7 @@ describe("a refused write re-checks the address once", () => {
     const recheck = vi.fn(async () => undefined);
     await expect(
       writeWithAddressRecheck(
-        async () => ({ mailbox: box(1), candidates: [candidate("a", []), candidate("b", [])] }),
+        async () => ({ candidates: [candidate("a", []), candidate("b", [])] }),
         async () => {
           throw offline;
         },
@@ -315,8 +322,8 @@ describe("a refused write re-checks the address once", () => {
   it("without a re-check the candidates are simply tried in order", async () => {
     const seen: string[] = [];
     const out = await writeWithAddressRecheck(
-      async () => ({ mailbox: box(1), candidates: [candidate("a", []), candidate("b", [])] }),
-      async (_m, auth) => {
+      async () => ({ candidates: [candidate("a", []), candidate("b", [])] }),
+      async (_t, auth) => {
         seen.push(nameOf(auth));
         if (nameOf(auth) === "a") throw refused();
         return 1;
@@ -325,6 +332,26 @@ describe("a refused write re-checks the address once", () => {
     );
     expect(out).toBe(1);
     expect(seen).toEqual(["a", "b"]);
+  });
+
+  it("ADR-0078: a candidate whose binding does not verify is skipped, never written", async () => {
+    const seen: string[] = [];
+    const out = await writeWithAddressRecheck(
+      async () => ({ candidates: [refusedBinding(), candidate("b", [])] }),
+      async (_t, auth) => {
+        seen.push(nameOf(auth));
+        return 2;
+      },
+      { recheck: null },
+    );
+    expect(out).toBe(2);
+    expect(seen).toEqual(["b"]);
+    // Nothing verifies: nothing is written, and the write is unreachable.
+    const write = vi.fn(async () => 1);
+    await expect(
+      writeWithAddressRecheck(async () => ({ candidates: [refusedBinding()] }), write, { recheck: null }),
+    ).rejects.toBeInstanceOf(MailboxUnreachableError);
+    expect(write).not.toHaveBeenCalled();
   });
 });
 

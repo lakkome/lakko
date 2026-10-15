@@ -19,9 +19,9 @@ export function fakeSigner(epoch: bigint, label = "g"): ProofSigner {
     epoch,
     sign: (method, path, query, body) =>
       `proof:${label}@${epoch}:${method}:${path}:${query}:${body.length}`,
-    mailboxClaimBodyJson: () => `{"identity_pk_b64":"${label}"}`,
+    mailboxClaimBodyJson: () => `{"mailbox_pk_b64":"${label}"}`,
     verifyingKey: () => new Uint8Array([Number(epoch & 0xffn), label.charCodeAt(0)]),
-    mailboxPseudonym: () => new Uint8Array(32).fill(label.charCodeAt(0)),
+    mailboxAddress: () => new Uint8Array(32).fill(label.charCodeAt(0)),
     free: () => undefined,
   };
 }

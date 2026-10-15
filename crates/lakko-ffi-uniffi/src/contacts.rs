@@ -1989,6 +1989,21 @@ impl CallInviteCapability {
         self.inner.link_grant.clone().into()
     }
 
+    /// The owner's mailbox key the link grant names, verified against the
+    /// owner's ACCOUNT key (the one-time KeyPackage's device binding, or the
+    /// leaf key of an unbound leaf) — ADR-0078 phase 1. A joiner writes under
+    /// the link grant only to this key; an error means the link is damaged.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Mailbox`] when the KeyPackage or either binding does not
+    /// verify.
+    pub fn verified_link_grant_mailbox_pk(&self) -> Result<Vec<u8>, FfiError> {
+        lakko_calls::link_invite::verified_link_grant_mailbox_pk(&self.inner)
+            .map(|pk| pk.to_vec())
+            .map_err(|e| FfiError::Mailbox(e.to_string()))
+    }
+
     /// `true` iff the capability has not expired at `now_ms`.
     pub fn is_valid_now(&self, now_ms: u64) -> bool {
         self.inner.is_valid_now(now_ms)
@@ -3430,9 +3445,12 @@ mod tests {
 
     const TEST_LINK_ID: [u8; 16] = [0x1C; 16];
 
+    /// Derived from Alice's account seed (`[0xAA; 32]`, the signer of the
+    /// tests' capabilities and requests): its mailbox binding must verify
+    /// under the signer's key (ADR-0078).
     fn test_link_grant() -> FfiReachGrant {
         derive_reach_grant(
-            vec![0x6E; 32],
+            vec![0xAA; 32],
             FfiReachClass::Link,
             TEST_LINK_ID.to_vec(),
             0,
@@ -3441,7 +3459,7 @@ mod tests {
     }
 
     fn test_reply_grant() -> FfiReachGrant {
-        derive_reach_grant(vec![0x6F; 32], FfiReachClass::Reply, vec![0x9A; 16], 0).unwrap()
+        derive_reach_grant(vec![0xAA; 32], FfiReachClass::Reply, vec![0x9A; 16], 0).unwrap()
     }
 
     // ===================================================================
@@ -4785,11 +4803,17 @@ mod tests {
             FfiReachStateEntry,
         };
         let payload = FfiIntroductionPayload {
-            identity_pk: vec![1; 32],
+            identity_pk: lakko_crypto::signing::SigningKey::from_seed(&[3; 32])
+                .verifying_key()
+                .to_bytes()
+                .to_vec(),
             account_id: vec![2; 16],
             display_name: Some("Anna".to_string()),
             username: None,
             username_certificate: None,
+            mailbox_binding: lakko_contacts::mailbox::MailboxBinding::for_account_seed(&[3; 32])
+                .encode()
+                .to_vec(),
             fof: Some(derive_reach_grant(vec![3; 32], FfiReachClass::Fof, vec![], 1).unwrap()),
         };
         let record = compose_introduction(payload, vec![vec![5; 64]], 1).unwrap();

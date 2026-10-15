@@ -21,8 +21,13 @@ import LakkoCore
 //   * the RESETTING device registers the key's public half on its new
 //     account mailbox in its reset order, with an expiry (this file's
 //     marker; `ReachCenter` keeps it registered until then);
-//   * a PEER signs its Welcome with `DsProofSigner.forReach(seed)`
-//     (`ReachCenter.writeAuthCandidates`).
+//   * a PEER used to sign its Welcome with `DsProofSigner.forReach(seed)`,
+//     at the mailbox derived from the new identity key. Since ADR-0078 a
+//     mailbox is not derivable from an identity key and no carrier brings
+//     the reset account's new mailbox binding (the ADR-0078 open question),
+//     so no peer write uses this key: the successor Welcome is a recorded
+//     no-op (`ContinuityWelcome`). ``auth(targetAccountKeyB64:pins:nowMs:)``
+//     is kept for when a carrier lands.
 //
 // It is a write permission, not a secret that protects content: anyone who
 // knows the account id and the generation can derive it (R.4 "What it

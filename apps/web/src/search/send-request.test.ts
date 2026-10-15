@@ -43,7 +43,17 @@ describe("sendFoundRequest", () => {
     const d = deps();
     expect(await sendFoundRequest(found(), INTRO, d)).toEqual({ kind: "sent" });
     expect(d.reachCheck).toHaveBeenCalledWith(KEY, "GRANT");
-    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, KEY, X25519, INTRO, "GRANT");
+    // A grant-reach send carries no open-mailbox binding (ADR-0078).
+    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, KEY, X25519, INTRO, "GRANT", null);
+  });
+
+  it("ADR-0078: an open (Everyone) person with no username is sent the binding their public record carries", async () => {
+    const d = deps();
+    const person = found({ reach: "open", grantWireB64: null, openBindingB64: "BINDING" });
+    expect(await sendFoundRequest(person, INTRO, d)).toEqual({ kind: "sent" });
+    // No reach check (nothing is signed), and the binding rides to the sender.
+    expect(d.reachCheck).not.toHaveBeenCalled();
+    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, KEY, X25519, INTRO, null, "BINDING");
   });
 
   it("is Request refused, and sends nothing, when the person changed who can find them", async () => {
@@ -69,7 +79,7 @@ describe("sendFoundRequest", () => {
     expect(await sendFoundRequest(found(), INTRO, d)).toEqual({ kind: "sent" });
     expect(provenPredecessor).toHaveBeenCalledWith(KEY, ACC);
     // Sealed to the published key, never to the key the hit was found under.
-    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, CURRENT, X25519, INTRO, "GRANT");
+    expect(d.sendToBundle).toHaveBeenCalledWith(ACC, CURRENT, X25519, INTRO, "GRANT", null);
   });
 
   it("an UNPROVEN mismatch is still refused", async () => {

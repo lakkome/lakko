@@ -30,8 +30,8 @@
 //! ```text
 //! u16be        profile_len          — 0 = no profile
 //! [..]         profile envelope     — crate::profile wire, `profile_len` bytes
-//! u8           reply_grant_len      — 0 = no reply grant, else exactly 37
-//! [37]         reply_grant          — crate::reach::ReachGrant, class `reply` (SECRET)
+//! u8           reply_grant_len      — 0 = no reply grant, else exactly 134
+//! [134]         reply_grant          — crate::reach::ReachGrant, class `reply` (SECRET)
 //! [..]         intro message        — everything that remains (may be empty)
 //! ```
 //!
@@ -67,17 +67,21 @@
 //! `ReachGrant::derive(account_seed, Reply, reply_id, 0)` over a fresh
 //! random 16-byte `reply_id`, registered with the Delivery Service with a
 //! 7-day expiry, and removed once the request is answered. The recipient
-//! signs both writes back to the requester's mailbox
-//! (`BLAKE3(from_pubkey)`) with it (`DsProofSigner::for_reach(grant.seed)`).
+//! signs both writes back to the requester's mailbox with it
+//! (`DsProofSigner::for_reach(grant.seed)`). Since ADR-0078 the grant
+//! carries the requester's mailbox binding, and [`open_envelope`] verifies
+//! it under `from_pubkey` (the key the request signature authenticates), so
+//! the mailbox the recipient writes back to is the requester's own.
 //! The same carrier serves the call links: a joiner's call Welcome or
 //! KeyPackage forward rides a `ContactRequest` to the owner, and the reply
 //! grant is how the owner (or the call's committer) delivers the Welcome
 //! back.
 //!
 //! **A malformed reply grant fails the open, unlike a malformed profile.**
-//! A `reply_grant_len` other than 0 or 37 is a framing error like any
-//! other. A grant of 37 bytes that does not decode, or decodes to a class
-//! other than `reply`, is refused the same way, with
+//! A `reply_grant_len` other than 0 or 134 is a framing error like any
+//! other. A grant of 134 bytes that does not decode, decodes to a class
+//! other than `reply`, or carries a mailbox binding that does not verify
+//! under the request's `from_pubkey` (ADR-0078), is refused the same way, with
 //! [`ContactError::InvalidEncoding`]: the profile is display data the
 //! recipient can do without, while the reply grant is the only way to
 //! answer. Opening the request without it would put an Accept button in
@@ -242,7 +246,8 @@ pub struct OpenedRequest {
 /// * [`ContactError::InvalidArgument`] when `profile` violates a bound —
 ///   the same bounds the recipient's decoder enforces, so a conforming
 ///   sender never seals a profile the recipient would drop — or when
-///   `reply_grant` is not class [`ReachClass::Reply`].
+///   `reply_grant` is not class [`ReachClass::Reply`] or its mailbox binding
+///   does not verify under `sender_signing`'s public key (ADR-0078).
 #[allow(clippy::too_many_arguments)]
 pub fn compose(
     sender_signing: &SigningKey,
@@ -260,6 +265,13 @@ pub fn compose(
             "privacy_pass_token must be <= {MAX_PRIVACY_PASS_TOKEN_LEN} bytes, got {}",
             privacy_pass_token.len(),
         )));
+    }
+    if let Some(grant) = reply_grant {
+        grant
+            .mailbox_pk_verified(&sender_signing.verifying_key().to_bytes())
+            .map_err(|e| {
+                ContactError::InvalidArgument(format!("reply grant binding: {}", e.code()))
+            })?;
     }
     let sealed_plaintext = frame_sealed_plaintext(profile, reply_grant, intro_message)?;
     let sealed_envelope = envelope::seal(recipient_x25519_pub, ENVELOPE_AAD, &sealed_plaintext)?;
@@ -367,13 +379,21 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<ContactRequest> {
 ///   different recipient (or tampered with after sealing).
 /// - [`ContactError::InvalidEncoding`] — envelope wire format is
 ///   malformed, the sealed plaintext's framing is, or the reply grant
-///   does not decode or is not class `reply`.
+///   does not decode, is not class `reply`, or names a mailbox
+///   `req.from_pubkey` did not bind (ADR-0078).
 pub fn open_envelope(
     req: &ContactRequest,
     recipient_priv: &X25519SecretKey,
 ) -> Result<OpenedRequest> {
     let plaintext = envelope::open(recipient_priv, ENVELOPE_AAD, &req.sealed_envelope)?;
     let (profile, reply_grant, intro) = split_sealed_plaintext(&plaintext)?;
+    if let Some(grant) = &reply_grant {
+        grant
+            .mailbox_pk_verified(&req.from_pubkey.to_bytes())
+            .map_err(|e| {
+                ContactError::InvalidEncoding(format!("reply grant binding: {}", e.code()))
+            })?;
+    }
     Ok(OpenedRequest {
         profile,
         reply_grant,
@@ -421,7 +441,7 @@ fn frame_sealed_plaintext(
     out.extend_from_slice(&profile_bytes);
     match reply_grant {
         Some(grant) => {
-            // REACH_GRANT_LEN is 37, a one-byte value by construction.
+            // REACH_GRANT_LEN is 134, a one-byte value by construction.
             out.push(REPLY_GRANT_WIRE_LEN);
             out.extend_from_slice(&grant.encode());
         },
@@ -1068,9 +1088,9 @@ mod tests {
         let p = profile_wire.len();
         assert_eq!(&framed[..2], &len.to_be_bytes());
         assert_eq!(&framed[2..2 + p], profile_wire.as_slice());
-        assert_eq!(framed[2 + p], 37);
-        assert_eq!(&framed[3 + p..3 + p + 37], &grant.encode());
-        assert_eq!(&framed[3 + p + 37..], b"intro");
+        assert_eq!(framed[2 + p], 134);
+        assert_eq!(&framed[3 + p..3 + p + 134], &grant.encode());
+        assert_eq!(&framed[3 + p + 134..], b"intro");
         // Nothing: two zero prefixes, then the intro verbatim.
         assert_eq!(
             frame_sealed_plaintext(None, None, b"x").unwrap(),
@@ -1079,7 +1099,9 @@ mod tests {
     }
 
     fn reply_grant() -> ReachGrant {
-        ReachGrant::derive(&[0x3C; 32], ReachClass::Reply, &[0x9A; 16], 0).unwrap()
+        // Derived from the sender's own account seed: its binding must
+        // verify under `from_pubkey` (ADR-0078).
+        ReachGrant::derive(&[7u8; 32], ReachClass::Reply, &[0x9A; 16], 0).unwrap()
     }
 
     /// ADR-0060 §6: the requester's reply grant rides the sealed plaintext
@@ -1129,13 +1151,32 @@ mod tests {
     }
 
     #[test]
+    fn compose_refuses_a_reply_grant_bound_to_another_mailbox() {
+        let bob = recipient_x25519();
+        let foreign = ReachGrant::derive(&[0x3C; 32], ReachClass::Reply, &[0x9A; 16], 0).unwrap();
+        let err = compose(
+            &sender(),
+            &sender_account_id(),
+            &bob.public_key(),
+            [0u8; PSEUDONYM_LEN],
+            0,
+            b"",
+            None,
+            Some(&foreign),
+            b"",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContactError::InvalidArgument(_)));
+    }
+
+    #[test]
     fn compose_refuses_a_grant_of_another_class() {
         for class in ReachClass::ALL {
             if class == ReachClass::Reply {
                 continue;
             }
             let scope: &[u8] = if class.is_account_wide() { b"" } else { b"s" };
-            let grant = ReachGrant::derive(&[1; 32], class, scope, 1).unwrap();
+            let grant = ReachGrant::derive(&[7; 32], class, scope, 1).unwrap();
             let err = compose(
                 &sender(),
                 &sender_account_id(),
@@ -1164,8 +1205,8 @@ mod tests {
                 continue;
             }
             let scope: &[u8] = if class.is_account_wide() { b"" } else { b"s" };
-            let grant = ReachGrant::derive(&[1; 32], class, scope, 1).unwrap();
-            let mut plain = vec![0, 0, 37];
+            let grant = ReachGrant::derive(&[7; 32], class, scope, 1).unwrap();
+            let mut plain = vec![0, 0, 134];
             plain.extend_from_slice(&grant.encode());
             plain.extend_from_slice(b"hi");
             cases.push(plain);
@@ -1173,18 +1214,24 @@ mod tests {
         // An unknown class byte.
         let mut unknown = reply_grant().encode();
         unknown[0] = 0xEE;
-        let mut plain = vec![0, 0, 37];
+        let mut plain = vec![0, 0, 134];
         plain.extend_from_slice(&unknown);
         cases.push(plain);
-        // A length that is neither 0 nor 37.
-        for len in [1u8, 36, 38, 0xFF] {
+        // A reply grant whose binding names someone else's mailbox
+        // (ADR-0078): it decodes, but does not verify under `from_pubkey`.
+        let foreign = ReachGrant::derive(&[0x3C; 32], ReachClass::Reply, &[0x9A; 16], 0).unwrap();
+        let mut plain = vec![0, 0, 134];
+        plain.extend_from_slice(&foreign.encode());
+        cases.push(plain);
+        // A length that is neither 0 nor 134.
+        for len in [1u8, 36, 37, 133, 135, 0xFF] {
             let mut plain = vec![0, 0, len];
             plain.extend_from_slice(&[3u8; 64]);
             cases.push(plain);
         }
-        // 37 declared, fewer carried.
-        let mut short = vec![0, 0, 37];
-        short.extend_from_slice(&reply_grant().encode()[..36]);
+        // 134 declared, fewer carried.
+        let mut short = vec![0, 0, 134];
+        short.extend_from_slice(&reply_grant().encode()[..133]);
         cases.push(short);
         for plaintext in cases {
             let req = signed_request_sealing(&plaintext);
@@ -1197,7 +1244,7 @@ mod tests {
             );
         }
         // Control: the well-formed grant opens.
-        let mut good = vec![0, 0, 37];
+        let mut good = vec![0, 0, 134];
         good.extend_from_slice(&reply_grant().encode());
         let opened = open_envelope(&signed_request_sealing(&good), &bob).unwrap();
         assert_eq!(opened.reply_grant, Some(reply_grant()));
@@ -1267,7 +1314,7 @@ mod tests {
         for garbage in [bad_profile.clone(), b"not a profile at all".to_vec()] {
             let mut plaintext = u16::try_from(garbage.len()).unwrap().to_be_bytes().to_vec();
             plaintext.extend_from_slice(&garbage);
-            plaintext.push(37);
+            plaintext.push(134);
             plaintext.extend_from_slice(&reply_grant().encode());
             plaintext.extend_from_slice(b"hi bob");
             let req = signed_request_sealing(&plaintext);

@@ -5,9 +5,9 @@
  * ADR-0053 — the pure rules of the client contract (`ds/access.ts`), and the
  * two facts about the real wasm signer the rest of the client leans on: the
  * header name is the one the DS reads, and a mailbox signer names EXACTLY the
- * mailbox each of the two pollers fetches (a signer for a different pseudonym
- * would sign every read of the right mailbox under the wrong key, and every
- * read would be refused).
+ * mailbox the poller fetches (a signer for a different address would sign
+ * every read of the right mailbox under the wrong key, and every read would
+ * be refused).
  */
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -46,40 +46,36 @@ describe("the wasm signer the client drives", () => {
     expect(wasm.dsProofHeaderName()).toBe(DS_PROOF_HEADER);
   });
 
-  it("the ACCOUNT mailbox signer names the mailbox `pollMailbox` fetches", () => {
-    // `pollMailbox` derives its pseudonym from the account identity's key.
+  it("the ACCOUNT mailbox signer names the mailbox key's address, never an identity-derived one (ADR-0078)", () => {
+    // `pollMailbox` reads the address of the account's MAILBOX key, which
+    // every device of the account derives from the account seed.
     const account = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x21));
-    const polled = wasm.IdentityPseudonym.fromIdentity(account.signaturePublicKey).asBytes();
+    const key = wasm.MailboxKey.fromAccountIdentity(account);
     const signer = wasm.dsMailboxSigner(account);
-    expect(sameBytes(signer.mailboxPseudonym(), polled)).toBe(true);
+    expect(sameBytes(signer.mailboxAddress(), key.address())).toBe(true);
+    expect(sameBytes(key.address(), wasm.mailboxAddress(key.publicKey()))).toBe(true);
+    // Not a function of the identity key any more.
+    const old = wasm.IdentityPseudonym.fromIdentity(account.signaturePublicKey).asBytes();
+    expect(sameBytes(signer.mailboxAddress(), old)).toBe(false);
     expect(signer.epoch).toBe(wasm.dsMailboxEpoch());
+    // The claim body registers the mailbox key, not the identity key.
+    const body = JSON.parse(signer.mailboxClaimBodyJson()) as Record<string, unknown>;
+    expect(Object.keys(body)).toEqual(["mailbox_pk_b64"]);
     signer.free();
+    key.free();
     account.free();
   });
 
-  it("the DEVICE mailbox signer names the mailbox `pollDeviceMailbox` fetches (where Welcomes land)", () => {
-    // `pollDeviceMailbox` derives its pseudonym from the DEVICE identity's
-    // key, and the direct add and the sweep address a Welcome to it through
-    // `IdentityPseudonym.fromIdentity(keyPackageSignatureKey(kp))`.
-    const account = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x22));
-    const device = wasm.Identity.fromSeedBound(
-      new Uint8Array(32).fill(0x23),
-      account.ed25519Seed,
-      1_700_000_000n,
-    );
-    const polled = wasm.IdentityPseudonym.fromIdentity(device.signaturePublicKey).asBytes();
-    const kp = device.createKeyPackage();
-    const addressed = wasm.IdentityPseudonym.fromIdentity(wasm.keyPackageSignatureKey(kp)).asBytes();
-    const signer = wasm.dsMailboxSigner(device);
-    expect(sameBytes(signer.mailboxPseudonym(), polled)).toBe(true);
-    expect(sameBytes(signer.mailboxPseudonym(), addressed)).toBe(true);
-    // And the two mailboxes are different journals with different keys.
-    const accountSigner = wasm.dsMailboxSigner(account);
-    expect(sameBytes(accountSigner.mailboxPseudonym(), polled)).toBe(false);
-    accountSigner.free();
-    signer.free();
-    device.free();
-    account.free();
+  it("a second instance of the account identity derives the same mailbox (every device reads one inbox)", () => {
+    const a = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x22));
+    const b = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x22));
+    const ka = wasm.MailboxKey.fromAccountIdentity(a);
+    const kb = wasm.MailboxKey.fromAccountIdentity(b);
+    expect(sameBytes(ka.address(), kb.address())).toBe(true);
+    ka.free();
+    kb.free();
+    a.free();
+    b.free();
   });
 
   it("a group signer proves requests at its epoch (ADR-0057: it registers nothing)", () => {
@@ -138,7 +134,7 @@ describe("DsAccessRegistry", () => {
     expect(reg.groupSigners(new Uint8Array([5])).current).toBeNull();
     const signer = fakeSigner(0n, "m");
     reg.setMailboxSigner(signer);
-    expect(reg.mailboxSigner(signer.mailboxPseudonym())).toBe(signer);
+    expect(reg.mailboxSigner(signer.mailboxAddress())).toBe(signer);
     expect(reg.mailboxSigner(new Uint8Array(32).fill(0x01))).toBeNull();
   });
 

@@ -147,7 +147,7 @@ internal object KeyRotationDevice {
                     // the step stays owed).
                     val ffi = uniffi.lakko_ffi_uniffi.dsMailboxSigner(identity)
                     me.lakko.app.ds.DsClient().use { ds ->
-                        ds.claimMailbox(ffi.mailboxPseudonym(), me.lakko.app.ds.FfiDsJournalSigner(ffi))
+                        ds.claimMailbox(ffi.mailboxAddress(), me.lakko.app.ds.FfiDsJournalSigner(ffi))
                     }
                     reach.bind(accountIdB64, identity)
                 }

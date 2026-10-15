@@ -60,7 +60,12 @@
 //!   `contact` grant **only from the other participant of a one-to-one
 //!   conversation** (resolved at receipt, C-68) and drops it from a group's
 //!   profile or a channel card: a `contact` key in a group would hand every
-//!   co-member the reach of a contact. A grant is a **secret**
+//!   co-member the reach of a contact. Every grant carries the owner's
+//!   mailbox binding (ADR-0078) and all grants of one profile must carry the
+//!   same one; **the receiver verifies it against the sender's account key
+//!   resolved at receipt** (`ReachGrant::mailbox_pk_verified`) before it
+//!   keeps or uses a grant, since this codec does not know the sender. A
+//!   grant is a **secret**
 //!   ([`crate::reach::ReachGrant`]); the envelope is only ever sent inside an
 //!   E2EE carrier.
 //!
@@ -72,7 +77,7 @@
 //!      └──── 17 bytes, ASCII ────┘ └─ 0x03 ─┘ └── 8 B, BE ───┘ └── 1 B ──┘ └ .. ┘ └──── 1 B ────┘ └── .. ──┘
 //!
 //!       || account_id_len || account_id || cert_len || cert || grant_count || grants
-//!          └─ 1 B: 0|16 ─┘ └── .. ────┘  └ 1 B: 0|153 ┘ └ .. ┘ └── 1 B ───┘ └ 37 B each ┘
+//!          └─ 1 B: 0|16 ─┘ └── .. ────┘  └ 1 B: 0|153 ┘ └ .. ┘ └── 1 B ───┘ └ 134 B each ┘
 //!
 //!                     "lakko/profile/v1\x00"
 //! ```
@@ -346,7 +351,8 @@ impl Profile {
     ///   [`ProfileError::CertificateWithoutUsername`] — the certificate is
     ///   the wrong length, or there is no username for it to certify.
     /// * [`ProfileError::TooManyGrants`] / [`ProfileError::DuplicateGrantClass`]
-    ///   / [`ProfileError::GrantClassNotAllowed`] — a grant bound.
+    ///   / [`ProfileError::GrantClassNotAllowed`] /
+    ///   [`ProfileError::GrantBindingsDiffer`] — a grant bound.
     pub fn validate(&self) -> CoreResult<(), ProfileError> {
         if let Some(name) = &self.display_name {
             check_display_name(name).map_err(ProfileError::DisplayName)?;
@@ -373,6 +379,10 @@ impl Profile {
             }
             if self.grants[..i].iter().any(|g| g.class == grant.class) {
                 return Err(ProfileError::DuplicateGrantClass(grant.class.to_byte()));
+            }
+            // One profile, one owner, one mailbox (ADR-0078).
+            if self.grants[..i].iter().any(|g| g.binding != grant.binding) {
+                return Err(ProfileError::GrantBindingsDiffer);
             }
         }
         Ok(())
@@ -761,6 +771,10 @@ pub enum ProfileError {
     /// A grant failed to decode.
     #[error("invalid reach grant: {0}")]
     Grant(ReachError),
+    /// Two grants name different mailboxes (ADR-0078): every grant of one
+    /// profile writes to its one owner's mailbox.
+    #[error("profile reach grants name different mailboxes")]
+    GrantBindingsDiffer,
 }
 
 impl ProfileError {
@@ -784,6 +798,7 @@ impl ProfileError {
             Self::DuplicateGrantClass(_) => "grants.duplicateClass".to_string(),
             Self::GrantClassNotAllowed(_) => "grants.classNotAllowed".to_string(),
             Self::Grant(e) => format!("grants.{}", e.code()),
+            Self::GrantBindingsDiffer => "grants.bindingsDiffer".to_string(),
         }
     }
 }
@@ -827,6 +842,7 @@ mod tests {
             class,
             version: 1,
             seed: lakko_crypto::SecretBytes::new([byte; 32]),
+            binding: crate::mailbox::MailboxBinding::for_account_seed(&[0x77; 32]),
         }
     }
 
@@ -900,8 +916,8 @@ mod tests {
     #[test]
     fn envelope_length_bounds_are_the_documented_construction() {
         assert_eq!(PROFILE_ENVELOPE_MIN_LEN, 31);
-        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 31 + 255 + 32 + 16 + 153 + 2 * 37);
-        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 561);
+        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 31 + 255 + 32 + 16 + 153 + 2 * 134);
+        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 755);
         let empty = compose_profile(&profile(None, None, 0)).unwrap();
         assert_eq!(empty.len(), PROFILE_ENVELOPE_MIN_LEN);
         // A maximal envelope: 255 bytes of name in exactly 64 chars (63

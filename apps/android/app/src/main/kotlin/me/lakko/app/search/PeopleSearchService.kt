@@ -8,6 +8,7 @@ import java.util.Base64
 import me.lakko.app.chat.AllowanceKind
 import me.lakko.app.contacts.ContactsError
 import me.lakko.app.contacts.ContactsRepository
+import me.lakko.app.contacts.grantMailboxPkOrNull
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.l10n.UiText
 import me.lakko.app.profile.ProfileDirectory
@@ -173,7 +174,7 @@ public class PeopleSearchService(
 
         override fun openPublicRecord(record: ByteArray, oprfOutput: ByteArray): OpenedPublicRecord? = try {
             uniffi.lakko_ffi_uniffi.openPublicRecord(record, oprfOutput)?.let {
-                OpenedPublicRecord(it.identityPk, it.accountId, it.displayName)
+                OpenedPublicRecord(it.identityPk, it.accountId, it.displayName, it.mailboxBinding)
             }
         } catch (_: Throwable) {
             null
@@ -258,9 +259,13 @@ public class PeopleSearchService(
     /** The DS reach check of a person's account mailbox with a grant wire. */
     private suspend fun reachCheckWith(identityPk: ByteArray, grantWireB64: String): Boolean {
         val grant = uniffi.lakko_ffi_uniffi.decodeReachGrant(Base64.getDecoder().decode(grantWireB64))
-        // ADR-0074 3.5a rule 1: the person's CURRENT mailbox (a proven
+        // ADR-0074 3.5a rule 1: the person's CURRENT key (a proven
         // predecessor key resolves to its successor; nothing else does).
-        val mailbox = reach().mailboxOf(identityPk)
+        // ADR-0078: the mailbox is the one the grant's binding names, verified
+        // against that key; a grant that does not verify reaches nobody.
+        val current = reach().mailboxAccountKey(identityPk)
+        val mailboxPk = me.lakko.app.contacts.NativeMailboxCrypto.grantMailboxPkOrNull(grant, current) ?: return false
+        val mailbox = me.lakko.app.contacts.NativeMailboxCrypto.address(mailboxPk)
         return me.lakko.app.ds.DsClient().use { ds -> ds.checkReach(mailbox, me.lakko.app.ds.reachSigner(grant.seed)) }
     }
 
@@ -302,11 +307,12 @@ public class PeopleSearchService(
                 IdentityKeys(Base64.getDecoder().decode(it.signature_pubkey), Base64.getDecoder().decode(it.x25519_pubkey))
             }
 
-        override suspend fun sendByUsername(username: String, intro: ByteArray, grantWireB64: String?) {
+        override suspend fun sendByUsername(username: String, intro: ByteArray, grantWireB64: String?, bindingB64: String?) {
             contacts.sendFoundContactRequestByUsername(
                 recipientUsername = username,
                 introMessage = intro,
                 grantWire = grantWireB64?.let { Base64.getDecoder().decode(it) },
+                mailboxBinding = bindingB64?.let { Base64.getDecoder().decode(it) },
             )
         }
 
@@ -316,6 +322,7 @@ public class PeopleSearchService(
             x25519Pub: ByteArray,
             intro: ByteArray,
             grantWireB64: String?,
+            bindingB64: String?,
         ) {
             contacts.sendFoundContactRequestToBundle(
                 recipientAccountId = accountId,
@@ -324,6 +331,7 @@ public class PeopleSearchService(
                 introMessage = intro,
                 grantWire = grantWireB64?.let { Base64.getDecoder().decode(it) },
                 shownUsername = shownUsername,
+                mailboxBinding = bindingB64?.let { Base64.getDecoder().decode(it) },
             )
         }
 

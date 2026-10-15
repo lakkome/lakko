@@ -80,10 +80,11 @@ import { defaultAnonTokenStore, type AnonTokenStore } from "./anon-token-store";
 
 /**
  * The token contexts, in wire order: the names `anonTokenContexts()` returns
- * (`lakko_anon_token::TokenContext::ALL`, wire bytes 1..=10), pinned against
+ * (`lakko_anon_token::TokenContext::ALL`, wire bytes 1..=11), pinned against
  * the wasm core by `anon-token-contexts.test.ts`. `channel-subscribe` and
  * `directory-search` are ADR-0059; `vault-claim` is ADR-0064; `blob-upload`
- * and `blob-read` are ADR-0065. Nothing spends the last three yet.
+ * and `blob-read` are ADR-0065 (nothing spends those three yet);
+ * `mailbox-write` is ADR-0078: a mailbox write with no reach proof.
  */
 export const ANON_TOKEN_CONTEXTS = [
   "discovery-lookup",
@@ -96,6 +97,7 @@ export const ANON_TOKEN_CONTEXTS = [
   "vault-claim",
   "blob-upload",
   "blob-read",
+  "mailbox-write",
 ] as const;
 
 /** One token context (see {@link ANON_TOKEN_CONTEXTS}). */
@@ -115,6 +117,9 @@ export const REFILL_BATCH: Readonly<Record<AnonTokenContext, number>> = {
   "vault-claim": 4,
   "blob-upload": 2,
   "blob-read": 2,
+  // ADR-0078 - a proofless mailbox write (a contact request to someone in
+  // Everyone). Chosen, not measured.
+  "mailbox-write": 2,
 };
 /** Refill a context when it holds fewer than this many tokens: lookups keep
  *  a spare, the rarer actions refill only once empty. The three storage
@@ -131,6 +136,7 @@ export const LOW_WATER: Readonly<Record<AnonTokenContext, number>> = {
   "vault-claim": 1,
   "blob-upload": 1,
   "blob-read": 1,
+  "mailbox-write": 1,
 };
 
 /** The refill batch of `context`. */

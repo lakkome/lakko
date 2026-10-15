@@ -87,9 +87,9 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 
 /// Server-side ceiling on the sealed blob: the longest sealed `/i/` link the
-/// codec can produce (`lakko_contacts::invite::MAX_SEALED_LEN`, 307 bytes),
+/// codec can produce (`lakko_contacts::invite::MAX_SEALED_LEN`, 404 bytes),
 /// derived rather than written as a literal. Pinned to the `VARBINARY` width
-/// of `invites.sealed_capability` in `migrations/0024_link_grant_sealed_width.sql`
+/// of `invites.sealed_capability` in `migrations/0030_link_grant_mailbox_binding_width.sql`
 /// by a test.
 const MAX_SEALED_BYTES: usize = MAX_SEALED_LEN;
 
@@ -1108,14 +1108,14 @@ mod tests {
     /// "everything past N bytes 500s in production".
     #[test]
     fn max_sealed_bytes_matches_column_width() {
-        let widened = include_str!("../migrations/0024_link_grant_sealed_width.sql");
+        let widened = include_str!("../migrations/0030_link_grant_mailbox_binding_width.sql");
         let widened = widened.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             widened.contains(&format!(
                 "MODIFY sealed_capability VARBINARY({MAX_SEALED_BYTES})"
             )),
             "MAX_SEALED_BYTES ({MAX_SEALED_BYTES}) must match invites.sealed_capability \
-             in 0024_link_grant_sealed_width.sql",
+             in 0030_link_grant_mailbox_binding_width.sql",
         );
         let migration = include_str!("../migrations/0022_sealed_invite_links.sql");
         let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1123,7 +1123,7 @@ mod tests {
             normalised.contains(&format!("label VARBINARY({MAX_LABEL_LEN})")),
             "invites.label must be VARBINARY(MAX_LABEL_LEN)",
         );
-        assert_eq!(MAX_SEALED_BYTES, 307);
+        assert_eq!(MAX_SEALED_BYTES, 404);
     }
 
     #[test]
@@ -1218,8 +1218,9 @@ mod tests {
             true,
             &label,
             &[0x1C; 16],
+            // ADR-0078: the grant's mailbox binding must be the owner's.
             &lakko_contacts::reach::ReachGrant::derive(
-                &[0x6E; 32],
+                &signing.to_seed(),
                 lakko_contacts::reach::ReachClass::Link,
                 &[0x1C; 16],
                 0,

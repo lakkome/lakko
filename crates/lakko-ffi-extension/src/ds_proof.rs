@@ -6,7 +6,8 @@
 //! A push wake previews the newest row of a journal, and once that journal is
 //! claimed the fetch needs a proof like any other read. The signer is built
 //! from the throwaway restored group (`Group.dsAccessSigner`) or from the
-//! identity key for a mailbox wake ([`ds_mailbox_signer`]); it signs a `GET`,
+//! account's mailbox key (ADR-0078, derived from the account seed) for a
+//! mailbox wake ([`ds_mailbox_signer`]); it signs a `GET`,
 //! which is the only request this process makes. There is deliberately no
 //! claim body here - registering a key is a write to the journal's posture
 //! and belongs to the foreground app (C-59).
@@ -75,11 +76,12 @@ pub fn ds_mailbox_epoch() -> u64 {
     MAILBOX_EPOCH
 }
 
-/// The signer for `identity`'s own mailbox.
+/// The signer for the own mailbox of the account whose identity is
+/// `account_identity`: its mailbox key (ADR-0078; never the identity key).
 #[uniffi::export]
-pub fn ds_mailbox_signer(identity: &Identity) -> Arc<DsProofSigner> {
+pub fn ds_mailbox_signer(account_identity: &Identity) -> Arc<DsProofSigner> {
     Arc::new(DsProofSigner {
-        inner: Inner::for_mailbox(&identity.inner.ed25519_seed_bytes()),
+        inner: Inner::for_account_mailbox(&account_identity.inner.ed25519_seed_bytes()),
     })
 }
 

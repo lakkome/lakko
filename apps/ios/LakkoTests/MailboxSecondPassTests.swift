@@ -33,6 +33,16 @@ final class MailboxSecondPassTests: XCTestCase {
 
     private func key(_ byte: UInt8) throws -> Data { try identity(byte).signaturePublicKey() }
 
+    /// ADR-0078 — the mailbox address of the account seeded by `byte`.
+    private func box(_ byte: UInt8) throws -> Data {
+        MailboxKey.fromAccountIdentity(accountIdentity: try identity(byte)).address()
+    }
+
+    /// The verified mailbox of the account seeded by `byte`.
+    private func target(_ byte: UInt8) throws -> MailboxTarget {
+        MailboxTarget.own(accountIdentity: try identity(byte))
+    }
+
     private func b64(_ data: Data) -> String { data.base64EncodedString() }
 
     private func proven(_ edges: [(Data, Data)]) -> ProvenPredecessors {
@@ -231,17 +241,18 @@ final class MailboxSecondPassTests: XCTestCase {
         XCTAssertFalse(RefusedMailboxWrite.isRefusal(Offline()))
     }
 
-    func testOnlyAMovedAddressOrAMovedGrantEarnsTheRetry() {
+    func testOnlyAMovedAddressOrAMovedGrantEarnsTheRetry() throws {
         let seed = Data(repeating: 1, count: 32), other = Data(repeating: 2, count: 32)
-        let first = MailboxWriteAttempt(mailbox: Data([1]), auth: DsMailboxWriteAuth(reachSeed: seed))
+        let one = try target(0x01), two = try target(0x02)
+        let first = MailboxWriteAttempt(target: one, auth: DsMailboxWriteAuth(reachSeed: seed))
         XCTAssertFalse(RefusedMailboxWrite.retries(first: first, rechecked: first))
         XCTAssertFalse(RefusedMailboxWrite.retries(first: first, rechecked: nil))
         XCTAssertTrue(RefusedMailboxWrite.retries(
             first: first,
-            rechecked: MailboxWriteAttempt(mailbox: Data([2]), auth: DsMailboxWriteAuth(reachSeed: seed))))
+            rechecked: MailboxWriteAttempt(target: two, auth: DsMailboxWriteAuth(reachSeed: seed))))
         XCTAssertTrue(RefusedMailboxWrite.retries(
             first: first,
-            rechecked: MailboxWriteAttempt(mailbox: Data([1]), auth: DsMailboxWriteAuth(reachSeed: other))))
+            rechecked: MailboxWriteAttempt(target: one, auth: DsMailboxWriteAuth(reachSeed: other))))
     }
 
     func testAPersonIsReCheckedAtMostOncePerInterval() {
@@ -308,7 +319,7 @@ final class MailboxSecondPassTests: XCTestCase {
         XCTAssertEqual(merged.filter { !$0.isSuperseded }.compactMap(\.seed), [c.seed])
     }
 
-    func testAPeerThatGotTheReSentProfileFirstCanStillWriteToTheOldMailbox() throws {
+    func testAPeerThatGotTheReSentProfileFirstKeepsItOnlyOnceTheRotationIsProven() throws {
         let old = try key(0x01), new = try key(0x02)
         var map = ProvenPredecessors()
         let c = try center { own in AccountKeyResolver(proven: map, ownCurrentKey: own) }
@@ -316,21 +327,22 @@ final class MailboxSecondPassTests: XCTestCase {
         let carrier = ReachRules.Carrier.oneToOneProfile(fromOtherParticipant: true)
 
         // Both arrive from the leaf bound to the OLD key; the proof is unseen.
+        // ADR-0078 — the new grant's binding is signed by the NEW key, which
+        // nothing ties to the sender yet: it is not kept.
         XCTAssertTrue(c.keep(before, carrier: carrier, fromAccountKeyB64: b64(old), scopeHex: "aa"))
-        XCTAssertTrue(c.keep(after, carrier: carrier, fromAccountKeyB64: b64(old), scopeHex: "aa"))
+        XCTAssertFalse(c.keep(after, carrier: carrier, fromAccountKeyB64: b64(old), scopeHex: "aa"))
 
-        let oldBox = try XCTUnwrap(MailboxAddress.pseudonym(of: old))
-        XCTAssertEqual(c.writeAuth(toAccountKey: old)?.reachSeed, after.seed, "the newest goes first")
-        XCTAssertEqual(
-            c.writeAuthCandidates(toMailbox: oldBox).map(\.reachSeed), [after.seed, before.seed],
-            "the displaced grant still opens the old mailbox when the new one is refused there")
+        let oldBox = try box(0x01)
+        XCTAssertEqual(c.writeAuth(toAccountKey: old)?.reachSeed, before.seed)
+        XCTAssertEqual(c.writeAuthCandidates(toMailbox: oldBox).map(\.reachSeed), [before.seed])
         XCTAssertEqual(c.accountKey(forMailbox: oldBox), old)
 
-        // The re-check proves the rotation: the address is current, and only
-        // the grant for the new mailbox is offered.
+        // The re-check proves the rotation: the new grant is kept, and a
+        // write recorded to the old mailbox goes to the new one.
         map = proven([(old, new)])
         c.reloadKeyResolver()
-        let newBox = try XCTUnwrap(MailboxAddress.pseudonym(of: new))
+        XCTAssertTrue(c.keep(after, carrier: carrier, fromAccountKeyB64: b64(old), scopeHex: "aa"))
+        let newBox = try box(0x02)
         XCTAssertEqual(c.currentMailbox(for: oldBox), newBox)
         XCTAssertEqual(c.writeAuthCandidates(toMailbox: newBox).map(\.reachSeed), [after.seed])
         XCTAssertEqual(c.accountKey(forMailbox: oldBox), new, "found under any key they have had")
@@ -339,8 +351,8 @@ final class MailboxSecondPassTests: XCTestCase {
 
     func testAMailboxNothingHereNamesHasNobodyToReCheck() throws {
         let c = try center { own in AccountKeyResolver(ownCurrentKey: own) }
-        XCTAssertNil(c.accountKey(forMailbox: try XCTUnwrap(MailboxAddress.pseudonym(of: try key(0x44)))))
-        let ownBox = try XCTUnwrap(MailboxAddress.pseudonym(of: try key(0x31)))
+        XCTAssertNil(c.accountKey(forMailbox: try box(0x44)))
+        let ownBox = try box(0x31)
         XCTAssertNil(c.accountKey(forMailbox: ownBox), "this account's own mailbox is never re-checked")
     }
 
@@ -591,21 +603,21 @@ final class MailboxSecondPassTests: XCTestCase {
             AccountKeyResolver(ownCurrentKey: own, ownPredecessorKeys: [committerOld.signaturePublicKey()])
         }
         XCTAssertEqual(committing.ownAccountKey, committerNew.signaturePublicKey())
-        let box = try XCTUnwrap(MailboxAddress.pseudonym(of: added))
+        let addedBox = try box(0x01)
 
         // Without the old key's seed nothing can be signed.
         committing.keepDelegation(envelope, fromAccountKeyB64: b64(proposer))
-        XCTAssertTrue(committing.writeAuthCandidates(toMailbox: box).isEmpty)
+        XCTAssertTrue(committing.writeAuthCandidates(toMailbox: addedBox).isEmpty)
 
         committing.ownPredecessorSigningSeeds = { _ in
             [(committerOld.signaturePublicKey(), committerOld.ed25519Seed())]
         }
-        let auth = try XCTUnwrap(committing.writeAuthCandidates(toMailbox: box).first)
+        let auth = try XCTUnwrap(committing.writeAuthCandidates(toMailbox: addedBox).first)
         XCTAssertEqual(auth.reachSeed, committerOld.ed25519Seed(), "signed with the key the delegation names")
         XCTAssertEqual(
             auth.delegationHeader,
             try committerDelegationFor(envelope: envelope, ownAccountKey: committerOld.signaturePublicKey()))
-        XCTAssertEqual(committing.accountKey(forMailbox: box), added)
+        XCTAssertEqual(committing.accountKey(forMailbox: addedBox), added)
     }
 }
 

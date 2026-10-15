@@ -19,7 +19,7 @@ import type { IdentitySecrets } from "../auth/AuthContext";
 import { DiscoveryClient } from "../discovery/client";
 import { DsClient } from "../ds/client";
 import { bytesToHex } from "../channels/composer";
-import { accountMailboxOf } from "../reach/mailbox-write";
+import { personKeysOf, verifiedTargetOfGrant } from "../reach/mailbox-write";
 import { provenSuccessorWith } from "../contacts/proven-successor";
 import { bestGrantForPerson } from "../reach/received-grants";
 import { personKeysHex } from "../contacts/address-resolver";
@@ -150,17 +150,24 @@ export function openPublicRecordWith(
       identityPk: payload.identityPk,
       accountId: payload.accountId,
       displayName: payload.displayName ?? null,
+      // ADR-0078 - where an unsigned request to this person goes.
+      mailboxBinding: payload.mailboxBinding,
     };
   } finally {
     payload.free();
   }
 }
 
-/** The DS reach check of a person's account mailbox with a kept grant wire. */
+/** The DS reach check of a person's account mailbox with a kept grant wire.
+ *  ADR-0078: the mailbox is the one the grant's binding names, verified
+ *  against the person's key (and its proven chain); a binding that does not
+ *  verify is a refusal, and no request is made. */
 async function reachCheckWith(identityPk: Uint8Array, grantWireB64: string): Promise<boolean> {
+  const target = await verifiedTargetOfGrant(grantWireB64, personKeysOf(identityPk));
+  if (target === null) return false;
   const signer = await reachSignerForGrantWire(grantWireB64);
   try {
-    return await new DsClient().reachCheck(await accountMailboxOf(identityPk), signer);
+    return await new DsClient().reachCheck(target.address, signer);
   } finally {
     try {
       signer.free();
@@ -289,10 +296,12 @@ export function sendDeps(args: {
         client.sendContactRequest(args.identity(), username, intro, { writeGrant }),
       );
     },
-    sendToBundle: async (accountId, signaturePub, x25519Pub, intro, grantWireB64) => {
+    sendToBundle: async (accountId, signaturePub, x25519Pub, intro, grantWireB64, openBindingB64) => {
       await withGrant(grantWireB64, (writeGrant) =>
         client.sendContactRequestToBundle(args.identity(), accountId, signaturePub, x25519Pub, intro, {
           writeGrant,
+          openBinding:
+            openBindingB64 === null || openBindingB64 === undefined ? null : base64Decode(openBindingB64),
         }),
       );
     },

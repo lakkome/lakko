@@ -7,15 +7,15 @@
  * delegations members posted for adds they proposed.
  *
  * Pure: the store is an immutable value, persisted encrypted by
- * `reach-store.ts` (the `grants` row). A grant is kept as its 37-byte wire in
- * base64 (class, version, seed); decoding it back to a wasm `ReachGrant` is
+ * `reach-store.ts` (the `grants` row). A grant is kept as its 134-byte wire in
+ * base64 (class, version, seed, mailbox binding; ADR-0078); decoding it back to a wasm `ReachGrant` is
  * the service's job.
  */
 import type { ReachClassName } from "./reach-model";
 
 /** One kept grant. */
 export interface HeldGrant {
-  /** Standard base64 of the 37-byte grant wire. Secret. */
+  /** Standard base64 of the 134-byte grant wire. Secret. */
   readonly wireB64: string;
   readonly version: number;
   readonly receivedAtMs: number;

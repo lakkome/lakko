@@ -16,9 +16,38 @@
  */
 import { journalHex } from "../ds/access";
 
+/** The part of a wasm `ReachGrant` the binding check needs. */
+export interface BindingCheckable {
+  mailboxPkVerified(ownerAccountPk: Uint8Array): Uint8Array;
+}
+
+/**
+ * ADR-0078 - whether a join attribution's `reply` grant names the joiner's
+ * own mailbox: its binding verifies against the joiner's ACCOUNT key (for a
+ * chat group, the account the proposal's leaf is bound to; for a channel
+ * co-publisher, the leaf key itself). A grant that fails is not kept: a
+ * member could otherwise hand out its own mailbox under the joiner's name and
+ * swallow the joiner's Welcome. `null` account key (unresolvable): `false`.
+ * Never throws; logs without identifiers.
+ */
+export function joinReplyBindingVerifies(
+  grant: BindingCheckable,
+  joinerAccountKey: Uint8Array | null | undefined,
+): boolean {
+  if (joinerAccountKey === null || joinerAccountKey === undefined) return false;
+  try {
+    grant.mailboxPkVerified(joinerAccountKey);
+    return true;
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn("ADR-0078: a join reply grant was not kept; its mailbox binding did not verify");
+    return false;
+  }
+}
+
 const replies = new Map<string, string>();
 
-/** Keep a joiner's reply grant (the 37-byte wire, base64). */
+/** Keep a joiner's reply grant (the 134-byte wire, base64; ADR-0078). */
 export function rememberJoinReply(joinerSignatureKey: Uint8Array, grantWireB64: string): void {
   replies.set(journalHex(joinerSignatureKey), grantWireB64);
 }

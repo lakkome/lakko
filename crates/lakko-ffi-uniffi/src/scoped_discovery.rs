@@ -196,8 +196,15 @@ impl From<ReachClass> for FfiReachClass {
     }
 }
 
-/// A reach key handed to someone (ADR-0060 §1): class, version, seed. Mirror
-/// of [`lakko_contacts::reach::ReachGrant`].
+/// A reach key handed to someone (ADR-0060 §1): class, version, seed, and the
+/// owner's 97-byte mailbox binding (ADR-0078). Mirror of
+/// [`lakko_contacts::reach::ReachGrant`].
+///
+/// **A writer verifies `binding` before every write**:
+/// [`reach_grant_mailbox_pk_verified`] with the owner's account key as the
+/// writer holds it pinned. A grant whose binding does not verify must not be
+/// written under: it would route the write to a mailbox the owner does not
+/// read.
 ///
 /// **`seed` is secret**: whoever holds it can write to the owner's mailbox.
 /// Keep it only in encrypted storage and never log it — `Debug` here prints
@@ -210,6 +217,9 @@ pub struct FfiReachGrant {
     pub version: u32,
     /// The 32-byte Ed25519 seed.
     pub seed: Vec<u8>,
+    /// The owner's 97-byte mailbox binding (`version || mailbox_pk || sig`),
+    /// not verified by the decoder.
+    pub binding: Vec<u8>,
 }
 
 impl fmt::Debug for FfiReachGrant {
@@ -218,6 +228,7 @@ impl fmt::Debug for FfiReachGrant {
             .field("class", &self.class)
             .field("version", &self.version)
             .field("seed", &"<redacted>")
+            .field("binding", &self.binding)
             .finish()
     }
 }
@@ -228,6 +239,7 @@ impl From<RustReachGrant> for FfiReachGrant {
             class: g.class.into(),
             version: g.version,
             seed: g.seed.as_bytes().to_vec(),
+            binding: g.binding.encode().to_vec(),
         }
     }
 }
@@ -240,6 +252,8 @@ impl TryFrom<FfiReachGrant> for RustReachGrant {
             class: g.class.into(),
             version: g.version,
             seed: SecretBytes::new(seed32(&g.seed, "reach grant seed")?),
+            binding: lakko_contacts::mailbox::MailboxBinding::decode(&g.binding)
+                .map_err(|e| FfiError::Reach(format!("badBinding: {e}")))?,
         })
     }
 }
@@ -303,6 +317,30 @@ pub fn continuity_reach_seed(
         .to_vec())
 }
 
+/// The mailbox key a grant writes to (32 bytes), after verifying its binding
+/// against `account_pk`, the owner's 32-byte account identity key as the
+/// writer holds it pinned (ADR-0078). Call before every write under the
+/// grant; seal the row to the returned key (`sealMailboxRow`) and address it
+/// to `mailboxAddress` of it.
+///
+/// # Errors
+///
+/// [`FfiError::Reach`] `seedLength` / `badBinding` for a malformed grant;
+/// [`FfiError::Mailbox`] `badBinding` / `badKey` when the binding does not
+/// verify, `keyLength` when `account_pk` is not 32 bytes.
+#[uniffi::export]
+pub fn reach_grant_mailbox_pk_verified(
+    grant: FfiReachGrant,
+    account_pk: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let rust = RustReachGrant::try_from(grant)?;
+    let account = crate::mailbox::key32(&account_pk, "account key")?;
+    Ok(rust
+        .mailbox_pk_verified(&account)
+        .map_err(crate::mailbox::mailbox_err)?
+        .to_vec())
+}
+
 /// [`reach_seed`] wrapped as a grant, ready to hand out.
 ///
 /// # Errors
@@ -330,12 +368,14 @@ pub fn reach_verifying_key(seed: Vec<u8>) -> Result<Vec<u8>, FfiError> {
     Ok(rust_reach_verifying_key(&seed32(&seed, "reach seed")?).to_vec())
 }
 
-/// Encode a grant as its 37-byte wire (`class || version || seed`). The
-/// output holds the seed: seal it before it leaves the device.
+/// Encode a grant as its 134-byte wire (`class || version || seed ||
+/// binding`). The output holds the seed: seal it before it leaves the
+/// device.
 ///
 /// # Errors
 ///
-/// [`FfiError::Reach`] `seedLength` — the seed is not 32 bytes.
+/// [`FfiError::Reach`] `seedLength` — the seed is not 32 bytes; `badBinding`
+/// — the binding is malformed.
 #[uniffi::export]
 pub fn encode_reach_grant(grant: FfiReachGrant) -> Result<Vec<u8>, FfiError> {
     let rust = RustReachGrant::try_from(grant)?;
@@ -346,7 +386,8 @@ pub fn encode_reach_grant(grant: FfiReachGrant) -> Result<Vec<u8>, FfiError> {
 ///
 /// # Errors
 ///
-/// [`FfiError::Reach`] `badLength` / `unknownClass`.
+/// [`FfiError::Reach`] `badLength` / `unknownClass` / `badBinding`. The
+/// binding's signature is not checked (see [`reach_grant_mailbox_pk_verified`]).
 #[uniffi::export]
 pub fn decode_reach_grant(bytes: Vec<u8>) -> Result<FfiReachGrant, FfiError> {
     Ok(RustReachGrant::decode(&bytes)?.into())
@@ -359,7 +400,7 @@ pub fn reach_seed_len() -> u32 {
     u32::try_from(REACH_SEED_LEN).unwrap_or(u32::MAX)
 }
 
-/// Wire length of a reach grant: 37.
+/// Wire length of a reach grant: 134.
 #[uniffi::export]
 #[must_use]
 pub fn reach_grant_len() -> u32 {
@@ -395,6 +436,10 @@ pub struct FfiIntroductionPayload {
     pub username: Option<String>,
     /// The 153-byte discovery-signed username certificate, or `None`.
     pub username_certificate: Option<Vec<u8>>,
+    /// Their 97-byte mailbox binding (ADR-0078): where to write to them.
+    /// Compose and open verify it against `identity_pk`; a `fof` grant must
+    /// carry the same one.
+    pub mailbox_binding: Vec<u8>,
     /// Their `Fof` reach grant (secret). Required in a contacts-of-contacts
     /// record ([`compose_introduction`] / [`open_introduction`]), absent in
     /// an Everyone public record ([`compose_public_record`] /
@@ -410,6 +455,7 @@ impl From<RustIntroductionPayload> for FfiIntroductionPayload {
             display_name: p.display_name,
             username: p.username,
             username_certificate: p.username_certificate,
+            mailbox_binding: p.mailbox_binding.encode().to_vec(),
             fof: p.fof.map(Into::into),
         }
     }
@@ -433,12 +479,16 @@ impl TryFrom<FfiIntroductionPayload> for RustIntroductionPayload {
                     p.account_id.len()
                 ))
             })?;
+        let mailbox_binding =
+            lakko_contacts::mailbox::MailboxBinding::decode(&p.mailbox_binding)
+                .map_err(|e| FfiError::Introduction(format!("mailboxBinding.{}: {e}", e.code())))?;
         Ok(Self {
             identity_pk,
             account_id,
             display_name: p.display_name,
             username: p.username,
             username_certificate: p.username_certificate,
+            mailbox_binding,
             fof: p.fof.map(TryInto::try_into).transpose()?,
         })
     }
@@ -1185,9 +1235,13 @@ fn delegation_error(e: &DelegationError) -> FfiError {
 /// pending**, and whenever the candidate set changes.
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct FfiCommitterDelegationEnvelope {
-    /// The added person's 32-byte account signature key; every delegation
-    /// must name its mailbox.
+    /// The added person's 32-byte account signature key.
     pub added_account_key: Vec<u8>,
+    /// The added person's 97-byte mailbox binding (ADR-0078), copied from
+    /// the grant the proposer holds for them. It must verify under
+    /// `added_account_key`, and every delegation must name its mailbox
+    /// (`checkCommitterDelegations` checks both).
+    pub added_mailbox_binding: Vec<u8>,
     /// 1 to [`max_committer_delegations`] raw 185-byte delegation blobs.
     pub delegations: Vec<Vec<u8>>,
 }
@@ -1196,6 +1250,7 @@ impl From<CommitterDelegationEnvelope> for FfiCommitterDelegationEnvelope {
     fn from(e: CommitterDelegationEnvelope) -> Self {
         Self {
             added_account_key: e.added_account_key.to_vec(),
+            added_mailbox_binding: e.added_mailbox_binding.encode().to_vec(),
             delegations: e.delegations.iter().map(|d| d.to_vec()).collect(),
         }
     }
@@ -1229,8 +1284,12 @@ impl TryFrom<FfiCommitterDelegationEnvelope> for CommitterDelegationEnvelope {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let added_mailbox_binding =
+            lakko_contacts::mailbox::MailboxBinding::decode(&e.added_mailbox_binding)
+                .map_err(|err| FfiError::CommitterDelegation(format!("badBinding: {err}")))?;
         Ok(Self {
             added_account_key,
+            added_mailbox_binding,
             delegations,
         })
     }
@@ -1240,7 +1299,7 @@ impl TryFrom<FfiCommitterDelegationEnvelope> for CommitterDelegationEnvelope {
 /// signature and the expiry when it is used).
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct FfiDelegation {
-    /// The mailbox pseudonym the write may go to (32 bytes).
+    /// The mailbox address the write may go to (32 bytes, ADR-0078).
     pub mailbox: Vec<u8>,
     /// The key that signs the delegated request (32 bytes).
     pub delegate_pk: Vec<u8>,
@@ -1413,7 +1472,10 @@ mod tests {
     fn a_committer_finds_its_own_delegation_through_the_dispatcher() {
         let account = |b: u8| SigningKey::from_seed(&[b; 32]).verifying_key().to_bytes();
         let added = account(9);
-        let mailbox = lakko_ds_proof::mailbox_pseudonym(&VerifyingKey::from_bytes(&added).unwrap());
+        let mailbox = lakko_ds_proof::MailboxKey::from_account_seed(&[9; 32]).address();
+        let added_binding = lakko_contacts::mailbox::MailboxBinding::for_account_seed(&[9; 32])
+            .encode()
+            .to_vec();
         let (owner, admin) = (account(1), account(2));
         let expires = 1_000;
         let blob = |delegate: [u8; 32], n: u8| {
@@ -1428,6 +1490,7 @@ mod tests {
         };
         let envelope = FfiCommitterDelegationEnvelope {
             added_account_key: added.to_vec(),
+            added_mailbox_binding: added_binding.clone(),
             delegations: vec![blob(owner, 1), blob(admin, 2)],
         };
         let wire = compose_committer_delegation_envelope(envelope.clone()).unwrap();
@@ -1466,6 +1529,17 @@ mod tests {
             owner
         );
 
+        // A binding signed by another account refuses the whole envelope.
+        let mut foreign = envelope.clone();
+        foreign.added_mailbox_binding =
+            lakko_contacts::mailbox::MailboxBinding::for_account_seed(&[8; 32])
+                .encode()
+                .to_vec();
+        assert_eq!(
+            code_of(&check_committer_delegations(foreign).unwrap_err()),
+            "badMailboxBinding"
+        );
+
         // A delegation for another mailbox refuses the whole envelope.
         let mut bad = envelope;
         bad.delegations[1] = crate::ds_proof::sign_delegation_blob(
@@ -1481,6 +1555,7 @@ mod tests {
         assert_eq!(code_of(&err), "wrongMailbox");
         let err = compose_committer_delegation_envelope(FfiCommitterDelegationEnvelope {
             added_account_key: added.to_vec(),
+            added_mailbox_binding: added_binding,
             delegations: vec![],
         })
         .unwrap_err();
@@ -1568,6 +1643,26 @@ mod tests {
         let grant =
             derive_reach_grant(ACCOUNT_SEED.to_vec(), FfiReachClass::Group, vec![7; 8], 3).unwrap();
         assert_eq!(grant.seed, seed);
+        // ADR-0078: the grant names the owner's mailbox, verified only under
+        // the owner's account key.
+        let owner = SigningKey::from_seed(&ACCOUNT_SEED)
+            .verifying_key()
+            .to_bytes();
+        assert_eq!(
+            reach_grant_mailbox_pk_verified(grant.clone(), owner.to_vec()).unwrap(),
+            lakko_contacts::mailbox::MailboxKey::from_account_seed(&ACCOUNT_SEED)
+                .public()
+                .to_vec()
+        );
+        let stranger = SigningKey::from_seed(&[0x43; 32])
+            .verifying_key()
+            .to_bytes();
+        assert_eq!(
+            code_of(
+                &reach_grant_mailbox_pk_verified(grant.clone(), stranger.to_vec()).unwrap_err()
+            ),
+            "badBinding"
+        );
         let wire = encode_reach_grant(grant.clone()).unwrap();
         assert_eq!(wire.len(), reach_grant_len() as usize);
         assert_eq!(decode_reach_grant(wire).unwrap(), grant);
@@ -1576,6 +1671,7 @@ mod tests {
             "Debug redacts the seed"
         );
         assert_eq!(reach_seed_len(), 32);
+        assert_eq!(reach_grant_len(), 134);
         assert_eq!(max_reach_scope_id_len(), 64);
     }
 
@@ -1590,7 +1686,7 @@ mod tests {
         assert_eq!(code_of(&e), "seedLength");
         let e = decode_reach_grant(vec![0; 36]).unwrap_err();
         assert_eq!(code_of(&e), "badLength");
-        let mut wire = vec![0u8; 37];
+        let mut wire = vec![0u8; 134];
         wire[0] = 9;
         assert_eq!(
             code_of(&decode_reach_grant(wire).unwrap_err()),
@@ -1600,11 +1696,19 @@ mod tests {
 
     fn payload() -> FfiIntroductionPayload {
         FfiIntroductionPayload {
-            identity_pk: vec![1; 32],
+            identity_pk: SigningKey::from_seed(&ACCOUNT_SEED)
+                .verifying_key()
+                .to_bytes()
+                .to_vec(),
             account_id: vec![2; 16],
             display_name: Some("Anna Weber".to_string()),
             username: Some("anna".to_string()),
             username_certificate: None,
+            mailbox_binding: lakko_contacts::mailbox::MailboxBinding::for_account_seed(
+                &ACCOUNT_SEED,
+            )
+            .encode()
+            .to_vec(),
             fof: Some(
                 derive_reach_grant(ACCOUNT_SEED.to_vec(), FfiReachClass::Fof, vec![], 1).unwrap(),
             ),

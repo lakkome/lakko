@@ -79,7 +79,7 @@ class ChannelMemberCardsTest {
     private val ownKey = ByteArray(32) { 0x0B }
     private val bobKey = ByteArray(32) { 0x0C }
     private val bobAccount = ByteArray(16) { 0x0D }
-    private val channelGrant = FfiReachGrant(FfiReachClass.CHANNEL, 4u, ByteArray(32) { 5 })
+    private val channelGrant = FfiReachGrant(FfiReachClass.CHANNEL, 4u, ByteArray(32) { 5 }, ByteArray(97) { 6 })
 
     /** card name -> (identity key, profile), or a card that fails to open. */
     private inner class Fake(

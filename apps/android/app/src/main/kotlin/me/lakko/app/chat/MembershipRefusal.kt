@@ -498,6 +498,9 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.PhraseCheck,
                 is FfiException.PasskeyVaultNotOpened,
                 is FfiException.PasskeyVault,
+                // ADR-0078 - a refused mailbox row or binding; not a
+                // membership refusal.
+                is FfiException.Mailbox,
                 is FfiException.EmailVaultNotOpened,
                 is FfiException.EmailVault,
                 is FfiException.RecoveryEmail,

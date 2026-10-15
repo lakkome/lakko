@@ -17,7 +17,8 @@ import LakkoCore
 //   2. a reach grant is kept for the PERSON (the current key), and one kept
 //      under a key that later became a proven predecessor is still found
 //      (``AccountKeyResolver/allKeys(of:)``);
-//   4. the account's own predecessor mailboxes are READ for
+//   4. the account's own predecessor mailboxes (ADR-0078: the mailbox key
+//      of each predecessor SEED) are READ for
 //      ``PredecessorMailbox/readWindowMs`` after adopting, then left
 //      (``PredecessorMailbox/reads(adoptedAtMs:nowMs:)``). Nothing is
 //      registered there.
@@ -80,7 +81,7 @@ public struct AccountKeyResolver: Equatable {
     }
 
     /// Every key this resolver knows as a predecessor of something (own and
-    /// other people's): what a stored mailbox pseudonym is matched against.
+    /// other people's).
     public var predecessorKeys: [Data] {
         var out = ownCurrentKey == nil ? [] : ownPredecessorKeys
         out += proven.predecessorKeysB64.compactMap { Data(base64Encoded: $0) }
@@ -88,32 +89,131 @@ public struct AccountKeyResolver: Equatable {
     }
 }
 
-/// Deriving a mailbox from an account key, resolved first (rule 1).
-public enum MailboxAddress {
+/// ADR-0078 phase 1 — one mailbox a write goes to, VERIFIED.
+///
+/// A mailbox address is no longer a function of an identity key: it is the
+/// hash of a mailbox key derived from the owner's account seed, and a writer
+/// learns that key only from the owner's 97-byte mailbox binding (the key
+/// signed by the owner's account identity key). A target exists only once the
+/// binding verified against the account key this device holds for the person
+/// (``verified(binding:accountKey:)``, ``verified(grant:accountKey:)``), so a
+/// row is never sealed to, or addressed at, a mailbox the person does not
+/// read. A failed check writes nothing.
+public struct MailboxTarget: Equatable, Hashable {
+    /// The 32-byte Ed25519 mailbox public key a row is sealed to.
+    public let mailboxPk: Data
+    /// The 32-byte address the row is posted under (`/ds/mailbox/{hex}`).
+    public let address: Data
+    /// The 97-byte binding the key came from (what a committer delegation
+    /// carries for the added person).
+    public let binding: Data
+    /// The account key the binding verified under.
+    public let accountKey: Data
 
-    /// The mailbox pseudonym of an account key, exactly as derived.
-    public static func pseudonym(of accountKey: Data) -> Data? {
-        try? IdentityPseudonym.fromIdentity(pubkey: accountKey).asBytes()
+    public init(mailboxPk: Data, address: Data, binding: Data, accountKey: Data) {
+        self.mailboxPk = mailboxPk
+        self.address = address
+        self.binding = binding
+        self.accountKey = accountKey
     }
 
-    /// The mailbox a write for the person holding `accountKey` goes to: the
-    /// mailbox of their CURRENT key.
-    public static func pseudonym(forAccountKey accountKey: Data, resolver: AccountKeyResolver) -> Data? {
-        pseudonym(of: resolver.current(of: accountKey))
+    /// The mailbox `binding` names, after verifying it against `accountKey`,
+    /// the account key this device holds pinned for its owner. Throws when it
+    /// does not verify (or is malformed): the caller writes nothing.
+    public static func verified(binding: Data, accountKey: Data) throws -> MailboxTarget {
+        let pk = try verifyMailboxBinding(binding: binding, accountPk: accountKey)
+        return MailboxTarget(
+            mailboxPk: pk, address: try mailboxAddress(mailboxPk: pk), binding: binding,
+            accountKey: accountKey)
     }
 
-    /// Re-address a mailbox pseudonym that was derived earlier (an outbox
-    /// entry recorded before the rotation was observed): when it is the
-    /// mailbox of a known predecessor key, the mailbox of that person's
-    /// current key; otherwise `pseudonym` itself.
-    public static func current(
-        of pseudonym: Data, resolver: AccountKeyResolver,
-        derive: (Data) -> Data? = MailboxAddress.pseudonym(of:)
-    ) -> Data {
-        for key in resolver.predecessorKeys where derive(key) == pseudonym {
-            return derive(resolver.current(of: key)) ?? pseudonym
+    /// The mailbox a reach grant writes to, after verifying its binding
+    /// against `accountKey`. Throws when it does not verify.
+    public static func verified(grant: FfiReachGrant, accountKey: Data) throws -> MailboxTarget {
+        let pk = try reachGrantMailboxPkVerified(grant: grant, accountPk: accountKey)
+        return MailboxTarget(
+            mailboxPk: pk, address: try mailboxAddress(mailboxPk: pk), binding: grant.binding,
+            accountKey: accountKey)
+    }
+
+    /// ``verified(binding:accountKey:)`` that logs a refusal (without any
+    /// identifier) and answers `nil`.
+    public static func verifiedOrNil(binding: Data, accountKey: Data) -> MailboxTarget? {
+        do {
+            return try verified(binding: binding, accountKey: accountKey)
+        } catch {
+            NSLog("ADR-0078: a mailbox binding did not verify; nothing is written there")
+            return nil
         }
-        return pseudonym
+    }
+
+    /// ``verified(grant:accountKey:)`` that logs a refusal (without any
+    /// identifier) and answers `nil`.
+    public static func verifiedOrNil(grant: FfiReachGrant, accountKey: Data) -> MailboxTarget? {
+        do {
+            return try verified(grant: grant, accountKey: accountKey)
+        } catch {
+            NSLog("ADR-0078: a reach grant's mailbox binding did not verify; nothing is written there")
+            return nil
+        }
+    }
+
+    /// This account's own mailbox (every device of the account derives the
+    /// same): where a Welcome for one of its own devices goes.
+    public static func own(accountIdentity: Identity) -> MailboxTarget {
+        let key = MailboxKey.fromAccountIdentity(accountIdentity: accountIdentity)
+        return MailboxTarget(
+            mailboxPk: key.publicKey(), address: key.address(),
+            binding: signMailboxBinding(accountIdentity: accountIdentity),
+            accountKey: accountIdentity.signaturePublicKey())
+    }
+
+    /// Seal `body` as one row of `kind` to this mailbox.
+    public func seal(kind: FfiMailboxKind, body: Data) throws -> Data {
+        try sealMailboxRow(mailboxPk: mailboxPk, kind: kind, body: body)
+    }
+}
+
+/// A write to one person, decided (ADR-0078): the VERIFIED mailbox it goes
+/// to and every authorisation this device holds for that mailbox, in the
+/// order a writer tries them (empty: the write goes without a proof and
+/// spends a `mailbox-write` anonymous token, which only an open mailbox
+/// stores).
+public struct MailboxWritePlan: Equatable {
+    public let target: MailboxTarget
+    public let candidates: [DsMailboxWriteAuth]
+
+    public init(target: MailboxTarget, candidates: [DsMailboxWriteAuth]) {
+        self.target = target
+        self.candidates = candidates
+    }
+
+    /// The first authorisation, `nil` for a proofless write.
+    public var auth: DsMailboxWriteAuth? { candidates.first }
+}
+
+/// No mailbox is known for the person a write is meant for (no grant, no
+/// binding), or the binding that named one did not verify: nothing is
+/// written. Carries no identifier.
+public struct MailboxUnknown: Error, Equatable, LocalizedError {
+    public init() {}
+    public var errorDescription: String? { "No way to reach this person yet." }
+}
+
+/// ADR-0078 phase 1 — reading the own mailbox.
+public enum MailboxRows {
+
+    /// Open one row of the own mailbox: its kind and the inner wire, or `nil`
+    /// for a row that does not open (garbage, a row for another mailbox, an
+    /// unknown kind). A row that does not open is dropped by the caller; the
+    /// cursor still moves past it. Logged without identifiers.
+    public static func open(_ row: Data, key: MailboxKey) -> FfiOpenedMailboxRow? {
+        do {
+            return try openMailboxRow(key: key, row: row)
+        } catch {
+            NSLog("ADR-0078: a mailbox row did not open and was dropped")
+            return nil
+        }
     }
 }
 

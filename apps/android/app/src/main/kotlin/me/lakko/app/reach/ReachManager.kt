@@ -24,6 +24,13 @@ import me.lakko.app.ds.DsReachAuth
 import me.lakko.app.ds.DsReachKeyAdd
 import me.lakko.app.ds.FfiDsJournalSigner
 import me.lakko.app.ds.reachSigner
+import me.lakko.app.contacts.MailboxCrypto
+import me.lakko.app.contacts.MailboxDest
+import me.lakko.app.contacts.NativeMailboxCrypto
+import me.lakko.app.contacts.bindingMailboxPkOrNull
+import me.lakko.app.contacts.firstVerifiedMailboxPk
+import me.lakko.app.contacts.grantMailboxPkOrNull
+import me.lakko.app.contacts.verifiedGrantDest
 import uniffi.lakko_ffi_uniffi.FfiReachClass
 import uniffi.lakko_ffi_uniffi.FfiReachGrant
 import uniffi.lakko_ffi_uniffi.FfiReachState
@@ -56,9 +63,12 @@ public enum class ReachApplyStatus {
  * - Derives every one of the owner's keys from the account seed and a version
  *   counter (nothing secret of the owner's is stored).
  * - Keeps the owner's mailbox holding exactly [desiredReachKeys]: one
- *   `PUT /ds/mailbox/{hex}/reach` per change, signed by the identity proof.
+ *   `PUT /ds/mailbox/{hex}/reach` per change, signed by the mailbox key
+ *   (ADR-0078).
  * - Keeps the grants received, and picks the one a write into someone's
- *   mailbox is signed with ([reachAuthFor]).
+ *   mailbox is signed with ([reachAuthFor]); the mailbox a write is sealed to
+ *   comes from the grant's binding, verified against the account key held
+ *   for the person ([mailboxPkFor]).
  * - Holds the "who can find me" setting.
  *
  * The setting and the version counters are shared with the account's other
@@ -85,6 +95,8 @@ public class ReachManager internal constructor(
      *  ([ContinuityMarkerStore]), by the signed-in account id; `null` when
      *  this device never reset the account. */
     private val continuityMarker: (ownerAccountIdB64: String) -> ContinuityMarker? = { null },
+    /** ADR-0078 - the binding check and sealing of mailbox rows. */
+    private val mailboxCrypto: MailboxCrypto = NativeMailboxCrypto,
 ) {
     /**
      * ADR-0073 R.4 - the account and generation behind [ownerKey] when this
@@ -118,9 +130,14 @@ public class ReachManager internal constructor(
         val accountSeed: ByteArray,
         /** The account identity's signature public key. */
         val accountKey: ByteArray,
-        /** The account mailbox pseudonym. */
+        /** The account mailbox address (ADR-0078: a hash of the mailbox key). */
         val mailbox: ByteArray,
-        /** The identity proof signer of that mailbox. */
+        /** The account's 32-byte mailbox public key. */
+        val mailboxPk: ByteArray,
+        /** The account's 97-byte mailbox binding (the key signed by the
+         *  identity key): what every grant and public record carries. */
+        val mailboxBinding: ByteArray,
+        /** The mailbox-key proof signer of that mailbox. */
         val mailboxSigner: DsJournalSigner,
     )
 
@@ -184,11 +201,14 @@ public class ReachManager internal constructor(
         }
         val sameAccount = current != null && current.accountIdB64 == accountIdB64
         val ffiSigner = uniffi.lakko_ffi_uniffi.dsMailboxSigner(account)
+        val mailboxPk = uniffi.lakko_ffi_uniffi.MailboxKey.fromAccountIdentity(account).use { it.publicKey() }
         val bound = Binding(
             accountIdB64 = accountIdB64,
             accountSeed = account.ed25519Seed(),
             accountKey = accountKey,
-            mailbox = ffiSigner.mailboxPseudonym(),
+            mailbox = ffiSigner.mailboxAddress(),
+            mailboxPk = mailboxPk,
+            mailboxBinding = uniffi.lakko_ffi_uniffi.signMailboxBinding(account),
             mailboxSigner = FfiDsJournalSigner(ffiSigner),
         )
         // The previous binding's seed is NOT wiped here: a reconcile still
@@ -257,6 +277,9 @@ public class ReachManager internal constructor(
     /** The bound account's signature public key, or `null`. */
     public fun ownAccountKey(): ByteArray? = binding.get()?.accountKey?.copyOf()
 
+    /** ADR-0078 - the bound account's 97-byte mailbox binding, or `null`. */
+    public fun ownMailboxBinding(): ByteArray? = binding.get()?.mailboxBinding?.copyOf()
+
     /**
      * The account bound at one moment, for work that is handed something FOR
      * that account and runs later (a launched intake): it passes this back
@@ -296,10 +319,26 @@ public class ReachManager internal constructor(
     /** [mailboxAccountKey] over lowercase hex. */
     public fun mailboxAccountKeyHex(accountKeyHex: String): String = addressedKeyHex(accountKeyHex, links())
 
-    /** The mailbox pseudonym a write for the person known by [accountKey]
-     *  goes to: the CURRENT key's ([mailboxAccountKey]). */
-    public fun mailboxOf(accountKey: ByteArray): ByteArray =
-        uniffi.lakko_ffi_uniffi.IdentityPseudonym.fromIdentity(mailboxAccountKey(accountKey)).use { it.asBytes() }
+    /**
+     * ADR-0078 - the VERIFIED mailbox key of the person known by
+     * [accountKey], or `null` when none is known (nothing can be written to
+     * them then). This account's own key for this account (a proven
+     * predecessor included). For anyone else: the binding of the first grant
+     * held for the person that verifies against their CURRENT account key
+     * ([mailboxAccountKey]); a grant whose binding does not verify is skipped
+     * (one filed under a predecessor names the old mailbox, which is never
+     * addressed). The address is never derived from the identity key.
+     */
+    public fun mailboxPkFor(accountKey: ByteArray): ByteArray? {
+        val b = binding.get() ?: return null
+        val current = mailboxAccountKey(accountKey)
+        if (current.contentEquals(b.accountKey)) return b.mailboxPk.copyOf()
+        return firstVerifiedMailboxPk(heldFor(accountKey).map { it.second }, current, mailboxCrypto)
+    }
+
+    /** The address [mailboxPkFor] names, or `null`. */
+    public fun mailboxAddressFor(accountKey: ByteArray): ByteArray? =
+        mailboxPkFor(accountKey)?.let(mailboxCrypto::address)
 
     /** Rule 2 - every key the person is filed under, current first. */
     private fun personKeys(accountKey: ByteArray): List<String> = personKeysHex(reachHex(accountKey), links())
@@ -1230,8 +1269,9 @@ public class ReachManager internal constructor(
     }
 
     /**
-     * What signs a write of [purpose] into [ownerKey]'s mailbox, or `null`
-     * (unsigned — which an open mailbox takes and a closed one drops).
+     * Where a write of [purpose] into [ownerKey]'s mailbox goes and what signs
+     * it, or `null` when no grant held verifies (a proofless write then needs
+     * [mailboxPkFor], which an open mailbox takes and a closed one drops).
      *
      * This account's own mailbox is written with its own `contact` key (the
      * account's other devices, ADR-0050). A Welcome into [groupHex] prefers a
@@ -1241,12 +1281,26 @@ public class ReachManager internal constructor(
         ownerKey: ByteArray,
         purpose: WritePurpose,
         groupHex: String? = null,
-    ): DsReachAuth? {
+    ): MailboxDest? {
         for (candidate in reachAuthCandidates(ownerKey, purpose, groupHex)) {
             candidate()?.let { return it }
         }
         return null
     }
+
+    /**
+     * ADR-0078 - where a write of [purpose] to [ownerKey] goes: the first
+     * held grant that verifies ([reachAuthFor]), else a proofless write to
+     * the mailbox key a held binding names ([mailboxPkFor]; it spends one
+     * `mailbox-write` token), else `null` (no mailbox known: nothing is
+     * written).
+     */
+    public fun writeDestFor(
+        ownerKey: ByteArray,
+        purpose: WritePurpose,
+        groupHex: String? = null,
+    ): MailboxDest? =
+        reachAuthFor(ownerKey, purpose, groupHex) ?: mailboxPkFor(ownerKey)?.let { MailboxDest(it, null) }
 
     /**
      * Every authorisation this device holds for a write of [purpose] into
@@ -1260,66 +1314,53 @@ public class ReachManager internal constructor(
         ownerKey: ByteArray,
         purpose: WritePurpose,
         groupHex: String? = null,
-    ): List<() -> DsReachAuth?> {
+    ): List<() -> MailboxDest?> {
         val b = binding.get() ?: return emptyList()
         // ADR-0074 3.5a rule 1: this account's own conversation key (a
         // proven predecessor after a rotation) IS this account.
-        if (mailboxAccountKey(ownerKey).contentEquals(b.accountKey)) {
-            return listOf({ grant(ReachKind.CONTACT)?.let { DsReachAuth(reachSigner(it.seed)) } })
+        val current = mailboxAccountKey(ownerKey)
+        if (current.contentEquals(b.accountKey)) {
+            return listOf({
+                grant(ReachKind.CONTACT)?.let { MailboxDest(b.mailboxPk.copyOf(), DsReachAuth(reachSigner(it.seed))) }
+            })
         }
         val held = heldFor(ownerKey)
-        val out = ArrayList<() -> DsReachAuth?>()
+        val out = ArrayList<() -> MailboxDest?>()
         for (ref in orderedWriteGrants(held.map { it.first }, purpose, groupHex?.lowercase())) {
             // Rule 2: one class and scope may be held under the current key
             // and under a predecessor; each is a candidate, the current
             // key's first, and a `401` moves on to the next.
-            val seeds = held.filter { it.first == ref }.map { it.second.seed }
-            for ((index, seed) in seeds.withIndex()) {
-                if (seeds.take(index).any { it.contentEquals(seed) }) continue
-                out += { DsReachAuth(reachSigner(seed)) }
+            val grants = held.filter { it.first == ref }.map { it.second }
+            for ((index, grant) in grants.withIndex()) {
+                if (grants.take(index).any { it.seed.contentEquals(grant.seed) }) continue
+                // ADR-0078: the grant's binding is verified against the
+                // person's CURRENT key before the write; a refused one
+                // writes nothing (the candidate yields `null`).
+                out += { verifiedGrantDest(grant, current, mailboxCrypto) { seed -> DsReachAuth(reachSigner(seed)) } }
             }
         }
-        // ADR-0073 R.4 - a Welcome to a person whose reset this device
-        // accepted may be signed with the continuity key of their new
-        // mailbox: nobody holds a grant for it. After the grants the person
-        // issued (once they are in a conversation their profile hands those
-        // out and this key is not used again), before a committer delegation.
+        // ADR-0073 R.4 - the continuity Welcome to a person whose reset this
+        // device accepted is a recorded no-op under ADR-0078: there is no
+        // carrier for the reset account's new mailbox key (ADR-0078 open
+        // question), and an address derived from the account id or the
+        // identity key is exactly what ADR-0078 removed.
         if (purpose == WritePurpose.WELCOME) {
-            out += { continuityAuthFor(ownerKey) }
+            out += { continuityWelcomeDest(runCatching { acceptedResetOf?.invoke(current) }.getOrNull() != null) }
         }
         if (purpose == WritePurpose.WELCOME && groupHex != null) {
             out += {
                 // The write is signed with the own key the delegation
-                // NAMES: the current one, or an own predecessor.
+                // NAMES: the current one, or an own predecessor; it is
+                // sealed to the mailbox the delegation's binding names,
+                // verified against the added person's current key.
                 delegationFor(groupHex, ownerKey)?.let { picked ->
-                    DsReachAuth(reachSigner(picked.signerSeed), delegationHeader = picked.header)
+                    mailboxCrypto.bindingMailboxPkOrNull(picked.addedMailboxBinding, current)?.let { pk ->
+                        MailboxDest(pk, DsReachAuth(reachSigner(picked.signerSeed), delegationHeader = picked.header))
+                    }
                 }
             }
         }
         return out
-    }
-
-    /** The continuity key of [ownerKey]'s mailbox as a write authorisation,
-     *  or `null` when this device accepted no reset that produced that key or
-     *  the key's window is over ([continuityKeyUsable]). */
-    private fun continuityAuthFor(ownerKey: ByteArray): DsReachAuth? {
-        val reset = try {
-            acceptedResetOf?.invoke(mailboxAccountKey(ownerKey))
-        } catch (_: Throwable) {
-            null
-        } ?: return null
-        if (!continuityKeyUsable(reset.signedAtMs, System.currentTimeMillis())) return null
-        val accountId = try {
-            java.util.Base64.getDecoder().decode(reset.accountIdB64)
-        } catch (_: IllegalArgumentException) {
-            return null
-        }
-        val seed = uniffi.lakko_ffi_uniffi.continuityReachSeed(accountId, reset.keyGeneration.toULong())
-        return try {
-            DsReachAuth(reachSigner(seed))
-        } finally {
-            seed.fill(0)
-        }
     }
 
     /**
@@ -1554,9 +1595,14 @@ public class ReachManager internal constructor(
         }
     }
 
-    /** A delegation this device may use: its header and the 32-byte
-     *  Ed25519 seed of the own account key it names. SECRET. */
-    public class OwnDelegation(public val header: String, public val signerSeed: ByteArray)
+    /** A delegation this device may use: its header, the 32-byte Ed25519
+     *  seed of the own account key it names, and the added person's mailbox
+     *  binding the envelope carried (ADR-0078). SECRET. */
+    public class OwnDelegation(
+        public val header: String,
+        public val signerSeed: ByteArray,
+        public val addedMailboxBinding: ByteArray,
+    )
 
     /**
      * The delegation naming this account for a Welcome to [addedAccountKey]
@@ -1589,11 +1635,12 @@ public class ReachManager internal constructor(
         }
         try {
             val keys = listOf(b.accountKey) + previous.map { it.first }
+            var bindingOfPick: ByteArray? = null
             val (header, index) = pickOwnDelegation(envelopes, keys) { env, key ->
-                uniffi.lakko_ffi_uniffi.committerDelegationFor(env, key)
+                uniffi.lakko_ffi_uniffi.committerDelegationFor(env, key)?.also { bindingOfPick = env.addedMailboxBinding }
             } ?: return null
             val seed = if (index == 0) b.accountSeed.copyOf() else previous[index - 1].second.copyOf()
-            return OwnDelegation(header, seed)
+            return OwnDelegation(header, seed, bindingOfPick ?: return null)
         } finally {
             previous.forEach { it.second.fill(0) }
         }
@@ -1618,7 +1665,11 @@ public class ReachManager internal constructor(
         // CURRENT mailbox, and is signed to each candidate's current key
         // (the key that candidate's device signs the write with).
         val addedCurrent = mailboxAccountKey(addedAccountKey)
-        val mailbox = uniffi.lakko_ffi_uniffi.IdentityPseudonym.fromIdentity(addedCurrent).use { it.asBytes() }
+        // ADR-0078: the mailbox comes from the contact grant's binding,
+        // verified against that current key; a refused binding sends no
+        // delegation.
+        val mailboxPk = mailboxCrypto.grantMailboxPkOrNull(contact, addedCurrent) ?: return null
+        val mailbox = mailboxCrypto.address(mailboxPk)
         val expires = (nowMs + ttlMs).toULong()
         val max = uniffi.lakko_ffi_uniffi.maxCommitterDelegations().toInt()
         val blobs = candidateKeys.take(max).map { candidate ->
@@ -1629,6 +1680,7 @@ public class ReachManager internal constructor(
         return uniffi.lakko_ffi_uniffi.composeCommitterDelegationEnvelope(
             uniffi.lakko_ffi_uniffi.FfiCommitterDelegationEnvelope(
                 addedAccountKey = addedAccountKey,
+                addedMailboxBinding = contact.binding,
                 delegations = blobs,
             ),
         )

@@ -431,7 +431,11 @@ final class InviteLinkShapeTests: XCTestCase {
             ownerSigningSeed: owner.ed25519Seed(), ownerAccountId: Data(repeating: 4, count: 16),
             ownerX25519Pubkey: owner.x25519PublicKey(), expiryMs: 0, maxUses: 0,
             bootstrapReferral: false, label: "",
-            linkId: Self.testLinkId, linkGrant: Self.testLinkGrant)
+            // ADR-0078 — an `/i/` link grant carries the owner's own mailbox
+            // binding, which the core checks against the owner key.
+            linkId: Self.testLinkId,
+            linkGrant: try deriveReachGrant(
+                accountSeed: owner.ed25519Seed(), class: .link, scopeId: Self.testLinkId, version: 1))
         XCTAssertEqual(mint.issuerPubkey, owner.signaturePublicKey())
         let cap = try InviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret)
         XCTAssertEqual(cap.ownerAccountId(), Data(repeating: 4, count: 16))

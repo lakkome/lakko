@@ -113,18 +113,29 @@ final class NseServiceEnvelopeTests: XCTestCase {
     }()
 
     /// Stand-in for the slim FFI's `profileEnvelopeMinLen()...profileEnvelopeMaxLen()`
-    /// (28...315 — domain 17 + version 1 + stamp 8 + two length bytes, plus a
-    /// 255-byte name and a 32-byte username at most). Restated for the same
-    /// reason as ``beaconEnvelopeLen``; the Rust side pins the exported values.
-    /// ``testProfileFixtureBoundsMatchTheAdvertisedRange`` keeps it honest
-    /// against the envelopes this file builds.
-    private static let profileEnvelopeLens: ClosedRange<Int> = 28...315
+    /// (31...755 — profile v3 with ADR-0078's 134-byte reach grants: domain 17
+    /// + version 1 + stamp 8 + five length / count bytes at the least; at most
+    /// a 255-byte name, a 32-byte username, a 16-byte account id, a 153-byte
+    /// username certificate and two grants). Restated for the same reason as
+    /// ``beaconEnvelopeLen``; the Rust golden in
+    /// `crates/lakko-ffi-extension/src/profile.rs` pins the exported values,
+    /// and ``testProfileFixtureBoundsMatchTheAdvertisedRange`` keeps this
+    /// fixture honest against the envelopes this file builds.
+    private static let profileEnvelopeLens: ClosedRange<Int> = 31...755
 
-    /// A well-formed profile envelope:
-    /// `domain(17) || version(1) || updated_at_ms(8 BE) || name_len || name || username_len || username`.
-    private func profileEnvelope(name: String = "", username: String = "", updatedAtMs: UInt64 = 7) -> Data {
+    /// The ADR-0078 reach grant: `class(1) || version(4 BE) || seed(32) ||
+    /// binding(97)`.
+    private static let reachGrantLen = 134
+
+    /// A well-formed profile v3 envelope: `domain(17) || version(1) ||
+    /// updated_at_ms(8 BE) || name_len || name || username_len || username ||
+    /// account_id_len || account_id || cert_len || cert || grant_count ||
+    /// grants`. `full` fills the account id, the certificate and two grants.
+    private func profileEnvelope(
+        name: String = "", username: String = "", updatedAtMs: UInt64 = 7, full: Bool = false
+    ) -> Data {
         var out = Self.profileDomain
-        out.append(0x01)
+        out.append(0x03)
         for shift in stride(from: 56, through: 0, by: -8) {
             out.append(UInt8((updatedAtMs >> UInt64(shift)) & 0xFF))
         }
@@ -134,6 +145,12 @@ final class NseServiceEnvelopeTests: XCTestCase {
         let usernameBytes = Data(username.utf8)
         out.append(UInt8(usernameBytes.count))
         out.append(usernameBytes)
+        out.append(full ? 16 : 0)
+        if full { out.append(Data(repeating: 7, count: 16)) }
+        out.append(full ? 153 : 0)
+        if full { out.append(Data(repeating: 9, count: 153)) }
+        out.append(full ? 2 : 0)
+        if full { out.append(Data(repeating: 3, count: 2 * Self.reachGrantLen)) }
         return out
     }
 
@@ -144,12 +161,18 @@ final class NseServiceEnvelopeTests: XCTestCase {
         let domain = Self.profileDomain
         guard bytes.count > domain.count, bytes.prefix(domain.count) == domain else { return false }
         let payload = Array(bytes.dropFirst(domain.count))
-        guard payload.count >= 1 + 8 + 2, payload[0] == 0x01 else { return false }
-        let nameLen = Int(payload[9])
-        let usernameLenIndex = 10 + nameLen
-        guard payload.count > usernameLenIndex else { return false }
-        let usernameLen = Int(payload[usernameLenIndex])
-        return payload.count == usernameLenIndex + 1 + usernameLen
+        guard payload.count >= 1 + 8 + 5, payload[0] == 0x03 else { return false }
+        var at = 9
+        func field(_ allowed: (Int) -> Bool) -> Bool {
+            guard payload.count > at, allowed(Int(payload[at])) else { return false }
+            at += 1 + Int(payload[at])
+            return payload.count >= at
+        }
+        guard field({ $0 <= 255 }), field({ $0 <= 32 }), field({ $0 == 0 || $0 == 16 }),
+              field({ $0 == 0 || $0 == 153 }), payload.count > at else { return false }
+        let grants = Int(payload[at])
+        guard grants <= 2 else { return false }
+        return payload.count == at + 1 + grants * Self.reachGrantLen
     }
 
     /// A well-formed committer beacon: `domain(26) || version(1)=0x01`, 27
@@ -1249,7 +1272,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
     func testProfileFixtureBoundsMatchTheAdvertisedRange() {
         XCTAssertEqual(profileEnvelope().count, Self.profileEnvelopeLens.lowerBound)
         XCTAssertEqual(
-            profileEnvelope(name: String(repeating: "a", count: 255), username: String(repeating: "b", count: 32)).count,
+            profileEnvelope(
+                name: String(repeating: "a", count: 255), username: String(repeating: "b", count: 32),
+                full: true).count,
             Self.profileEnvelopeLens.upperBound
         )
     }
@@ -1261,7 +1286,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
         let lens = Self.profileEnvelopeLens
         XCTAssertTrue(nseLooksLikeProfile(profileEnvelope(), envelopeLens: lens))
         XCTAssertTrue(nseLooksLikeProfile(
-            profileEnvelope(name: String(repeating: "a", count: 255), username: String(repeating: "b", count: 32)),
+            profileEnvelope(
+                name: String(repeating: "a", count: 255), username: String(repeating: "b", count: 32),
+                full: true),
             envelopeLens: lens))
         XCTAssertFalse(nseLooksLikeProfile(profileEnvelope().dropLast(), envelopeLens: lens), "one byte short")
         XCTAssertFalse(
@@ -1412,16 +1439,41 @@ final class NseServiceEnvelopeTests: XCTestCase {
         XCTAssertTrue(isService(try composeReachStateEnvelope(state: state)))
     }
 
-    func testCommitterDelegationEnvelopeIsAServiceEnvelope() throws {
-        let mailbox = Data(repeating: 7, count: 32)
-        let blob = try signDelegationBlob(
-            issuerSeed: Data(repeating: 1, count: 32), mailbox: mailbox,
-            delegatePk: try reachVerifyingKey(seed: Data(repeating: 2, count: 32)),
-            expiresAtMs: 1_700_000_000_000, nonce: Data(repeating: 3, count: 16))
-        let envelope = try composeCommitterDelegationEnvelope(
+    /// A committer delegation (v2, ADR-0078: it carries the added person's
+    /// mailbox binding) for `count` candidates, naming the added person's
+    /// real mailbox.
+    private func delegationEnvelope(count: Int) throws -> Data {
+        let added = try Identity.fromSeed(seed: Data(repeating: 9, count: 64))
+        let key = MailboxKey.fromAccountIdentity(accountIdentity: added)
+        var blobs: [Data] = []
+        for index in 0..<count {
+            blobs.append(try signDelegationBlob(
+                issuerSeed: Data(repeating: 1, count: 32), mailbox: key.address(),
+                delegatePk: try reachVerifyingKey(seed: Data(repeating: UInt8(10 + index), count: 32)),
+                expiresAtMs: 1_700_000_000_000, nonce: Data(repeating: UInt8(index), count: 16)))
+        }
+        return try composeCommitterDelegationEnvelope(
             envelope: FfiCommitterDelegationEnvelope(
-                addedAccountKey: Data(repeating: 9, count: 32), delegations: [blob]))
-        XCTAssertTrue(isService(envelope))
+                addedAccountKey: added.signaturePublicKey(),
+                addedMailboxBinding: signMailboxBinding(accountIdentity: added),
+                delegations: blobs))
+    }
+
+    func testCommitterDelegationEnvelopeIsAServiceEnvelope() throws {
+        XCTAssertTrue(isService(try delegationEnvelope(count: 1)))
+    }
+
+    /// ADR-0078 — a committer delegation envelope is 346 bytes with one
+    /// delegation and 3121 with sixteen (the same bounds the Rust golden in
+    /// `crates/lakko-ffi-extension/src/scoped_discovery.rs` pins), both inside
+    /// the range the NSE pre-filter admits.
+    func testCommitterDelegationEnvelopeLengthsAreInsideThePreFilterRange() throws {
+        let smallest = try delegationEnvelope(count: 1)
+        let largest = try delegationEnvelope(count: Int(maxCommitterDelegations()))
+        XCTAssertEqual(smallest.count, 346)
+        XCTAssertEqual(largest.count, 3121)
+        XCTAssertTrue(nseLooksLikeScopedDiscovery(smallest, envelopeLens: Self.scopedDiscoveryEnvelopeLens))
+        XCTAssertTrue(nseLooksLikeScopedDiscovery(largest, envelopeLens: Self.scopedDiscoveryEnvelopeLens))
     }
 
     /// A chat body and a profile are never classified as one of the five.

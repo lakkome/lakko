@@ -271,7 +271,9 @@ internal interface SweepJournalPort {
     /** Publish to this group's journal; returns the DS-assigned id. */
     suspend fun publishGroup(bytes: ByteArray): Long
 
-    /** Publish to a member's mailbox pseudonym; returns the DS id. */
+    /** Seal the raw Welcome [bytes] to the account named by [pseudonym] (an
+     *  account key from [SweepPorts.welcomeTargets]) and publish it into its
+     *  mailbox (ADR-0078); returns the DS id. */
     suspend fun publishMailbox(pseudonym: ByteArray, bytes: ByteArray): Long
 }
 
@@ -397,15 +399,13 @@ internal class SweepPorts(
     val cursor: SweepCursorRef,
     val actingCommitter: ActingCommitterOracle,
     /**
-     * ADR-0060 §6 — the mailboxes one Welcome goes to, for the added leaves'
-     * 32-byte signature keys: one per added ACCOUNT (resolved through each
-     * leaf's device binding in the merged roster), deduplicated. Called only
-     * after the sweep merged.
+     * ADR-0060 §6 — who one Welcome goes to, for the added leaves' 32-byte
+     * signature keys: one ACCOUNT key per added account (resolved through
+     * each leaf's device binding in the merged roster), deduplicated. Called
+     * only after the sweep merged. ADR-0078: the account's mailbox is
+     * resolved, and the Welcome sealed to it, by [SweepJournalPort.publishMailbox].
      */
     val welcomeTargets: (List<ByteArray>) -> List<ByteArray>,
-    /** Wrap the raw Welcome in the stranger-inbox envelope the recipient's
-     *  mailbox poll expects (`wrapEnvelope(KIND_WELCOME, welcome)`). */
-    val wrapWelcome: (ByteArray) -> ByteArray,
     /** Echo-suppress a row this device published, so its own next poll drops it
      *  instead of hitting `CannotDecryptOwnMessage`. */
     val markOwnPublished: (Long) -> Unit,
@@ -717,7 +717,7 @@ internal suspend fun resolveOwedVerdict(ports: SweepPorts): SweepOutcome {
         StagedSweepArtifacts(
             commit = ports.decodeB64(owed.commitB64),
             welcome = owed.welcomeEnvelopeB64?.let(ports.decodeB64),
-            // Already wrapped + already addressed when the entry was written.
+            // The raw Welcome recorded with the entry; each write seals it (ADR-0078).
             addedSignatureKeys = emptyList(),
         ),
         ports.cursor.read(),
@@ -804,7 +804,7 @@ internal suspend fun resolveOwedWelcomes(ports: SweepPorts): SweepOutcome {
  * publish the commit, read the verdict, then merge or abandon.
  *
  * [owed] is supplied on the restart path, where the entry already exists and its
- * Welcome is already wrapped and addressed.
+ * raw Welcome is already recorded; each write seals it (ADR-0078).
  */
 private suspend fun publishAndAdjudicate(
     ports: SweepPorts,
@@ -829,19 +829,19 @@ private suspend fun publishAndAdjudicate(
             throw cause
         }
         // Obligation 4 — durably record BOTH artifacts before ANY publish. The
-        // Welcome is wrapped and addressed HERE, so the bytes the restart sweep
-        // would publish are the very bytes computed now; nothing can drift.
+        // raw Welcome is recorded HERE, so the bytes the restart sweep would
+        // publish are the very bytes computed now; nothing can drift. Each
+        // mailbox write seals it to its recipient (ADR-0078).
         //
         // ADR-0053 §4 / client contract point 8 — the Welcome goes to each
         // added member's mailbox and nowhere else. A `/g/` joiner now waits on
         // its own device mailbox, so no `WelcomeRendezvous` is written to the
         // group journal any more (C-69 amended).
         val leaves = staged.addedSignatureKeys.map(ports.encodeB64)
-        val wrapped = staged.welcome?.let(ports.wrapWelcome)
         entry = SweepDurableEntry(
             id = ports.outbox.newEntryId(),
             commitB64 = ports.encodeB64(staged.commit),
-            welcomeEnvelopeB64 = wrapped?.let(ports.encodeB64),
+            welcomeEnvelopeB64 = staged.welcome?.let(ports.encodeB64),
             welcomeLeafKeysB64 = leaves,
         )
         try {
@@ -1020,7 +1020,7 @@ private suspend fun adjudicate(
 }
 
 /**
- * Fan the (already wrapped) Welcome out to every added member's mailbox.
+ * Fan the raw Welcome out to every added member's mailbox, each write sealed to its recipient (ADR-0078).
  *
  * A newly added member is not yet in the group and does not poll its journal, so
  * the Welcome goes to their stranger-inbox pseudonym — the same destination the

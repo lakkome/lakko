@@ -60,11 +60,16 @@ pub enum TokenContext {
     /// `services/storage`: one token buys an hour's attachment read pass
     /// (ADR-0065 section 5).
     BlobRead = 10,
+    /// `services/ds`: a write with no reach proof to a personal mailbox that
+    /// is open (Everyone) or not yet claimed (ADR-0078 section 1). Under
+    /// sealed sender nothing about such a writer is visible, so the token is
+    /// what rations it.
+    MailboxWrite = 11,
 }
 
 impl TokenContext {
     /// Every context, in wire order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::DiscoveryLookup,
         Self::DiscoveryRegister,
         Self::InviteConsume,
@@ -75,6 +80,7 @@ impl TokenContext {
         Self::VaultClaim,
         Self::BlobUpload,
         Self::BlobRead,
+        Self::MailboxWrite,
     ];
 
     /// The frozen wire byte.
@@ -100,6 +106,7 @@ impl TokenContext {
             8 => Ok(Self::VaultClaim),
             9 => Ok(Self::BlobUpload),
             10 => Ok(Self::BlobRead),
+            11 => Ok(Self::MailboxWrite),
             _ => Err(AnonTokenError::UnknownContext),
         }
     }
@@ -118,6 +125,7 @@ impl TokenContext {
             Self::VaultClaim => "vault-claim",
             Self::BlobUpload => "blob-upload",
             Self::BlobRead => "blob-read",
+            Self::MailboxWrite => "mailbox-write",
         }
     }
 
@@ -168,7 +176,7 @@ mod tests {
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
-            TokenContext::from_u8(11),
+            TokenContext::from_u8(12),
             Err(AnonTokenError::UnknownContext)
         );
         assert_eq!(
@@ -185,14 +193,14 @@ mod tests {
     fn all_lists_every_context_once_in_wire_order() {
         // `ALL` is what `from_name`, the issuer's quota table and both FFI
         // surfaces enumerate: a context missing from it has no name lookup
-        // and no quota. Exactly the bytes 1..=10 parse, and `ALL` is those
+        // and no quota. Exactly the bytes 1..=11 parse, and `ALL` is those
         // contexts in that order.
         let parsed: Vec<TokenContext> = (0..=u8::MAX)
             .filter_map(|b| TokenContext::from_u8(b).ok())
             .collect();
         assert_eq!(parsed, TokenContext::ALL);
         let bytes: Vec<u8> = TokenContext::ALL.iter().map(|c| c.as_u8()).collect();
-        assert_eq!(bytes, (1..=10).collect::<Vec<u8>>());
+        assert_eq!(bytes, (1..=11).collect::<Vec<u8>>());
         let mut names: Vec<&str> = TokenContext::ALL.iter().map(|c| c.name()).collect();
         names.sort_unstable();
         names.dedup();
@@ -211,6 +219,7 @@ mod tests {
         assert_eq!(TokenContext::VaultClaim.as_u8(), 8);
         assert_eq!(TokenContext::BlobUpload.as_u8(), 9);
         assert_eq!(TokenContext::BlobRead.as_u8(), 10);
+        assert_eq!(TokenContext::MailboxWrite.as_u8(), 11);
         assert_eq!(TokenContext::DiscoveryLookup.name(), "discovery-lookup");
         assert_eq!(TokenContext::DiscoveryRegister.name(), "discovery-register");
         assert_eq!(TokenContext::InviteConsume.name(), "invite-consume");
@@ -221,6 +230,7 @@ mod tests {
         assert_eq!(TokenContext::VaultClaim.name(), "vault-claim");
         assert_eq!(TokenContext::BlobUpload.name(), "blob-upload");
         assert_eq!(TokenContext::BlobRead.name(), "blob-read");
+        assert_eq!(TokenContext::MailboxWrite.name(), "mailbox-write");
     }
 
     #[test]

@@ -123,8 +123,8 @@ public data class PendingCommitEntry(
     /** base64 of the EXACT commit wire-bytes the core create-commit produced. */
     val commitB64: String,
     /** base64 of the second artifact's EXACT publishable wire-bytes — for
-     *  [SecondArtifactKind.WELCOME] the `wrapEnvelope(KIND_WELCOME, welcome)`
-     *  mailbox envelope; before ADR-0045 S7 also the
+     *  [SecondArtifactKind.WELCOME] the raw MLS Welcome (ADR-0078: sealed per
+     *  mailbox when re-published); before ADR-0045 S7 also the
      *  `wrapWelcomeRendezvous(...)` group-journal bytes. `null` for remove /
      *  role (they publish only the commit). */
     val secondArtifactB64: String? = null,

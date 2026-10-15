@@ -44,6 +44,9 @@ public class CallInviteAcceptor(
      *  JVM test that has no native library. */
     private val lengths: me.lakko.app.discovery.InviteLinkLengths =
         me.lakko.app.discovery.InviteLinkLengths.core,
+    /** ADR-0078 - the binding check of the link grant; a host JVM test
+     *  passes a fake. */
+    private val mailboxCrypto: me.lakko.app.contacts.MailboxCrypto = me.lakko.app.contacts.NativeMailboxCrypto,
 ) {
 
     /**
@@ -199,6 +202,12 @@ public class CallInviteAcceptor(
         } catch (e: me.lakko.app.discovery.InviteLinkDamaged) {
             return Result.Damaged
         }
+        // ADR-0078: the link grant must name the owner's own mailbox (its
+        // binding verifies against the owner's account key, the key that
+        // signed the capability). One that does not is a damaged link.
+        if (!callLinkGrantBindsOwner(capability, mailboxCrypto)) {
+            return Result.Damaged
+        }
         // The consume dedup tag is computed over the PLAINTEXT capability.
         val capabilityBytes = capability.wire()
 
@@ -252,3 +261,16 @@ public class CallInviteAcceptor(
         )
     }
 }
+
+/** ADR-0078 - whether a `/c/` capability's link grant names its owner's
+ *  mailbox: the grant's binding verifies against the owner's account key
+ *  (the key the capability is signed by). Any failure is "no". */
+internal fun callLinkGrantBindsOwner(
+    capability: CallInviteCapability,
+    crypto: me.lakko.app.contacts.MailboxCrypto,
+): Boolean =
+    try {
+        me.lakko.app.contacts.grantBindsTo(capability.linkGrant(), capability.ownerSignaturePubkey(), crypto)
+    } catch (_: Throwable) {
+        false
+    }

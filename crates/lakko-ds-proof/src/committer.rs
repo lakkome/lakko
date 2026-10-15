@@ -5,13 +5,15 @@
 //!
 //! `lakko_contacts::committer_delegation` carries a proposer's delegations for
 //! whichever committer candidate sweeps its `Add`; that crate cannot depend
-//! on this one (this one names mailboxes with its pseudonym derivation), so
-//! its codec is structural only. This module does the rest, once, for both
-//! FFI surfaces:
+//! on this one, so its codec is structural only. This module does the rest,
+//! once, for both FFI surfaces:
 //!
+//! * the added person's mailbox binding verifies under `added_account_key`
+//!   ([ADR-0078]: the mailbox key is not derivable from the account key, so
+//!   the envelope carries it, signed);
 //! * every blob parses as a [`Delegation`];
 //! * every delegation names the **added person's** mailbox
-//!   (`mailbox_pseudonym(added_account_key)`), so a proposer cannot hand a
+//!   (`mailbox_address(binding.mailbox_pk)`), so a proposer cannot hand a
 //!   committer a delegation that points its write somewhere else;
 //! * no two delegations name the same delegate, so "the one naming me" is
 //!   unambiguous.
@@ -25,14 +27,18 @@
 //! person registered. [`delegation_for`] returns the delegation naming the
 //! caller's own account key, which is the only one it can use.
 //!
+//! The caller still checks that `added_account_key` is the account the
+//! proposal it rides beside adds (the roster); this module cannot.
+//!
 //! [ADR-0060]: ../../../docs/adr/0060-scoped-discovery.md
+//! [ADR-0078]: ../../../docs/adr/0078-servers-cannot-link-accounts.md
 
 use lakko_contacts::committer_delegation::{
     CommitterDelegationEnvelope, ADDED_ACCOUNT_KEY_LEN, COMMITTER_DELEGATION_BLOB_LEN,
 };
 
 use crate::delegation::Delegation;
-use crate::{mailbox_pseudonym, VerifyingKey};
+use crate::mailbox_address;
 
 /// Why a committer-delegation envelope's delegations were refused. A reason
 /// code and an index; nothing from the payload.
@@ -42,6 +48,10 @@ pub enum CommitterDelegationCheckError {
     /// mailbox.
     #[error("the added account key is not a valid public key")]
     BadAddedAccountKey,
+    /// The added person's mailbox binding does not verify under
+    /// `added_account_key` (ADR-0078).
+    #[error("the added person's mailbox binding does not verify")]
+    BadMailboxBinding,
     /// The blob at this index does not parse as a delegation.
     #[error("delegation {0} does not parse")]
     Malformed(usize),
@@ -64,6 +74,7 @@ impl CommitterDelegationCheckError {
             Self::Malformed(_) => "malformed",
             Self::WrongMailbox(_) => "wrongMailbox",
             Self::DuplicateDelegate(_) => "duplicateDelegate",
+            Self::BadMailboxBinding => "badMailboxBinding",
         }
     }
 }
@@ -78,9 +89,13 @@ impl CommitterDelegationCheckError {
 pub fn check_committer_delegations(
     envelope: &CommitterDelegationEnvelope,
 ) -> Result<Vec<Delegation>, CommitterDelegationCheckError> {
-    let added = VerifyingKey::from_bytes(&envelope.added_account_key)
+    crate::VerifyingKey::from_bytes(&envelope.added_account_key)
         .map_err(|_| CommitterDelegationCheckError::BadAddedAccountKey)?;
-    let mailbox = mailbox_pseudonym(&added);
+    let mailbox_pk = envelope
+        .added_mailbox_binding
+        .verify(&envelope.added_account_key)
+        .map_err(|_| CommitterDelegationCheckError::BadMailboxBinding)?;
+    let mailbox = mailbox_address(&mailbox_pk);
     let mut out: Vec<Delegation> = Vec::with_capacity(envelope.delegations.len());
     for (index, blob) in envelope.delegations.iter().enumerate() {
         let delegation = Delegation::decode(blob)
@@ -119,20 +134,24 @@ mod tests {
     use crate::delegation::sign_delegation;
     use crate::SigningKey;
 
+    use lakko_contacts::mailbox::{MailboxBinding, MailboxKey};
+
     fn account(byte: u8) -> [u8; 32] {
         SigningKey::from_seed(&[byte; 32])
             .verifying_key()
             .to_bytes()
     }
 
-    fn mailbox_of(key: &[u8; 32]) -> [u8; 32] {
-        mailbox_pseudonym(&VerifyingKey::from_bytes(key).unwrap())
+    /// The mailbox address of the account whose seed is `[byte; 32]`.
+    fn mailbox_of(byte: u8) -> [u8; 32] {
+        MailboxKey::from_account_seed(&[byte; 32]).address()
     }
 
-    fn envelope(added: [u8; 32], delegates: &[[u8; 32]]) -> CommitterDelegationEnvelope {
-        let mailbox = mailbox_of(&added);
+    fn envelope(added: u8, delegates: &[[u8; 32]]) -> CommitterDelegationEnvelope {
+        let mailbox = mailbox_of(added);
         CommitterDelegationEnvelope {
-            added_account_key: added,
+            added_account_key: account(added),
+            added_mailbox_binding: MailboxBinding::for_account_seed(&[added; 32]),
             delegations: delegates
                 .iter()
                 .enumerate()
@@ -159,7 +178,7 @@ mod tests {
     fn a_well_formed_envelope_checks_and_each_candidate_finds_its_own() {
         let owner = account(1);
         let admin = account(2);
-        let env = envelope(account(9), &[owner, admin]);
+        let env = envelope(9, &[owner, admin]);
         let parsed = check_committer_delegations(&env).unwrap();
         assert_eq!(parsed.len(), 2);
         assert_eq!(delegation_for(&parsed, &owner).unwrap().delegate_pk, owner);
@@ -169,15 +188,9 @@ mod tests {
 
     #[test]
     fn a_delegation_for_another_mailbox_refuses_the_envelope() {
-        let mut env = envelope(account(9), &[account(1), account(2)]);
-        env.delegations[1] = sign_delegation(
-            &[0x44; 32],
-            &mailbox_of(&account(8)),
-            &account(2),
-            1_000,
-            [7; 16],
-        )
-        .encode();
+        let mut env = envelope(9, &[account(1), account(2)]);
+        env.delegations[1] =
+            sign_delegation(&[0x44; 32], &mailbox_of(8), &account(2), 1_000, [7; 16]).encode();
         assert_eq!(
             check_committer_delegations(&env),
             Err(CommitterDelegationCheckError::WrongMailbox(1))
@@ -185,8 +198,26 @@ mod tests {
     }
 
     #[test]
+    fn a_binding_not_signed_by_the_added_account_refuses_the_envelope() {
+        let mut env = envelope(9, &[account(1)]);
+        env.added_mailbox_binding = MailboxBinding::for_account_seed(&[8; 32]);
+        assert_eq!(
+            check_committer_delegations(&env),
+            Err(CommitterDelegationCheckError::BadMailboxBinding)
+        );
+        // The delegation names the added account's real mailbox, but the
+        // envelope claims another account added it: the binding fails.
+        let mut env = envelope(9, &[account(1)]);
+        env.added_account_key = account(8);
+        assert_eq!(
+            check_committer_delegations(&env),
+            Err(CommitterDelegationCheckError::BadMailboxBinding)
+        );
+    }
+
+    #[test]
     fn a_repeated_delegate_refuses_the_envelope() {
-        let env = envelope(account(9), &[account(1), account(1)]);
+        let env = envelope(9, &[account(1), account(1)]);
         assert_eq!(
             check_committer_delegations(&env),
             Err(CommitterDelegationCheckError::DuplicateDelegate(1))
@@ -195,7 +226,7 @@ mod tests {
 
     #[test]
     fn an_unparseable_blob_refuses_the_envelope() {
-        let mut env = envelope(account(9), &[account(1)]);
+        let mut env = envelope(9, &[account(1)]);
         env.delegations[0][0] = 0x7F;
         assert_eq!(
             check_committer_delegations(&env),
@@ -220,6 +251,10 @@ mod tests {
         assert_eq!(
             CommitterDelegationCheckError::DuplicateDelegate(0).code(),
             "duplicateDelegate"
+        );
+        assert_eq!(
+            CommitterDelegationCheckError::BadMailboxBinding.code(),
+            "badMailboxBinding"
         );
     }
 }

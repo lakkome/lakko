@@ -8,13 +8,13 @@
 //! [`lakko_ds_proof`] header. A journal with no row keeps the Phase 1.3
 //! posture (anyone who names it) - which is every group journal until its
 //! owner claims it. A mailbox is different since ADR-0060: it is personal, so
-//! its `GET messages` needs the identity proof whether or not it is claimed
+//! its `GET messages` needs the owner's proof whether or not it is claimed
 //! (an unclaimed one has no key and always answers the uniform `401`); the
 //! proofless meeting points moved to their own `/ds/rendezvous/` namespace.
 //!
 //! What is gated: a claimed group's `GET messages` (read tier), `POST
 //! messages` and `GET knocks` (write tier); every mailbox's `GET messages`
-//! (the identity proof, whether or not the mailbox is claimed, ADR-0060).
+//! (the mailbox-key proof, whether or not the mailbox is claimed, ADR-0060).
 //! A mailbox `POST` is gated by reach keys, not here (ADR-0060,
 //! `src/reach.rs`): ADR-0053 left it the open cold inbox, and a claimed
 //! mailbox is now closed to a stranger.
@@ -32,7 +32,9 @@
 //! `401` reveals is nothing a caller does not already know).
 //!
 //! The server holds public keys only: one Ed25519 verifying key per registered
-//! epoch of a group, and the identity key a mailbox's pseudonym is the hash of.
+//! epoch of a group, and the mailbox key a mailbox's address is the hash of
+//! (ADR-0078: an account-level key derived from the account seed, never the
+//! identity key, so nothing here joins to discovery's identity bundles).
 //!
 //! **Two tiers of epoch key** (ADR-0053 open question 1, resolved in S3;
 //! the write tier widened by the ADR-0053 amendment of 2026-10-01):
@@ -249,14 +251,14 @@ async fn journal_owned(
     Ok(row.is_some())
 }
 
-/// The identity key a claimed mailbox is named after, or `None` when unclaimed.
+/// The mailbox key a claimed mailbox is named after, or `None` when unclaimed.
 async fn mailbox_key(
     pool: &MySqlPool,
-    device_id: &[u8; PSEUDONYM_LEN],
+    mailbox: &[u8; PSEUDONYM_LEN],
 ) -> Result<Option<VerifyingKey>, HandlerError> {
     let row: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT identity_pk FROM ds_mailbox_access WHERE device_id = ?")
-            .bind(&device_id[..])
+        sqlx::query_as("SELECT mailbox_pk FROM ds_mailbox_access WHERE mailbox = ?")
+            .bind(&mailbox[..])
             .fetch_optional(pool)
             .await
             .map_err(db_error("load mailbox access key"))?;
@@ -390,23 +392,23 @@ pub(crate) async fn gate_group(
     Ok(Gated::Proven { latest_epoch })
 }
 
-/// Gate a mailbox read: a valid proof under the identity key at
+/// Gate a mailbox read: a valid proof under the mailbox key at
 /// `MAILBOX_EPOCH`. An unclaimed mailbox has no key, so every read of it is
 /// the uniform [`refused`] - the same answer a claimed mailbox gives a read
 /// without a proof - and the answer never tells whether a mailbox is claimed
 /// (ADR-0060; proofless meeting points use `/ds/rendezvous/`).
 pub(crate) async fn gate_mailbox_read(
     state: &AppState,
-    device_id: &[u8; PSEUDONYM_LEN],
+    mailbox: &[u8; PSEUDONYM_LEN],
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
 ) -> Result<(), HandlerError> {
-    let Some(key) = mailbox_key(&state.db, device_id).await? else {
+    let Some(key) = mailbox_key(&state.db, mailbox).await? else {
         return Err(refused());
     };
     let req = parts(method, uri, &[]);
-    check_proof(&state.db, device_id, headers, &req, |epoch| {
+    check_proof(&state.db, mailbox, headers, &req, |epoch| {
         (epoch == MAILBOX_EPOCH).then_some(key)
     })
     .await
@@ -456,30 +458,33 @@ pub(crate) fn registration_db_error(what: &'static str) -> impl Fn(sqlx::Error) 
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct MailboxAccessBody {
-    /// Standard base64 of the 32-byte identity verifying key.
-    pub(crate) identity_pk_b64: String,
+    /// Standard base64 of the 32-byte mailbox verifying key (ADR-0078).
+    pub(crate) mailbox_pk_b64: String,
 }
 
-/// `PUT /ds/mailbox/{hex}/access` - claim a mailbox under the identity key
-/// it is named after. No proof: the key is public, and registering it grants
-/// the registrant nothing (reads then need the private half). Idempotent.
+/// `PUT /ds/mailbox/{hex}/access` - claim a mailbox under the mailbox key its
+/// address is the hash of (ADR-0078). No proof: the key is public, and
+/// registering it grants the registrant nothing (reads then need the private
+/// half). The first claim wins; a repeat is a no-op. A small-order key is
+/// refused (a signature under it can be forged).
 pub(crate) async fn put_mailbox_access(
     State(state): State<AppState>,
-    AxumPath(device_hex): AxumPath<String>,
+    AxumPath(mailbox_hex): AxumPath<String>,
     Json(body): Json<MailboxAccessBody>,
 ) -> Result<Response, HandlerError> {
-    let device_id = journal::decode_pseudonym(&device_hex)?;
-    let key = decode_pk(&body.identity_pk_b64)
-        .map_err(|(s, m)| (s, m.replace("access_pk_b64", "identity_pk_b64")))?;
-    if !lakko_ds_proof::mailbox_owner_matches(&device_id, &key) {
+    let mailbox = journal::decode_pseudonym(&mailbox_hex)?;
+    let key = decode_pk(&body.mailbox_pk_b64)
+        .map_err(|(s, m)| (s, m.replace("access_pk_b64", "mailbox_pk_b64")))?;
+    if key.is_weak() || !lakko_ds_proof::mailbox_owner_matches(&mailbox, &key) {
         return Err((
             StatusCode::BAD_REQUEST,
-            "identity_pk_b64 is not the key this mailbox is named after".to_string(),
+            "mailbox_pk_b64 is not the key this mailbox is named after".to_string(),
         ));
     }
-    sqlx::query("INSERT IGNORE INTO ds_mailbox_access (device_id, identity_pk) VALUES (?, ?)")
-        .bind(&device_id[..])
+    sqlx::query("INSERT IGNORE INTO ds_mailbox_access (mailbox, mailbox_pk) VALUES (?, ?)")
+        .bind(&mailbox[..])
         .bind(&key.to_bytes()[..])
         .execute(&state.db)
         .await
@@ -1026,10 +1031,11 @@ pub(crate) mod tests {
         let Some((app, _pool)) = app().await else {
             return;
         };
-        // A fresh identity per run: the mailbox name derives from it, and a
-        // fixed key would find the previous run's rows in a reused test DB.
+        // A fresh mailbox key per run (named `identity`, the key that signs the
+        // owner's reads): the address derives from it, and a fixed key would
+        // find the previous run's rows in a reused test DB.
         let identity = SigningKey::from_seed(&fresh_name(21));
-        let device = lakko_ds_proof::mailbox_pseudonym(&identity.verifying_key());
+        let device = lakko_ds_proof::mailbox_address(&identity.verifying_key().to_bytes());
         let access_uri = format!("/ds/mailbox/{}/access", hex::encode(device));
         // A key that is not the one the name is derived from is refused.
         let (status, _) = send(
@@ -1037,7 +1043,7 @@ pub(crate) mod tests {
             Req {
                 method: "PUT",
                 uri: &access_uri,
-                body: serde_json::json!({ "identity_pk_b64": pk_b64(&key(22)) })
+                body: serde_json::json!({ "mailbox_pk_b64": pk_b64(&key(22)) })
                     .to_string()
                     .into_bytes(),
                 proof: None,
@@ -1052,7 +1058,7 @@ pub(crate) mod tests {
                 Req {
                     method: "PUT",
                     uri: &access_uri,
-                    body: serde_json::json!({ "identity_pk_b64": pk_b64(&identity) })
+                    body: serde_json::json!({ "mailbox_pk_b64": pk_b64(&identity) })
                         .to_string()
                         .into_bytes(),
                     proof: None,
@@ -1062,8 +1068,8 @@ pub(crate) mod tests {
             assert_eq!(status, StatusCode::NO_CONTENT);
         }
         let uri = messages_uri("mailbox", &device);
-        // A proofless post is answered as stored; since ADR-0060 a claimed,
-        // closed mailbox drops it (`src/reach.rs` covers the reach keys).
+        // A proofless post that is not a sealed, bucket-padded row is refused
+        // before anything else (ADR-0078).
         let (status, _) = send(
             &app,
             Req {
@@ -1074,8 +1080,24 @@ pub(crate) mod tests {
             },
         )
         .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // A well-formed proofless post that pays a `mailbox-write` token is
+        // answered as stored; since ADR-0060 a claimed, closed mailbox drops
+        // it (`src/reach.rs` covers the reach keys).
+        let token = token_at(TokenContext::MailboxWrite, 0);
+        let (status, _) = send_with(
+            &app,
+            Req {
+                method: "POST",
+                uri: &uri,
+                body: mailbox_row(b"hi"),
+                proof: None,
+            },
+            &[(lakko_anon_token::TOKEN_HEADER, &token)],
+        )
+        .await;
         assert_eq!(status, StatusCode::CREATED);
-        // Reading needs the identity key at the mailbox epoch.
+        // Reading needs the mailbox key at the mailbox epoch.
         let (status, _) = send(
             &app,
             Req {

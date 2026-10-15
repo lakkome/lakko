@@ -297,7 +297,7 @@ mod tests {
 
         let owner = X25519SecretKey::from_bytes([0xCD; 32]);
         let joiner = SigningKey::from_seed(&[0x51; 32]);
-        let grant = ReachGrant::derive(&[0x52; 32], ReachClass::Reply, &[0x53; 16], 0).unwrap();
+        let grant = ReachGrant::derive(&[0x51; 32], ReachClass::Reply, &[0x53; 16], 0).unwrap();
         let wrapped = wrap_call_kp_forward(&[0xCD; 512]);
         let wire = compose(
             &joiner,
@@ -318,7 +318,7 @@ mod tests {
             &[0xCD; 512][..]
         );
 
-        let contact = ReachGrant::derive(&[0x52; 32], ReachClass::Contact, b"", 0).unwrap();
+        let contact = ReachGrant::derive(&[0x51; 32], ReachClass::Contact, b"", 0).unwrap();
         assert!(compose(
             &joiner,
             &[0x54; 16],

@@ -38,16 +38,22 @@ function secrets(fill: number): IdentitySecrets {
   } as unknown as IdentitySecrets;
 }
 
-/** A DS that keeps every mailbox publish and replays it on fetch. */
+/** A DS that keeps every mailbox publish, per address, and replays it on
+ *  fetch of that address. */
 function memoryDs() {
-  const rows: Array<{ id: number; payload: Uint8Array; createdAt: string }> = [];
+  const rows = new Map<string, Array<{ id: number; payload: Uint8Array; createdAt: string }>>();
+  const hex = (b: Uint8Array): string => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  let next = 1;
   const ds = {
-    publishMailbox: vi.fn(async (_p: Uint8Array, payload: Uint8Array) => {
-      rows.push({ id: rows.length + 1, payload, createdAt: "2026-09-13T00:00:00Z" });
-      return { id: rows.length, createdAt: "2026-09-13T00:00:00Z" };
+    publishMailbox: vi.fn(async (address: Uint8Array, payload: Uint8Array) => {
+      const list = rows.get(hex(address)) ?? [];
+      list.push({ id: next, payload, createdAt: "2026-09-13T00:00:00Z" });
+      rows.set(hex(address), list);
+      next += 1;
+      return { id: next - 1, createdAt: "2026-09-13T00:00:00Z" };
     }),
-    fetchMailbox: vi.fn(async () => ({ messages: rows, hasMore: false })),
-  } as unknown as DsClient;
+    fetchMailbox: vi.fn(async (address: Uint8Array) => ({ messages: rows.get(hex(address)) ?? [], hasMore: false })),
+  } as unknown as DsClient & { publishMailbox: ReturnType<typeof vi.fn> };
   return ds;
 }
 
@@ -59,19 +65,22 @@ async function roundTrip(ownProfileEnvelope: (() => Promise<Uint8Array | null>) 
   const ds = memoryDs();
 
   const sender = new ContactsClient(undefined, ds, ownProfileEnvelope === undefined ? {} : { ownProfileEnvelope });
+  // ADR-0078: Bob is in Everyone; the request goes unsigned to the mailbox
+  // his public record's binding names, verified against his key.
   await sender.sendContactRequestToBundle(
     alice,
     bob.accountId,
     bobIdentity.signaturePublicKey,
     bobIdentity.x25519PublicKey,
     new TextEncoder().encode("hi bob"),
+    { openBinding: wasm.signMailboxBinding(bobIdentity) },
   );
 
   const recipient = new ContactsClient(undefined, ds);
   const polled = await recipient.pollMailbox(bob, 0);
   const ev = polled.events[0];
   if (ev?.kind !== "contact-request") throw new Error("expected a contact request");
-  return { request: ev.request, aliceKey: aliceIdentity.signaturePublicKey };
+  return { request: ev.request, aliceKey: aliceIdentity.signaturePublicKey, ds, bobIdentity };
 }
 
 describe("contact request carries a profile", () => {
@@ -102,6 +111,63 @@ describe("contact request carries a profile", () => {
     const { request } = await roundTrip(undefined);
     expect(request.profile).toBeNull();
     expect(request.intro).toBe("hi bob");
+  });
+
+  it("ADR-0078: the row is SEALED to Bob's mailbox key and addressed to its address, with no clear kind byte", async () => {
+    const { ds, bobIdentity } = await roundTrip(undefined);
+    const call = ds.publishMailbox.mock.calls[0] as [Uint8Array, Uint8Array];
+    const key = wasm.MailboxKey.fromAccountIdentity(bobIdentity);
+    try {
+      expect(Array.from(call[0])).toEqual(Array.from(key.address()));
+      expect(wasm.isWellFormedMailboxRow(call[1])).toBe(true);
+      const opened = wasm.openMailboxRow(key, call[1]);
+      try {
+        expect(opened.kind).toBe(wasm.MailboxKind.ContactRequest);
+        // The body is the signed ContactRequest wire, unchanged.
+        expect(() => wasm.ContactRequest.decodeAndVerify(opened.body).free()).not.toThrow();
+      } finally {
+        opened.free();
+      }
+    } finally {
+      key.free();
+    }
+  });
+
+  it("ADR-0078: a binding that does not verify against the recipient's key refuses the write", async () => {
+    const bob = secrets(0x0b);
+    const bobIdentity = wasm.Identity.fromSeed(bob.accountIdentitySeed);
+    const mallory = wasm.Identity.fromSeed(new Uint8Array(64).fill(0x0c));
+    const ds = memoryDs();
+    const sender = new ContactsClient(undefined, ds, {});
+    await expect(
+      sender.sendContactRequestToBundle(
+        secrets(0x0a),
+        bob.accountId,
+        bobIdentity.signaturePublicKey,
+        bobIdentity.x25519PublicKey,
+        new TextEncoder().encode("hi bob"),
+        // Mallory's mailbox presented under Bob's name.
+        { openBinding: wasm.signMailboxBinding(mallory) },
+      ),
+    ).rejects.toThrow();
+    expect(ds.publishMailbox).not.toHaveBeenCalled();
+  });
+
+  it("ADR-0078: with no grant and no binding nothing is written (no identity-derived address)", async () => {
+    const bob = secrets(0x0b);
+    const bobIdentity = wasm.Identity.fromSeed(bob.accountIdentitySeed);
+    const ds = memoryDs();
+    const sender = new ContactsClient(undefined, ds, {});
+    await expect(
+      sender.sendContactRequestToBundle(
+        secrets(0x0a),
+        bob.accountId,
+        bobIdentity.signaturePublicKey,
+        bobIdentity.x25519PublicKey,
+        new TextEncoder().encode("hi bob"),
+      ),
+    ).rejects.toThrow();
+    expect(ds.publishMailbox).not.toHaveBeenCalled();
   });
 
   it("a failing profile source never stops the request", async () => {

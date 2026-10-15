@@ -7,8 +7,11 @@
  * The Delivery Service is a thin append-only relay: every
  * message goes into either a per-group journal
  * (`/ds/group/{group_hex}`) or a per-mailbox journal
- * (`/ds/mailbox/{device_hex}`). Both paths key the journal by a
- * 32-byte pseudonym encoded as **lowercase hex** in the URL.
+ * (`/ds/mailbox/{address_hex}`). Both paths key the journal by a
+ * 32-byte id encoded as **lowercase hex** in the URL. ADR-0078: a mailbox
+ * address is `mailboxAddress(mailbox_pk)` for the account's mailbox key,
+ * never a function of an identity key, and every row in a mailbox is a
+ * sealed row (`contacts/mailbox-row.ts`).
  *
  * Two endpoints per journal kind:
  *
@@ -26,7 +29,7 @@
  * ADR-0053 - a CLAIMED journal answers only a request that carries an
  * `x-lakko-ds-proof` header signed under a key the journal was claimed with:
  * a per-epoch key derived from the MLS group for a group journal, the
- * identity key for a mailbox read. The signer comes from the registry in
+ * mailbox key for a mailbox read. The signer comes from the registry in
  * `./access` (or is passed explicitly); the path signed is the service path,
  * never the `/api/ds` prefix, and the query is signed exactly as sent. A
  * refused group request is retried under the previous epoch's key (contract
@@ -34,9 +37,9 @@
  * obligation 2), the owner claims it with its root (the claim registers the
  * current epoch) and retries once; an already-claimed journal is left alone. A plain member
  * never claims and never registers: it waits for the committer's
- * registration. Mailbox writes and the knock stay unsigned; the knock spends
- * one anonymous `ds-knock` token instead (ADR-0054 S3) and carries no
- * credentials.
+ * registration. The knock stays unsigned and spends one anonymous `ds-knock`
+ * token instead (ADR-0054 S3), carrying no credentials; a mailbox write with
+ * no reach proof spends one `mailbox-write` token the same way (ADR-0078).
  *
  * ADR-0057 statements (claim, reset, register, registrars, push binding) are
  * `PUT /ds/group/<hex>/<segment>` with the signer's JSON body and NO proof
@@ -561,11 +564,12 @@ export class DsClient implements StatementSender {
     }
   }
 
-  /** `PUT /ds/mailbox/{hex}/access` - claim the mailbox `signer`'s identity
-   *  key names. Unsigned: the key is public and registering it grants the
-   *  registrant nothing. Idempotent. */
+  /** `PUT /ds/mailbox/{hex}/access` - claim the mailbox `signer`'s mailbox
+   *  key names (ADR-0078: the body is `{"mailbox_pk_b64"}`). Unsigned: the
+   *  key is public, the DS checks that it hashes to the address, and the
+   *  first claim wins. Idempotent. */
   async claimMailbox(signer: ProofSigner): Promise<void> {
-    const pseudonym = signer.mailboxPseudonym();
+    const pseudonym = signer.mailboxAddress();
     const body = new TextEncoder().encode(signer.mailboxClaimBodyJson());
     await this.send({
       method: "PUT",
@@ -627,13 +631,19 @@ export class DsClient implements StatementSender {
   // -----------------------------------------------------------------
 
   /**
-   * `POST /ds/mailbox/{pseudonym_hex}/messages` — publish a raw
-   * payload to a mailbox. The body is sent as
-   * `application/octet-stream`; the server caps the size at
-   * `MAX_MESSAGE_BYTES`. ADR-0060: a claimed mailbox is closed unless its
-   * owner chose Everyone, so the write carries the reach grant (or the
+   * `POST /ds/mailbox/{address_hex}/messages` — publish one sealed
+   * mailbox row (ADR-0078, `contacts/mailbox-row.ts`). The body is sent as
+   * `application/octet-stream`; the DS refuses a body that is not a
+   * well-formed row with `400`. ADR-0060: a claimed mailbox is closed unless
+   * its owner chose Everyone, so the write carries the reach grant (or the
    * delegation) that authorises it; an unauthorised write to a closed
    * mailbox is answered as stored and dropped.
+   *
+   * ADR-0078: a write with NO reach proof spends one anonymous
+   * `mailbox-write` token and carries no credentials, whether the mailbox
+   * turns out to be open, unclaimed or closed (the DS spends it in every
+   * case, so the answer says nothing about the mailbox). A write with a
+   * proof spends none.
    */
   async publishMailbox(
     pseudonym: Uint8Array,
@@ -653,8 +663,24 @@ export class DsClient implements StatementSender {
       // rather than as a 401.
       throw new DsClientArgError("a delegation needs the delegate's proof signer");
     }
+    const path = `/ds/mailbox/${pseudonymHex(pseudonym)}/messages`;
+    if (signer === null) {
+      const req = {
+        method: "POST" as const,
+        path,
+        query: "",
+        body: payload,
+        contentType: "application/octet-stream",
+      };
+      const response = await this.tokens.spend("mailbox-write", (headerName, headerValue) =>
+        this.attempt({ ...req, extraHeaders: { [headerName]: headerValue }, anonymous: true }, null),
+      );
+      const ok = await this.finish(req, response);
+      const json = (await ok.json()) as { id: number; created_at: string };
+      return { id: json.id, createdAt: json.created_at };
+    }
     return this.publish(
-      `/ds/mailbox/${pseudonymHex(pseudonym)}/messages`,
+      path,
       payload,
       { kind: "explicit", signer },
       delegation === null ? undefined : { [DS_DELEGATION_HEADER]: delegation },
@@ -689,7 +715,7 @@ export class DsClient implements StatementSender {
   /**
    * `PUT /ds/mailbox/{hex}/reach` (ADR-0060 section 2): add and remove reach
    * public keys and set the Everyone flag, proven under the mailbox's
-   * identity key. `pseudonym` must be one of this device's own mailboxes (the
+   * mailbox key (ADR-0078). `pseudonym` must be one of this device's own mailboxes (the
    * registry holds its signer); the mailbox is claimed first when the DS says
    * it is not.
    */
@@ -709,7 +735,7 @@ export class DsClient implements StatementSender {
   /**
    * `GET /ds/mailbox/{hex}/reach` (ADR-0060 section 1, "Versions after a
    * restore"): the reach public keys registered on this device's OWN mailbox
-   * and its Everyone flag, proven under the mailbox's identity key exactly
+   * and its Everyone flag, proven under the mailbox key exactly
    * like the owner's read of its messages. Public keys only. Throws on any
    * refusal or failure, so a failed read is never mistaken for "nothing
    * registered".
@@ -810,7 +836,7 @@ export class DsClient implements StatementSender {
   /**
    * `GET /ds/mailbox/{pseudonym_hex}/messages?after=&limit=&wait=`
    * — pull all messages newer than `after` for the given
-   * mailbox. Always proven under the identity key: only this device's own
+   * mailbox. Always proven under the mailbox key: only this account's own
    * mailboxes are read here (ADR-0060; a rendezvous id has its own route).
    *
    * `wait` is the long-poll budget in seconds (0 returns
@@ -833,7 +859,7 @@ export class DsClient implements StatementSender {
     if (pseudonym.length !== 32) {
       throw new DsClientArgError("pseudonym must be 32 bytes");
     }
-    // ADR-0060: every read of a personal mailbox carries the identity proof
+    // ADR-0060: every read of a personal mailbox carries the mailbox-key proof
     // (an unproven read is 401 whether the mailbox is claimed or not);
     // rendezvous ids are read through `fetchRendezvous`.
     const plan: SigningPlan =

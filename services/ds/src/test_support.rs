@@ -230,6 +230,26 @@ pub(crate) async fn send_with(
     (status, body)
 }
 
+/// The smallest well-formed mailbox row (ADR-0078): version byte, then a
+/// bucket-padded sealed envelope - 1 + 32 + 1024 + 16 bytes. The DS checks
+/// only that shape, so a test row carries `body` in the clear behind a
+/// one-byte length, which [`mailbox_body`] reads back.
+pub(crate) fn mailbox_row(body: &[u8]) -> Vec<u8> {
+    let len = u8::try_from(body.len()).expect("a test body under 256 bytes");
+    let mut row = vec![0u8; 1 + 32 + 1024 + 16];
+    row[0] = 1;
+    row[1] = len;
+    row[2..2 + body.len()].copy_from_slice(body);
+    assert!(lakko_ds_proof::is_well_formed_mailbox_row(&row));
+    row
+}
+
+/// The body a [`mailbox_row`] carries.
+pub(crate) fn mailbox_body(row: &[u8]) -> Vec<u8> {
+    let len = usize::from(row[1]);
+    row[2..2 + len].to_vec()
+}
+
 pub(crate) fn messages_uri(kind: &str, name: &[u8; PSEUDONYM_LEN]) -> String {
     format!("/ds/{kind}/{}/messages", hex::encode(name))
 }

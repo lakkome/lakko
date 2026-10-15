@@ -398,6 +398,12 @@ public enum ReachRules {
         /// the person's current address. `nil` (not superseded) for a record
         /// stored before the field existed.
         public var superseded: Bool?
+        /// ADR-0078 — the owner's 97-byte mailbox binding the grant carried:
+        /// where a write signed with this grant goes, once verified against
+        /// the owner's account key. `nil` for a record stored before the
+        /// field existed; such a grant names no mailbox and is never written
+        /// under.
+        public var bindingB64: String?
 
         public init(grant: FfiReachGrant, scopeHex: String?, storedAtMs: UInt64) {
             self.classRaw = ReachRules.className(grant.class)
@@ -405,12 +411,47 @@ public enum ReachRules {
             self.seedB64 = grant.seed.base64EncodedString()
             self.scopeHex = scopeHex
             self.storedAtMs = storedAtMs
+            self.bindingB64 = grant.binding.base64EncodedString()
         }
 
         public var isSuperseded: Bool { superseded == true }
 
         public var reachClass: FfiReachClass? { ReachRules.reachClass(named: classRaw) }
         public var seed: Data? { Data(base64Encoded: seedB64) }
+        public var binding: Data? { bindingB64.flatMap { Data(base64Encoded: $0) } }
+
+        /// The grant as the core takes it (for the binding check), or `nil`
+        /// when a field does not decode.
+        public var ffiGrant: FfiReachGrant? {
+            guard let reachClass, let seed, let binding else { return nil }
+            return FfiReachGrant(class: reachClass, version: version, seed: seed, binding: binding)
+        }
+    }
+
+    /// ADR-0078 — the grants held for one person grouped by the mailbox they
+    /// write to, best mailbox first. `verify` answers the mailbox a grant's
+    /// binding names once it verified against one of the person's account
+    /// keys (`nil` refuses the grant: it is never written under). The
+    /// mailbox of the grant ``writeSeeds(from:groupIdHex:)`` prefers comes
+    /// first; within a mailbox the seeds keep that order.
+    public static func writeMailboxes(
+        from held: [HeldGrant], groupIdHex: String?, verify: (HeldGrant) -> MailboxTarget?
+    ) -> [(target: MailboxTarget, seeds: [Data])] {
+        var verified: [(grant: HeldGrant, target: MailboxTarget)] = []
+        for grant in held {
+            guard let target = verify(grant) else { continue }
+            verified.append((grant, target))
+        }
+        var order: [MailboxTarget] = []
+        for seed in writeSeeds(from: verified.map(\.grant), groupIdHex: groupIdHex) {
+            guard let entry = verified.first(where: { $0.grant.seed == seed }),
+                  !order.contains(entry.target) else { continue }
+            order.append(entry.target)
+        }
+        return order.map { target in
+            let grants = verified.filter { $0.target == target }.map(\.grant)
+            return (target, writeSeeds(from: grants, groupIdHex: groupIdHex))
+        }
     }
 
     /// The seed to sign a write to a person's mailbox with, from the grants
@@ -474,7 +515,9 @@ public enum ReachRules {
         }
         // The same grant again (a re-sent profile): nothing moves, and a
         // superseded grant is never revived by a replay of itself.
-        if held.contains(where: { sameSlot($0) && $0.seedB64 == incoming.seedB64 }) {
+        if held.contains(where: {
+            sameSlot($0) && $0.seedB64 == incoming.seedB64 && $0.bindingB64 == incoming.bindingB64
+        }) {
             return held
         }
         let displaced = held.first { sameSlot($0) && !$0.isSuperseded }

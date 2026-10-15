@@ -36,7 +36,7 @@ describe("the token contexts against the core", () => {
     expect([...ANON_TOKEN_CONTEXTS]).toEqual(wasm.anonTokenContexts());
   });
 
-  it("is the ten contexts of wire bytes 1..=10", () => {
+  it("is the eleven contexts of wire bytes 1..=11", () => {
     // Literals on purpose: a context appended in Rust fails the comparison
     // above; this one fails when a name is edited on both sides at once.
     expect(wasm.anonTokenContexts()).toEqual([
@@ -50,6 +50,7 @@ describe("the token contexts against the core", () => {
       "vault-claim",
       "blob-upload",
       "blob-read",
+      "mailbox-write",
     ]);
   });
 
@@ -94,5 +95,9 @@ describe("the token contexts against the core", () => {
     expect([refillBatch("vault-claim"), lowWater("vault-claim")]).toEqual([4, 1]);
     expect([refillBatch("blob-upload"), lowWater("blob-upload")]).toEqual([2, 1]);
     expect([refillBatch("blob-read"), lowWater("blob-read")]).toEqual([2, 1]);
+  });
+
+  it("the ADR-0078 mailbox-write context: batch 2, refilled once empty", () => {
+    expect([refillBatch("mailbox-write"), lowWater("mailbox-write")]).toEqual([2, 1]);
   });
 });

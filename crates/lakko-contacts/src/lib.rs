@@ -114,6 +114,7 @@ pub mod introduction;
 pub mod invite;
 pub mod key_rotation;
 pub mod link_seal;
+pub mod mailbox;
 pub mod media_state;
 pub mod pin;
 pub mod profile;
@@ -158,7 +159,7 @@ pub use committer_delegation::{
     compose_committer_delegation, decode_committer_delegation, try_unwrap_committer_delegation,
     CommitterDelegationEnvelope, CommitterDelegationError, COMMITTER_DELEGATION_BLOB_LEN,
     COMMITTER_DELEGATION_ENVELOPE_DOMAIN_V1, COMMITTER_DELEGATION_ENVELOPE_MAX_LEN,
-    COMMITTER_DELEGATION_ENVELOPE_MIN_LEN, COMMITTER_DELEGATION_VERSION_V1,
+    COMMITTER_DELEGATION_ENVELOPE_MIN_LEN, COMMITTER_DELEGATION_VERSION_V2,
     MAX_COMMITTER_DELEGATIONS,
 };
 pub use error::{ContactError, Result};
@@ -204,6 +205,14 @@ pub use key_rotation::{
     KeyRotationError, KEY_ROTATION_ENTROPY_LEN, KEY_ROTATION_ENVELOPE_DOMAIN_V1,
     KEY_ROTATION_ENVELOPE_LEN, KEY_ROTATION_PENDING_MAX_AGE_MS, KEY_ROTATION_PROOF_LEN,
     KEY_ROTATION_VERSION_V1,
+};
+pub use mailbox::{
+    bucket_for as mailbox_bucket_for, is_well_formed_row as is_well_formed_mailbox_row,
+    mailbox_address, mailbox_seed, open_mailbox_row, seal_mailbox_row, MailboxBinding,
+    MailboxError, MailboxKey, MailboxKind, MAILBOX_ADDRESS_DOMAIN, MAILBOX_BINDING_DOMAIN,
+    MAILBOX_BINDING_LEN, MAILBOX_ENVELOPE_AAD_DOMAIN, MAILBOX_KEY_LEN, MAILBOX_MAX_BODY_LEN,
+    MAILBOX_MAX_BUCKET, MAILBOX_MAX_ROW_LEN, MAILBOX_MIN_ROW_LEN, MAILBOX_ROW_OVERHEAD,
+    MAILBOX_SEED_DOMAIN,
 };
 pub use media_state::{
     compose_media_state, decode_media_state, try_unwrap_media_state, MediaState, MediaStateError,
@@ -305,5 +314,29 @@ pub mod fuzz_api {
     #[must_use]
     pub fn contact_request_plaintext(plain: &[u8]) -> Option<bool> {
         crate::request::fuzz_split(plain)
+    }
+
+    /// Open `row` as a mailbox row (ADR-0078) under a fixed key. `None` when
+    /// the open refuses; `Some(true)` when what opened re-seals to a row
+    /// that opens to the same kind and body, `Some(false)` otherwise (a bug).
+    #[must_use]
+    pub fn mailbox_row_open(row: &[u8]) -> Option<bool> {
+        crate::mailbox::fuzz_open(row)
+    }
+
+    /// Parse an opened mailbox plaintext (`kind || body_len || body ||
+    /// zeros`), which a fuzzer cannot reach through the AEAD. `None` when it
+    /// refuses; `Some(true)` when the body fits the plaintext.
+    #[must_use]
+    pub fn mailbox_plaintext(plain: &[u8]) -> Option<bool> {
+        crate::mailbox::fuzz_plaintext(plain)
+    }
+
+    /// Decode a mailbox binding and verify it against a fixed account key.
+    /// `None` when the decode refuses; `Some(true)` when it re-encodes to
+    /// the same bytes.
+    #[must_use]
+    pub fn mailbox_binding_decode(bytes: &[u8]) -> Option<bool> {
+        crate::mailbox::fuzz_binding(bytes)
     }
 }

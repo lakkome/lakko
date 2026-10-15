@@ -94,6 +94,11 @@ public data class PersonResult(
      *  (`encodeReachGrant`) the reach check and the request are signed with.
      *  Secret. */
     val grantWireB64: String?,
+    /** ADR-0078 - for a person found in Everyone: standard base64 of the
+     *  97-byte mailbox binding their public record carried. The request is
+     *  sealed to the key it names once it verifies against the person's
+     *  account key; without it (and without a grant) nothing is written. */
+    val mailboxBindingB64: String? = null,
 )
 
 /**
@@ -200,6 +205,7 @@ public fun mergePeople(lists: List<List<PersonResult>>, ownKeyHex: String?): Lis
                 } else {
                     null
                 },
+                mailboxBindingB64 = held.mailboxBindingB64 ?: p.mailboxBindingB64,
             )
         }
     }

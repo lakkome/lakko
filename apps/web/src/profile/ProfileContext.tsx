@@ -64,7 +64,8 @@ import {
 import { journalHex } from "../ds/access";
 import { rosterOf } from "../chat/client";
 import { reachSession, reachSessionSignal, reachVersionsTick } from "../reach/reach-service";
-import { foldProfileGrants } from "../reach/grant-intake";
+import { foldProfileGrants, grantsWithVerifiedBindings } from "../reach/grant-intake";
+import { personKeysOf } from "../reach/mailbox-write";
 import {
   installProfileResend,
   owedProfileConversations,
@@ -650,18 +651,31 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
           return;
         }
         const oneToOne = isOneToOne(entry.group);
-        void session
-          .updateReceivedGrants((g) =>
+        void (async () => {
+          // ADR-0078 - a grant is kept only when its mailbox binding verifies
+          // against the sender's account key resolved at receipt (C-68) or a
+          // proven key of the same person; the rest are dropped here.
+          const wasm = await loadWasm();
+          const grants = grantsWithVerifiedBindings(
+            wasm,
+            profile.grants ?? [],
+            personKeysOf(base64Decode(senderKeyB64)),
+          );
+          await session.updateReceivedGrants((g) =>
             foldProfileGrants(g, {
               senderHex,
               ownHex: session.accountKeyHex,
               scopeHex: journalHex(base64Decode(context.groupIdB64)),
               oneToOne,
-              grants: profile.grants ?? [],
+              grants,
               nowMs: Date.now(),
             }),
-          )
-          .then(() => bump());
+          );
+          bump();
+        })().catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("[reach] profile grants not filed", err instanceof Error ? err.name : "");
+        });
       }
     },
     groupJoined(groupIdB64) {

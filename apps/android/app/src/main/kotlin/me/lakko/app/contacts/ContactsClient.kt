@@ -31,7 +31,6 @@ import uniffi.lakko_ffi_uniffi.ContactRequest
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.FfiProfile
 import uniffi.lakko_ffi_uniffi.FfiReachGrant
-import uniffi.lakko_ffi_uniffi.IdentityPseudonym
 import uniffi.lakko_ffi_uniffi.composeContactAck
 import uniffi.lakko_ffi_uniffi.composeContactRequest
 import uniffi.lakko_ffi_uniffi.verifySupersession
@@ -46,21 +45,20 @@ import uniffi.lakko_ffi_uniffi.verifySupersession
  *
  *   * [sendContactRequest] — resolve `@username` →
  *     `account_id` via [DiscoveryClient.lookup] → fetch
- *     identity bundle → derive recipient mailbox pseudonym from
- *     their Ed25519 pubkey → compose envelope via UniFFI
- *     [composeContactRequest] → publish to recipient's mailbox
- *     via [DsClient.publishMailbox], wrapped with
- *     [KIND_CONTACT_REQUEST].
+ *     identity bundle → compose envelope via UniFFI
+ *     [composeContactRequest] → seal it as a mailbox row
+ *     (ADR-0078) to the mailbox key a verified binding names →
+ *     publish via [DsClient.publishMailbox].
  *
  *   * [sendContactRequestToBundle] — same compose+publish path
  *     but skipping the lookup+identityFetch round-trips when
  *     the caller already has the recipient's bundle in hand
  *     (the invite-link flow in 1.15e6).
  *
- *   * [pollStrangerInbox] — fetch the user's own
- *     [IdentityPseudonym.fromIdentity]-derived mailbox via
- *     [DsClient.fetchMailbox], parse each envelope's kind
- *     byte, decode + verify each ContactRequest, surface a
+ *   * [pollStrangerInbox] — fetch the account's own mailbox
+ *     (ADR-0078: addressed by its mailbox key) via
+ *     [DsClient.fetchMailbox], open each sealed row and dispatch
+ *     on its kind, decode + verify each ContactRequest, surface a
  *     mixed list of [IncomingMailboxEvent] entries + a fresh
  *     cursor. Welcome envelopes pass through as
  *     [IncomingMailboxEvent.Welcome] for the chat surface
@@ -170,6 +168,9 @@ public class ContactsClient(
     /** ADR-0073 R.2 step 3 - the VERIFIED key-log answer for the served key.
      *  The default runs [verifyIdentityInLog]; a test injects the answer. */
     private val resetLogCheck: (suspend (accountId: ByteArray, servedPubkey: ByteArray) -> LogCheck)? = null,
+    /** ADR-0078 - the binding check and sealing of mailbox rows; a test
+     *  injects a fake (the host JVM loads no native library). */
+    private val mailboxCrypto: MailboxCrypto = NativeMailboxCrypto,
 ) : AutoCloseable {
 
     override fun close() {
@@ -201,9 +202,11 @@ public class ContactsClient(
          *  the recipient named by their signature key, sealed in the request
          *  so the recipient can answer into the sender's closed mailbox. */
         mintReply: (suspend (recipientSignaturePubkey: ByteArray) -> FfiReachGrant?)? = null,
-        /** ADR-0060 §2 — the grant authorising a write into the recipient's
-         *  mailbox (found through search), by their signature key. */
-        reachFor: ((recipientSignaturePubkey: ByteArray) -> DsReachAuth?)? = null,
+        /** ADR-0060 §2 / ADR-0078 — where the write into the recipient's
+         *  mailbox goes (the verified mailbox key) and what authorises it,
+         *  by their signature key. `null` (or a `null` answer) writes nothing:
+         *  the request is refused with no mailbox known. */
+        reachFor: ((recipientSignaturePubkey: ByteArray) -> MailboxDest?)? = null,
     ): SendResult {
         // 1. Resolve the username.
         val lookup = try {
@@ -244,7 +247,7 @@ public class ContactsClient(
             introMessage = introMessage,
             senderProfile = senderProfile,
             replyGrant = mintReply?.invoke(recipientSignaturePub),
-            reach = reachFor?.invoke(recipientSignaturePub),
+            dest = reachFor?.invoke(recipientSignaturePub),
         )
 
         return SendResult(
@@ -656,9 +659,11 @@ public class ContactsClient(
         senderProfile: FfiProfile? = null,
         /** ADR-0060 §6 — the sender's own `reply` grant, sealed in the request. */
         replyGrant: FfiReachGrant? = null,
-        /** ADR-0060 §2 — what authorises the write (a link grant from the
-         *  capability, or a grant found through search). */
-        reach: DsReachAuth? = null,
+        /** ADR-0060 §2 / ADR-0078 — where the write goes and what authorises
+         *  it (a link grant from the capability, or a grant or binding found
+         *  through search), its binding already verified against the
+         *  recipient's account key. `null` writes nothing. */
+        reach: MailboxDest? = null,
     ): SendResult {
         // ADR-0074 section 3.5a rule 1 - resolve before addressing. A bundle
         // carried by a link or a search result may name a key its owner has
@@ -686,7 +691,7 @@ public class ContactsClient(
             introMessage = introMessage,
             senderProfile = senderProfile,
             replyGrant = replyGrant,
-            reach = reach,
+            dest = reach,
         )
         return SendResult(
             recipientUsername = "",
@@ -754,7 +759,7 @@ public class ContactsClient(
         introMessage: ByteArray,
         senderProfile: FfiProfile? = null,
         mintReply: (suspend (recipientSignaturePubkey: ByteArray) -> FfiReachGrant?)? = null,
-        reachFor: ((recipientSignaturePubkey: ByteArray) -> DsReachAuth?)? = null,
+        reachFor: ((recipientSignaturePubkey: ByteArray) -> MailboxDest?)? = null,
     ): SendResult {
         val (signaturePub, x25519Pub) = resolveVerifiedBundle(recipientAccountId)
         val publish = composeAndPublishContactRequest(
@@ -766,7 +771,7 @@ public class ContactsClient(
             introMessage = introMessage,
             senderProfile = senderProfile,
             replyGrant = mintReply?.invoke(signaturePub),
-            reach = reachFor?.invoke(signaturePub),
+            dest = reachFor?.invoke(signaturePub),
         )
         return SendResult(
             recipientUsername = "",
@@ -1277,18 +1282,15 @@ public class ContactsClient(
      * subtle details (mailbox-pseudonym derivation, envelope
      * kind wrapping, sender-pseudonym choice).
      *
-     * The recipient's mailbox is keyed by their public-pubkey
-     * pseudonym — anyone holding the recipient's Ed25519
-     * identity pubkey can compute the same 32-byte value, by
-     * design. This is the routing address for cold contact
-     * requests (see ADR-0005 §13.7).
+     * ADR-0078: the recipient's mailbox key comes from [dest], whose
+     * binding the caller verified against the recipient's account key; the
+     * request is sealed to it as a CONTACT_REQUEST row and posted to its
+     * address. No address is ever derived from the identity key, and with
+     * no [dest] nothing is written.
      *
-     * The sender's `from_pseudonym` is also their identity
-     * pseudonym (public, derivable from the sender's pubkey);
-     * the receiver uses it to address a future ack. Per-
-     * relationship pseudonyms (which rotate after the handshake
-     * via [uniffi.lakko_ffi_uniffi.PerRelationship.derive]) are
-     * 1.15e6+ work.
+     * The sender's `from_pseudonym` is 32 random bytes (the core's
+     * documented choice: routing metadata only). The ack is addressed by
+     * the reply grant the request carries, not by this value.
      */
     private suspend fun composeAndPublishContactRequest(
         senderSigningSeed: ByteArray,
@@ -1299,7 +1301,7 @@ public class ContactsClient(
         introMessage: ByteArray,
         senderProfile: FfiProfile?,
         replyGrant: FfiReachGrant?,
-        reach: DsReachAuth?,
+        dest: MailboxDest?,
     ): PublishedRequest {
         // ADR-0074 3.5a rule 1 - resolve before addressing. A request is
         // SEALED to the X25519 key published with [recipientSignaturePubkey],
@@ -1315,13 +1317,11 @@ public class ContactsClient(
                 IllegalStateException("the recipient's account keys were rotated; fetch their current keys"),
             )
         }
-        // Recipient mailbox pseudonym = BLAKE3(domain || their pubkey).
-        val recipientPseudonym =
-            IdentityPseudonym.fromIdentity(recipientSignaturePubkey).use { it.asBytes() }
+        // ADR-0078: no verified mailbox key, no write.
+        val target = dest ?: throw ContactsError.wrap(MailboxUnknown())
 
-        // Sender's from_pseudonym = their own identity pseudonym.
-        val senderPseudonym =
-            IdentityPseudonym.fromIdentity(senderSignaturePubkey).use { it.asBytes() }
+        // Sender's from_pseudonym: 32 random bytes (routing metadata only).
+        val senderPseudonym = ByteArray(FROM_PSEUDONYM_LEN).also { java.security.SecureRandom().nextBytes(it) }
 
         val validAfterMs = System.currentTimeMillis().toULong()
 
@@ -1356,9 +1356,13 @@ public class ContactsClient(
             throw ContactsError.wrap(e)
         }
 
-        val envelope = wrapEnvelope(KIND_CONTACT_REQUEST, wireBytes)
+        val sealed = try {
+            mailboxCrypto.sealFor(target, MailboxRowKind.CONTACT_REQUEST, wireBytes)
+        } catch (e: FfiException) {
+            throw ContactsError.wrap(e)
+        }
         val publish = try {
-            ds.publishMailbox(recipientPseudonym, envelope, reach = reach)
+            ds.publishMailbox(sealed.address, sealed.row, reach = target.auth)
         } catch (e: DsReachRefusedError) {
             throw ContactsError.reachRefused(e)
         } catch (e: DsHttpError) {
@@ -1387,23 +1391,24 @@ public class ContactsClient(
      * `startGroupWith` to complete.
      *
      * **Routing:** the ack body carries
-     * `ackToPseudonym = original.fromPseudonym`. The publish target
-     * is the sender's stranger-inbox mailbox — derived from
-     * `original.fromPubkey` via [IdentityPseudonym.fromIdentity].
+     * `ackToPseudonym = original.fromPseudonym`. ADR-0078: the publish
+     * target is the requester's mailbox, whose key [reach] carries (the
+     * reply grant the request held, its binding verified against the
+     * requester's account key); the ack is sealed to it as a CONTACT_ACK
+     * row. With no [reach] nothing is written.
      */
     public suspend fun sendContactAck(
         accepterSigningSeed: ByteArray,
         accepterAccountId: ByteArray,
         accepterX25519Pubkey: ByteArray,
         originalRequest: IncomingContactRequest,
-        /** ADR-0060 §6 — the requester's `reply` grant, which authorises the
-         *  ack into their closed mailbox. */
-        reach: DsReachAuth? = null,
+        /** ADR-0060 §6 — the requester's `reply` grant as a verified
+         *  destination, which authorises the ack into their closed mailbox. */
+        reach: MailboxDest? = null,
     ): PublishedAck {
-        // ADR-0074 3.5a rule 1 - the requester's CURRENT mailbox: an ack is
-        // signed, not sealed, so it follows a proven rotation of their keys.
-        val senderMailbox =
-            IdentityPseudonym.fromIdentity(mailboxKeyOf(originalRequest.fromPubkey)).use { it.asBytes() }
+        // ADR-0078: the requester's mailbox key comes from the verified
+        // destination; none known writes nothing.
+        val target = reach ?: throw ContactsError.wrap(MailboxUnknown())
 
         val acceptedAtMs = System.currentTimeMillis().toULong()
 
@@ -1419,9 +1424,13 @@ public class ContactsClient(
             throw ContactsError.wrap(e)
         }
 
-        val envelope = wrapEnvelope(KIND_CONTACT_ACK, wireBytes)
+        val sealed = try {
+            mailboxCrypto.sealFor(target, MailboxRowKind.CONTACT_ACK, wireBytes)
+        } catch (e: FfiException) {
+            throw ContactsError.wrap(e)
+        }
         val publish = try {
-            ds.publishMailbox(senderMailbox, envelope, reach = reach)
+            ds.publishMailbox(sealed.address, sealed.row, reach = target.auth)
         } catch (e: DsHttpError) {
             throw ContactsError.wrap(e)
         } catch (e: DsNetworkError) {
@@ -1447,10 +1456,10 @@ public class ContactsClient(
      * honest client wants to keep moving past corrupted entries
      * rather than surface "garbage on the wire" to the UI.
      *
-     * @param mySignaturePubkey  Caller's Ed25519 verifying key
-     *                           (32 bytes). Mailbox pseudonym is
-     *                           [IdentityPseudonym.fromIdentity]
-     *                           of this.
+     * @param own               The account's own mailbox (ADR-0078):
+     *                           its address and the opener of its
+     *                           sealed rows. A row that does not open
+     *                           is dropped (the cursor still moves).
      * @param myX25519Secret     Caller's 32-byte X25519 secret —
      *                           used to unseal each
      *                           ContactRequest envelope.
@@ -1461,7 +1470,7 @@ public class ContactsClient(
      *                           (`0` returns immediately).
      */
     public suspend fun pollStrangerInbox(
-        mySignaturePubkey: ByteArray,
+        own: OwnMailbox,
         myX25519Secret: ByteArray,
         after: Long = 0,
         waitSecs: Int = 0,
@@ -1470,11 +1479,8 @@ public class ContactsClient(
          *  `401`), and a refusal claims the mailbox and retries once. */
         mailboxSigner: DsJournalSigner? = null,
     ): PollResult {
-        val myPseudonym =
-            IdentityPseudonym.fromIdentity(mySignaturePubkey).use { it.asBytes() }
-
         val raw = try {
-            ds.fetchMailbox(myPseudonym, after = after, waitSecs = waitSecs, signer = mailboxSigner)
+            ds.fetchMailbox(own.address, after = after, waitSecs = waitSecs, signer = mailboxSigner)
         } catch (e: DsHttpError) {
             throw ContactsError.wrap(e)
         } catch (e: DsNetworkError) {
@@ -1486,17 +1492,18 @@ public class ContactsClient(
         for (message in raw.messages) {
             cursor = message.id
 
-            when (val env = parseEnvelope(message.payload)) {
-                is ParsedEnvelope.Unknown -> {
-                    // Future / unknown kind byte — cursor still
-                    // advances so we don't re-process. No
-                    // logger plumbed yet (see the
-                    // ContactRequest branch below for the
-                    // rationale).
+            // ADR-0078: open the sealed row; one that does not open (garbage,
+            // a row for another mailbox, an unknown kind) is dropped and the
+            // cursor still advances.
+            val env = own.open(message.payload) ?: continue
+            when (env.kind) {
+                MailboxRowKind.WELCOME_RENDEZVOUS -> {
+                    // The channel co-publisher join reads its own rows
+                    // ([me.lakko.app.channels.CoPublisher]); not a chat event.
                     continue
                 }
 
-                is ParsedEnvelope.Welcome -> {
+                MailboxRowKind.WELCOME -> {
                     events.add(
                         IncomingMailboxEvent.Welcome(
                             messageId = message.id,
@@ -1506,7 +1513,7 @@ public class ContactsClient(
                     )
                 }
 
-                is ParsedEnvelope.ContactAck -> {
+                MailboxRowKind.CONTACT_ACK -> {
                     // 1.9b1: signature is verified inside the UniFFI
                     // surface; bad-signature / malformed-wire entries
                     // drop silently and the cursor still advances.
@@ -1529,7 +1536,7 @@ public class ContactsClient(
                     events.add(IncomingMailboxEvent.ContactAck(ack))
                 }
 
-                is ParsedEnvelope.ContactRequest -> {
+                MailboxRowKind.CONTACT_REQUEST -> {
                     val parsed = try {
                         ContactRequest.decodeAndVerify(env.body)
                     } catch (_: FfiException) {
@@ -2020,3 +2027,6 @@ internal fun readProofExpiresAtSecs(proofBytes: ByteArray): Long {
  */
 internal fun staleRecipientKey(recipientKey: ByteArray, addressedKey: ByteArray): Boolean =
     !recipientKey.contentEquals(addressedKey)
+
+/** Length of a contact request's `from_pseudonym` (routing metadata). */
+private const val FROM_PSEUDONYM_LEN = 32

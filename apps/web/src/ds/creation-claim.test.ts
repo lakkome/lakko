@@ -41,6 +41,18 @@ afterEach(() => {
   putDeviceGroupSnapshot.mockClear();
 });
 
+/** The peer's `reply` grant (ADR-0060), as accepting their contact request
+ *  holds it: its mailbox binding (ADR-0078) is the peer's, so the 1:1
+ *  Welcome has a verified mailbox to go to. */
+function replyGrantOf(peer: wasm.Identity): string {
+  const grant = wasm.deriveReachGrant(peer.ed25519Seed, wasm.ReachClass.Reply, new Uint8Array(16).fill(7), 0);
+  try {
+    return Buffer.from(wasm.encodeReachGrant(grant)).toString("base64");
+  } finally {
+    grant.free();
+  }
+}
+
 function httpError(status: number): Error {
   return Object.assign(new Error(`HTTP ${status}`), { status });
 }
@@ -76,14 +88,33 @@ describe("a conversation group: no Welcome before the claim lands", () => {
     // binding names. `startGroupWith` adds only a device bound to it
     // (ADR-0073 R.2, `contacts/add-member-key.ts`).
     const peerKey = peer.signaturePublicKey;
-    return { client, ds, order, peerKey, free: () => [device, account, peer].forEach((i) => i.free()) };
+    const replyGrantB64 = replyGrantOf(peer);
+    return {
+      client,
+      ds,
+      order,
+      peerKey,
+      replyGrantB64,
+      free: () => [device, account, peer].forEach((i) => i.free()),
+    };
   }
 
   it("204: the claim goes first, then the Welcome", async () => {
     const s = setup(204);
     try {
-      await s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat");
+      await s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat", {
+          replyGrantB64: s.replyGrantB64,
+        });
       expect(s.order).toEqual(["claim:claim", "welcome"]);
+      // ADR-0078: the Welcome is a row SEALED to the peer's mailbox key (the
+      // one the reply grant binds), addressed to that key's address.
+      const call = (s.ds.publishMailbox as unknown as { mock: { calls: [Uint8Array, Uint8Array][] } }).mock
+        .calls[0]!;
+      const grant = wasm.decodeReachGrant(Buffer.from(s.replyGrantB64, "base64"));
+      const pk = grant.mailboxPkVerified(s.peerKey);
+      grant.free();
+      expect(Array.from(call[0])).toEqual(Array.from(wasm.mailboxAddress(pk)));
+      expect(wasm.isWellFormedMailboxRow(call[1])).toBe(true);
     } finally {
       s.free();
     }
@@ -95,7 +126,9 @@ describe("a conversation group: no Welcome before the claim lands", () => {
       const s = setup(status);
       try {
         await expect(
-          s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat"),
+          s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat", {
+          replyGrantB64: s.replyGrantB64,
+        }),
         ).rejects.toBeDefined();
         expect(s.order).toEqual(["claim:claim"]);
         expect(s.ds.publishMailbox).not.toHaveBeenCalled();
@@ -136,6 +169,7 @@ describe("a conversation group: no Welcome before the founder's state is on disk
       ds,
       order,
       peerKey: peer.signaturePublicKey,
+      replyGrantB64: replyGrantOf(peer),
       free: () => [device, account, peer].forEach((i) => i.free()),
     };
   }
@@ -145,7 +179,9 @@ describe("a conversation group: no Welcome before the founder's state is on disk
       order.push("persist");
     });
     try {
-      await s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat");
+      await s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat", {
+          replyGrantB64: s.replyGrantB64,
+        });
       // The second persist is the best-effort one after the delivery.
       expect(s.order).toEqual(["claim", "persist", "welcome", "persist"]);
     } finally {
@@ -160,7 +196,9 @@ describe("a conversation group: no Welcome before the founder's state is on disk
     });
     try {
       await expect(
-        s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat"),
+        s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat", {
+          replyGrantB64: s.replyGrantB64,
+        }),
       ).rejects.toBeDefined();
       expect(s.order).toEqual(["claim", "persist"]);
       expect(s.ds.publishMailbox).not.toHaveBeenCalled();
@@ -178,7 +216,9 @@ describe("a conversation group: no Welcome before the founder's state is on disk
     });
     try {
       await expect(
-        s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat"),
+        s.client.startGroupWith(null, new Uint8Array(16).fill(1), s.peerKey, "chat", {
+          replyGrantB64: s.replyGrantB64,
+        }),
       ).rejects.toBeDefined();
       expect(persistSnapshotDurable).not.toHaveBeenCalled();
       expect(s.ds.publishMailbox).not.toHaveBeenCalled();

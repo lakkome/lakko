@@ -429,7 +429,8 @@ extension ChatRepository {
                 accepted: state.accepted, pending: state.pending, own: state.own,
                 prepared: PreparedSuccessor(
                     successorGroupIdB64: successorB64,
-                    welcomeB64: base64Encode(wrapEnvelope(kind: .welcome, body: welcome)),
+                    // ADR-0078 — kept raw; sealed per target at delivery.
+                    welcomeB64: base64Encode(welcome),
                     targetKeysB64: targets,
                     delivered: false)))
         return successorB64
@@ -514,14 +515,18 @@ extension ChatRepository {
             requestProfilesAfterJoin(groupIdHex: successorHex)
         }
         if !prepared.delivered {
-            guard let welcomeB64 = prepared.welcomeB64, let welcomeEnvelope = base64Decode(welcomeB64) else {
+            guard let welcomeB64 = prepared.welcomeB64, let welcome = base64Decode(welcomeB64) else {
                 return false
             }
             for keyB64 in prepared.targetKeysB64 {
                 guard let key = base64Decode(keyB64) else { continue }
-                try await deliverWelcome(
-                    welcomeEnvelope: welcomeEnvelope, toAccountKey: key,
-                    auth: ReachCenter.shared.writeAuth(toAccountKey: key))
+                switch ContinuityWelcome.decide(plan: ReachCenter.shared.writePlan(toAccountKey: key)) {
+                case .deliver(let plan):
+                    try await deliverWelcome(welcome: welcome, toAccountKey: key, plan: plan)
+                case .skipNoCarrier:
+                    // ADR-0078 open question — see ``ContinuityWelcome``.
+                    NSLog("ADR-0078: a successor Welcome to a reset account was skipped: no carrier for its new mailbox")
+                }
             }
             // Kept as the mark "this device founded it"; the Welcome is
             // dropped.
@@ -1161,5 +1166,28 @@ final class RepositoryContinuityPort: ContinuityPort {
         try await repository.resendOwnMessages(
             oldGroupIdHex: try hex(oldGroupIdB64), successorGroupIdB64: successorGroupIdB64,
             accountIdB64: accountIdB64)
+    }
+}
+
+/// ADR-0073 R.4 under ADR-0078 — the Welcome a successor's founder owes a
+/// person who reset their keys.
+///
+/// Before ADR-0078 a peer that accepted the reset wrote that Welcome to the
+/// mailbox derived from the reset account's NEW identity key, signed with the
+/// continuity key (derivable from the account id and the key generation). A
+/// mailbox address is no longer derivable from an identity key, and nothing
+/// yet carries the reset account's new mailbox binding to its peers: that is
+/// the open question at the end of ADR-0078 section 1. So the write is a
+/// recorded no-op when this device holds no grant from the new identity
+/// (`skipNoCarrier`): nothing is derived from the account id or the identity
+/// key, and nothing is sent. A grant the new identity itself handed out (in a
+/// conversation it is already in) is an ordinary verified mailbox and the
+/// Welcome goes there.
+enum ContinuityWelcome: Equatable {
+    case deliver(MailboxWritePlan)
+    case skipNoCarrier
+
+    static func decide(plan: MailboxWritePlan?) -> ContinuityWelcome {
+        plan.map { .deliver($0) } ?? .skipNoCarrier
     }
 }

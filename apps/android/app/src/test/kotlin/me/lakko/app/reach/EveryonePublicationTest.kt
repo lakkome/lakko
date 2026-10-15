@@ -49,13 +49,40 @@ class EveryonePublicationTest {
     private val identityPk = ByteArray(32) { 7 }
     private val accountId = ByteArray(16) { 3 }
     private val certificate = ByteArray(153) { 9 }
+    private val binding = ByteArray(97) { 4 }
+
+    @Test
+    fun `the public record carries the mailbox binding and without one nothing is published`() = runTest {
+        // ADR-0078: a searcher addresses the open mailbox through the binding
+        // the record carries; there is no identity-derived address to fall
+        // back to, so without a binding nothing is sent.
+        val r = Recorder()
+        val outcome = publishEveryone(
+            wantPublic = true,
+            who = EveryoneIdentity("Anna Weber", "anna", certificate, identityPk, accountId, binding),
+            ops = ops(r, listOf("ann")),
+            nowMs = 1_000,
+        )
+        assertEquals(EveryoneOutcome.PUBLISHED, outcome)
+        assertArrayEquals(binding, r.composedPayload!!.mailboxBinding)
+
+        val none = Recorder()
+        val skipped = publishEveryone(
+            wantPublic = true,
+            who = EveryoneIdentity("Anna Weber", "anna", certificate, identityPk, accountId, null),
+            ops = ops(none, listOf("ann")),
+            nowMs = 1_000,
+        )
+        assertEquals(EveryoneOutcome.NOTHING_TO_PUBLISH, skipped)
+        assertTrue(none.puts.isEmpty())
+    }
 
     @Test
     fun `entering Everyone sends lookup keys and a record sealed over the outputs`() = runTest {
         val r = Recorder()
         val outcome = publishEveryone(
             wantPublic = true,
-            who = EveryoneIdentity("Anna Weber", "anna", certificate, identityPk, accountId),
+            who = EveryoneIdentity("Anna Weber", "anna", certificate, identityPk, accountId, binding),
             ops = ops(r, listOf("ann", "anna", "web")),
             nowMs = 1_000,
         )
@@ -90,7 +117,7 @@ class EveryonePublicationTest {
         val r = Recorder()
         publishEveryone(
             wantPublic = true,
-            who = EveryoneIdentity("Anna", "anna", null, identityPk, accountId),
+            who = EveryoneIdentity("Anna", "anna", null, identityPk, accountId, binding),
             ops = ops(r, listOf("anna")),
             nowMs = 1,
         )
@@ -105,7 +132,7 @@ class EveryonePublicationTest {
         val r = Recorder()
         val outcome = publishEveryone(
             wantPublic = true,
-            who = EveryoneIdentity(null, "anna", certificate, identityPk, accountId),
+            who = EveryoneIdentity(null, "anna", certificate, identityPk, accountId, binding),
             ops = ops(r, emptyList()),
             nowMs = 1,
         )
@@ -119,7 +146,7 @@ class EveryonePublicationTest {
         val r = Recorder()
         val outcome = publishEveryone(
             wantPublic = true,
-            who = EveryoneIdentity(null, "anna", null, identityPk, accountId),
+            who = EveryoneIdentity(null, "anna", null, identityPk, accountId, binding),
             ops = ops(r, emptyList()),
             nowMs = 1,
         )
@@ -133,7 +160,7 @@ class EveryonePublicationTest {
         val r = Recorder()
         val outcome = publishEveryone(
             wantPublic = false,
-            who = EveryoneIdentity("Anna", "anna", certificate, identityPk, accountId),
+            who = EveryoneIdentity("Anna", "anna", certificate, identityPk, accountId, binding),
             ops = ops(r, listOf("anna")),
             nowMs = 1,
         )

@@ -556,6 +556,7 @@ mod tests {
         };
         let env = CommitterDelegationEnvelope {
             added_account_key: [4; 32],
+            added_mailbox_binding: crate::mailbox::MailboxBinding::for_account_seed(&[4; 32]),
             delegations: vec![[1; COMMITTER_DELEGATION_BLOB_LEN]; 2],
         };
         let wire = compose_committer_delegation(&env).unwrap();
@@ -760,11 +761,14 @@ mod tests {
         use crate::visibility::{compose_reach_state, compose_visibility, ReachStateEntry};
 
         let payload = IntroductionPayload {
-            identity_pk: [1; 32],
+            identity_pk: lakko_crypto::signing::SigningKey::from_seed(&[9; 32])
+                .verifying_key()
+                .to_bytes(),
             account_id: [2; 16],
             display_name: Some("Anna".to_string()),
             username: None,
             username_certificate: None,
+            mailbox_binding: crate::mailbox::MailboxBinding::for_account_seed(&[9; 32]),
             fof: Some(ReachGrant::derive(&[9; 32], ReachClass::Fof, b"", 1).unwrap()),
         };
         let record = compose_introduction(&payload, &[[5; 64]], 1).unwrap();

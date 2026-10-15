@@ -87,7 +87,7 @@ describe("a restored device resumes from the keys the mailbox holds", () => {
       ],
       open: false,
     }));
-    const session = await ReachSession.open("acc", seed, account.signaturePublicKey, { ds });
+    const session = await ReachSession.open("acc", seed, account.signaturePublicKey, { ds, accountMailbox: new Uint8Array(32).fill(0xaa) });
     session.setScopeProvider(() => ({ groupIdsHex: [GROUP_HEX], channels: [] }));
     try {
       await session.syncNow(true);
@@ -117,7 +117,7 @@ describe("a restored device resumes from the keys the mailbox holds", () => {
       open: false,
     }));
     let groups: string[] = [];
-    const session = await ReachSession.open("acc", seed, account.signaturePublicKey, { ds });
+    const session = await ReachSession.open("acc", seed, account.signaturePublicKey, { ds, accountMailbox: new Uint8Array(32).fill(0xaa) });
     session.setScopeProvider(() => ({ groupIdsHex: groups, channels: [] }));
     try {
       await session.syncNow(true);
@@ -144,7 +144,7 @@ describe("a restored device resumes from the keys the mailbox holds", () => {
     const { ds, puts } = fakeDs(async () => {
       throw Object.assign(new Error("HTTP 503"), { status: 503 });
     });
-    const session = await ReachSession.open("acc", account.ed25519Seed, account.signaturePublicKey, { ds });
+    const session = await ReachSession.open("acc", account.ed25519Seed, account.signaturePublicKey, { ds, accountMailbox: new Uint8Array(32).fill(0xaa) });
     session.setScopeProvider(() => ({ groupIdsHex: [GROUP_HEX], channels: [] }));
     try {
       await expect(session.syncNow(true)).rejects.toThrow();
@@ -164,7 +164,7 @@ describe("a restored device resumes from the keys the mailbox holds", () => {
     const seed = account.ed25519Seed;
     const contactV0 = reachPk(seed, wasm.ReachClass.Contact, new Uint8Array(0), 0);
     const { ds, puts } = fakeDs(async () => ({ keys: [], open: false }));
-    const session = await ReachSession.open("acc", seed, account.signaturePublicKey, { ds });
+    const session = await ReachSession.open("acc", seed, account.signaturePublicKey, { ds, accountMailbox: new Uint8Array(32).fill(0xaa) });
     session.setScopeProvider(() => ({ groupIdsHex: [], channels: [] }));
     try {
       await session.syncNow(true);

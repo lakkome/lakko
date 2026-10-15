@@ -71,20 +71,30 @@
 //! [`MAX_INTRODUCTION_TERMS`] is 65 (64 name terms plus the username):
 //! chosen, not measured.
 //!
-//! ## Payload wire (v2)
+//! ## Payload wire (v3)
 //!
 //! ```text
-//! payload = version(1)=0x02 || identity_pk(32) || account_id(16)
+//! payload = version(1)=0x03 || identity_pk(32) || account_id(16)
 //!           || name_len(1) || name || username_len(1) || username
 //!           || cert_len(1: 0 | 153) || cert
-//!           || fof_len(1: 0 | 37) || fof_grant
+//!           || mailbox_binding(97)
+//!           || fof_len(1: 0 | 134) || fof_grant
 //! ```
 //!
 //! Field rules are the profile's ([`crate::profile`]): the display-name
 //! rule, the canonical-username rule, the certificate length and "a
 //! certificate needs a username"; a grant, when present, must be of class
-//! [`ReachClass::Fof`]. Version 1 (grant always present) is refused: a flag
-//! day, nothing is deployed.
+//! [`ReachClass::Fof`]. Versions 1 and 2 are refused: a flag day, nothing is
+//! deployed.
+//!
+//! **The mailbox binding (ADR-0078).** Every payload carries the owner's
+//! [`MailboxBinding`] (the mailbox key signed by the account identity key),
+//! so a reader learns where to write - the public record of a person in
+//! Everyone carries no grant, so this is the only place it can. Encode and
+//! decode both **verify the binding against `identity_pk`** and require a
+//! grant's binding to be the same one, so a record names one owner and one
+//! mailbox. Whether `identity_pk` is the person the reader means is still
+//! the reader's to establish (the username certificate, a pinned key).
 //!
 //! ## Two uses of one record: contacts of contacts, and Everyone
 //!
@@ -122,7 +132,7 @@
 //! long the owner's name is. Both are left for the S6 security pass.
 //!
 //! [`MAX_BUNDLE_RECORDS`] (1024) is chosen, not measured; with the longest
-//! records it bounds a bundle at about 6.7 MB.
+//! records it bounds a bundle at about 6.9 MB.
 
 use core::result::Result as CoreResult;
 
@@ -131,6 +141,7 @@ use lakko_crypto::hash::blake3_derive_key_from_material;
 use lakko_crypto::{random, SecretBytes};
 use thiserror::Error;
 
+use crate::mailbox::{MailboxBinding, MailboxError, MAILBOX_BINDING_LEN};
 use crate::profile::{check_display_name, DisplayNameError, ACCOUNT_ID_LEN, USERNAME_CERT_LEN};
 use crate::reach::{ReachClass, ReachError, ReachGrant, REACH_GRANT_LEN};
 use crate::username::{check_canonical_username, UsernameError};
@@ -157,8 +168,9 @@ pub const WRAPPED_KEY_LEN: usize = NONCE_LEN + CONTENT_KEY_LEN + TAG_LEN;
 /// Length of an identity public key in a payload.
 pub const IDENTITY_PK_LEN: usize = 32;
 
-/// Payload schema version (v2: the `fof` grant became optional).
-pub const INTRODUCTION_PAYLOAD_VERSION_V2: u8 = 0x02;
+/// Payload schema version (v3: the mailbox binding, ADR-0078; the `fof`
+/// grant optional since v2).
+pub const INTRODUCTION_PAYLOAD_VERSION_V3: u8 = 0x03;
 
 /// Record schema version.
 pub const INTRODUCTION_RECORD_VERSION_V1: u8 = 0x01;
@@ -170,7 +182,7 @@ pub const MAX_INTRODUCTION_TERMS: usize = 65;
 /// Shortest payload: no name, no username, no certificate, no grant (a
 /// public record's shape).
 pub const INTRODUCTION_PAYLOAD_MIN_LEN: usize =
-    1 + IDENTITY_PK_LEN + ACCOUNT_ID_LEN + 1 + 1 + 1 + 1;
+    1 + IDENTITY_PK_LEN + ACCOUNT_ID_LEN + 1 + 1 + 1 + MAILBOX_BINDING_LEN + 1;
 
 /// Longest payload: a maximal name, username, a certificate and a grant.
 pub const INTRODUCTION_PAYLOAD_MAX_LEN: usize = INTRODUCTION_PAYLOAD_MIN_LEN
@@ -236,6 +248,9 @@ pub struct IntroductionPayload {
     /// The discovery-signed username certificate, exactly
     /// [`USERNAME_CERT_LEN`] bytes, opaque here. Requires `username`.
     pub username_certificate: Option<Vec<u8>>,
+    /// The owner's mailbox binding (ADR-0078), verified against
+    /// `identity_pk` by encode and decode.
+    pub mailbox_binding: MailboxBinding,
     /// The `fof` reach grant, class [`ReachClass::Fof`]. Required in a
     /// contacts-of-contacts record, refused in a public record (module
     /// docs, "Two uses of one record").
@@ -264,9 +279,15 @@ impl IntroductionPayload {
                 return Err(IntroductionError::CertificateWithoutUsername);
             }
         }
+        self.mailbox_binding
+            .verify(&self.identity_pk)
+            .map_err(IntroductionError::MailboxBinding)?;
         if let Some(fof) = &self.fof {
             if fof.class != ReachClass::Fof {
                 return Err(IntroductionError::NotFofGrant(fof.class.to_byte()));
+            }
+            if fof.binding != self.mailbox_binding {
+                return Err(IntroductionError::GrantBindingMismatch);
             }
         }
         Ok(())
@@ -283,7 +304,7 @@ impl IntroductionPayload {
         let username = self.username.as_deref().unwrap_or("").as_bytes();
         let cert = self.username_certificate.as_deref().unwrap_or(&[]);
         let mut out = Vec::with_capacity(INTRODUCTION_PAYLOAD_MAX_LEN);
-        out.push(INTRODUCTION_PAYLOAD_VERSION_V2);
+        out.push(INTRODUCTION_PAYLOAD_VERSION_V3);
         out.extend_from_slice(&self.identity_pk);
         out.extend_from_slice(&self.account_id);
         push_len_u8(&mut out, name.len())?;
@@ -292,6 +313,7 @@ impl IntroductionPayload {
         out.extend_from_slice(username);
         push_len_u8(&mut out, cert.len())?;
         out.extend_from_slice(cert);
+        out.extend_from_slice(&self.mailbox_binding.encode());
         match &self.fof {
             Some(fof) => {
                 push_len_u8(&mut out, REACH_GRANT_LEN)?;
@@ -312,7 +334,7 @@ impl IntroductionPayload {
     pub fn decode(bytes: &[u8]) -> CoreResult<Self, IntroductionError> {
         let mut cur = bytes;
         let version = take_u8(&mut cur)?;
-        if version != INTRODUCTION_PAYLOAD_VERSION_V2 {
+        if version != INTRODUCTION_PAYLOAD_VERSION_V3 {
             return Err(IntroductionError::UnknownVersion(version));
         }
         let identity_pk = take_array::<IDENTITY_PK_LEN>(&mut cur)?;
@@ -327,6 +349,8 @@ impl IntroductionPayload {
             USERNAME_CERT_LEN => Some(take(&mut cur, USERNAME_CERT_LEN)?.to_vec()),
             got => return Err(IntroductionError::CertificateLength { got }),
         };
+        let mailbox_binding = MailboxBinding::decode(take(&mut cur, MAILBOX_BINDING_LEN)?)
+            .map_err(IntroductionError::MailboxBinding)?;
         let fof = match usize::from(take_u8(&mut cur)?) {
             0 => None,
             REACH_GRANT_LEN => Some(
@@ -362,6 +386,7 @@ impl IntroductionPayload {
             display_name,
             username,
             username_certificate,
+            mailbox_binding,
             fof,
         };
         payload.validate()?;
@@ -1056,6 +1081,13 @@ pub enum IntroductionError {
     /// The grant failed to decode.
     #[error("invalid reach grant: {0}")]
     Grant(ReachError),
+    /// The mailbox binding does not decode or does not verify under
+    /// `identity_pk` (ADR-0078).
+    #[error("invalid mailbox binding: {0}")]
+    MailboxBinding(MailboxError),
+    /// The grant names another mailbox than the payload's binding.
+    #[error("introduction grant names another mailbox")]
+    GrantBindingMismatch,
     /// The AEAD refused to seal (not expected for valid inputs).
     #[error("introduction could not be sealed")]
     Seal,
@@ -1091,6 +1123,8 @@ impl IntroductionError {
             Self::MissingFofGrant => "grant.missing".to_string(),
             Self::UnexpectedFofGrant => "grant.unexpected".to_string(),
             Self::Grant(e) => format!("grant.{}", e.code()),
+            Self::MailboxBinding(e) => format!("mailboxBinding.{}", e.code()),
+            Self::GrantBindingMismatch => "grant.bindingMismatch".to_string(),
             Self::Seal => "seal".to_string(),
             Self::Open => "open".to_string(),
         }
@@ -1210,21 +1244,36 @@ mod tests {
         o
     }
 
+    /// The account the test payloads belong to.
+    const OWNER_SEED: [u8; 32] = [0xA1; 32];
+
+    fn owner_pk() -> [u8; 32] {
+        lakko_crypto::signing::SigningKey::from_seed(&OWNER_SEED)
+            .verifying_key()
+            .to_bytes()
+    }
+
+    fn owner_binding() -> MailboxBinding {
+        MailboxBinding::for_account_seed(&OWNER_SEED)
+    }
+
     fn fof(byte: u8) -> ReachGrant {
         ReachGrant {
             class: ReachClass::Fof,
             version: 7,
             seed: SecretBytes::new([byte; 32]),
+            binding: owner_binding(),
         }
     }
 
     fn payload() -> IntroductionPayload {
         IntroductionPayload {
-            identity_pk: [0xA1; 32],
+            identity_pk: owner_pk(),
             account_id: [0xB2; 16],
             display_name: Some("Anna Weber".to_string()),
             username: Some("anna".to_string()),
             username_certificate: Some(vec![0xC3; USERNAME_CERT_LEN]),
+            mailbox_binding: owner_binding(),
             fof: Some(fof(0xD4)),
         }
     }
@@ -1239,11 +1288,12 @@ mod tests {
 
     fn minimal_payload() -> IntroductionPayload {
         IntroductionPayload {
-            identity_pk: [1; 32],
+            identity_pk: owner_pk(),
             account_id: [2; 16],
             display_name: None,
             username: None,
             username_certificate: None,
+            mailbox_binding: owner_binding(),
             fof: None,
         }
     }
@@ -1259,8 +1309,8 @@ mod tests {
 
     #[test]
     fn payload_round_trips_and_its_bounds_are_the_documented_construction() {
-        assert_eq!(INTRODUCTION_PAYLOAD_MIN_LEN, 53);
-        assert_eq!(INTRODUCTION_PAYLOAD_MAX_LEN, 53 + 255 + 32 + 153 + 37);
+        assert_eq!(INTRODUCTION_PAYLOAD_MIN_LEN, 53 + 97);
+        assert_eq!(INTRODUCTION_PAYLOAD_MAX_LEN, 53 + 97 + 255 + 32 + 153 + 134);
         for p in [
             payload(),
             public_payload(),
@@ -1313,12 +1363,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_mailbox_binding_must_be_the_owners_and_the_grants() {
+        // A binding signed by someone else does not verify under the owner.
+        let mut foreign = public_payload();
+        foreign.mailbox_binding = MailboxBinding::for_account_seed(&[0x55; 32]);
+        let why = IntroductionError::MailboxBinding(MailboxError::BadBinding);
+        assert_eq!(foreign.encode(), Err(why));
+        assert_eq!(
+            IntroductionPayload::decode(&raw_payload(&foreign)),
+            Err(why)
+        );
+        // A grant naming another mailbox than the payload's.
+        let mut mismatched = payload();
+        if let Some(grant) = mismatched.fof.as_mut() {
+            grant.binding = MailboxBinding::for_account_seed(&[0x55; 32]);
+        }
+        assert_eq!(
+            mismatched.encode(),
+            Err(IntroductionError::GrantBindingMismatch)
+        );
+        assert_eq!(
+            IntroductionPayload::decode(&raw_payload(&mismatched)),
+            Err(IntroductionError::GrantBindingMismatch)
+        );
+    }
+
     /// Encode past `validate`, so decode's gates are exercised.
     fn raw_payload(p: &IntroductionPayload) -> Vec<u8> {
         let name = p.display_name.as_deref().unwrap_or("").as_bytes();
         let username = p.username.as_deref().unwrap_or("").as_bytes();
         let cert = p.username_certificate.as_deref().unwrap_or(&[]);
-        let mut out = vec![INTRODUCTION_PAYLOAD_VERSION_V2];
+        let mut out = vec![INTRODUCTION_PAYLOAD_VERSION_V3];
         out.extend_from_slice(&p.identity_pk);
         out.extend_from_slice(&p.account_id);
         out.push(u8::try_from(name.len()).unwrap());
@@ -1327,6 +1403,7 @@ mod tests {
         out.extend_from_slice(username);
         out.push(u8::try_from(cert.len()).unwrap());
         out.extend_from_slice(cert);
+        out.extend_from_slice(&p.mailbox_binding.encode());
         match &p.fof {
             Some(grant) => {
                 out.push(u8::try_from(REACH_GRANT_LEN).unwrap());
@@ -1452,12 +1529,13 @@ mod tests {
     #[test]
     fn record_length_bounds_are_the_documented_construction() {
         assert_eq!(WRAPPED_KEY_LEN, 60);
-        assert_eq!(SEALED_PAYLOAD_MIN_LEN, 12 + 16 + 53);
-        assert_eq!(INTRODUCTION_RECORD_MIN_LEN, 10 + 92 + 2 + 81);
+        assert_eq!(SEALED_PAYLOAD_MIN_LEN, 12 + 16 + 150);
+        assert_eq!(INTRODUCTION_RECORD_MIN_LEN, 10 + 92 + 2 + 178);
         assert_eq!(
             INTRODUCTION_RECORD_MAX_LEN,
-            10 + 65 * 92 + 2 + 12 + 16 + 530
+            10 + 65 * 92 + 2 + 12 + 16 + 724
         );
+        assert_eq!(INTRODUCTION_RECORD_MAX_LEN, 6744);
         let min = compose_public_record(&minimal_payload(), &[U_OPRF], 1).unwrap();
         assert_eq!(min.len(), INTRODUCTION_RECORD_MIN_LEN);
         let terms: Vec<_> = (0..MAX_INTRODUCTION_TERMS).map(term).collect();

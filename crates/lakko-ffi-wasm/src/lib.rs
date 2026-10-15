@@ -85,6 +85,7 @@ pub mod feed;
 pub mod key_reset;
 pub mod key_rotation;
 pub mod l10n;
+pub mod mailbox;
 pub mod mls;
 pub mod mnemonic;
 pub mod pairing;

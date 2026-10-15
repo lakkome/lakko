@@ -145,7 +145,8 @@ export class ReachSession {
     private readonly accountSeed: Uint8Array,
     /** The account identity's public key. */
     readonly accountKey: Uint8Array,
-    /** The account mailbox pseudonym. */
+    /** The address of the account's own mailbox (ADR-0078: of the mailbox
+     *  key derived from the account seed). */
     readonly accountMailbox: Uint8Array,
     private readonly wasm: Wasm,
     private readonly ds: DsClient,
@@ -161,10 +162,18 @@ export class ReachSession {
     accountIdB64: string,
     accountSeed: Uint8Array,
     accountKey: Uint8Array,
-    options: { readonly ds?: DsClient; readonly now?: () => number } = {},
+    options: {
+      /** The address of the account's own mailbox:
+       *  `MailboxKey.fromAccountIdentity(accountIdentity).address()`
+       *  (ADR-0078). The session never derives an address from a key. */
+      readonly accountMailbox: Uint8Array;
+      readonly ds?: DsClient;
+      readonly now?: () => number;
+    },
   ): Promise<ReachSession> {
     const wasm = await loadWasm();
-    const mailbox = wasm.IdentityPseudonym.fromIdentity(accountKey).asBytes();
+    if (options.accountMailbox.length !== 32) throw new Error("account mailbox address must be 32 bytes");
+    const mailbox = options.accountMailbox.slice();
     const [bookJson, grantsJson] = await Promise.all([
       loadReachRow(accountIdB64, "book"),
       loadReachRow(accountIdB64, "grants"),
@@ -222,7 +231,23 @@ export class ReachSession {
     return cls === "reply" ? 0 : versionOf(this.book, cls, journalHex(scope));
   }
 
-  /** The current grant of `(cls, scope)`. The caller frees it. */
+  /**
+   * This account's own 97-byte mailbox binding (ADR-0078): the mailbox key
+   * signed by the account identity key, as every grant this account mints
+   * carries it. A public record of a person in Everyone carries it so a
+   * finder knows where to write.
+   */
+  mailboxBinding(): Uint8Array {
+    const grant = this.grant("contact");
+    try {
+      return grant.binding;
+    } finally {
+      grant.free();
+    }
+  }
+
+  /** The current grant of `(cls, scope)`. The caller frees it. Every grant
+   *  carries this account's mailbox binding (ADR-0078). */
   grant(cls: ReachClassName, scope: Uint8Array = new Uint8Array(0)): WasmReachGrant {
     const scopeHex = journalHex(scope);
     const version = cls === "reply" ? 0 : versionOf(this.book, cls, scopeHex);
@@ -849,13 +874,14 @@ export async function startReachSession(
   accountIdB64: string,
   accountSeed: Uint8Array,
   accountKey: Uint8Array,
+  accountMailbox: Uint8Array,
 ): Promise<ReachSession | null> {
   generation += 1;
   const mine = generation;
   current?.stop();
   current = null;
   setSessionSignal(null);
-  const session = await ReachSession.open(accountIdB64, accountSeed, accountKey);
+  const session = await ReachSession.open(accountIdB64, accountSeed, accountKey, { accountMailbox });
   if (mine !== generation) {
     session.stop();
     return null;

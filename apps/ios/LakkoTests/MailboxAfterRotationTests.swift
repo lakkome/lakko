@@ -15,6 +15,13 @@ final class MailboxAfterRotationTests: XCTestCase {
         try Identity.fromSeed(seed: Data(repeating: byte, count: 32)).signaturePublicKey()
     }
 
+    /// ADR-0078 — the mailbox address of the account seeded by `byte` (its
+    /// mailbox key, never its identity key).
+    private func box(_ byte: UInt8) throws -> Data {
+        MailboxKey.fromAccountIdentity(
+            accountIdentity: try Identity.fromSeed(seed: Data(repeating: byte, count: 32))).address()
+    }
+
     private func b64(_ data: Data) -> String { data.base64EncodedString() }
 
     private func proven(_ edges: [(Data, Data)]) -> ProvenPredecessors {
@@ -34,10 +41,7 @@ final class MailboxAfterRotationTests: XCTestCase {
         XCTAssertEqual(resolver.current(of: old), new)
         XCTAssertEqual(resolver.current(of: new), new)
         XCTAssertEqual(resolver.current(of: stranger), stranger, "a key nobody superseded is itself")
-        XCTAssertEqual(
-            MailboxAddress.pseudonym(forAccountKey: old, resolver: resolver),
-            MailboxAddress.pseudonym(of: new))
-        XCTAssertNotEqual(MailboxAddress.pseudonym(of: old), MailboxAddress.pseudonym(of: new))
+        XCTAssertNotEqual(try box(0x01), try box(0x02), "each account seed has its own mailbox")
     }
 
     func testAnUnprovenChangeIsNeverResolved() throws {
@@ -49,9 +53,6 @@ final class MailboxAfterRotationTests: XCTestCase {
 
         XCTAssertEqual(resolver.current(of: old), old, "a reset's old key still addresses its own mailbox")
         XCTAssertFalse(resolver.samePerson(old, new))
-        XCTAssertEqual(
-            MailboxAddress.pseudonym(forAccountKey: old, resolver: resolver),
-            MailboxAddress.pseudonym(of: old))
     }
 
     func testAChainOfProvenRotationsResolvesToItsEnd() throws {
@@ -86,22 +87,6 @@ final class MailboxAfterRotationTests: XCTestCase {
             AccountKeyResolver(ownCurrentKey: nil, ownPredecessorKeys: [oldOwn]).current(of: oldOwn), oldOwn)
     }
 
-    func testAMailboxRecordedBeforeTheRotationWasSeenIsReAddressed() throws {
-        let old = try key(0x01), new = try key(0x02), oldOwn = try key(0x10), own = try key(0x12)
-        let resolver = AccountKeyResolver(
-            proven: proven([(old, new)]), ownCurrentKey: own, ownPredecessorKeys: [oldOwn])
-        let oldBox = try XCTUnwrap(MailboxAddress.pseudonym(of: old))
-        let newBox = try XCTUnwrap(MailboxAddress.pseudonym(of: new))
-        let unrelated = try XCTUnwrap(MailboxAddress.pseudonym(of: try key(0x44)))
-
-        XCTAssertEqual(MailboxAddress.current(of: oldBox, resolver: resolver), newBox)
-        XCTAssertEqual(MailboxAddress.current(of: newBox, resolver: resolver), newBox)
-        XCTAssertEqual(MailboxAddress.current(of: unrelated, resolver: resolver), unrelated)
-        XCTAssertEqual(
-            MailboxAddress.current(of: try XCTUnwrap(MailboxAddress.pseudonym(of: oldOwn)), resolver: resolver),
-            MailboxAddress.pseudonym(of: own))
-    }
-
     // MARK: - Rule 2: grants are kept for the person
 
     private struct Party {
@@ -110,10 +95,14 @@ final class MailboxAfterRotationTests: XCTestCase {
         let ownKey: Data
     }
 
-    private func center(resolver: @escaping @MainActor (Data?) -> AccountKeyResolver) throws -> Party {
+    private func center(
+        ownPredecessorBoxes: [Data] = [],
+        resolver: @escaping @MainActor (Data?) -> AccountKeyResolver
+    ) throws -> Party {
         let identity = try Identity.fromSeed(seed: Data(repeating: 0x31, count: 32))
         let c = ReachCenter(persistence: InMemoryReachPersistence(), ds: UnusedReachDs())
         c.keyResolverProvider = { _, own in resolver(own) }
+        c.ownPredecessorMailboxAddresses = { _ in ownPredecessorBoxes }
         c.activate(accountIdB64: "mailbox-after-rotation", accountIdentity: identity)
         return Party(center: c, ownSeed: identity.ed25519Seed(), ownKey: identity.signaturePublicKey())
     }
@@ -138,9 +127,24 @@ final class MailboxAfterRotationTests: XCTestCase {
         XCTAssertEqual(party.center.heldAccountKeys(), [b64(new)], "kept for the person, not the key it came under")
         XCTAssertEqual(party.center.writeAuth(toAccountKey: new)?.reachSeed, grant.seed)
         XCTAssertEqual(party.center.writeAuth(toAccountKey: old)?.reachSeed, grant.seed)
-        let newBox = try XCTUnwrap(MailboxAddress.pseudonym(of: new))
+        // ADR-0078 — the mailbox is the one the grant's binding names (the new
+        // seed's), verified under a key of the same person.
+        let newBox = try box(0x02)
         XCTAssertEqual(party.center.writeAuth(toMailbox: newBox)?.reachSeed, grant.seed)
         XCTAssertEqual(party.center.mailbox(forAccountKey: old), newBox)
+    }
+
+    /// ADR-0078 — a grant whose binding was signed by someone else than the
+    /// person it arrived from (resolved at receipt) is never kept: it would
+    /// route their Welcomes to a mailbox they do not read.
+    func testAGrantWhoseBindingIsSomeoneElsesIsNotKept() throws {
+        let sender = try key(0x01)
+        let party = try center { own in AccountKeyResolver(ownCurrentKey: own) }
+        XCTAssertFalse(party.center.keep(
+            try contactGrant(seedByte: 0x07), carrier: .oneToOneProfile(fromOtherParticipant: true),
+            fromAccountKeyB64: b64(sender), scopeHex: "aa"))
+        XCTAssertTrue(party.center.heldAccountKeys().isEmpty)
+        XCTAssertNil(party.center.writePlan(toAccountKey: sender), "no verified mailbox, no write")
     }
 
     func testAGrantKeptBeforeTheRotationWasSeenIsStillFoundAfterIt() throws {
@@ -153,7 +157,7 @@ final class MailboxAfterRotationTests: XCTestCase {
             before, carrier: .oneToOneProfile(fromOtherParticipant: true),
             fromAccountKeyB64: b64(old), scopeHex: "aa"))
         XCTAssertNil(party.center.writeAuth(toAccountKey: new), "nothing ties the two keys yet")
-        let oldBox = try XCTUnwrap(MailboxAddress.pseudonym(of: old))
+        let oldBox = try box(0x01)
         XCTAssertEqual(party.center.currentMailbox(for: oldBox), oldBox)
 
         // The gate records the proven rotation.
@@ -164,13 +168,11 @@ final class MailboxAfterRotationTests: XCTestCase {
 
         XCTAssertEqual(kept, [b64(new)], "a Welcome owed for this person is retried")
         XCTAssertEqual(party.center.writeAuth(toAccountKey: new)?.reachSeed, before.seed)
-        let newBox = try XCTUnwrap(MailboxAddress.pseudonym(of: new))
-        XCTAssertEqual(party.center.currentMailbox(for: oldBox), newBox)
+        // ADR-0078 — only the old mailbox is known (the grant held names it):
+        // nothing derives the new one from the new key.
+        XCTAssertEqual(party.center.currentMailbox(for: oldBox), oldBox)
         XCTAssertEqual(
-            party.center.writeAuthCandidates(toMailbox: newBox).map(\.reachSeed), [before.seed])
-        XCTAssertTrue(
-            party.center.writeAuthCandidates(toMailbox: oldBox).isEmpty,
-            "the old mailbox is never the address of a write again")
+            party.center.writeAuthCandidates(toMailbox: oldBox).map(\.reachSeed), [before.seed])
 
         // The re-sent profile's grant (same class, scope and version, derived
         // from the new seed) replaces it for the person.
@@ -180,6 +182,11 @@ final class MailboxAfterRotationTests: XCTestCase {
             fromAccountKeyB64: b64(old), scopeHex: "aa"))
         XCTAssertEqual(party.center.writeAuth(toAccountKey: old)?.reachSeed, after.seed)
         XCTAssertEqual(party.center.heldAccountKeys(), [b64(new)])
+        // The new grant names the new mailbox, which a write recorded to the
+        // old one now goes to.
+        let newBox = try box(0x02)
+        XCTAssertEqual(party.center.currentMailbox(for: oldBox), newBox)
+        XCTAssertEqual(party.center.writeAuthCandidates(toMailbox: oldBox).first?.reachSeed, after.seed)
 
         party.center.dropHeld(accountKeyB64: b64(new))
         XCTAssertNil(party.center.writeAuth(toAccountKey: old), "dropping the person drops every key's grants")
@@ -193,22 +200,25 @@ final class MailboxAfterRotationTests: XCTestCase {
             fromAccountKeyB64: b64(old), scopeHex: "aa"))
 
         XCTAssertNil(party.center.writeAuth(toAccountKey: reset))
-        XCTAssertEqual(party.center.mailbox(forAccountKey: old), MailboxAddress.pseudonym(of: old))
+        XCTAssertNil(party.center.mailbox(forAccountKey: reset), "no mailbox is derived from a key")
+        XCTAssertEqual(party.center.mailbox(forAccountKey: old), try box(0x01))
     }
 
     func testAWriteToTheAccountsOwnOldKeyIsSignedForItsCurrentMailbox() throws {
         let oldOwn = try key(0x10)
-        let party = try center { own in
+        let oldOwnBox = try box(0x10)
+        let party = try center(ownPredecessorBoxes: [oldOwnBox]) { own in
             AccountKeyResolver(ownCurrentKey: own, ownPredecessorKeys: [oldOwn])
         }
         let ownSeed = try XCTUnwrap(party.center.ownContactSeed())
+        let ownBox = try box(0x31)
 
         // "Another device of my own account": its leaf is bound to the old key.
         XCTAssertEqual(party.center.writeAuth(toAccountKey: oldOwn)?.reachSeed, ownSeed)
-        XCTAssertEqual(party.center.mailbox(forAccountKey: oldOwn), MailboxAddress.pseudonym(of: party.ownKey))
-        let oldOwnBox = try XCTUnwrap(MailboxAddress.pseudonym(of: oldOwn))
+        XCTAssertEqual(party.center.mailbox(forAccountKey: oldOwn), ownBox)
+        XCTAssertEqual(party.center.ownMailbox?.address, ownBox)
         let target = party.center.currentMailbox(for: oldOwnBox)
-        XCTAssertEqual(target, MailboxAddress.pseudonym(of: party.ownKey))
+        XCTAssertEqual(target, ownBox)
         XCTAssertEqual(party.center.writeAuthCandidates(toMailbox: target).map(\.reachSeed), [ownSeed])
     }
 
@@ -228,7 +238,10 @@ final class MailboxAfterRotationTests: XCTestCase {
         let delegations = try checkCommitterDelegations(envelope: envelope)
 
         XCTAssertEqual(envelope.addedAccountKey, new)
-        XCTAssertEqual(delegations.map(\.mailbox), [try XCTUnwrap(MailboxAddress.pseudonym(of: new))])
+        XCTAssertEqual(
+            envelope.addedMailboxBinding,
+            signMailboxBinding(accountIdentity: try Identity.fromSeed(seed: Data(repeating: 0x02, count: 32))))
+        XCTAssertEqual(delegations.map(\.mailbox), [try box(0x02)])
         XCTAssertEqual(delegations.map(\.delegatePk), [committerNew])
     }
 

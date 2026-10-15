@@ -19,18 +19,25 @@
 //!   stored write to an unclaimed one (`201` with a real id and timestamp,
 //!   see `journal::publish_dropped`) and nothing is stored, so a stranger
 //!   cannot tell a closed mailbox from an unused pseudonym by writing to it.
+//!   It spends a `mailbox-write` token exactly as a stored proofless write
+//!   does (below): otherwise a writer could tell the two apart by whether
+//!   its token came back unspent.
 //! - A write with a proof that does not verify is the one ADR-0053 `401`,
 //!   whatever the mailbox's state (claimed or not, open or closed). Only a
 //!   writer who once held a valid key can learn that it stopped working.
-//! - An **open** mailbox takes a proofless write; a write that does carry a
-//!   proof is judged as anywhere else.
+//! - An **open** mailbox, and an **unclaimed** one, take a proofless write
+//!   only when it spends one anonymous token of context `mailbox-write`
+//!   (ADR-0078 section 1): under sealed sender nothing about such a writer is
+//!   visible, so the token is what rations it. A write that does carry a
+//!   proof spends none and is judged as anywhere else.
 //!
-//! Registration (`PUT /ds/mailbox/{hex}/reach`) is signed by the identity
-//! key the mailbox is named after, at `MAILBOX_EPOCH` (ADR-0053's mailbox
-//! proof), and applied in one transaction behind the mailbox row's lock.
+//! Registration (`PUT /ds/mailbox/{hex}/reach`) is signed by the mailbox key
+//! the mailbox is named after (ADR-0078; never the identity key), at
+//! `MAILBOX_EPOCH` (ADR-0053's mailbox proof), and applied in one
+//! transaction behind the mailbox row's lock.
 //!
 //! The owner reads its registered keys back (`GET /ds/mailbox/{hex}/reach`,
-//! the same identity proof, every failure the uniform `401`) so a device
+//! the same mailbox-key proof, every failure the uniform `401`) so a device
 //! restored with no version state can resume each class at the version the
 //! server still honours (ADR-0060 section 1, "Versions after a restore").
 //!
@@ -77,11 +84,14 @@ pub(crate) const MAX_REACH_KEYS: usize = 4096;
 /// What the mailbox gate decided for a write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MailboxWrite {
-    /// Store it.
+    /// Store it (a valid reach proof or delegation was consumed).
     Store,
-    /// Answer as if stored, store nothing (a proofless write to a closed
-    /// mailbox).
-    Drop,
+    /// Store it once the caller has spent one `mailbox-write` anonymous token
+    /// (a proofless write to an open or unclaimed mailbox, ADR-0078).
+    StoreAfterToken,
+    /// Spend one `mailbox-write` token, then answer as if stored and store
+    /// nothing (a proofless write to a closed mailbox).
+    DropAfterToken,
 }
 
 /// A claimed mailbox's `is_open` flag, or `None` when unclaimed.
@@ -90,7 +100,7 @@ async fn mailbox_open(
     mailbox: &[u8; PSEUDONYM_LEN],
 ) -> Result<Option<bool>, HandlerError> {
     let row: Option<(bool,)> =
-        sqlx::query_as("SELECT is_open FROM ds_mailbox_access WHERE device_id = ?")
+        sqlx::query_as("SELECT is_open FROM ds_mailbox_access WHERE mailbox = ?")
             .bind(&mailbox[..])
             .fetch_optional(pool)
             .await
@@ -204,8 +214,8 @@ pub(crate) async fn gate_mailbox_write(
             return Err(refused());
         }
         return Ok(match open {
-            None | Some(true) => MailboxWrite::Store,
-            Some(false) => MailboxWrite::Drop,
+            None | Some(true) => MailboxWrite::StoreAfterToken,
+            Some(false) => MailboxWrite::DropAfterToken,
         });
     }
     // A proof is judged the same way whatever the mailbox's state. An
@@ -336,7 +346,7 @@ fn validate(body: ReachBody) -> Result<ReachUpdate, HandlerError> {
 /// `PUT /ds/mailbox/{hex}/reach` - add and remove reach keys, and set the
 /// Everyone flag, in one transaction.
 ///
-/// Signed by the identity key the mailbox is named after (`MAILBOX_EPOCH`);
+/// Signed by the mailbox key the mailbox is named after (`MAILBOX_EPOCH`);
 /// an unclaimed mailbox has no such key and answers the uniform `401`.
 /// Idempotent: re-adding a key replaces its expiry, removing an absent key
 /// changes nothing. More than [`MAX_REACH_KEYS`] unexpired keys after the
@@ -376,7 +386,7 @@ pub(crate) async fn put_mailbox_reach(
         .map_err(db_error("begin reach update"))?;
     // The row lock serializes updates of one mailbox.
     let row: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT identity_pk FROM ds_mailbox_access WHERE device_id = ? FOR UPDATE")
+        sqlx::query_as("SELECT mailbox_pk FROM ds_mailbox_access WHERE mailbox = ? FOR UPDATE")
             .bind(&mailbox[..])
             .fetch_optional(&mut *tx)
             .await
@@ -450,7 +460,7 @@ pub(crate) async fn put_mailbox_reach(
     }
 
     if let Some(open) = update.open {
-        sqlx::query("UPDATE ds_mailbox_access SET is_open = ? WHERE device_id = ?")
+        sqlx::query("UPDATE ds_mailbox_access SET is_open = ? WHERE mailbox = ?")
             .bind(open)
             .bind(&mailbox[..])
             .execute(&mut *tx)
@@ -514,7 +524,7 @@ pub(crate) struct ReachList {
 /// versions 0, 1, 2, ... and resumes at the highest one listed here.
 ///
 /// Authenticated exactly like the owner's mailbox read (ADR-0053's mailbox
-/// proof: the identity key the pseudonym derives from, at `MAILBOX_EPOCH`,
+/// proof: the mailbox key the address derives from, at `MAILBOX_EPOCH`,
 /// nonce consumed). Every failure - no proof, a proof by any other key
 /// (a reach key included), a replay, an unclaimed mailbox - is the uniform
 /// `401`, so the route tells a non-owner nothing. Public keys only
@@ -591,21 +601,25 @@ const _: () = assert!(NONCE_LEN == 16);
 mod tests {
     use super::*;
     use crate::test_support::{
-        app, fresh_name, fresh_nonce, key, messages_uri, pk_b64, send, send_with, Req,
+        app, fresh_name, fresh_nonce, key, mailbox_body, mailbox_row, messages_uri, pk_b64, send,
+        send_with, token_at, Req,
     };
     use axum::Router;
+    use lakko_anon_token::TokenContext;
     use lakko_ds_proof::{sign, sign_delegation, SigningKey};
 
-    /// A fresh claimed mailbox: its identity key and pseudonym.
+    /// A fresh claimed mailbox: its mailbox key (named `identity` in these
+    /// tests, the key that signs the owner's reads and registrations) and its
+    /// address.
     async fn claimed_mailbox(app: &Router, tag: u8) -> (SigningKey, [u8; PSEUDONYM_LEN]) {
         let identity = SigningKey::from_seed(&fresh_name(tag));
-        let mailbox = lakko_ds_proof::mailbox_pseudonym(&identity.verifying_key());
+        let mailbox = lakko_ds_proof::mailbox_address(&identity.verifying_key().to_bytes());
         let (status, _) = send(
             app,
             Req {
                 method: "PUT",
                 uri: &format!("/ds/mailbox/{}/access", hex::encode(mailbox)),
-                body: serde_json::json!({ "identity_pk_b64": pk_b64(&identity) })
+                body: serde_json::json!({ "mailbox_pk_b64": pk_b64(&identity) })
                     .to_string()
                     .into_bytes(),
                 proof: None,
@@ -667,7 +681,7 @@ mod tests {
             Req {
                 method: "POST",
                 uri: &messages_uri("mailbox", mailbox),
-                body: body.to_vec(),
+                body: mailbox_row(body),
                 proof,
             },
             extra,
@@ -699,8 +713,14 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|m| B64.decode(m["payload_b64"].as_str().unwrap()).unwrap())
+            .map(|m| mailbox_body(&B64.decode(m["payload_b64"].as_str().unwrap()).unwrap()))
             .collect()
+    }
+
+    /// A spendable `mailbox-write` token header, for a proofless write to an
+    /// open or unclaimed mailbox (ADR-0078).
+    fn mailbox_token() -> String {
+        token_at(TokenContext::MailboxWrite, 0)
     }
 
     async fn check(app: &Router, mailbox: &[u8; PSEUDONYM_LEN], signer: &SigningKey) -> StatusCode {
@@ -733,9 +753,43 @@ mod tests {
         let unclaimed = fresh_name(40);
         let (identity, closed) = claimed_mailbox(&app, 41).await;
 
-        let (s1, first) = write(&app, &unclaimed, b"to nobody", None, &[]).await;
-        let (s2, dropped) = write(&app, &closed, b"to a stranger", None, &[]).await;
-        let (s3, last) = write(&app, &unclaimed, b"to nobody again", None, &[]).await;
+        let token = mailbox_token();
+        let (s1, first) = write(
+            &app,
+            &unclaimed,
+            b"to nobody",
+            None,
+            &[(lakko_anon_token::TOKEN_HEADER, &token)],
+        )
+        .await;
+        let token = mailbox_token();
+        let (s2, dropped) = write(
+            &app,
+            &closed,
+            b"to a stranger",
+            None,
+            &[(lakko_anon_token::TOKEN_HEADER, &token)],
+        )
+        .await;
+        // The dropped write spent its token like a stored one would.
+        let (replayed, _) = write(
+            &app,
+            &closed,
+            b"again",
+            None,
+            &[(lakko_anon_token::TOKEN_HEADER, &token)],
+        )
+        .await;
+        assert_eq!(replayed, StatusCode::UNAUTHORIZED);
+        let token = mailbox_token();
+        let (s3, last) = write(
+            &app,
+            &unclaimed,
+            b"to nobody again",
+            None,
+            &[(lakko_anon_token::TOKEN_HEADER, &token)],
+        )
+        .await;
         assert_eq!(
             (s1, s2, s3),
             (
@@ -780,13 +834,14 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         // A replayed proof.
         let uri = messages_uri("mailbox", &mailbox);
+        let once = mailbox_row(b"once");
         let header = sign(
             &reach,
             &RequestParts {
                 method: "POST",
                 canonical_path: &uri,
                 query: "",
-                body: b"once",
+                body: &once,
             },
             REACH_EPOCH,
             now_ms(),
@@ -978,12 +1033,54 @@ mod tests {
             }
         };
         assert_eq!(set_open(true).await, StatusCode::NO_CONTENT);
-        let (status, _) = write(&app, &mailbox, b"from anyone", None, &[]).await;
+        // ADR-0078: without a `mailbox-write` token a proofless write to an
+        // open mailbox is refused with the gate's stable code, stores nothing.
+        let (status, json) = write(&app, &mailbox, b"no token", None, &[]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(json["error"], "anon-token-required");
+        // A token of another context does not pay for it.
+        let knock = token_at(TokenContext::DsKnock, 0);
+        let (status, _) = write(
+            &app,
+            &mailbox,
+            b"wrong token",
+            None,
+            &[(lakko_anon_token::TOKEN_HEADER, &knock)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let token = mailbox_token();
+        let (status, _) = write(
+            &app,
+            &mailbox,
+            b"from anyone",
+            None,
+            &[(lakko_anon_token::TOKEN_HEADER, &token)],
+        )
+        .await;
         assert_eq!(status, StatusCode::CREATED);
+        // A spent token is refused.
+        let (status, _) = write(
+            &app,
+            &mailbox,
+            b"replayed",
+            None,
+            &[(lakko_anon_token::TOKEN_HEADER, &token)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
         let (status, _) = write(&app, &mailbox, b"x", Some((&key(61), REACH_EPOCH)), &[]).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(set_open(false).await, StatusCode::NO_CONTENT);
-        let (status, _) = write(&app, &mailbox, b"dropped", None, &[]).await;
+        let token = mailbox_token();
+        let (status, _) = write(
+            &app,
+            &mailbox,
+            b"dropped",
+            None,
+            &[(lakko_anon_token::TOKEN_HEADER, &token)],
+        )
+        .await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(
             stored(&app, &identity, &mailbox).await,
@@ -1033,13 +1130,14 @@ mod tests {
         add_reach(&app, &identity, &mailbox, &other, None).await;
         let uri = messages_uri("mailbox", &mailbox);
         let signed = |signer: &SigningKey, body: &'static [u8]| {
+            let row = mailbox_row(body);
             sign(
                 signer,
                 &RequestParts {
                     method: "POST",
                     canonical_path: &uri,
                     query: "",
-                    body,
+                    body: &row,
                 },
                 REACH_EPOCH,
                 now_ms(),
@@ -1092,7 +1190,8 @@ mod tests {
         let (identity, claimed) = claimed_mailbox(&app, 83).await;
         // An identity whose mailbox nobody claimed.
         let stranger_identity = SigningKey::from_seed(&fresh_name(84));
-        let unclaimed = lakko_ds_proof::mailbox_pseudonym(&stranger_identity.verifying_key());
+        let unclaimed =
+            lakko_ds_proof::mailbox_address(&stranger_identity.verifying_key().to_bytes());
         let read = |mailbox: [u8; PSEUDONYM_LEN], proof: Option<(&SigningKey, u64)>| {
             let app = app.clone();
             let proof = proof.map(|(k, e)| (k.clone(), e));
@@ -1126,10 +1225,27 @@ mod tests {
             read(claimed, Some((&identity, MAILBOX_EPOCH))).await.0,
             StatusCode::OK
         );
-        // And writes are indistinguishable too: a proofless post to either is
-        // answered as stored.
-        let (s1, _) = write(&app, &unclaimed, b"a", None, &[]).await;
-        let (s2, _) = write(&app, &claimed, b"b", None, &[]).await;
+        // And writes are indistinguishable too: a proofless post that pays its
+        // token is answered as stored, whether it lands in an unclaimed
+        // mailbox or is dropped by a closed one.
+        let token = mailbox_token();
+        let (s1, _) = write(
+            &app,
+            &unclaimed,
+            b"a",
+            None,
+            &[(lakko_anon_token::TOKEN_HEADER, &token)],
+        )
+        .await;
+        let token = mailbox_token();
+        let (s2, _) = write(
+            &app,
+            &claimed,
+            b"b",
+            None,
+            &[(lakko_anon_token::TOKEN_HEADER, &token)],
+        )
+        .await;
         assert_eq!((s1, s2), (StatusCode::CREATED, StatusCode::CREATED));
     }
 
@@ -1443,7 +1559,7 @@ mod tests {
             assert_eq!(body, uniform.as_bytes());
         }
         let unborn = SigningKey::from_seed(&fresh_name(89));
-        let unclaimed = lakko_ds_proof::mailbox_pseudonym(&unborn.verifying_key());
+        let unclaimed = lakko_ds_proof::mailbox_address(&unborn.verifying_key().to_bytes());
         let (status, body) = list_reach(&app, &unclaimed, Some((&unborn, MAILBOX_EPOCH))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body, uniform.as_bytes());

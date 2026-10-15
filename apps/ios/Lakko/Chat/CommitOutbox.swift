@@ -101,13 +101,14 @@ public struct PendingCommitEntry: Codable, Equatable {
     public var targetEpoch: String
     /// base64 of the EXACT commit wire-bytes the core create-commit produced.
     public var commitB64: String
-    /// base64 of the second artifact's EXACT publishable wire-bytes — the
-    /// `wrapEnvelope(.welcome, welcome)` mailbox envelope. `nil` for remove /
-    /// role (they publish only the commit).
+    /// base64 of the second artifact — the raw MLS Welcome, sealed as a
+    /// `.welcome` mailbox row (ADR-0078) at publish time to the verified
+    /// mailbox the recorded address resolves to. `nil` for remove / role
+    /// (they publish only the commit).
     public var secondArtifactB64: String?
     /// Discriminates the second artifact's re-publish destination.
     public var secondArtifactKind: SecondArtifactKind?
-    /// base64 of the recipient mailbox pseudonym — the `publishMailbox` target
+    /// base64 of the recipient mailbox address — the `publishMailbox` target
     /// for the second artifact. `nil` when there is no second artifact.
     public var secondArtifactMailboxB64: String?
     /// ADR-0045 — `true` while this entry belongs to a STAGED sweep whose

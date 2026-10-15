@@ -13,17 +13,16 @@
  *   2. Fetch the recipient's identity bundle (Ed25519 + X25519
  *      pubkeys) via discovery
  *      (`DiscoveryClient.identityFetch`).
- *   3. Derive the recipient's mailbox pseudonym
- *      (`IdentityPseudonym.fromIdentity(recipient_pubkey)` —
- *      32 bytes, public, anyone with the recipient's identity
- *      pubkey can compute the same value).
+ *   3. Find the recipient's mailbox (ADR-0078): the mailbox key a
+ *      grant, link or public record binds, verified against the
+ *      recipient's pinned account key. The address is NOT a
+ *      function of the identity key.
  *   4. Compose the wire bytes via
  *      `ContactRequest.compose(senderSigningSeed,
  *      recipientX25519Pub, fromPseudonym, validAfterMs,
  *      introMessage)`.
- *   5. POST the bytes to
- *      `lakko-svc-ds`'s `/ds/mailbox/{recipient_pseudonym_hex}`
- *      endpoint.
+ *   5. Seal them as one mailbox row (`contacts/mailbox-row.ts`) and
+ *      POST it to `lakko-svc-ds`'s `/ds/mailbox/{address_hex}`.
  *
  * The receive flow + UI live in **1.16d3d**.
  *
@@ -101,13 +100,7 @@ import {
 } from "./local-store";
 import { verifyIdentityInLog, verifyRotationChain } from "../transparency/verify";
 import type { LogVerifyStatus } from "../transparency/verify";
-import {
-  KIND_CONTACT_ACK,
-  KIND_CONTACT_REQUEST,
-  KIND_WELCOME,
-  parseEnvelope,
-  wrapEnvelope,
-} from "./envelope";
+import { openOwnRow, sealRowFor } from "./mailbox-row";
 import {
   deleteEntry,
   loadUnacked,
@@ -144,13 +137,18 @@ import { reachSession } from "../reach/reach-service";
 import {
   accountKeyOfKeyPackage,
   accountKeyOfLeaf,
-  accountMailboxOf,
   MailboxUnreachableError,
-  mailboxOfExactKey,
+  personKeysOf,
+  verifiedTargetOfGrant,
   writeToPerson,
   writeWelcome,
 } from "../reach/mailbox-write";
-import { forgetJoinReply, joinReplyFor, rememberJoinReply } from "../reach/join-replies";
+import {
+  forgetJoinReply,
+  joinReplyBindingVerifies,
+  joinReplyFor,
+  rememberJoinReply,
+} from "../reach/join-replies";
 import { journalHex } from "../ds/access";
 import { scanJournal } from "../chat/journal-head-epoch";
 import {
@@ -300,7 +298,7 @@ export interface IncomingContactRequest {
    *  signature authenticates): file it under that key and verify the
    *  username before showing it. */
   profile: ReceivedProfile | null;
-  /** ADR-0060 section 6 — the requester's `reply` grant (the 37-byte grant
+  /** ADR-0060 section 6 — the requester's `reply` grant (the 134-byte grant
    *  wire, base64), which the accept (the 1:1 Welcome) and the ContactAck are
    *  written with; `null` when the request carried none or did not decrypt.
    *  Secret: never logged, kept only until the request is answered. */
@@ -317,6 +315,10 @@ export interface ContactRequestOptions {
    *  find us), else sent unsigned (which only an Everyone mailbox stores).
    *  Not consumed: the caller frees it and never keeps a link grant. */
   readonly writeGrant?: WasmReachGrant | null;
+  /** ADR-0078 - the recipient's 97-byte mailbox binding from their public
+   *  record (a person in Everyone): where an unsigned request goes when no
+   *  grant reaches them. Verified against the recipient's key before use. */
+  readonly openBinding?: Uint8Array | null;
 }
 
 /** A verified incoming Welcome (MLS group-join blob) decoded
@@ -327,8 +329,8 @@ export interface IncomingWelcome {
    *  `Group.joinFromWelcome(identity, ...)`. */
   welcomeBytes: Uint8Array;
   createdAt: string;
-  /** ADR-0053 — the Welcome arrived in the ACCOUNT mailbox rather than the
-   *  device mailbox. Since ADR-0050 a conversation Welcome is addressed to a
+  /** ADR-0053 — the Welcome arrived in the ACCOUNT mailbox (ADR-0078: the
+   *  only mailbox there is). Since ADR-0050 a conversation Welcome is addressed to a
    *  device leaf, so the one Welcome still addressed to the account key is a
    *  channel co-publisher's (the PublisherGroup lives in the account
    *  identity's provider), which the co-publisher flow opens itself. The
@@ -897,6 +899,9 @@ function sweepPortsFor(
       // to the account mailbox that leaf's binding names, read off the roster
       // after the merge. A leaf of an account already written to in this
       // sweep is skipped (its devices share one mailbox and one Welcome).
+      // ADR-0078 — `bytes` is the RAW Welcome (`wrapWelcome` is the
+      // identity): it is sealed here, per attempt, to the mailbox key the
+      // grant used for that attempt binds.
       publishMailbox: async (leafKey, bytes) => {
         const accountKey = accountKeyOfLeaf(rosterOf(group), leafKey);
         // ADR-0074 section 3.5a rule 1 - the leaf's binding may name a proven
@@ -915,10 +920,12 @@ function sweepPortsFor(
         try {
           // ADR-0074 section 3.5a rule 6 - a refusal re-checks the address
           // once; the mailbox is the one resolved for that attempt.
+          const wasm = await loadWasm();
           id = await writeWelcome(
             accountKey,
             { scope: groupIdBytes, explicit },
-            async (pseudonym, auth) => (await ds.publishMailbox(pseudonym, bytes, auth)).id,
+            async (target, auth) =>
+              (await ds.publishMailbox(target.address, sealRowFor(wasm, target, "welcome", bytes), auth)).id,
           );
         } catch (err) {
           if (!(err instanceof MailboxUnreachableError)) throw err;
@@ -1002,7 +1009,9 @@ function sweepPortsFor(
     // ADR-0060 — the destination recorded is the added LEAF's key; the
     // account mailbox it maps to is resolved at publish (see `publishMailbox`).
     welcomeMailbox: (signatureKey) => signatureKey,
-    wrapWelcome: (welcome) => wrapEnvelope(KIND_WELCOME, welcome),
+    // ADR-0078 — the outbox keeps the RAW Welcome: a row is sealed to the
+    // mailbox key the write resolves, which is only known at publish.
+    wrapWelcome: (welcome) => welcome,
     // ADR-0053 contract point 3 + ADR-0057 obligation 5 — the staged epoch's
     // key, registered with this device's root or registrar key before the
     // sweep is published. The owner revokes the registrar keys of the
@@ -1223,7 +1232,8 @@ export class ContactsClient {
     // Never fall back to `resolveIdentity`: since ADR-0050 the canonical
     // identity is this DEVICE's leaf identity, and a contact request signed
     // with it names the device key as `from_pubkey`, so the acceptor routes
-    // its ContactAck to the device mailbox, where only Welcomes are read.
+    // its ContactAck to a mailbox nothing reads (ADR-0078: device mailboxes
+    // are gone).
     // Seen live on 2026-09-16 (web request, Android accept, no contact on
     // web). The account identity is always derivable from the phrase seed.
     if (secrets === null) throw ContactsError.noIdentitySecrets();
@@ -1624,33 +1634,23 @@ export class ContactsClient {
         let secondMessageId: number | undefined;
         if (
           entry.secondArtifactB64 !== undefined &&
-          entry.secondArtifactMailboxB64 !== undefined
+          entry.secondArtifactAccountKeyB64 !== undefined
         ) {
           // Welcome -> the new member's mailbox (NOT this device's group
           // journal), so no echo re-arm — the committer never re-fetches it.
+          // ADR-0078: the entry holds the RAW Welcome and the account key; the
+          // target is resolved now (a verified binding of a grant held for
+          // that account) and the row sealed to it. Signed with the key that
+          // reaches the account; rule 6: re-checked once on a refusal.
           const secondBytes = base64Decode(entry.secondArtifactB64);
-          // ADR-0074 section 3.5a rule 1 - the entry recorded the mailbox as
-          // it was derived then; the account may have rotated (with a proof)
-          // since, so it is derived again from the account key when the
-          // entry carries one.
-          if (entry.secondArtifactAccountKeyB64 === undefined) {
-            // An entry that predates ADR-0060: unsigned, to the mailbox it
-            // recorded.
-            const pub2 = await this.ds.publishMailbox(
-              base64Decode(entry.secondArtifactMailboxB64),
-              secondBytes,
-            );
-            secondMessageId = pub2.id;
-          } else {
-            // ADR-0060 — signed with the key that reaches the account the
-            // mailbox is named after; rule 6: re-checked once on a refusal.
-            const pub2 = await writeToPerson(
-              base64Decode(entry.secondArtifactAccountKeyB64),
-              { scope: groupIdBytes, allowMember: true },
-              (pseudonym, auth) => this.ds.publishMailbox(pseudonym, secondBytes, auth),
-            );
-            secondMessageId = pub2.id;
-          }
+          const wasm = await loadWasm();
+          const pub2 = await writeToPerson(
+            base64Decode(entry.secondArtifactAccountKeyB64),
+            { scope: groupIdBytes, allowMember: true },
+            (target, auth) =>
+              this.ds.publishMailbox(target.address, sealRowFor(wasm, target, "welcome", secondBytes), auth),
+          );
+          secondMessageId = pub2.id;
         }
         await this.ackCommitBestEffort(entry.id, commitPub.id, secondMessageId);
       } catch (err) {
@@ -2550,12 +2550,15 @@ export class ContactsClient {
     const recipientX25519Pub = base64Decode(bundle.x25519_pubkey);
     this.reportUsernameResolved(recipientSignaturePub, lookup.normalisedUsername);
 
+    // ADR-0078 - a person in Everyone: their public record's mailbox binding
+    // is where an unsigned request goes (verified against the bundle key
+    // before the write; a binding signed by another key reaches nothing).
     const publish = await this.composeAndPublishContactRequest(
       identity,
       recipientSignaturePub,
       recipientX25519Pub,
       introMessage,
-      options,
+      { ...options, openBinding: options?.openBinding ?? lookup.mailboxBinding ?? null },
     );
 
     return {
@@ -2660,11 +2663,9 @@ export class ContactsClient {
       throw ContactsError.noIdentitySecrets();
     }
 
-    // The recipient's mailbox is keyed by their public-pubkey
-    // pseudonym — anyone holding the recipient's Ed25519
-    // identity pubkey can compute the same 32-byte value, by
-    // design. This is the routing address for cold contact
-    // requests (see ADR-0005 §13.7).
+    // ADR-0078: the recipient's mailbox is the one a binding (a grant's,
+    // or the public record's for a person in Everyone) names, verified
+    // against the recipient key in hand; no address is derived from it.
     //
     // ADR-0074 section 3.5a rule 1 - resolved first. A request is sealed to
     // the X25519 key the caller supplied, which belongs to the key it
@@ -2680,10 +2681,12 @@ export class ContactsClient {
       );
     }
     // Sender's `from_pseudonym` field. For a first cold contact
-    // we use the sender's identity pseudonym (public, derivable
-    // by anyone holding the sender's pubkey); the receiver
-    // uses it to address an ack. Per-relationship pseudonyms
-    // (which rotate after the handshake) are 1.16d3d's job.
+    // we use the sender's identity pseudonym; the receiver echoes
+    // it in its ack (`ackToPseudonym`), which the sender matches
+    // against its pending-sent table. ADR-0078: it is NOT a mailbox
+    // address any more (the ack goes to the mailbox the reply grant's
+    // binding names), and it rides inside the sealed row, so the
+    // Delivery Service never reads it.
     const senderPseudonym = wasm.IdentityPseudonym.fromIdentity(
       senderIdentity.signaturePublicKey,
     ).asBytes();
@@ -2741,28 +2744,27 @@ export class ContactsClient {
       }
     }
 
-    // Publish to the DS, wrapped with the kind discriminator so
-    // the receiver's pollMailbox can distinguish a
-    // ContactRequest from a Welcome (1.16e3). ADR-0060: signed with the
-    // grant that lets us reach the recipient (a link's, or a kept one).
-    const envelope = wrapEnvelope(KIND_CONTACT_REQUEST, wireBytes);
+    // ADR-0078: sealed as a ContactRequest row (the kind rides inside the
+    // seal) to the mailbox key the grant used for the attempt binds. ADR-0060:
+    // signed with the grant that lets us reach the recipient (a link's, or a
+    // kept one); unsigned (one `mailbox-write` token) only to the mailbox the
+    // public record of a person in Everyone binds.
     // ADR-0074 section 3.5a rule 6 - a refused write re-checks the address
-    // once. The request is SEALED to the key in hand, so the re-check may
-    // only change which GRANT is offered: should the key turn out to be
-    // superseded, the write is not moved to another mailbox (the plan's
-    // mailbox is compared with the one the request was sealed for).
-    const sealedFor = journalHex(await mailboxOfExactKey(recipientSignaturePubkey));
+    // once. The request is SEALED to the key in hand, so every binding is
+    // verified against exactly that key (`exactKey`): should it turn out to
+    // be superseded, no binding of the successor's is accepted and the write
+    // is not moved to another mailbox.
     let publish;
     try {
       publish = await writeToPerson(
         recipientSignaturePubkey,
-        { explicit: options?.writeGrant ?? null },
-        (mailbox, auth) => {
-          if (journalHex(mailbox) !== sealedFor) {
-            throw new Error("contact request: the recipient key was superseded by a proven key rotation");
-          }
-          return this.ds.publishMailbox(mailbox, envelope, auth);
+        {
+          explicit: options?.writeGrant ?? null,
+          openBinding: options?.openBinding ?? null,
+          exactKey: true,
         },
+        (target, auth) =>
+          this.ds.publishMailbox(target.address, sealRowFor(wasm, target, "contact-request", wireBytes), auth),
       );
     } catch (err) {
       throw ContactsError.wrap(err);
@@ -2785,11 +2787,10 @@ export class ContactsClient {
    * to complete the more expensive Group / Welcome dance.
    *
    * **Routing:** the ack body carries `ackToPseudonym = original
-   * request's fromPseudonym`. The publish target is the sender's
-   * stranger-inbox mailbox — derived from `original.fromPubkey`
-   * via `IdentityPseudonym.fromIdentity` (the same public-pubkey
-   * derivation the contact-request flow uses for the recipient's
-   * mailbox).
+   * request's fromPseudonym`. The publish target is the requester's
+   * mailbox the request's `reply` grant binds (ADR-0078: verified by
+   * the core against `fromPubkey` when the request was opened, and again
+   * here before the write), sealed as a ContactAck row.
    *
    * **Threat-model note:** the ack carries only public material
    * (pubkeys + account_id + a self-attested timestamp). The
@@ -2811,8 +2812,8 @@ export class ContactsClient {
       throw ContactsError.noIdentitySecrets();
     }
 
-    // Sender's mailbox = `IdentityPseudonym.fromIdentity(sender_pubkey)`.
-    // The original request's `fromPubkey` is the routing handle.
+    // ADR-0078: the requester's mailbox is the one their `reply` grant's
+    // binding names, verified against `fromPubkey`.
     // ADR-0074 section 3.5a rule 1 - resolved: an ack never goes to the
     // mailbox of a key a proven rotation superseded.
     const acceptedAtMs = BigInt(Date.now());
@@ -2830,7 +2831,6 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
 
-    const envelope = wrapEnvelope(KIND_CONTACT_ACK, wireBytes);
     // ADR-0060 section 6 — written with the requester's `reply` grant.
     // Rule 6: a refusal re-checks the requester's address once.
     let publish;
@@ -2838,7 +2838,8 @@ export class ContactsClient {
       publish = await writeToPerson(
         originalRequest.fromPubkey,
         { explicit: originalRequest.replyGrantB64 },
-        (mailbox, auth) => this.ds.publishMailbox(mailbox, envelope, auth),
+        (target, auth) =>
+          this.ds.publishMailbox(target.address, sealRowFor(wasm, target, "contact-ack", wireBytes), auth),
       );
     } catch (err) {
       throw ContactsError.wrap(err);
@@ -2852,9 +2853,9 @@ export class ContactsClient {
    * once the sender has called `Group.addMember(recipientKp)`
    * and gotten the welcome bytes back.
    *
-   * Routing target: same `IdentityPseudonym.fromIdentity(...)`
-   * mailbox the ContactRequest flow uses — the receiver
-   * polls one place and dispatches by the kind byte.
+   * Routing target: the recipient's account mailbox, as a grant held for
+   * them binds it (ADR-0078) — the receiver polls one place, opens every
+   * sealed row and dispatches by the kind inside it.
    *
    * The Welcome blob is itself authenticated by the sender's
    * KeyPackage signature (RFC 9420 §12.4); our envelope just
@@ -2865,10 +2866,9 @@ export class ContactsClient {
    *                                  bytes) — the same value
    *                                  the receiver hands to
    *                                  `Identity.fromSeed`'s
-   *                                  upload bundle. The
-   *                                  mailbox pseudonym is
-   *                                  derived from this pubkey
-   *                                  via `IdentityPseudonym.fromIdentity`.
+   *                                  upload bundle. Every
+   *                                  grant's mailbox binding
+   *                                  is verified against it.
    * @param welcomeBytes              `welcome` field of the
    *                                  `AddMember` result.
    */
@@ -2890,7 +2890,7 @@ export class ContactsClient {
     // ADR-0074 section 3.5a rule 1 - the CURRENT mailbox of that account
     // (the leaf may be bound to a proven predecessor; own account included).
     // Rule 6: a refused write re-checks the address once and is retried.
-    const envelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
+    const wasm = await loadWasm();
     let publish;
     try {
       publish = await writeToPerson(
@@ -2898,11 +2898,13 @@ export class ContactsClient {
         {
           ...(options.groupId === undefined ? {} : { scope: options.groupId }),
           explicit: options.explicitGrantB64 ?? null,
-          // ADR-0073 R.4: `allowMember` marks a Welcome, which signs with the
-          // continuity key for the new identity of an accepted reset.
+          // `allowMember` marks a Welcome. ADR-0073 R.4's continuity key is a
+          // recorded no-op under ADR-0078 (no carrier names a reset account's
+          // new mailbox); see `planWriteToPerson`.
           allowMember: true,
         },
-        (mailbox, auth) => this.ds.publishMailbox(mailbox, envelope, auth),
+        (target, auth) =>
+          this.ds.publishMailbox(target.address, sealRowFor(wasm, target, "welcome", welcomeBytes), auth),
       );
     } catch (err) {
       throw ContactsError.wrap(err);
@@ -2914,88 +2916,16 @@ export class ContactsClient {
   }
 
   /**
-   * ADR-0050 — poll this DEVICE's mailbox: the pseudonym of the device leaf
-   * key, where Welcomes sealed to this device's KeyPackages arrive. Only
-   * Welcome envelopes are surfaced; anything else in a device mailbox is
-   * dropped (the cursor still advances).
-   */
-  async pollDeviceMailbox(
-    identity: IdentitySecrets | null,
-    after: number,
-    waitSecs = 0,
-    signal?: AbortSignal,
-  ): Promise<PollResult> {
-    const wasm = await loadWasm();
-    const device = await this.resolveIdentity(identity);
-    const pseudonym = wasm.IdentityPseudonym.fromIdentity(
-      device.signaturePublicKey,
-    ).asBytes();
-    let raw;
-    try {
-      raw = await this.ds.fetchMailbox(pseudonym, {
-        after,
-        waitSecs,
-        ...(signal !== undefined ? { signal } : {}),
-      });
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-    const events: IncomingMailboxEvent[] = [];
-    let cursor = after;
-    for (const message of raw.messages) {
-      cursor = message.id;
-      const env = parseEnvelope(message.payload);
-      if (env.kind === KIND_CONTACT_ACK) {
-        // A ContactAck routed by the requester's device key (a sender that
-        // signed its request with the device identity) lands here; it is a
-        // verified accept all the same, so it is dispatched like the account
-        // mailbox does rather than silently skipped.
-        let ack;
-        try {
-          ack = wasm.ContactAck.decodeAndVerify(env.body);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("ContactAck verify failed", message.id, err);
-          continue;
-        }
-        events.push({
-          kind: "contact-ack",
-          ack: {
-            messageId: message.id,
-            accepterPubkey: ack.accepterPubkey,
-            accepterAccountId: ack.accepterAccountId,
-            accepterX25519Pubkey: ack.accepterX25519Pubkey,
-            ackToPseudonym: ack.ackToPseudonym,
-            acceptedAtMs: ack.acceptedAtMs,
-            createdAt: message.createdAt,
-          },
-        });
-        continue;
-      }
-      if (env.kind !== KIND_WELCOME) continue;
-      events.push({
-        kind: "welcome",
-        welcome: {
-          messageId: message.id,
-          welcomeBytes: env.body,
-          createdAt: message.createdAt,
-        },
-      });
-    }
-    return { events, cursor, hasMore: raw.hasMore };
-  }
-
-  /**
    * Poll the user's stranger-inbox mailbox for new
    * ContactRequests, decode + verify each, return the
    * processed list plus a fresh cursor.
    *
    * @param identity   Current session secrets — used to derive
-   *                   the mailbox pseudonym (from the sender's
-   *                   own Ed25519 pubkey via
-   *                   `IdentityPseudonym.fromIdentity`) and
-   *                   the X25519 secret needed to unseal each
-   *                   envelope.
+   *                   the account's MAILBOX key (ADR-0078,
+   *                   `MailboxKey.fromAccountIdentity`), whose
+   *                   address is read and which opens every sealed
+   *                   row, and the X25519 secret needed to unseal
+   *                   each contact request's inner seal.
    * @param after      Cursor from the previous poll. Pass `0`
    *                   on first call to fetch the entire
    *                   backlog.
@@ -3011,8 +2941,10 @@ export class ContactsClient {
    * drops a batch whose cursor moved and serializes the dispatch.
    *
    * Malformed entries on the wire are **dropped silently** —
-   * the verifier rejects bad signatures, decoding errors are
-   * logged via `console.warn` and skipped. We don't surface a
+   * a row that does not open under the mailbox key (ADR-0078:
+   * garbage, a row for another mailbox, an unknown kind) is
+   * dropped unlogged; the verifier rejects bad signatures,
+   * decoding errors are logged via `console.warn` and skipped. We don't surface a
    * "garbage on the wire" error to the UI because every honest
    * client just wants to keep moving past corrupted entries.
    */
@@ -3030,99 +2962,31 @@ export class ContactsClient {
   ): Promise<PollResult> {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveAccountIdentity(identity);
-    const myPseudonym = wasm.IdentityPseudonym.fromIdentity(
-      myIdentity.signaturePublicKey,
-    ).asBytes();
+    // ADR-0078 - the account's mailbox key (the predecessor's, for a
+    // predecessor mailbox: `resolveAccountIdentity` gives that identity).
+    const mailboxKey = wasm.MailboxKey.fromAccountIdentity(myIdentity);
     const myX25519Secret = myIdentity.x25519SecretKey;
 
-    let raw;
     try {
-      raw = await this.ds.fetchMailbox(myPseudonym, {
-        after,
-        waitSecs,
-        ...(signal !== undefined ? { signal } : {}),
-      });
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-
-    const events: IncomingMailboxEvent[] = [];
-    let cursor = after;
-    for (const message of raw.messages) {
-      cursor = message.id;
-
-      // Strip the envelope kind byte (1.16e3) and dispatch on
-      // the discriminator. Unknown kinds are dropped with a
-      // warn; cursor still advances so we don't re-process.
-      const env = parseEnvelope(message.payload);
-      if (env.kind === "unknown") {
-        // eslint-disable-next-line no-console
-        console.warn(
-          "mailbox envelope: unknown kind",
-          message.id,
-          env.rawKind,
-        );
-        continue;
-      }
-      if (env.kind === KIND_WELCOME) {
-        events.push({
-          kind: "welcome",
-          welcome: {
-            messageId: message.id,
-            welcomeBytes: env.body,
-            createdAt: message.createdAt,
-            fromAccountMailbox: true,
-          },
+      let raw;
+      try {
+        raw = await this.ds.fetchMailbox(mailboxKey.address(), {
+          after,
+          waitSecs,
+          ...(signal !== undefined ? { signal } : {}),
         });
-        continue;
+      } catch (err) {
+        throw ContactsError.wrap(err);
       }
-      if (options.welcomesOnly === true) continue;
-      if (env.kind === KIND_CONTACT_ACK) {
-        // Phase 1.9b1: signature is verified inside the WASM
-        // surface; bad-signature / malformed-wire entries drop
-        // with a warn and the cursor still advances.
-        let ack;
-        try {
-          ack = wasm.ContactAck.decodeAndVerify(env.body);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("ContactAck verify failed", message.id, err);
-          continue;
-        }
-        // ADR-0060 — they answered: the `reply` key our request handed them
-        // has done its job and is removed from our mailbox.
-        void reachSession()?.closeRepliesTo(journalHex(ack.accepterPubkey));
-        events.push({
-          kind: "contact-ack",
-          ack: {
-            messageId: message.id,
-            accepterPubkey: ack.accepterPubkey,
-            accepterAccountId: ack.accepterAccountId,
-            accepterX25519Pubkey: ack.accepterX25519Pubkey,
-            ackToPseudonym: ack.ackToPseudonym,
-            acceptedAtMs: ack.acceptedAtMs,
-            createdAt: message.createdAt,
-          },
-        });
-        continue;
+      const dispatched = dispatchMailboxRows(wasm, mailboxKey, raw.messages, after, myX25519Secret, options);
+      return { ...dispatched, hasMore: raw.hasMore };
+    } finally {
+      try {
+        mailboxKey.free();
+      } catch {
+        /* already freed */
       }
-      // env.kind === KIND_CONTACT_REQUEST
-      const request = decodeContactRequestBody(
-        wasm,
-        message.id,
-        env.body,
-        message.createdAt,
-        myX25519Secret,
-      );
-      if (request === null) continue;
-      events.push({
-        kind: "contact-request",
-        request,
-        row: { messageId: message.id, payload: message.payload, createdAt: message.createdAt },
-      });
     }
-
-    return { events, cursor, hasMore: raw.hasMore };
   }
 
   /**
@@ -3130,6 +2994,10 @@ export class ContactsClient {
    * device (`contacts/inbox-store.ts`), through the same verify-and-open path
    * `pollMailbox` runs. One result per row, in order; `null` for a row that no
    * longer decodes as a verified ContactRequest (the caller drops it).
+   *
+   * ADR-0078: a kept row holds the OPENED request body (the signed
+   * ContactRequest wire, its intro and profile still sealed to this
+   * account's X25519 key), not the sealed mailbox row.
    */
   async decodePendingRequestRows(
     identity: IdentitySecrets | null,
@@ -3139,11 +3007,9 @@ export class ContactsClient {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveAccountIdentity(identity);
     const x25519Secret = myIdentity.x25519SecretKey;
-    return rows.map((row) => {
-      const env = parseEnvelope(row.payload);
-      if (env.kind !== KIND_CONTACT_REQUEST) return null;
-      return decodeContactRequestBody(wasm, row.messageId, env.body, row.createdAt, x25519Secret);
-    });
+    return rows.map((row) =>
+      decodeContactRequestBody(wasm, row.messageId, row.payload, row.createdAt, x25519Secret),
+    );
   }
 
   /**
@@ -3727,9 +3593,21 @@ export class ContactsClient {
       );
       if (candidates.length === 0) return;
       const grant = wasm.decodeReachGrant(base64Decode(held.wireB64));
+      // ADR-0078 - the added person's mailbox is the one the grant's binding
+      // names, verified against the account key the Add adds (and its proven
+      // chain); the envelope carries the binding so the committer can verify
+      // it too. A binding that does not verify posts nothing.
+      const target = await verifiedTargetOfGrant(grant, personKeysOf(addedAccountKey));
+      const binding = grant.binding;
       const seed = grant.seed;
       grant.free();
-      const mailbox = await accountMailboxOf(addedAccountKey);
+      if (target === null) {
+        seed.fill(0);
+        // eslint-disable-next-line no-console
+        console.warn("ADR-0078: committer delegations not posted; the kept grant's mailbox binding did not verify");
+        return;
+      }
+      const mailbox = target.address;
       const expires = BigInt(Date.now() + DELEGATION_TTL_MS);
       const blobs: Uint8Array[] = [];
       try {
@@ -3751,7 +3629,7 @@ export class ContactsClient {
       } finally {
         seed.fill(0);
       }
-      const env = new wasm.CommitterDelegationEnvelope(addedAccountKey, blobs);
+      const env = new wasm.CommitterDelegationEnvelope(addedAccountKey, binding, blobs);
       const bytes = wasm.composeCommitterDelegationEnvelope(env);
       env.free();
       const chat = new ChatClient(undefined, {
@@ -3835,7 +3713,7 @@ export class ContactsClient {
     //    the successful atomic persist is ONE fail-closed region. The core
     //    `addMember` eager-merged epoch N -> N+1 in the in-memory provider, so ANY
     //    throw before the publish — the Welcome-artifact computation
-    //    (`IdentityPseudonym.fromIdentity` / `wrapEnvelope`, which CAN throw) OR
+    //    (`accountKeyOfKeyPackage`, which CAN throw) OR
     //    the persist itself — must reset the in-memory group back to the durable N
     //    snapshot before aborting; otherwise a later same-session commit builds on
     //    the un-published N+1 and strands the WHOLE group ("device-ahead"). Compute
@@ -3848,9 +3726,7 @@ export class ContactsClient {
     //    OUTSIDE this region: a publish failure must NOT reset (the durable entry
     //    is re-published idempotently by `sweepPendingCommits`).
     let groupIdBytes: Uint8Array;
-    let welcomePseudonym: Uint8Array;
     let welcomeAccountKey: Uint8Array;
-    let welcomeEnvelope: Uint8Array;
     let entryId: string;
     try {
       groupIdBytes = group.groupId;
@@ -3858,9 +3734,9 @@ export class ContactsClient {
       // sealed to THIS leaf's KeyPackage but addressed to the ACCOUNT mailbox
       // the leaf's binding names — one inbound mailbox per person.
       welcomeAccountKey = await accountKeyOfKeyPackage(keyPackageBytes);
-      // ADR-0074 section 3.5a rule 1 - resolved to the CURRENT mailbox.
-      welcomePseudonym = await accountMailboxOf(welcomeAccountKey);
-      welcomeEnvelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
+      // ADR-0078 - the outbox keeps the RAW Welcome and the account key; the
+      // row is sealed at publish to the mailbox key a grant held for that
+      // account binds (verified then), which is also what a replay does.
       // ADR-0053 contract point 3 — register N+1 before anything durable says
       // the commit exists. A refusal lands in the catch below: reset, no publish.
       await this.registerNextEpochOrThrow(group, myIdentity, signerN);
@@ -3870,9 +3746,8 @@ export class ContactsClient {
         groupId: base64Encode(groupIdBytes),
         targetEpoch: group.epoch.toString(),
         commitB64: base64Encode(commitBytes),
-        secondArtifactB64: base64Encode(welcomeEnvelope),
+        secondArtifactB64: base64Encode(welcomeBytes),
         secondArtifactKind: "welcome",
-        secondArtifactMailboxB64: base64Encode(welcomePseudonym),
         secondArtifactAccountKeyB64: base64Encode(welcomeAccountKey),
       });
     } catch (err) {
@@ -3897,10 +3772,12 @@ export class ContactsClient {
     //    once; the outbox entry above re-derives the mailbox on a replay.
     let welcomePublish;
     try {
+      const wasm = await loadWasm();
       welcomePublish = await writeToPerson(
         welcomeAccountKey,
         { scope: groupIdBytes, allowMember: true },
-        (mailbox, auth) => this.ds.publishMailbox(mailbox, welcomeEnvelope, auth),
+        (target, auth) =>
+          this.ds.publishMailbox(target.address, sealRowFor(wasm, target, "welcome", welcomeBytes), auth),
       );
     } catch (err) {
       throw ContactsError.wrap(err);
@@ -4642,7 +4519,13 @@ export class ContactsClient {
    *  returned `joinerSignatureKey` to a pending request and checks
    *  `issuerSignaturePubkey ∈ roster` against the live `group.members()`. The
    *  attribution is advisory — the role-gated approval gate is the boundary. */
-  async fetchJoinAttributions(groupId: Uint8Array): Promise<
+  async fetchJoinAttributions(
+    groupId: Uint8Array,
+    /** ADR-0078 - the account key a pending joiner's leaf is bound to
+     *  (`Group.pendingExternalJoinAccountKey`). A reply grant is kept only
+     *  when its mailbox binding verifies against it. */
+    accountKeyOf?: (joinerSignatureKey: Uint8Array) => Uint8Array | undefined,
+  ): Promise<
     Array<{
       joinerSignatureKey: Uint8Array;
       issuerSignaturePubkey: Uint8Array;
@@ -4690,7 +4573,17 @@ export class ContactsClient {
       if (session !== null) {
         const reply = attr.replyGrant;
         try {
-          rememberJoinReply(attr.joinerSignatureKey, session.encodeGrant(reply));
+          let accountKey: Uint8Array | undefined;
+          try {
+            accountKey = accountKeyOf?.(attr.joinerSignatureKey);
+          } catch {
+            accountKey = undefined;
+          }
+          // ADR-0078 - checked against the joiner's account key resolved from
+          // the proposal's leaf; a grant naming another mailbox is not kept.
+          if (joinReplyBindingVerifies(reply, accountKey)) {
+            rememberJoinReply(attr.joinerSignatureKey, session.encodeGrant(reply));
+          }
         } finally {
           reply.free();
         }
@@ -5105,6 +4998,88 @@ export class ContactsClient {
       outcome,
     };
   }
+}
+
+/**
+ * ADR-0078 - open and dispatch the rows of one read of the own mailbox. Every
+ * row is opened with `mailboxKey`; a row that does not open is DROPPED with no
+ * log (it may be garbage, a row sealed for another mailbox, or an unknown
+ * kind), and the cursor still advances past it. The opened kind decides the
+ * decoder: a Welcome is surfaced as is, an ack and a request are verified as
+ * before. A Welcome rendezvous (the co-publisher join) is read by the
+ * co-publisher flow itself, never here. With `welcomesOnly` (a predecessor
+ * mailbox, ADR-0074 section 3.5a rules 4 and 5) a request or an ack is
+ * neither opened further nor acted on. Exported for the host tests.
+ */
+export function dispatchMailboxRows(
+  wasm: Wasm,
+  mailboxKey: import("../../wasm/lakko_ffi_wasm").MailboxKey,
+  messages: readonly { readonly id: number; readonly payload: Uint8Array; readonly createdAt: string }[],
+  after: number,
+  myX25519Secret: Uint8Array,
+  options: { readonly welcomesOnly?: boolean } = {},
+): { events: IncomingMailboxEvent[]; cursor: number } {
+  const events: IncomingMailboxEvent[] = [];
+  let cursor = after;
+  for (const message of messages) {
+    cursor = message.id;
+    const row = openOwnRow(wasm, mailboxKey, message.payload);
+    if (row === null) continue;
+    if (row.kind === "welcome") {
+      events.push({
+        kind: "welcome",
+        welcome: {
+          messageId: message.id,
+          welcomeBytes: row.body,
+          createdAt: message.createdAt,
+          fromAccountMailbox: true,
+        },
+      });
+      continue;
+    }
+    if (row.kind === "welcome-rendezvous") continue;
+    if (options.welcomesOnly === true) continue;
+    if (row.kind === "contact-ack") {
+      // Phase 1.9b1: signature is verified inside the WASM
+      // surface; bad-signature / malformed-wire entries drop
+      // with a warn and the cursor still advances.
+      let ack;
+      try {
+        ack = wasm.ContactAck.decodeAndVerify(row.body);
+      } catch {
+        // eslint-disable-next-line no-console
+        console.warn("ContactAck verify failed");
+        continue;
+      }
+      // ADR-0060 — they answered: the `reply` key our request handed them
+      // has done its job and is removed from our mailbox.
+      void reachSession()?.closeRepliesTo(journalHex(ack.accepterPubkey));
+      events.push({
+        kind: "contact-ack",
+        ack: {
+          messageId: message.id,
+          accepterPubkey: ack.accepterPubkey,
+          accepterAccountId: ack.accepterAccountId,
+          accepterX25519Pubkey: ack.accepterX25519Pubkey,
+          ackToPseudonym: ack.ackToPseudonym,
+          acceptedAtMs: ack.acceptedAtMs,
+          createdAt: message.createdAt,
+        },
+      });
+      continue;
+    }
+    // row.kind === "contact-request"
+    const request = decodeContactRequestBody(wasm, message.id, row.body, message.createdAt, myX25519Secret);
+    if (request === null) continue;
+    events.push({
+      kind: "contact-request",
+      request,
+      // ADR-0078: the row kept on this device is the OPENED request body
+      // (`decodePendingRequestRows` decodes it directly).
+      row: { messageId: message.id, payload: row.body, createdAt: message.createdAt },
+    });
+  }
+  return { events, cursor };
 }
 
 /**

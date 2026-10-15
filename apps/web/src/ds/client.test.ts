@@ -320,7 +320,7 @@ describe("mailboxes", () => {
   const OWN = new Uint8Array(32).fill("m".charCodeAt(0));
   const OTHER = new Uint8Array(32).fill(0x01);
 
-  it("a read of this device's own mailbox is signed under its identity key", async () => {
+  it("a read of this account's own mailbox is signed under its mailbox key", async () => {
     const reg = new DsAccessRegistry();
     reg.setMailboxSigner(fakeSigner(0n, "m"));
     const { fetchImpl, sent } = fakeFetch([EMPTY]);
@@ -337,7 +337,7 @@ describe("mailboxes", () => {
     await new DsClient("/api/ds", { access: reg, fetchImpl }).fetchMailbox(OWN, {});
     expect(sent.map((s) => s.method)).toEqual(["GET", "PUT", "GET"]);
     expect(sent[1]?.proof).toBeUndefined();
-    expect(new TextDecoder().decode(sent[1]?.body)).toBe('{"identity_pk_b64":"m"}');
+    expect(new TextDecoder().decode(sent[1]?.body)).toBe('{"mailbox_pk_b64":"m"}');
   });
 
   it("a rendezvous id is read and written unsigned on its own route (ADR-0060)", async () => {
@@ -359,7 +359,8 @@ describe("mailboxes", () => {
     const reg = new DsAccessRegistry();
     const created = { status: 201, json: { id: 1, created_at: "t" } };
     const { fetchImpl, sent } = fakeFetch([created, created, created]);
-    const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
+    const { pool } = fakeTokenPool();
+    const ds = new DsClient("/api/ds", { access: reg, fetchImpl, tokens: pool });
     const hex = "01".repeat(32);
     await ds.publishMailbox(OTHER, new Uint8Array([7]), { signer: fakeSigner(0n, "reach") });
     await ds.publishMailbox(OTHER, new Uint8Array([7]), {
@@ -376,6 +377,25 @@ describe("mailboxes", () => {
     expect(headers[0]?.["x-lakko-ds-delegation"]).toBeUndefined();
     // No grant: unsigned, which an open (Everyone) mailbox stores.
     expect(sent[2]?.proof).toBeUndefined();
+    // ADR-0078: a proof carries no token; the proofless write spends one
+    // `mailbox-write` token and goes without credentials.
+    expect(sent[0]?.token).toBeUndefined();
+    expect(sent[1]?.token).toBeUndefined();
+    expect(sent[2]?.token).toBe("tok-1");
+    expect(sent[2]?.credentials).toBe("omit");
+    expect(sent[2]?.authorization).toBeUndefined();
+  });
+
+  it("a proofless mailbox write whose token is refused as spent is retried ONCE with another (ADR-0078)", async () => {
+    const { fetchImpl, sent } = fakeFetch([
+      { status: 401, json: { error: "anon-token-spent" } },
+      { status: 201, json: { id: 9, created_at: "t" } },
+    ]);
+    const { pool } = fakeTokenPool();
+    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl, tokens: pool });
+    await expect(ds.publishMailbox(OTHER, new Uint8Array([7]))).resolves.toEqual({ id: 9, createdAt: "t" });
+    expect(sent.map((s) => s.token)).toEqual(["tok-1", "tok-2"]);
+    expect(sent.every((s) => s.proof === undefined)).toBe(true);
   });
 
   it("refuses a delegation without the delegate's signer, before any request", async () => {
@@ -523,7 +543,8 @@ describe("ADR-0054 — the wake rides the signed group publish", () => {
 
   it("never puts a wake on a mailbox publish", async () => {
     const { fetchImpl, sent } = fakeFetch([{ status: 201, json: { id: 1, created_at: "t" } }]);
-    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl });
+    const { pool } = fakeTokenPool();
+    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl, tokens: pool });
     await ds.publishMailbox(GID, new Uint8Array([1]));
     expect(sent[0]?.wake).toBeUndefined();
   });

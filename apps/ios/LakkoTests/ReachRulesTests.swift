@@ -11,7 +11,11 @@ import LakkoCore
 @MainActor
 final class ReachRulesTests: XCTestCase {
 
-    private let accountSeed = Data(repeating: 0x21, count: 32)
+    /// The peer every grant in this file is derived from: its account seed is
+    /// the Ed25519 seed of `peerIdentity`, so a grant's mailbox binding
+    /// (ADR-0078) verifies under `peerIdentity`'s key.
+    private let peerIdentity = try! Identity.fromSeed(seed: Data(repeating: 0x41, count: 32))
+    private var accountSeed: Data { peerIdentity.ed25519Seed() }
     private let groupA = Data(repeating: 0xA1, count: 32)
     private let groupB = Data(repeating: 0xB2, count: 32)
     private let emptyState = FfiReachState(entries: [], updatedAtMs: 0)
@@ -260,7 +264,9 @@ final class ReachRulesTests: XCTestCase {
         XCTAssertTrue(c.keep(contact, carrier: .oneToOneProfile(fromOtherParticipant: true),
                              fromAccountKeyB64: peer.base64EncodedString(), scopeHex: "aa"))
         XCTAssertEqual(c.writeAuth(toAccountKey: peer)?.reachSeed, contact.seed)
-        let mailbox = try IdentityPseudonym.fromIdentity(pubkey: peer).asBytes()
+        // ADR-0078 — the mailbox is the one the grant's binding names.
+        let mailbox = MailboxKey.fromAccountIdentity(accountIdentity: peerIdentity).address()
+        XCTAssertEqual(c.writePlan(toAccountKey: peer)?.target.address, mailbox)
         XCTAssertEqual(c.writeAuth(toMailbox: mailbox)?.reachSeed, contact.seed)
     }
 
@@ -455,19 +461,17 @@ extension ReachRulesTests {
         XCTAssertTrue(c.keep(member, carrier: .groupProfile, fromAccountKeyB64: peerB64, scopeHex: groupHex))
         XCTAssertTrue(c.keep(contact, carrier: .oneToOneProfile(fromOtherParticipant: true),
                              fromAccountKeyB64: peerB64, scopeHex: "aa"))
-        let mailbox = try IdentityPseudonym.fromIdentity(pubkey: peer).asBytes()
+        let mailbox = MailboxKey.fromAccountIdentity(accountIdentity: peerIdentity).address()
 
         XCTAssertEqual(
             c.writeAuthCandidates(toMailbox: mailbox, groupIdHex: groupHex).map(\.reachSeed),
             [contact.seed, member.seed])
 
-        let own = try XCTUnwrap(c.ownAccountKey)
-        let ownMailbox = try IdentityPseudonym.fromIdentity(pubkey: own).asBytes()
+        let ownMailbox = try XCTUnwrap(c.ownMailbox?.address)
         XCTAssertEqual(c.writeAuthCandidates(toMailbox: ownMailbox).map(\.reachSeed), [c.ownContactSeed()])
 
-        let stranger = try IdentityPseudonym.fromIdentity(
-            pubkey: try Identity.fromSeed(seed: Data(repeating: 0x42, count: 32)).signaturePublicKey()
-        ).asBytes()
+        let stranger = MailboxKey.fromAccountIdentity(
+            accountIdentity: try Identity.fromSeed(seed: Data(repeating: 0x42, count: 32))).address()
         XCTAssertTrue(c.writeAuthCandidates(toMailbox: stranger).isEmpty, "no key, no candidate")
     }
 
@@ -476,9 +480,23 @@ extension ReachRulesTests {
         let c = try center()
         var fired: [String] = []
         c.onGrantKept = { fired.append($0) }
-        let peerB64 = Data(repeating: 9, count: 32).base64EncodedString()
+        let peerB64 = peerIdentity.signaturePublicKey().base64EncodedString()
         XCTAssertTrue(c.keep(try grant(.contact), carrier: .oneToOneProfile(fromOtherParticipant: true),
                              fromAccountKeyB64: peerB64, scopeHex: "aa"))
         XCTAssertEqual(fired, [peerB64])
+    }
+
+    /// ADR-0078 — a grant is kept only when its mailbox binding verifies
+    /// against the sender resolved at receipt; one whose binding is someone
+    /// else's is refused and fires nothing.
+    func testAGrantWhoseBindingDoesNotVerifyAgainstTheSenderIsRefused() throws {
+        let c = try center()
+        var fired: [String] = []
+        c.onGrantKept = { fired.append($0) }
+        let other = try Identity.fromSeed(seed: Data(repeating: 0x42, count: 32)).signaturePublicKey()
+        XCTAssertFalse(c.keep(try grant(.contact), carrier: .oneToOneProfile(fromOtherParticipant: true),
+                              fromAccountKeyB64: other.base64EncodedString(), scopeHex: "aa"))
+        XCTAssertTrue(fired.isEmpty)
+        XCTAssertNil(c.writePlan(toAccountKey: other))
     }
 }

@@ -32,7 +32,8 @@ final class PeopleSearchTests: XCTestCase {
             accountSeed: annaKey.ed25519Seed(), class: .fof, scopeId: Data(), version: 1)
         let payload = FfiIntroductionPayload(
             identityPk: annaKey.signaturePublicKey(), accountId: annaAccount,
-            displayName: name, username: nil, usernameCertificate: nil, fof: fof)
+            displayName: name, username: nil, usernameCertificate: nil,
+            mailboxBinding: signMailboxBinding(accountIdentity: annaKey), fof: fof)
         let terms = nameSearchTerms(displayName: name).map { fakeOutput("name", $0) }
         return (try composeIntroduction(payload: payload, termOprfs: terms, issuedAtMs: 1), fof)
     }
@@ -42,14 +43,15 @@ final class PeopleSearchTests: XCTestCase {
     private func annaPublicRecord(name: String = "Anna Weber", username: String? = nil) throws -> Data {
         let payload = FfiIntroductionPayload(
             identityPk: annaKey.signaturePublicKey(), accountId: annaAccount,
-            displayName: name, username: nil, usernameCertificate: nil, fof: nil)
+            displayName: name, username: nil, usernameCertificate: nil,
+            mailboxBinding: signMailboxBinding(accountIdentity: annaKey), fof: nil)
         var terms = nameSearchTerms(displayName: name).map { fakeOutput("name", $0) }
         if let username { terms.append(fakeOutput("user", username)) }
         return try composePublicRecord(payload: payload, termOprfs: terms, issuedAtMs: 1)
     }
 
     private func ports(
-        reachCheck: @escaping (Data, Data) async throws -> Bool = { _, _ in true },
+        reachCheck: @escaping (MailboxTarget, Data) async throws -> Bool = { _, _ in true },
         lookupUsername: @escaping (Data) async throws -> PublicAccountHit? = { _ in nil },
         identityKey: ((Data) async throws -> Data?)? = nil,
         nameLookup: @escaping (Data) async throws -> [PublicAccountHit] = { _ in [] },
@@ -80,6 +82,23 @@ final class PeopleSearchTests: XCTestCase {
         XCTAssertEqual(people.first?.displayName, "Anna Weber")
         XCTAssertEqual(people.first?.writeSeed, fof.seed)
         XCTAssertNil(people.first?.username, "no verified username, none shown")
+        // ADR-0078 — the request goes to the mailbox the record's binding
+        // names, verified against Anna's key.
+        XCTAssertEqual(
+            people.first?.mailbox?.address,
+            MailboxKey.fromAccountIdentity(accountIdentity: annaKey).address())
+    }
+
+    /// ADR-0078 — the reach check asks at the mailbox the record's verified
+    /// binding names, never at one derived from the identity key.
+    func testTheReachCheckAsksAtTheVerifiedMailbox() async throws {
+        let (record, fof) = try annaRecord()
+        var asked: [(Data, Data)] = []
+        _ = await PeopleSearch.network(
+            query: "anna", records: [record],
+            ports: ports(reachCheck: { target, seed in asked.append((target.address, seed)); return true }))
+        XCTAssertEqual(asked.map(\.0), [MailboxKey.fromAccountIdentity(accountIdentity: annaKey).address()])
+        XCTAssertEqual(asked.map(\.1), [fof.seed])
     }
 
     /// Several words narrow the result: `anna x` does not find `Anna Weber`.
@@ -411,7 +430,7 @@ final class PeopleSearchTests: XCTestCase {
         let payload = FfiIntroductionPayload(
             identityPk: annaKey.signaturePublicKey(), accountId: annaAccount,
             displayName: name, username: username, usernameCertificate: Data(repeating: 1, count: 153),
-            fof: fof)
+            mailboxBinding: signMailboxBinding(accountIdentity: annaKey), fof: fof)
         var terms = nameSearchTerms(displayName: name).map { fakeOutput("name", $0) }
         terms.append(fakeOutput("user", username))
         return try composeIntroduction(payload: payload, termOprfs: terms, issuedAtMs: 1)

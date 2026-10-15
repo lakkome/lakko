@@ -307,9 +307,8 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
       }
     }
     setIdentitySig(next);
-    // ADR-0053 — the device mailbox (where Welcomes land) is read under the
-    // device identity's key.
-    installMailboxAccess("device", next);
+    // ADR-0078 — no device mailbox: nothing is claimed or read for the device
+    // identity. Welcomes land in the account mailbox (`replaceAccountIdentity`).
   }
 
   // ADR-0053 contract point 1 — every request to a conversation group's

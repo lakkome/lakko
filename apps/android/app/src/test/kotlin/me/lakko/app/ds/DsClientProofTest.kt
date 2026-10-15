@@ -45,7 +45,7 @@ class DsClientProofTest {
 
         override val verifyingKey: ByteArray = ByteArray(32) { epoch.toByte() }
 
-        override fun mailboxClaimBody(): String = """{"identity_pk_b64":"$tag"}"""
+        override fun mailboxClaimBody(): String = """{"mailbox_pk_b64":"$tag"}"""
     }
 
     private data class Seen(
@@ -199,7 +199,52 @@ class DsClientProofTest {
         assertEquals("/ds/mailbox/${DsClient.pseudonymHex(mailbox)}/messages", signer.calls.single().path)
         assertEquals("after=2&wait=25", signer.calls.single().query)
         assertEquals("proof-m-1", seen[0].proof)
-        assertNull("a mailbox write stays open and unsigned", seen[1].proof)
+        assertNull("a proofless mailbox write carries no proof", seen[1].proof)
+        assertEquals("tok-1", seen[1].token)
+    }
+
+    // ------------------------------------------------------------ ADR-0078 mailbox-write token
+
+    @Test
+    fun `a proofless mailbox write spends one mailbox-write token, with no session`() = runTest {
+        val seen = mutableListOf<Seen>()
+        val tokens = FakeAnonTokenSource()
+        val row = ByteArray(1073) { 5 }
+        val result = client(listOf(Reply(HttpStatusCode.OK, published)), seen, tokens = tokens).use {
+            it.publishMailbox(mailbox, row)
+        }
+        assertEquals(7L, result.id)
+        assertEquals(listOf(AnonTokenContext.MAILBOX_WRITE), tokens.taken)
+        assertEquals("tok-1", seen.single().token)
+        assertNull(seen.single().proof)
+        assertNull(seen.single().authorization)
+        assertEquals("/native/ds/ds/mailbox/${DsClient.pseudonymHex(mailbox)}/messages", seen.single().encodedPath)
+        assertTrue(row.contentEquals(seen.single().body!!))
+    }
+
+    @Test
+    fun `a mailbox write signed by a reach grant spends no token`() = runTest {
+        val seen = mutableListOf<Seen>()
+        val tokens = FakeAnonTokenSource()
+        client(listOf(Reply(HttpStatusCode.OK, published)), seen, tokens = tokens).use {
+            it.publishMailbox(mailbox, ByteArray(1073) { 5 }, reach = DsReachAuth(FakeSigner(0uL, "r")))
+        }
+        assertTrue(tokens.taken.isEmpty())
+        assertNull(seen.single().token)
+        assertEquals("proof-r-1", seen.single().proof)
+    }
+
+    @Test
+    fun `a proofless mailbox write whose token was spent is retried once with another`() = runTest {
+        val seen = mutableListOf<Seen>()
+        client(
+            listOf(
+                Reply(HttpStatusCode.Unauthorized, """{"error":"anon-token-spent"}"""),
+                Reply(HttpStatusCode.OK, published),
+            ),
+            seen,
+        ).use { it.publishMailbox(mailbox, ByteArray(1073) { 5 }) }
+        assertEquals(listOf("tok-1", "tok-2"), seen.map { it.token })
     }
 
     // ------------------------------------------------------------ retry on 401

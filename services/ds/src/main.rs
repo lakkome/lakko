@@ -76,11 +76,12 @@
 //! - `POST   /ds/group/{group_id_hex}/messages`    — publish to group (1 MB cap;
 //!   optional `x-lakko-wake: <push_gid b64url>;<message|call>`, ADR-0054)
 //! - `GET    /ds/group/{group_id_hex}/messages`    — `?after=<id>&limit=<n>&wait=<secs>`
-//! - `POST   /ds/mailbox/{device_id_hex}/messages` — publish to device mailbox
-//!   (a claimed, closed mailbox takes a write only under a reach key or a
-//!   delegation, ADR-0060; see `src/reach.rs`)
-//! - `GET    /ds/mailbox/{device_id_hex}/messages` — `?after=<id>&limit=<n>&wait=<secs>`
-//!   (personal: the identity proof, whether or not the mailbox is claimed,
+//! - `POST   /ds/mailbox/{mailbox_hex}/messages`   — append a sealed, bucket-padded row
+//!   to a personal mailbox (ADR-0078; a claimed, closed mailbox takes a write
+//!   only under a reach key or a delegation, ADR-0060; an open or unclaimed
+//!   one spends a `mailbox-write` token; see `src/reach.rs`)
+//! - `GET    /ds/mailbox/{mailbox_hex}/messages`   — `?after=<id>&limit=<n>&wait=<secs>`
+//!   (personal: the mailbox-key proof, whether or not the mailbox is claimed,
 //!   ADR-0060)
 //! - `POST   /ds/rendezvous/{id_hex}/messages`     — append to a rendezvous
 //!   (pairing, recovery, courier, state bundle): no proof, never claimable,
@@ -94,10 +95,10 @@
 //! - `PUT    /ds/group/{group_id_hex}/registrars`  — the root manages registrars
 //! - `PUT    /ds/group/{group_id_hex}/root`        — the root names a new root
 //! - `PUT    /ds/group/{group_id_hex}/push-binding` — root or admin binds one `push_gid`
-//! - `PUT    /ds/mailbox/{device_id_hex}/access`   — claim a mailbox under its identity key
-//! - `PUT    /ds/mailbox/{device_id_hex}/reach`    — register / remove reach keys, set open (ADR-0060)
-//! - `GET    /ds/mailbox/{device_id_hex}/reach`    — the owner reads its reach keys back (ADR-0060)
-//! - `POST   /ds/mailbox/{device_id_hex}/reach/check` — is this reach key registered? (ADR-0060)
+//! - `PUT    /ds/mailbox/{mailbox_hex}/access`     — claim a mailbox under its mailbox key (ADR-0078)
+//! - `PUT    /ds/mailbox/{mailbox_hex}/reach`      — register / remove reach keys, set open (ADR-0060)
+//! - `GET    /ds/mailbox/{mailbox_hex}/reach`      — the owner reads its reach keys back (ADR-0060)
+//! - `POST   /ds/mailbox/{mailbox_hex}/reach/check` — is this reach key registered? (ADR-0060)
 //! - `POST   /ds/group/{group_id_hex}/knock`       — a non-member's request to join (token)
 //! - `GET    /ds/group/{group_id_hex}/knocks`      — the members read the knocks
 //!
@@ -325,7 +326,18 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/ds/group/{group_hex}/knock", post(access::post_knock))
         .route("/ds/group/{group_hex}/knocks", get(access::get_knocks))
         .layer(DefaultBodyLimit::max(journal::MAX_MESSAGE_BYTES))
-        .layer(TraceLayer::new_for_http())
+        // The request span names the method and the route template, never
+        // the URI: a path carries a mailbox address or a journal id, which a
+        // log line must not (ADR-0078).
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |req: &axum::http::Request<axum::body::Body>| {
+                let route = req
+                    .extensions()
+                    .get::<axum::extract::MatchedPath>()
+                    .map_or("unmatched", axum::extract::MatchedPath::as_str);
+                tracing::debug_span!("request", method = %req.method(), route)
+            },
+        ))
         .with_state(state)
 }
 

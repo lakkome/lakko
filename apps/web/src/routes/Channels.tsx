@@ -758,6 +758,9 @@ const JoinCoPublisher: Component = () => {
           joinerKey,
           channelIdHex,
           channelsState.keysByChannel().get(channelIdHex)?.signingKeySeed,
+          // ADR-0074 / ADR-0078 - the current account mailbox too, when the
+          // PublisherGroup's identity is a predecessor.
+          chats.accountIdentity(),
         );
         if (!sameSession()) return;
         if (keys === null) await new Promise((r) => setTimeout(r, 3000));

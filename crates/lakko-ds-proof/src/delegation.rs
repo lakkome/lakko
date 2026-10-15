@@ -72,7 +72,7 @@ pub const DELEGATION_HEADER_NAME: &str = "x-lakko-ds-delegation";
 pub const DELEGATION_DOMAIN: &[u8] = b"lakko/ds/delegation/v1";
 /// The only wire version this crate speaks.
 pub const DELEGATION_VERSION: u8 = 1;
-/// Length of a mailbox pseudonym and of an Ed25519 public key, in bytes.
+/// Length of a mailbox address and of an Ed25519 public key, in bytes.
 const KEY_LEN: usize = 32;
 /// Fixed wire length of a delegation, in bytes:
 /// `1 + 32 + 32 + 8 + 16 + 32 + 64`.
@@ -91,7 +91,7 @@ pub const MAX_DELEGATION_TTL_MS: u64 = 86_400_000;
 /// `mailbox`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Delegation {
-    /// The mailbox pseudonym the write may go to.
+    /// The mailbox address the write may go to (ADR-0078).
     pub mailbox: [u8; KEY_LEN],
     /// The key that signs the delegated request.
     pub delegate_pk: [u8; KEY_LEN],

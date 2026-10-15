@@ -22,13 +22,15 @@ class SendFoundRequestTest {
         var refusal: Throwable? = null,
     ) : SendDeps {
         val sent = mutableListOf<String>()
+        val bindings = mutableListOf<String?>()
         override suspend fun reachCheck(identityPk: ByteArray, grantWireB64: String): Boolean = reach
         override suspend fun identityFetch(accountId: ByteArray): IdentityKeys? =
             bundleKey?.let { IdentityKeys(it, ByteArray(32)) }
 
-        override suspend fun sendByUsername(username: String, intro: ByteArray, grantWireB64: String?) {
+        override suspend fun sendByUsername(username: String, intro: ByteArray, grantWireB64: String?, bindingB64: String?) {
             refusal?.let { throw it }
             sent += "username:$username"
+            bindings += bindingB64
         }
 
         override suspend fun sendToBundle(
@@ -37,8 +39,10 @@ class SendFoundRequestTest {
             x25519Pub: ByteArray,
             intro: ByteArray,
             grantWireB64: String?,
+            bindingB64: String?,
         ) {
             sent += "bundle:$grantWireB64"
+            bindings += bindingB64
         }
 
         override fun isRefusal(error: Throwable): Boolean = error is IllegalArgumentException
@@ -109,6 +113,7 @@ class SendFoundRequestTest {
                 x25519Pub: ByteArray,
                 intro: ByteArray,
                 grantWireB64: String?,
+                bindingB64: String?,
             ) {
                 sentTo += signaturePub
             }

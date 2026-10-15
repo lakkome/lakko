@@ -79,6 +79,9 @@ export interface OpenedPublicRecord {
   readonly identityPk: Uint8Array;
   readonly accountId: Uint8Array;
   readonly displayName: string | null;
+  /** ADR-0078 - the person's 97-byte mailbox binding, the core verified
+   *  against `identityPk`. Absent from a fake that does not model it. */
+  readonly mailboxBinding?: Uint8Array | null;
 }
 
 export interface PeopleSearchDeps {
@@ -164,6 +167,32 @@ export function acceptPublicRecord(
   return name.length === 0 ? null : name;
 }
 
+/**
+ * ADR-0078 - the mailbox binding a public record gives a lookup hit (standard
+ * base64), or `null`: under exactly the checks of {@link acceptPublicRecord}
+ * (the record names the hit's account id AND the key the identity bundle
+ * serves). The sender verifies it again against the key before writing.
+ */
+export function publicRecordBinding(
+  deps: Pick<PeopleSearchDeps, "openPublicRecord" | "encodeGrant">,
+  hit: LookupHit,
+  oprfOutput: Uint8Array,
+  bundleKey: Uint8Array,
+): string | null {
+  if (hit.publicRecord === null) return null;
+  let opened: OpenedPublicRecord | null;
+  try {
+    opened = deps.openPublicRecord(hit.publicRecord, oprfOutput);
+  } catch {
+    return null;
+  }
+  if (opened === null) return null;
+  if (toHex(opened.accountId) !== toHex(hit.accountId)) return null;
+  if (toHex(opened.identityPk) !== toHex(bundleKey)) return null;
+  const binding = opened.mailboxBinding ?? null;
+  return binding === null ? null : deps.encodeGrant(binding);
+}
+
 /** A result built from what is known locally, over a network finding. */
 function resultFor(
   deps: PeopleSearchDeps,
@@ -174,6 +203,7 @@ function resultFor(
   foundName: string | null,
   foundUsername: string | null,
   grantWireB64: string | null,
+  openBindingB64: string | null = null,
 ): PersonResult | null {
   const k = deps.known(keyB64);
   const reach: PersonReach = k.isContact ? "contact" : foundReach;
@@ -191,6 +221,7 @@ function resultFor(
     username: shownUsername(foundUsername ?? k.verifiedUsername, reach),
     reach,
     grantWireB64: reach === "grant" ? grantWireB64 : null,
+    ...(reach === "open" && openBindingB64 !== null ? { openBindingB64 } : {}),
   };
 }
 
@@ -248,6 +279,7 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
         published ?? `@${username}`,
         username,
         null,
+        publicRecordBinding(deps, hit, round.output, key.bytes),
       );
       return r === null ? [] : [r];
     } catch (err) {
@@ -273,7 +305,17 @@ export async function searchPeople(query: string, deps: PeopleSearchDeps): Promi
         const published = acceptPublicRecord(deps, hit, round.output, key.bytes);
         const name = deps.known(key.b64).name ?? published;
         if (name === null || !deps.nameMatches(name, query)) continue;
-        const r = resultFor(deps, key.b64, key.hex, accountIdHex, "open", published, null, null);
+        const r = resultFor(
+          deps,
+          key.b64,
+          key.hex,
+          accountIdHex,
+          "open",
+          published,
+          null,
+          null,
+          publicRecordBinding(deps, hit, round.output, key.bytes),
+        );
         if (r !== null) out.push(r);
       }
       legs.push("answered");

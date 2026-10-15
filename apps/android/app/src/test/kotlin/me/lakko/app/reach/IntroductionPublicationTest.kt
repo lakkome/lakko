@@ -20,7 +20,7 @@ import uniffi.lakko_ffi_uniffi.OprfResult
  */
 class IntroductionPublicationTest {
 
-    private val fof = FfiReachGrant(FfiReachClass.FOF, 2u, ByteArray(32) { 7 })
+    private val fof = FfiReachGrant(FfiReachClass.FOF, 2u, ByteArray(32) { 7 }, ByteArray(97) { 8 })
 
     private class Recorder {
         val oprf = mutableListOf<String>()
@@ -76,6 +76,9 @@ class IntroductionPublicationTest {
         val state = publishIntroductions(IntroPublicationState(), inputs(), ops(r))
         assertEquals(listOf("out:n:anna", "out:n:weber", "out:u:anna"), r.composedOutputs)
         assertEquals(fof, r.composedPayload!!.fof)
+        // ADR-0078: the record carries the owner's mailbox binding, the one
+        // the `fof` grant carries.
+        org.junit.Assert.assertArrayEquals(fof.binding, r.composedPayload!!.mailboxBinding)
         assertEquals("anna", r.composedPayload!!.username)
         assertEquals(listOf("g1" to "offer:record", "g2" to "offer:record"), r.sent)
         assertEquals(setOf("g1", "g2"), state.offerSentTo.keys)

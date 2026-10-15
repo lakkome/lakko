@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import me.lakko.app.contacts.grantMailboxPkOrNull
 import me.lakko.app.reach.GrantVenue
 import me.lakko.app.reach.ReachKind
 import me.lakko.app.reach.ReachManager
@@ -509,8 +510,13 @@ public object ChannelMemberCards {
             }
             verifiedGrants[cacheKey]?.let { return it }
             return try {
-                // ADR-0074 3.5a rule 1: the person's CURRENT mailbox.
-                val mailbox = reach.mailboxOf(accountKey)
+                // ADR-0074 3.5a rule 1: the person's CURRENT key. ADR-0078:
+                // the mailbox the grant's binding names, verified against it;
+                // a grant that does not verify reaches nobody.
+                val current = reach.mailboxAccountKey(accountKey)
+                val mailboxPk = me.lakko.app.contacts.NativeMailboxCrypto.grantMailboxPkOrNull(grant, current)
+                    ?: return false.also { verifiedGrants[cacheKey] = false }
+                val mailbox = me.lakko.app.contacts.NativeMailboxCrypto.address(mailboxPk)
                 val ok = me.lakko.app.ds.DsClient().use { ds ->
                     ds.checkReach(mailbox, me.lakko.app.ds.reachSigner(grant.seed))
                 }

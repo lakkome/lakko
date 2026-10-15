@@ -28,8 +28,13 @@ describe("the scoped-discovery sniff", () => {
   });
 
   it("names a committer-delegation envelope", () => {
-    const added = wasm.reachVerifyingKey(new Uint8Array(32).fill(9));
-    const mailbox = wasm.IdentityPseudonym.fromIdentity(added).asBytes();
+    // ADR-0078: the envelope carries the added person's mailbox binding, and
+    // each delegation names that binding's address.
+    const person = wasm.Identity.fromSeed(new Uint8Array(64).fill(9));
+    const added = person.signaturePublicKey;
+    const binding = wasm.signMailboxBinding(person);
+    person.free();
+    const mailbox = wasm.mailboxAddress(wasm.verifyMailboxBinding(binding, added));
     const blob = wasm.signDelegationBlob(
       new Uint8Array(32).fill(4),
       mailbox,
@@ -37,7 +42,7 @@ describe("the scoped-discovery sniff", () => {
       BigInt(Date.now() + 60_000),
       new Uint8Array(16),
     );
-    const env = wasm.composeCommitterDelegationEnvelope(new wasm.CommitterDelegationEnvelope(added, [blob]));
+    const env = wasm.composeCommitterDelegationEnvelope(new wasm.CommitterDelegationEnvelope(added, binding, [blob]));
     expect(sniffScopedEnvelope(wasm, env)).toBe("committer-delegation");
   });
 

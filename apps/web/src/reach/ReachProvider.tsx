@@ -23,6 +23,7 @@ import { useChats } from "../chat/ChatContext";
 import { journalHex } from "../ds/access";
 import { channelsState } from "../state/channels-state";
 import { reachSession, reachSessionSignal, startReachSession, stopReachSession } from "./reach-service";
+import { loadWasm } from "../wasm";
 import { clearVisibility, loadVisibility, visibilitySetting } from "./visibility-store";
 import { clearJoinReplies } from "./join-replies";
 import { applyHeldServiceEnvelopes, clearHeldServiceEnvelopes } from "./service-envelope-intake";
@@ -90,7 +91,17 @@ export function ReachProvider(props: { children: JSX.Element }): JSX.Element {
       const accountKey = identity.signaturePublicKey;
       void (async () => {
         await loadVisibility(account);
-        const session = await startReachSession(account, seed, accountKey);
+        // ADR-0078 - the account mailbox is named after the MAILBOX key the
+        // account seed derives, never after the identity key.
+        const wasm = await loadWasm();
+        const mailboxKey = wasm.MailboxKey.fromAccountIdentity(identity);
+        let accountMailbox: Uint8Array;
+        try {
+          accountMailbox = mailboxKey.address();
+        } finally {
+          mailboxKey.free();
+        }
+        const session = await startReachSession(account, seed, accountKey, accountMailbox);
         seed.fill(0);
         if (session === null) return;
         session.setSettingProvider(() => visibilitySetting());
