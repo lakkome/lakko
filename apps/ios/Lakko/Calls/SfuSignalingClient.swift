@@ -7,6 +7,21 @@ import LakkoCore
 /// The WebSocket subprotocol the SFU requires on the upgrade.
 let sfuSubprotocol = "lakko-sfu-v1"
 
+/// Prefix of the subprotocol that carries the call-admission JWT
+/// (`lakko_sfu_proto::TOKEN_SUBPROTOCOL_PREFIX`).
+let sfuTokenSubprotocolPrefix = "lakko-sfu-token."
+
+/// The subprotocols a connect offers: `lakko-sfu-v1` and
+/// `lakko-sfu-token.<jwt>`. The token rides `Sec-WebSocket-Protocol`
+/// rather than the URL, so no request line (and no access log, proxy log
+/// or crash report that records one) names who joined which call
+/// (invariant #5). A JWS compact string is base64url segments joined by
+/// `.`, all valid token characters. The SFU answers with `lakko-sfu-v1`
+/// only.
+func sfuSubprotocols(jwt: String) -> [String] {
+    [sfuSubprotocol, sfuTokenSubprotocolPrefix + jwt]
+}
+
 /// Caller misuse / setup failures before any I/O.
 enum SfuSignalingError: Error {
     case alreadyConnected
@@ -48,7 +63,8 @@ struct SfuSignalingCallbacks {
 /// and the web `apps/web/src/calls/sfu-signaling-client.ts`.
 ///
 /// Connects to the Rust SFU's `lakko-sfu-v1` WebSocket
-/// (`{baseUrl}/v1/connect?token=<jwt>`), parses the typed server frames
+/// (`{baseUrl}/v1/connect`, the JWT offered as a second subprotocol, see
+/// `sfuSubprotocols(jwt:)`), parses the typed server frames
 /// through the shared `lakko_sfu_proto` definition (the UniFFI
 /// `parseSfuServerFrame`), and sends the typed client frames via the
 /// `composeSfu*` helpers — so the client and `services/sfu` agree on the
@@ -131,16 +147,12 @@ final class SfuSignalingClient {
             .replacingOccurrences(of: "http://", with: "ws://")
             .replacingOccurrences(of: "https://", with: "wss://")
         if wsBase.hasSuffix("/") { wsBase.removeLast() }
-        // The JWT is base64url + dots, so already URL-safe; encode
-        // defensively anyway.
-        let escaped =
-            jwt.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? jwt
-        guard let url = URL(string: "\(wsBase)/v1/connect?token=\(escaped)") else {
+        guard let url = URL(string: "\(wsBase)/v1/connect") else {
             throw SfuSignalingError.badUrl
         }
-        // The subprotocol array sets the `Sec-WebSocket-Protocol` header
-        // the SFU's accept-check requires.
-        let t = session.webSocketTask(with: url, protocols: [sfuSubprotocol])
+        // The subprotocol array sets the `Sec-WebSocket-Protocol` header:
+        // `lakko-sfu-v1` plus the admission token, never in the URL.
+        let t = session.webSocketTask(with: url, protocols: sfuSubprotocols(jwt: jwt))
         task = t
         t.resume()
         receiveTask = Task { [weak self] in
@@ -188,6 +200,9 @@ final class SfuSignalingClient {
         let host: String
         let port: UInt16
         let innerUrl: String
+        /// The `Sec-WebSocket-Protocol` value: the same two subprotocols as
+        /// the direct path, comma-joined with no space.
+        let subprotocols: String
     }
 
     /// The tunnel endpoint and the inner WebSocket URL for `baseUrl`.
@@ -195,7 +210,8 @@ final class SfuSignalingClient {
     /// The inner URL is plain `ws://` (the obfuscated tunnel provides the
     /// encryption) and keeps the base URL's path: an SFU served under a prefix
     /// (`wss://test.lakko.me/sfu`) is reached at `/sfu/v1/connect`, exactly
-    /// like the direct path. `nil` when the base URL has no host or port.
+    /// like the direct path. The admission token never rides the URL; it is
+    /// offered in `subprotocols`. `nil` when the base URL has no host or port.
     static func tunneledTarget(baseUrl: String, jwt: String) -> TunneledTarget? {
         guard let comps = URLComponents(string: baseUrl), let host = comps.host, !host.isEmpty else {
             return nil
@@ -204,11 +220,11 @@ final class SfuSignalingClient {
         guard let port = UInt16(exactly: comps.port ?? (isSecure ? 443 : 80)) else { return nil }
         var path = comps.percentEncodedPath
         while path.hasSuffix("/") { path.removeLast() }
-        let escaped = jwt.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? jwt
         return TunneledTarget(
             host: host,
             port: port,
-            innerUrl: "ws://\(host)\(path)/v1/connect?token=\(escaped)"
+            innerUrl: "ws://\(host)\(path)/v1/connect",
+            subprotocols: sfuSubprotocols(jwt: jwt).joined(separator: ",")
         )
     }
 
@@ -223,6 +239,7 @@ final class SfuSignalingClient {
         let host = target.host
         let port = target.port
         let innerUrl = target.innerUrl
+        let subprotocols = target.subprotocols
         let now = UInt64(Date().timeIntervalSince1970)
 
         tunnelRecvQueue.async { [weak self] in
@@ -237,7 +254,7 @@ final class SfuSignalingClient {
                     endpointPort: port,
                     deadlineMs: config.deadlineMs,
                     url: innerUrl,
-                    subprotocol: sfuSubprotocol
+                    subprotocol: subprotocols
                 )
             } catch {
                 self.callbacks.onClosed?()

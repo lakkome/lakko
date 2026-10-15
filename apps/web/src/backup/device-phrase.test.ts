@@ -25,7 +25,8 @@ function storedPaths(source: string): string[] {
   const out: string[] = [];
   const call = /storeDevicePhrase\(([^;]*?)\);/gs;
   for (const m of source.matchAll(call)) {
-    const label = /"([a-z-]+)"\s*,?\s*$/s.exec((m[1] ?? "").trim());
+    // The label, optionally followed by a wipe mark.
+    const label = /"([a-z-]+)"\s*(?:,\s*[\w.]+\s*)?,?\s*$/s.exec((m[1] ?? "").trim());
     if (label?.[1] !== undefined) out.push(label[1]);
     else out.push(`<unlabelled: ${(m[1] ?? "").slice(0, 40)}>`);
   }
@@ -90,23 +91,34 @@ describe("every path that lands a device with keys stores the phrase", () => {
     expect(gates).toBeGreaterThan(store);
   });
 
-  it("stores a reset identity's phrase only after the server reset answered, and before the publish (ADR-0073 2.3)", () => {
-    // The point of no return is `reset/finish`: nothing is stored before it
-    // (a failure there discards the generated phrase), and everything local
-    // is persisted before the publishing steps, which can fail and be
-    // retried with what was stored.
-    // Since ADR-0074 the part after the server's answer is one function,
-    // `adoptKeyResetOutcome`, which the reset and the recall both call.
+  it("stages a reset identity's phrase BEFORE the server reset, and stores it again before the publish (ADR-0077 decision 3, ADR-0073 2.3)", () => {
+    // G-47: from `reset/finish` on, the new phrase is the account's only way
+    // back, so it is in the account's row before that call; a row that
+    // cannot be written refuses the reset, and a failed or overtaken step
+    // takes the row back out. Since ADR-0074 the part after the server's
+    // answer is one function, `adoptKeyResetOutcome`, which the reset and
+    // the recall both call.
     const start = authContext.indexOf("async mintFreshIdentity(");
-    const reset = authContext.indexOf("await client.resetAccountKeys(", start);
-    const adopt = authContext.indexOf("await adoptKeyResetOutcome(", start);
     const end = authContext.indexOf("async confirmFreshPhraseSaved(", start);
-    expect(reset).toBeGreaterThan(start);
-    expect(adopt).toBeGreaterThan(reset);
-    expect(adopt).toBeLessThan(end);
+    const body = authContext.slice(start, end);
+    const mark = body.indexOf("const wipes = takeWipeMark();");
+    const stage = body.indexOf("staged = await stageResetPhrase({");
+    const stale = body.indexOf("requireStillParked(pending, flow);\n        reset = await client.resetAccountKeys(");
+    const reset = body.indexOf("await client.resetAccountKeys(");
+    const rollback = body.indexOf("await staged.rollback()");
+    const adopt = body.indexOf("await adoptKeyResetOutcome(");
+    expect(mark).toBeGreaterThan(-1);
+    expect(stage).toBeGreaterThan(mark);
+    expect(stale).toBeGreaterThan(stage);
+    expect(reset).toBeGreaterThan(stale);
+    // The rollback is in the server step's catch.
+    expect(rollback).toBeGreaterThan(reset);
+    expect(adopt).toBeGreaterThan(rollback);
+    expect(body).toContain("deviceKey: staged.deviceKey,");
+    expect(body).toContain("wipes,\n      });");
 
     const adoptStart = authContext.indexOf("async function adoptKeyResetOutcome(");
-    const store = authContext.indexOf('"fresh-identity"', adoptStart);
+    const store = authContext.indexOf('"fresh-identity", ctx.wipes', adoptStart);
     const owed = authContext.indexOf("writeKeyResetOwed(", adoptStart);
     const publish = authContext.indexOf("await retryKeyResetPublish(", adoptStart);
     expect(adoptStart).toBeGreaterThan(0);
@@ -115,6 +127,26 @@ describe("every path that lands a device with keys stores the phrase", () => {
     expect(publish).toBeGreaterThan(owed);
     // The phrase is stored in exactly one place for both.
     expect(authContext.split('"fresh-identity"').length - 1).toBe(1);
+  });
+
+  it("a recall stages its phrase before the finish, keeps it while the answer is outstanding, and takes it out on a refusal", () => {
+    const start = authContext.indexOf("function runRecall(");
+    const end = authContext.indexOf("\n  }\n", start);
+    const body = authContext.slice(start, end);
+    const mark = body.indexOf("const wipes = takeWipeMark();");
+    const prepare = body.indexOf("await client.recallPrepare(");
+    const stage = body.indexOf("staged = await stageResetPhrase({");
+    const finish = body.lastIndexOf("await client.recallFinish(prepared)");
+    expect(mark).toBeGreaterThan(-1);
+    expect(mark).toBeLessThan(body.indexOf("withRecallLock("));
+    expect(stage).toBeGreaterThan(prepare);
+    expect(finish).toBeGreaterThan(stage);
+    // A refusal the server chose rolls back; no answer keeps the phrase.
+    expect(body).toMatch(
+      /An answer the server chose: the attempt is over, and did not\s*\/\/ land\.\s*await dropPending\(true\);/,
+    );
+    expect(body).toContain("await dropPending(earlierRefused);");
+    expect(body).toContain("deviceKey: landedKey,");
   });
 
   it("a recall continues through the reset's one path, and drops its record only after the new keys are stored (ADR-0074 part 1)", () => {

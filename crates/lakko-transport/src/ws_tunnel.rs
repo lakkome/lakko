@@ -45,11 +45,14 @@ pub enum WsTunnelError {
 /// Open a WebSocket to `url` over the framed `conn` (an obfuscated tunnel from
 /// the dialer).
 ///
-/// `url` is the inner `ws://host/path?query` the server expects (e.g. the SFU's
-/// `ws://sfu.lakko.invalid/v1/connect?token=...`); the Host + path ride the
-/// handshake through the byte-relay proxy to the internal WebSocket origin.
-/// `subprotocol`, when set, is sent as `Sec-WebSocket-Protocol` (the SFU uses
-/// `lakko-sfu-v1`).
+/// `url` is the inner `ws://host/path` the server expects (e.g. the SFU's
+/// `ws://sfu.lakko.invalid/v1/connect`); the Host + path ride the handshake
+/// through the byte-relay proxy to the internal WebSocket origin.
+/// `subprotocol`, when set, is sent verbatim as `Sec-WebSocket-Protocol`. It may
+/// name several subprotocols, comma-joined with no space: the SFU is offered
+/// `lakko-sfu-v1,lakko-sfu-token.<call-jwt>`, which keeps the admission token
+/// out of the URL. No space, because this tungstenite version splits the offer
+/// on `,` without trimming when it checks the server's answer.
 ///
 /// # Errors
 ///

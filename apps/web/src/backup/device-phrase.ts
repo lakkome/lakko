@@ -28,9 +28,18 @@
  * phrase (typed, minted, opened from a passkey) or as its entropy (another
  * device).
  */
+import type { WipeMark } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 import { clearThreeWordsSuspended } from "../auth/recover/three-words";
-import { getPhrase, putPhrase } from "./phrase-store";
+import {
+  deletePhrase,
+  getPhrase,
+  getPhraseRow,
+  putPhrase,
+  putPhraseRow,
+  type PhraseRowSnapshot,
+} from "./phrase-store";
+import type { PhraseRow } from "./staged-phrase";
 
 /** Every way a device comes to hold the account's keys. */
 export const PHRASE_LANDING_PATHS = [
@@ -66,16 +75,24 @@ export type PhraseLandingPath = (typeof PHRASE_LANDING_PATHS)[number];
  * other wrapped caches: a failed write is logged (with the path, never the
  * phrase) and the landing continues; the device then simply does not offer
  * what needs the phrase.
+ *
+ * Resolves `false` when the write failed or the store gate refused it (the
+ * account's data was wiped; under `wipes`, wiped since that mark was taken).
  */
 export async function storeDevicePhrase(
   accountIdB64: string,
   phrase: string,
   deviceKey: CryptoKey,
   path: PhraseLandingPath,
+  wipes?: WipeMark,
 ): Promise<boolean> {
   const bytes = new TextEncoder().encode(phrase);
   try {
-    await putPhrase(accountIdB64, bytes, deviceKey);
+    if (!(await putPhrase(accountIdB64, bytes, deviceKey, wipes))) {
+      // eslint-disable-next-line no-console
+      console.warn(`recovery phrase store (${path}) refused: the account's local data was wiped`);
+      return false;
+    }
     // A landing path wrote the phrase again (checked against the published
     // identity where one applies): a three-word suspension is over.
     clearThreeWordsSuspended(
@@ -124,4 +141,29 @@ export async function readDevicePhrase(accountIdB64: string): Promise<string | n
   }
   if (deviceKey === null) return null;
   return readDevicePhraseWith(accountIdB64, deviceKey);
+}
+
+/**
+ * `accountIdB64`'s row of the phrase store under `deviceKey`, for a staged
+ * write (`staged-phrase.ts`): every write is refused once the account was
+ * wiped since `wipes` was taken, and a plain sign-out refuses nothing.
+ */
+export function devicePhraseRow(
+  accountIdB64: string,
+  deviceKey: CryptoKey,
+  wipes: WipeMark,
+): PhraseRow<PhraseRowSnapshot> {
+  return {
+    readSnapshot: () => getPhraseRow(accountIdB64),
+    async readPhrase() {
+      try {
+        return (await getPhrase(accountIdB64, deviceKey))?.phrase ?? null;
+      } catch {
+        return null;
+      }
+    },
+    write: (phrase) => putPhrase(accountIdB64, phrase, deviceKey, wipes),
+    restore: (snapshot) => putPhraseRow(accountIdB64, snapshot, wipes),
+    remove: () => deletePhrase(accountIdB64),
+  };
 }

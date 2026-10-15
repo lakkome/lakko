@@ -24,7 +24,11 @@
  * `wasm-bindgen-test` lands in 1.16f we add a real round-trip.
  */
 
-import { accountStoresWritable } from "./account-store-gate";
+import {
+  accountStoresWritable,
+  accountStoresWritableSince,
+  type WipeMark,
+} from "./account-store-gate";
 
 const DB_NAME = "lakko-auth";
 const DB_VERSION = 1;
@@ -72,18 +76,26 @@ function awaitTx<T>(tx: IDBTransaction, value: T): Promise<T> {
 }
 
 /** Persist a device root key for the given account. Replaces an
- *  existing record if present. */
+ *  existing record if present. Resolves `false` when the store gate refused
+ *  the write (the account's data was wiped; under `wipes`, wiped since that
+ *  mark was taken). */
 export async function putDeviceKey(
   accountIdB64: string,
   key: CryptoKey,
-): Promise<void> {
+  wipes?: WipeMark,
+): Promise<boolean> {
   const db = await openDb();
   try {
-    if (!accountStoresWritable(accountIdB64)) return;
+    const writable =
+      wipes === undefined
+        ? accountStoresWritable(accountIdB64)
+        : accountStoresWritableSince(wipes, accountIdB64);
+    if (!writable) return false;
     const tx = db.transaction(STORE, "readwrite");
     const record: DeviceKeyRecord = { accountId: accountIdB64, key };
     tx.objectStore(STORE).put(record);
     await awaitTx(tx, undefined);
+    return true;
   } finally {
     db.close();
   }

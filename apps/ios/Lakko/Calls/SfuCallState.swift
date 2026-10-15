@@ -16,7 +16,8 @@ enum SfuCallState: String, Equatable {
 /// "in progress" on every other phone for the freshness window, and whoever
 /// taps Join lands in an empty room. The one party that knows a room is empty
 /// is the SFU: the call ends there five seconds after the last socket goes,
-/// and `GET /v1/calls/{call_id}?token=<call jwt>` says so. A phone showing the
+/// and `GET /v1/calls/{call_id}` (`Authorization: Bearer <call jwt>`) says
+/// so. A phone showing the
 /// call as joinable asks every ``intervalMs`` and, on `ended`, closes the
 /// chat's record itself by publishing the End signal — so the banner goes on
 /// every device, not only its own. Shared word-for-word with web and Android.
@@ -26,9 +27,11 @@ enum SfuCallStateProbe {
     static let intervalMs: Int64 = 10_000
 
     /// The state route for `callIdHex`, on the HTTP origin behind the SFU's
-    /// WebSocket base (`wss://host/sfu` -> `https://host/sfu`). The token is
-    /// the same call-admission JWT the socket uses, bound to this call id.
-    static func url(sfuBaseUrl: String, callIdHex: String, jwt: String) -> URL? {
+    /// WebSocket base (`wss://host/sfu` -> `https://host/sfu`). The token
+    /// never rides the URL (invariant #5: a request line in a log must not
+    /// name who asked about which call); ``request(sfuBaseUrl:callIdHex:jwt:)``
+    /// carries it in a header.
+    static func url(sfuBaseUrl: String, callIdHex: String) -> URL? {
         var base = sfuBaseUrl
         if base.lowercased().hasPrefix("wss:") {
             base = "https:" + base.dropFirst(4)
@@ -36,9 +39,17 @@ enum SfuCallStateProbe {
             base = "http:" + base.dropFirst(3)
         }
         while base.hasSuffix("/") { base.removeLast() }
-        guard var components = URLComponents(string: "\(base)/v1/calls/\(callIdHex)") else { return nil }
-        components.queryItems = [URLQueryItem(name: "token", value: jwt)]
-        return components.url
+        return URL(string: "\(base)/v1/calls/\(callIdHex)")
+    }
+
+    /// The probe request: the same call-admission JWT the socket uses, bound
+    /// to this call id, as a bearer token.
+    static func request(sfuBaseUrl: String, callIdHex: String, jwt: String) -> URLRequest? {
+        guard let url = url(sfuBaseUrl: sfuBaseUrl, callIdHex: callIdHex) else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 5
+        return request
     }
 
     /// The route's answer, or `nil` for anything that is not one of the four
@@ -53,9 +64,9 @@ enum SfuCallStateProbe {
 
     /// One probe over `URLSession`. Never throws; `nil` on any failure.
     static func fetch(sfuBaseUrl: String, callIdHex: String, jwt: String) async -> SfuCallState? {
-        guard let url = url(sfuBaseUrl: sfuBaseUrl, callIdHex: callIdHex, jwt: jwt) else { return nil }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 5
+        guard let request = request(sfuBaseUrl: sfuBaseUrl, callIdHex: callIdHex, jwt: jwt) else {
+            return nil
+        }
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse, http.statusCode == 200
         else { return nil }

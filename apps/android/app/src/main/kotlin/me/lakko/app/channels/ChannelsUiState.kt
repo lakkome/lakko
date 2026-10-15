@@ -525,14 +525,21 @@ public class ChannelsUiState(
      *  Returns the value the NEXT post should carry. Persisting
      *  before hand-off means a crash right after a post can only
      *  ever SKIP a counter, never hand the same value out twice —
-     *  the safe direction for AEAD nonce uniqueness. */
+     *  the safe direction for AEAD nonce uniqueness.
+     *
+     *  The write is synchronous and fail-closed
+     *  ([persistNextCounterDurably]): a floor that is not on disk
+     *  when the post leaves would let a relaunch restart below a
+     *  counter already used with the same signing key and seed, so
+     *  a write that was refused or failed throws and no value is
+     *  handed out (the in-memory floor stays advanced: a skip). */
     public fun nextCounter(channelId: String): ULong {
         var value: ULong = 0u
         _counterByChannel.update { map ->
             value = map[channelId] ?: 0u
             map + (channelId to (value + 1u))
         }
-        persistPublisherCounters()
+        persistNextCounterDurably()
         return value
     }
 
@@ -723,15 +730,43 @@ public class ChannelsUiState(
         me.lakko.app.account.AccountStoreGate.write(boundAccountIdB64 ?: return) {
             val sink = publisherPrefs ?: return
             val acct = boundAccountIdB64 ?: return
-            val arr = JSONArray()
-            for ((channelId, counter) in _counterByChannel.value) {
-                val row = JSONObject()
-                row.put("channelId", channelId)
-                row.put("counter", counter.toString())
-                arr.put(row)
-            }
-            sink.edit().putString(accountKey(PUBLISHER_COUNTERS_PREF_KEY, acct), arr.toString()).apply()
+            sink.edit().putString(accountKey(PUBLISHER_COUNTERS_PREF_KEY, acct), countersJson()).apply()
         }
+    }
+
+    /**
+     * [persistPublisherCounters] for the floor a post is about to use
+     * ([nextCounter]): `commit()`, not `apply()`, so the row is on disk
+     * before the ciphertext is composed. `apply()` returns before its disk
+     * write, and a process that died after the post left but before that
+     * write would come back with the previous floor while the signing seed,
+     * written long before, is still stored: the next post would repeat a
+     * `(key, nonce)` pair (G-51). Inside [me.lakko.app.account.AccountStoreGate.writeOrEnd]
+     * (ADR-0077 decision 4): a refused write ends the caller instead of
+     * letting the post go out on a floor that was never stored. With no
+     * store at all (the host tests), or before the first [bind] (the floor
+     * is merged into the account's row there, as the class documents), the
+     * counter is in memory only.
+     */
+    private fun persistNextCounterDurably() {
+        val sink = publisherPrefs ?: return
+        val acct = boundAccountIdB64 ?: return
+        me.lakko.app.account.AccountStoreGate.writeOrEnd(acct) {
+            val stored = sink.edit().putString(accountKey(PUBLISHER_COUNTERS_PREF_KEY, acct), countersJson()).commit()
+            if (!stored) throw IllegalStateException("the publish counter could not be stored")
+        }
+    }
+
+    /** The counter map as the persisted JSON rows. */
+    private fun countersJson(): String {
+        val arr = JSONArray()
+        for ((channelId, counter) in _counterByChannel.value) {
+            val row = JSONObject()
+            row.put("channelId", channelId)
+            row.put("counter", counter.toString())
+            arr.put(row)
+        }
+        return arr.toString()
     }
 
     private fun loadPublisherCounters(accountIdB64: String): Map<String, ULong> {

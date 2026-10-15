@@ -45,6 +45,21 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+/// The signaling WebSocket subprotocol. A client offers it on
+/// `/v1/connect`, and it is the only subprotocol the SFU ever answers
+/// with.
+pub const SIGNALING_SUBPROTOCOL: &str = "lakko-sfu-v1";
+
+/// Prefix of the subprotocol that carries the call-admission JWT on
+/// `/v1/connect`: the client offers `lakko-sfu-token.<jwt>` next to
+/// [`SIGNALING_SUBPROTOCOL`] in `Sec-WebSocket-Protocol`. A JWS compact
+/// string is base64url segments joined by `.`, all RFC 7230 token
+/// characters, so it is a valid subprotocol name. The token travels in a
+/// header rather than the URL so that no request line, and hence no
+/// access log or crash report that records one, names who joined which
+/// call (invariant #5). The SFU never answers with this subprotocol.
+pub const TOKEN_SUBPROTOCOL_PREFIX: &str = "lakko-sfu-token.";
+
 /// Maximum size of an inbound signaling frame, bytes. The hard cap
 /// protects the server against pathologically-large payloads on the
 /// wire. SDP offers in production peak around 8 KiB; we leave 64×

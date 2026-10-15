@@ -70,11 +70,11 @@ entry's status line, not a mechanical fact.
 | [G-44](./known-gaps.md#g-44) | Rejoining a call in the same MLS epoch reused SFrame `(key, nonce)` pairs | Closed, live check owed | not seen on a live call |
 | [G-45](./known-gaps.md#g-45) | After a key reset the old identity's leaves stay in conversation groups until peers evict them | Partly closed | an owned group, a table-less group, a group with no admin contact |
 | [G-46](./known-gaps.md#g-46) | A stolen session can reset the account keys; two discovery writes open to a superseded token | Partly closed | session + password, a lifted grant, the discovery part |
-| [G-47](./known-gaps.md#g-47) | A fresh identity's phrase rule (ADR-0077 decision 3) holds in full on Android only | Open | the write-before-the-server-step and the typed-phrase clear on web and iOS |
+| [G-47](./known-gaps.md#g-47) | A fresh identity's phrase rule (ADR-0077 decision 3) | Partly closed | the window between a server reset that succeeded and the owed marker; owed-marking rules still differ |
 | [G-48](./known-gaps.md#g-48) | Account store gate coverage (ADR-0077 decision 4) | Partly closed | the stores and paths listed in the entry |
 | [G-49](./known-gaps.md#g-49) | An overtaken sign-in can already have changed server state; binding residuals | Open | see the entry |
 | [G-50](./known-gaps.md#g-50) | Channel PublisherGroup commits publish before they persist | Open | an outbox-style record; iOS and Android not checked |
-| [G-51](./known-gaps.md#g-51) | Channel publish counters restart at 0 after Forget device | Unconfirmed | not confirmed on web; iOS and Android not checked |
+| [G-51](./known-gaps.md#g-51) | Channel publish counters restart at 0 after Forget device | Not real as reported | the reported path holds on none of the three; two adjacent reuse paths were fixed |
 
 ## MLS state machine
 
@@ -2913,7 +2913,12 @@ upload makes). None is built.
 <a id="g-47"></a>
 ### G-47: A fresh identity's phrase rule (ADR-0077 decision 3) holds in full on Android only
 
-**Status:** **OPEN** (state at `3af913ad`, 2026-10-14, found by reading; nothing run on a device)
+**Status:** **PARTLY CLOSED** (2026-10-14: the phrase is now written before the server step on web, iOS and Android, and a typed phrase clears the owed marker on all three; host-tested only, not walked live. The text below the closing note is the entry as minted at `3af913ad`.)
+
+**Closed 2026-10-14.** Web (`backup/staged-phrase.ts`, `auth/reset-phrase-stage.ts`) and iOS (`Auth/FreshPhraseKeep.swift`) now stage the new phrase in the account's phrase store before the ADR-0073 server reset, as Android's `StagedPhrase` does: a failed write refuses the reset with `restore_identity.lost.error.phrase_not_stored`, and a failed server step puts the previous row back while the row still holds this phrase. Web and iOS stage on the recall routes too; Android stages in `mintFreshIdentity` only. A phrase the person typed clears the owed marker on all three (web `PhraseSource`, iOS and Android `phraseHeldByPerson`); a phrase from the kept row, a vault or a passkey stays owed.
+
+**Still open.** (1) A server reset that succeeded but whose answer was lost runs the rollback, so the account's new phrase is on no device (all three; the rule as written). (2) A process killed between the server's answer and the landing leaves the phrase in the row with no owed marker yet, and no path reads it back (iOS and Android; web keeps the staged phrase on its pending recall record). Marking the phrase owed together with the staging write, and clearing it on rollback, would close (2). (3) How the phrase is marked owed still differs: web and Android mark it and clear it at the next landing for an account that is not phrase-protected; iOS marks it only when ADR-0075 shows new words. (4) A recall whose phrase cannot be stored shows the generic recall error on web (no catalog text for it).
+
 
 [ADR-0077](../adr/0077-account-binding-and-store-gate.md) decision 3 (the
 maintainer's, 2026-10-13) says the new phrase of `mintFreshIdentity` is written
@@ -2976,10 +2981,10 @@ Closed by the commit after `3af913ad` (host-tested only):
 
 Still not covered, or covered differently:
 
-- Android and web sign-in key writes (device key, export key, seeds, session
-  record) other than the phrase are not under a wipe mark; iOS's are.
-- The iOS channel co-publisher request still knocks before persisting its
-  KeyPackage keys.
+- Closed 2026-10-14: Android (`auth/SignInKeyWrites.kt`) and web (`WipeMark`,
+  `flow.openStores`) sign-in key writes are under the route's wipe mark, as
+  iOS's are; the iOS channel co-publisher request persists its KeyPackage keys
+  (`CoPublishRequestKeys`) before the knock.
 - Android: the seal ends at the account's next landing, so a stale coroutine
   that resumes after the same account signed in again is stopped by its binding
   check only.
@@ -3056,7 +3061,12 @@ Android.
 <a id="g-51"></a>
 ### G-51: Channel publish counters restart at 0 after Forget device
 
-**Status:** **UNCONFIRMED** (reported on web 2026-10-14 by the residual pass; not confirmed by reading the web code; iOS and Android not checked)
+**Status:** **NOT REAL AS REPORTED; two adjacent reuse paths fixed** (2026-10-14, by reading on all three clients; host-tested)
+
+**Resolution 2026-10-14.** On web, iOS and Android the channel post signing key, which enters the post key and nonce, is deleted together with the publish counters (web: the channel log goes first; iOS: one `ChannelsUiState.forget`, both Keychain items share one lifetime and also survive app deletion together; Android: one encrypted prefs file, one editor), so after Forget device the device signs with a new key and the counter restarting at 0 is safe. Two adjacent paths were real and are fixed: Android handed out a counter whose write used `apply()` (a crash after the post went out could restore the old counter under the same key) and handed it out even when the gate refused the write; iOS read an unreadable counter item as no floor while the signing key still read. Each now hands a counter out only after a durable write, and refuses it otherwise. Web reads the counter row back after writing it.
+
+The entry as reported:
+
 
 The report: Forget device deletes the channel publish counters, a new sign-in
 restarts them at 0, and if the device lands at the same PublisherGroup epoch

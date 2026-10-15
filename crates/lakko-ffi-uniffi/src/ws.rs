@@ -236,10 +236,28 @@ mod tests {
                 Request as WsRequest, Response as WsResponse,
             };
             let server_stream = ByteStreamConnection::new(server_conn);
+            // Answer like the SFU: the offer must carry the admission token
+            // as a `lakko-sfu-token.` subprotocol, and only `lakko-sfu-v1`
+            // is answered, never the token.
             let echo_proto = |req: &WsRequest, mut resp: WsResponse| {
-                if let Some(proto) = req.headers().get("sec-websocket-protocol") {
-                    resp.headers_mut()
-                        .insert("sec-websocket-protocol", proto.clone());
+                let offered = req
+                    .headers()
+                    .get("sec-websocket-protocol")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(str::trim)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                if offered.iter().any(|p| p == "lakko-sfu-v1")
+                    && offered.iter().any(|p| p == "lakko-sfu-token.a.b.c")
+                {
+                    resp.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        tokio_tungstenite::tungstenite::http::HeaderValue::from_static(
+                            "lakko-sfu-v1",
+                        ),
+                    );
                 }
                 Ok(resp)
             };
@@ -261,7 +279,7 @@ mod tests {
         let conn = open_over_connection(
             client_conn,
             "ws://lakko.invalid/v1/connect",
-            Some("lakko-sfu-v1"),
+            Some("lakko-sfu-v1,lakko-sfu-token.a.b.c"),
         )
         .expect("ws handshake over the loopback connection");
 

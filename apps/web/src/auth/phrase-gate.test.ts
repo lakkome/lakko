@@ -13,6 +13,7 @@ import {
   clearSignupPhraseOwed,
   isSignupPhraseOwed,
   markSignupPhraseOwed,
+  phraseSourceClearsOwed,
   sessionGuardView,
   type GuardAuthKind,
   type MarkerStorage,
@@ -251,7 +252,7 @@ describe("a sign-in that would park while its phrase is still owed", () => {
       /if \(await completeParkFromOwedPhrase\(parked, flow\)\) return;\s*if \(restoreKeys !== undefined\) \{/,
     );
     // Through the ordinary, fail-closed phrase path - never a second one.
-    expect(src).toMatch(/await api\.provideRecoveryPhrase\(phrase\);\s*return true;/);
+    expect(src).toMatch(/await withParkRouteWipes\(flow\.wipes, \(\) => api\.provideRecoveryPhrase\(phrase, "device"\)\);\s*return true;/);
   });
 
   it("a plain sign-out keeps the owed marker and the cached phrase", () => {
@@ -263,9 +264,57 @@ describe("a sign-in that would park while its phrase is still owed", () => {
     expect(logout).not.toContain("clearSignupPhraseOwed");
     expect(logout).not.toContain("deletePhrase");
     expect(logout).not.toContain("phraseOwedInMemory.delete");
+    expect(logout).not.toContain("clearOwedPhraseScreen");
     // Forget-device wipes both (`wipe-account.ts`).
     const wipe = readFileSync(fileURLToPath(new URL("./wipe-account.ts", import.meta.url)), "utf8");
     expect(wipe).toContain("deletePhrase(accountIdB64)");
     expect(wipe).toContain("clearSignupPhraseOwed(storage, accountIdB64)");
+  });
+});
+
+describe("a phrase the person typed clears the owed screen (ADR-0077 decision 3 rule 6)", () => {
+  it("only a typed phrase clears it", () => {
+    expect(phraseSourceClearsOwed("typed")).toBe(true);
+    expect(phraseSourceClearsOwed("device")).toBe(false);
+    expect(phraseSourceClearsOwed("vault")).toBe(false);
+  });
+
+  const read = (rel: string): string =>
+    readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+  const src = read("./AuthContext.tsx");
+  const body = (name: string): string => {
+    const start = src.indexOf(`\n    async ${name}(`);
+    expect(start).toBeGreaterThan(-1);
+    return src.slice(start, src.indexOf("\n    },\n", start));
+  };
+
+  it("the two phrase routes clear it after the phrase is stored, and default to leaving it owed", () => {
+    for (const [name, label] of [
+      ["provideRecoveryPhrase", '"provide-phrase"'],
+      ["recover", '"recover"'],
+    ] as const) {
+      const b = body(name);
+      expect(b).toMatch(/source = "vault"\) \{/);
+      const stored = b.indexOf(label);
+      const cleared = b.indexOf("if (phraseSourceClearsOwed(source)) clearOwedPhraseScreen(");
+      expect(stored).toBeGreaterThan(-1);
+      expect(cleared).toBeGreaterThan(stored);
+    }
+  });
+
+  it("each call site says where its phrase came from", () => {
+    // Typed by the person.
+    expect(read("./RestoreIdentityPrompt.tsx")).toContain('await auth.provideRecoveryPhrase(phrase(), "typed");');
+    expect(read("./recover/PhraseRecover.tsx")).toContain(
+      'await auth.recover(phrase(), password(), canonicalUsername, "typed");',
+    );
+    // Opened from the email vault.
+    expect(read("./recover/EmailRecover.tsx")).toContain(
+      'await auth.recover(phrase, password(), canonicalUsername, "vault");',
+    );
+    // This device's kept row, and a passkey's vault: still shown.
+    expect(src).toContain('api.provideRecoveryPhrase(phrase, "device")');
+    expect(src).toContain('api.provideRecoveryPhrase(phrase, "vault")');
+    expect(src.match(/api\.provideRecoveryPhrase\(/g)?.length).toBe(2);
   });
 });

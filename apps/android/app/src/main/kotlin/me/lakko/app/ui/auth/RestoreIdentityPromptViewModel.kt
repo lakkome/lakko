@@ -186,6 +186,7 @@ public class RestoreIdentityPromptViewModel(
         repo.completeFromPairing(
             phraseEntropy = outcome.phraseEntropy,
             session = outcome.session,
+            flowWipes = outcome.wipes,
         )
     }
 

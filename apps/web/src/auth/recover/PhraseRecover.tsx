@@ -110,7 +110,8 @@ export function PhraseRecover(props: {
     }
     setBusy(true);
     try {
-      await auth.recover(phrase(), password(), canonicalUsername);
+      // Typed by the person: an owed phrase screen is not shown back.
+      await auth.recover(phrase(), password(), canonicalUsername, "typed");
       // The phrase is a long-term secret the user keeps on paper; drop it
       // from DOM state as soon as the server has accepted the rotation.
       setPhrase("");

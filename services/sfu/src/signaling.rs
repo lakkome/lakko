@@ -9,9 +9,12 @@
 //! `ServerFrame` outbound; binary frames are reserved for
 //! a future RTP-over-WS fallback and are dropped here.
 //!
-//! - Client connects to `wss://sfu.lakko.me/v1/connect` with
-//!   `Sec-WebSocket-Protocol: lakko-sfu-v1` and a query
-//!   parameter `token=<call-jwt>`.
+//! - Client connects to `wss://sfu.lakko.me/v1/connect` offering two
+//!   subprotocols in `Sec-WebSocket-Protocol`: `lakko-sfu-v1` and
+//!   `lakko-sfu-token.<call-jwt>`. The token rides a header, never the
+//!   URL, so no request line (and no access log, proxy log or crash
+//!   report that records one) names who joined which call
+//!   (invariant #5). The SFU answers with `lakko-sfu-v1` only.
 //! - The SFU verifies the JWT against the JWKS cache. On
 //!   failure → HTTP 401 / 403 before the upgrade completes.
 //! - On success the connection is upgraded and the handler
@@ -33,13 +36,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        Path, Query, State, WebSocketUpgrade,
+        Path, State, WebSocketUpgrade,
     },
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
 };
 use futures::{SinkExt, StreamExt};
-use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -49,7 +51,10 @@ use crate::jwks::{JwksCache, JwksError};
 use crate::media::MediaTaskHandle;
 use crate::peer::{Peer, PeerId, PeerRegistry};
 use crate::prom::names;
-use crate::protocol::{ClientFrame, ErrorCode, ServerFrame, MAX_INBOUND_FRAME_BYTES};
+use crate::protocol::{
+    ClientFrame, ErrorCode, ServerFrame, MAX_INBOUND_FRAME_BYTES, SIGNALING_SUBPROTOCOL,
+    TOKEN_SUBPROTOCOL_PREFIX,
+};
 use crate::router::Router;
 
 /// Capacity of each peer's outbound mpsc. Must be large
@@ -150,28 +155,59 @@ impl AppState {
     }
 }
 
-/// Token query string — `?token=<jwt>`.
-#[derive(Debug, Deserialize)]
-pub struct ConnectQuery {
-    /// Call-admission JWT minted by `services/auth`.
-    pub token: String,
+/// The call-admission JWT offered as a `lakko-sfu-token.<jwt>`
+/// subprotocol in `Sec-WebSocket-Protocol` (every header line, each a
+/// comma-separated list). `None` when no such entry is offered, when the
+/// entry is empty, or when more than one is offered: an ambiguous
+/// offer is refused rather than guessed at.
+fn token_from_subprotocols(headers: &HeaderMap) -> Option<&str> {
+    let mut found: Option<&str> = None;
+    for value in headers.get_all(header::SEC_WEBSOCKET_PROTOCOL) {
+        let Ok(list) = value.to_str() else {
+            return None;
+        };
+        for entry in list.split(',').map(str::trim) {
+            if let Some(token) = entry.strip_prefix(TOKEN_SUBPROTOCOL_PREFIX) {
+                if token.is_empty() || found.is_some() {
+                    return None;
+                }
+                found = Some(token);
+            }
+        }
+    }
+    found
 }
 
-/// Pseudonymise an account id for log lines — first 8 chars
-/// of the hex `sub`, padded with `…` if shorter.
-fn pseudonymise(account_id: &str) -> String {
-    let n = account_id.len().min(8);
-    let head = &account_id[..n];
-    format!("{head}…")
+/// The token of an `Authorization: Bearer <jwt>` header. The scheme is
+/// matched case-insensitively (RFC 9110 section 11.1); exactly one
+/// Authorization header is accepted.
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let value = value.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    (!token.is_empty()).then_some(token)
 }
 
 /// Axum handler — verify token + upgrade to WebSocket.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
-    Query(query): Query<ConnectQuery>,
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    let claims = match state.jwks.verify(&query.token).await {
+    let Some(token) = token_from_subprotocols(&headers) else {
+        warn!("ws: no admission token offered");
+        metrics::counter!(names::PEERS_REJECTED_TOTAL).increment(1);
+        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    };
+    let claims = match state.jwks.verify(token).await {
         Ok(c) => c,
         Err(JwksError::Verify(e)) => {
             warn!(error = %e, "ws: jwt verify rejected");
@@ -198,16 +234,18 @@ pub async fn ws_handler(
         outbound: Some(out_tx),
     };
 
-    let acct_pseudo = pseudonymise(&peer.account_id);
-    let call_id = peer.call_id.clone();
-    let peer_id = peer.id.clone();
-    info!(peer = %peer_id, call = %call_id, account_pseudo = %acct_pseudo, "ws: admission ok");
+    // Nothing derived from the account id is logged: the peer id is
+    // fresh per socket, so a log line cannot tie a call to an account.
+    info!(peer = %peer.id, call = %peer.call_id, "ws: admission ok");
 
-    ws.protocols(["lakko-sfu-v1"])
+    // Only the signaling subprotocol is ever selected, so the token
+    // entry the client offered is never echoed back.
+    ws.protocols([SIGNALING_SUBPROTOCOL])
         .on_upgrade(move |socket| handle_socket(socket, peer, out_rx, state))
 }
 
-/// `GET /v1/calls/{call_id}?token=<jwt>` — whether the call the token
+/// `GET /v1/calls/{call_id}` with `Authorization: Bearer <jwt>` —
+/// whether the call the token
 /// names is still there (`call_lifetime.rs`). Gated by the same
 /// call-admission JWT as the socket, and the token must name the call
 /// asked about, so a member learns about a call it could join and
@@ -216,10 +254,13 @@ pub async fn ws_handler(
 /// `ended`.
 pub async fn call_state_handler(
     Path(call_id): Path<String>,
-    Query(query): Query<ConnectQuery>,
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    let claims = match state.jwks.verify(&query.token).await {
+    let Some(token) = bearer_token(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    };
+    let claims = match state.jwks.verify(token).await {
         Ok(c) => c,
         Err(JwksError::Verify(_) | JwksError::UnknownKid { .. }) => {
             return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
@@ -514,22 +555,69 @@ fn ack_ws_ping(peer: &Peer) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn pseudonymise_truncates() {
-        let p = pseudonymise("deadbeefdeadbeefdeadbeefdeadbeef");
-        assert_eq!(p, "deadbeef…");
+    fn with_protocols(values: &[&str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for v in values {
+            headers.append(
+                header::SEC_WEBSOCKET_PROTOCOL,
+                axum::http::HeaderValue::from_str(v).expect("header value"),
+            );
+        }
+        headers
     }
 
     #[test]
-    fn pseudonymise_handles_short_input() {
-        let p = pseudonymise("abc");
-        assert_eq!(p, "abc…");
+    fn token_is_read_from_the_offered_subprotocols() {
+        let h = with_protocols(&["lakko-sfu-v1, lakko-sfu-token.aaa.bbb.ccc"]);
+        assert_eq!(token_from_subprotocols(&h), Some("aaa.bbb.ccc"));
+        let h = with_protocols(&["lakko-sfu-v1,lakko-sfu-token.aaa.bbb.ccc"]);
+        assert_eq!(token_from_subprotocols(&h), Some("aaa.bbb.ccc"));
+        let h = with_protocols(&["lakko-sfu-v1", "lakko-sfu-token.x.y.z"]);
+        assert_eq!(token_from_subprotocols(&h), Some("x.y.z"));
     }
 
     #[test]
-    fn pseudonymise_handles_empty() {
-        let p = pseudonymise("");
-        assert_eq!(p, "…");
+    fn a_missing_empty_or_repeated_token_is_refused() {
+        assert_eq!(token_from_subprotocols(&HeaderMap::new()), None);
+        let h = with_protocols(&["lakko-sfu-v1"]);
+        assert_eq!(token_from_subprotocols(&h), None);
+        let h = with_protocols(&["lakko-sfu-v1, lakko-sfu-token."]);
+        assert_eq!(token_from_subprotocols(&h), None);
+        let h = with_protocols(&["lakko-sfu-token.a.b.c, lakko-sfu-token.d.e.f"]);
+        assert_eq!(token_from_subprotocols(&h), None);
+        let h = with_protocols(&["lakko-sfu-token.a.b.c", "lakko-sfu-token.a.b.c"]);
+        assert_eq!(token_from_subprotocols(&h), None);
+    }
+
+    fn with_authorization(values: &[&str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for v in values {
+            headers.append(
+                header::AUTHORIZATION,
+                axum::http::HeaderValue::from_str(v).expect("header value"),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn bearer_token_is_read_from_authorization() {
+        let h = with_authorization(&["Bearer a.b.c"]);
+        assert_eq!(bearer_token(&h), Some("a.b.c"));
+        let h = with_authorization(&["bearer a.b.c"]);
+        assert_eq!(bearer_token(&h), Some("a.b.c"));
+    }
+
+    #[test]
+    fn a_malformed_authorization_is_refused() {
+        assert_eq!(bearer_token(&HeaderMap::new()), None);
+        assert_eq!(bearer_token(&with_authorization(&["Basic a.b.c"])), None);
+        assert_eq!(bearer_token(&with_authorization(&["Bearer"])), None);
+        assert_eq!(bearer_token(&with_authorization(&["Bearer  "])), None);
+        assert_eq!(
+            bearer_token(&with_authorization(&["Bearer a.b.c", "Bearer d.e.f"])),
+            None
+        );
     }
 
     /// Compile-time sanity — the channel capacity must sit

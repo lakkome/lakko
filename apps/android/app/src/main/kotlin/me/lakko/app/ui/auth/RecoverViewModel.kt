@@ -153,6 +153,7 @@ public class RecoverViewModel(
             // Reached from the recovery list: offer a new password once the
             // session lands.
             forgotPassword = true,
+            flowWipes = outcome.wipes,
         )
     }
 

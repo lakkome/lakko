@@ -5,8 +5,9 @@
  * SFU WebSocket signaling client (SFU multi-party arc, subsprint 3a,
  * web).
  *
- * Connects to the Rust SFU's `lakko-sfu-v1` WebSocket
- * (`/v1/connect?token=<jwt>`), parses the typed server frames, and
+ * Connects to the Rust SFU's `lakko-sfu-v1` WebSocket (`/v1/connect`,
+ * the call JWT offered as a second subprotocol, see
+ * {@link sfuSubprotocols}), parses the typed server frames, and
  * sends the typed client frames. Wire framing goes through the
  * shared `lakko-sfu-proto` crate via wasm-bindgen
  * (`validateSfuServerFrame` + `composeSfu*`), so the web client and
@@ -203,6 +204,24 @@ export class SfuSignalingClosedError extends Error {
 /** The WebSocket subprotocol the SFU requires. */
 export const SFU_SUBPROTOCOL = "lakko-sfu-v1";
 
+/** Prefix of the subprotocol that carries the call-admission JWT
+ *  (`lakko_sfu_proto::TOKEN_SUBPROTOCOL_PREFIX`). */
+export const SFU_TOKEN_SUBPROTOCOL_PREFIX = "lakko-sfu-token.";
+
+/**
+ * The subprotocols a connect offers: `lakko-sfu-v1` and
+ * `lakko-sfu-token.<jwt>`. The token rides `Sec-WebSocket-Protocol`
+ * rather than the URL, so no request line (and no access log, proxy log
+ * or crash report that records one) names who joined which call
+ * (invariant #5). A browser WebSocket cannot set other headers but can
+ * offer subprotocols; a JWS compact string is base64url segments joined
+ * by `.`, all valid token characters. The SFU answers with
+ * `lakko-sfu-v1` only.
+ */
+export function sfuSubprotocols(jwt: string): string[] {
+  return [SFU_SUBPROTOCOL, `${SFU_TOKEN_SUBPROTOCOL_PREFIX}${jwt}`];
+}
+
 /**
  * One instance per call. Construct with the SFU base URL (a
  * `ws://` / `wss://` origin, no path) + the call-admission JWT
@@ -257,8 +276,8 @@ export class SfuSignalingClient {
     // Closed while the module loaded: no socket is opened for a client
     // nobody holds any more.
     if (this.closed) throw new SfuSignalingClosedError();
-    const url = `${this.baseUrl}/v1/connect?token=${encodeURIComponent(this.jwt)}`;
-    const socket = new WebSocket(url, SFU_SUBPROTOCOL);
+    const url = `${this.baseUrl}/v1/connect`;
+    const socket = new WebSocket(url, sfuSubprotocols(this.jwt));
     this.socket = socket;
 
     return new Promise<void>((resolve, reject) => {

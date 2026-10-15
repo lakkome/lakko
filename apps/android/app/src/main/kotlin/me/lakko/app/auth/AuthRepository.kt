@@ -201,12 +201,21 @@ public class AuthRepository(
         if (startedSignedIn) bound.ensureCurrent() else bound.takeOver()
     }
 
-    /** Where a sign-in started: the binding, and whether an account was on
-     *  the device (signed in or parked) at that moment. */
-    private class SignInStart(val bound: me.lakko.app.Binding, val startedSignedIn: Boolean)
+    /** Where a sign-in started: the binding, whether an account was on the
+     *  device (signed in or parked) at that moment, and the wipes so far, which
+     *  gate the route's key writes ([SignInKeyWrites]). */
+    private class SignInStart(
+        val bound: me.lakko.app.Binding,
+        val startedSignedIn: Boolean,
+        val wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
+    )
 
     private fun signInStart(): SignInStart =
-        SignInStart(bound = accountBinding.capture(), startedSignedIn = signedInAccountIdB64() != null)
+        SignInStart(
+            bound = accountBinding.capture(),
+            startedSignedIn = signedInAccountIdB64() != null,
+            wipes = me.lakko.app.account.AccountStoreGate.wipeMark(),
+        )
 
     /**
      * A sign-in for [accountIdB64] has passed its checks and is about to
@@ -918,18 +927,34 @@ public class AuthRepository(
         /** `false` on the routes that ran the backup restore themselves; every
          *  other landing makes one attempt at a restore still pending. */
         retryBackupRestore: Boolean = true,
+        /** The sign-in route's wipe mark: the session record is not
+         *  persisted for an account wiped after the route began
+         *  ([SignInKeyWrites]). */
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark? = null,
     ) {
-        persistSessionPairBestEffort(accountIdB64, secrets.session)
+        persistSessionPairBestEffort(accountIdB64, secrets.session, wipes)
         installSessionPair(accountIdB64, secrets.session)
         publishIdentitySecrets(secrets)
         if (retryBackupRestore) retryPendingBackupRestoreInBackground(secrets)
     }
 
     /** Persist [pair] where the session token always was; a failed write
-     *  only means the next launch lands signed out (fail closed). */
-    private fun persistSessionPairBestEffort(accountIdB64: String, pair: SessionPair) {
+     *  only means the next launch lands signed out (fail closed). With the
+     *  sign-in route's wipe mark [wipes], not written when the account was
+     *  wiped after the route began ([SignInKeyWrites]). */
+    private fun persistSessionPairBestEffort(
+        accountIdB64: String,
+        pair: SessionPair,
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark? = null,
+    ) {
         try {
-            SessionTokenStore.putSessionPair(applicationContext, accountIdB64, pair)
+            if (wipes == null) {
+                SessionTokenStore.putSessionPair(applicationContext, accountIdB64, pair)
+            } else {
+                SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                    SessionTokenStore.putSessionPair(applicationContext, accountIdB64, pair)
+                }
+            }
         } catch (cause: Throwable) {
             Log.w(
                 "lakko-auth",
@@ -1049,8 +1074,17 @@ public class AuthRepository(
     /** What a landing sends as `device_id_b64` when it expects to land
      *  [candidateAccountIdB64]; `null` (send nothing, bind afterwards) when
      *  the account is not known before the request. */
-    private fun landingDeviceId(candidateAccountIdB64: String?): ByteArray? =
-        when (val landing = landingDeviceFor(candidateAccountIdB64) { deviceIds.deviceIdFor(it) }) {
+    private fun landingDeviceId(
+        candidateAccountIdB64: String?,
+        /** The sign-in route's wipe mark: no device seed is minted for an
+         *  account wiped after the route began ([SignInKeyWrites]). */
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark? = null,
+    ): ByteArray? =
+        when (
+            val landing = landingDeviceFor(candidateAccountIdB64) {
+                if (wipes == null) deviceIds.deviceIdFor(it) else deviceIds.deviceIdFor(it, wipes)
+            }
+        ) {
             is LandingDevice.Named -> landing.deviceId
             LandingDevice.BindAfter -> null
         }
@@ -1072,8 +1106,14 @@ public class AuthRepository(
      * at the server, the stale session record that caused the wrong guess
      * is dropped, and the sign-in is refused so the next one lands cleanly.
      */
-    private suspend fun boundSession(accountIdB64: String, pair: SessionPair): SessionPair {
-        val deviceId = deviceIds.deviceIdFor(accountIdB64) ?: return pair
+    private suspend fun boundSession(
+        accountIdB64: String,
+        pair: SessionPair,
+        /** The sign-in route's wipe mark ([landingDeviceId]). */
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark? = null,
+    ): SessionPair {
+        val deviceId = (if (wipes == null) deviceIds.deviceIdFor(accountIdB64) else deviceIds.deviceIdFor(accountIdB64, wipes))
+            ?: return pair
         return when (deviceBindingActionFor(pair.accessToken, deviceId)) {
             DeviceBindingAction.Bound, DeviceBindingAction.Unknown -> pair
             DeviceBindingAction.Bind -> when (val outcome = bindDevice(pair, deviceId)) {
@@ -1121,14 +1161,14 @@ public class AuthRepository(
         )
     }
 
-    private suspend fun LoginResult.bound(): LoginResult =
-        copy(session = boundSession(base64Encode(accountId), session))
+    private suspend fun LoginResult.bound(wipes: me.lakko.app.account.AccountStoreGate.WipeMark): LoginResult =
+        copy(session = boundSession(base64Encode(accountId), session, wipes))
 
-    private suspend fun RecoverResult.bound(): RecoverResult =
-        copy(session = boundSession(base64Encode(accountId), session))
+    private suspend fun RecoverResult.bound(wipes: me.lakko.app.account.AccountStoreGate.WipeMark): RecoverResult =
+        copy(session = boundSession(base64Encode(accountId), session, wipes))
 
-    private suspend fun TotpRecoverResult.bound(): TotpRecoverResult =
-        copy(session = boundSession(base64Encode(accountId), session))
+    private suspend fun TotpRecoverResult.bound(wipes: me.lakko.app.account.AccountStoreGate.WipeMark): TotpRecoverResult =
+        copy(session = boundSession(base64Encode(accountId), session, wipes))
 
     /**
      * The duties of a session that is live with the account's keys, run in
@@ -1574,7 +1614,7 @@ public class AuthRepository(
                 // ADR-0074 - the session names this device from its first
                 // credential (the device seed for the new account is minted
                 // here; the ensure further down finds it).
-                deviceIdFor = { accountId -> landingDeviceId(base64Encode(accountId)) },
+                deviceIdFor = { accountId -> landingDeviceId(base64Encode(accountId), wipes) },
             )
             try {
                 val accountIdB64 = base64Encode(result.accountId)
@@ -1609,20 +1649,26 @@ public class AuthRepository(
                 // ADR-0076 - the name goes into the own-username register
                 // once the synced state is open.
                 pendingUsernameWrite.set(accountIdB64 to normalisedUsername)
-                sessionStore.save(
-                    PersistedSession(
-                        accountIdB64 = accountIdB64,
-                        username = normalisedUsername,
-                    ),
-                )
+                // Every key write below is refused when the account was wiped
+                // after this route began ([SignInKeyWrites]).
+                SignInKeyWrites.required(wipes, accountIdB64) {
+                    sessionStore.save(
+                        PersistedSession(
+                            accountIdB64 = accountIdB64,
+                            username = normalisedUsername,
+                        ),
+                    )
+                }
                 val deviceRootKey =
                     deriveDeviceRootKey(result.exportKey, accountIdB64)
                 try {
-                    deviceKeyStore.putDeviceKey(
-                        context = applicationContext,
-                        accountIdB64 = accountIdB64,
-                        rootKey = deviceRootKey,
-                    )
+                    SignInKeyWrites.required(wipes, accountIdB64) {
+                        deviceKeyStore.putDeviceKey(
+                            context = applicationContext,
+                            accountIdB64 = accountIdB64,
+                            rootKey = deviceRootKey,
+                        )
+                    }
                 } finally {
                     deviceRootKey.fill(0)
                 }
@@ -1633,11 +1679,13 @@ public class AuthRepository(
                 // going through the password round-trip. Best-
                 // effort.
                 try {
-                    ExportKeyStore.putExportKey(
-                        applicationContext,
-                        accountIdB64,
-                        result.exportKey,
-                    )
+                    SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                        ExportKeyStore.putExportKey(
+                            applicationContext,
+                            accountIdB64,
+                            result.exportKey,
+                        )
+                    }
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "export-key persist (signup) failed", cause)
                 }
@@ -1648,10 +1696,12 @@ public class AuthRepository(
                 // in the user's DeviceGroup (2a3a) once the
                 // add-device flow lands. Best-effort.
                 try {
-                    DeviceIdentityStore.ensureDeviceIdentitySeed(
-                        applicationContext,
-                        accountIdB64,
-                    )
+                    SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                        DeviceIdentityStore.ensureDeviceIdentitySeed(
+                            applicationContext,
+                            accountIdB64,
+                        )
+                    }
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "device-identity ensure (signup) failed", cause)
                 }
@@ -1678,11 +1728,13 @@ public class AuthRepository(
                     it.toSeed()
                 }
                 try {
-                    AccountIdentitySeedStore.putAccountIdentitySeed(
-                        applicationContext,
-                        accountIdB64,
-                        accountIdentitySeed,
-                    )
+                    SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                        AccountIdentitySeedStore.putAccountIdentitySeed(
+                            applicationContext,
+                            accountIdB64,
+                            accountIdentitySeed,
+                        )
+                    }
                 } catch (cause: Throwable) {
                     Log.w(
                         "lakko-auth",
@@ -1735,6 +1787,7 @@ public class AuthRepository(
                         accountIdentitySeed = accountIdentitySeed,
                         session = result.session,
                     ),
+                    wipes = wipes,
                 )
                 markSignedInNow(accountIdB64)
                 landedState = AuthState.Session(
@@ -1811,7 +1864,7 @@ public class AuthRepository(
                 randomPassword,
                 enrolRecovery = true,
                 onProofSolved = onProofSolved,
-                deviceIdFor = { accountId -> landingDeviceId(base64Encode(accountId)) },
+                deviceIdFor = { accountId -> landingDeviceId(base64Encode(accountId), wipes) },
             )
             try {
                 val accountIdB64 = base64Encode(result.accountId)
@@ -1835,37 +1888,49 @@ public class AuthRepository(
                 // real, random password, so this is the normal signup
                 // derivation) + persist key / export key / device-identity /
                 // account-identity seed, exactly as signup does.
+                // Every key write below is refused when the account was wiped
+                // after this route began ([SignInKeyWrites]).
                 val deviceRootKey = deriveDeviceRootKey(result.exportKey, accountIdB64)
                 try {
-                    deviceKeyStore.putDeviceKey(
-                        context = applicationContext,
-                        accountIdB64 = accountIdB64,
-                        rootKey = deviceRootKey,
-                    )
+                    SignInKeyWrites.required(wipes, accountIdB64) {
+                        deviceKeyStore.putDeviceKey(
+                            context = applicationContext,
+                            accountIdB64 = accountIdB64,
+                            rootKey = deviceRootKey,
+                        )
+                    }
                 } finally {
                     deviceRootKey.fill(0)
                 }
                 try {
-                    ExportKeyStore.putExportKey(applicationContext, accountIdB64, result.exportKey)
+                    SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                        ExportKeyStore.putExportKey(applicationContext, accountIdB64, result.exportKey)
+                    }
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "export-key persist (signupGuest) failed", cause)
                 }
                 try {
-                    DeviceIdentityStore.ensureDeviceIdentitySeed(applicationContext, accountIdB64)
+                    SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                        DeviceIdentityStore.ensureDeviceIdentitySeed(applicationContext, accountIdB64)
+                    }
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "device-identity ensure (signupGuest) failed", cause)
                 }
                 try {
-                    AccountIdentitySeedStore.putAccountIdentitySeed(
-                        applicationContext,
-                        accountIdB64,
-                        accountIdentitySeed,
-                    )
+                    SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                        AccountIdentitySeedStore.putAccountIdentitySeed(
+                            applicationContext,
+                            accountIdB64,
+                            accountIdentitySeed,
+                        )
+                    }
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "account-identity-seed persist (signupGuest) failed", cause)
                 }
                 // Persist the account marker — username EMPTY (unclaimed).
-                sessionStore.save(PersistedSession(accountIdB64 = accountIdB64, username = ""))
+                SignInKeyWrites.required(wipes, accountIdB64) {
+                    sessionStore.save(PersistedSession(accountIdB64 = accountIdB64, username = ""))
+                }
                 // The live session owns the seed once it has landed; every
                 // earlier exit wipes it.
                 var landed = false
@@ -1913,6 +1978,7 @@ public class AuthRepository(
                                         accountIdentitySeed = accountIdentitySeed,
                                         session = result.session,
                                     ),
+                                    wipes = wipes,
                                 )
                                 landed = true
                                 markSignedInNow(accountIdB64)
@@ -1989,7 +2055,7 @@ public class AuthRepository(
                 // ADR-0074 - name this device at the landing when the device
                 // already knows the account behind the typed name; else bind
                 // right after the answer.
-                call = { client.login(it.handle, password, landingDeviceId(candidateAccount(trimmed))).bound() },
+                call = { client.login(it.handle, password, landingDeviceId(candidateAccount(trimmed), start.wipes)).bound(start.wipes) },
                 sessionTokenOf = { it.sessionToken },
                 rebind = ::rebindLoginHandleInBackground,
             )
@@ -2017,24 +2083,31 @@ public class AuthRepository(
                 // mnemonic with a new password, in which case the
                 // old envelope decrypts to the previous device key
                 // and the new envelope replaces it cleanly.
+                //
+                // Every key write below is refused when the account was
+                // wiped after this route began ([SignInKeyWrites]).
                 val deviceRootKey = deriveDeviceRootKey(result.exportKey, accountIdB64)
                 try {
-                    deviceKeyStore.putDeviceKey(
-                        context = applicationContext,
-                        accountIdB64 = accountIdB64,
-                        rootKey = deviceRootKey,
-                    )
+                    SignInKeyWrites.required(start.wipes, accountIdB64) {
+                        deviceKeyStore.putDeviceKey(
+                            context = applicationContext,
+                            accountIdB64 = accountIdB64,
+                            rootKey = deviceRootKey,
+                        )
+                    }
                 } finally {
                     deviceRootKey.fill(0)
                 }
                 // Phase 2a2c2 — refresh the cached export key
                 // under EncryptedSharedPreferences. Best-effort.
                 try {
-                    ExportKeyStore.putExportKey(
-                        applicationContext,
-                        accountIdB64,
-                        result.exportKey,
-                    )
+                    SignInKeyWrites.ifNotWiped(start.wipes, accountIdB64) {
+                        ExportKeyStore.putExportKey(
+                            applicationContext,
+                            accountIdB64,
+                            result.exportKey,
+                        )
+                    }
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "export-key persist (login) failed", cause)
                 }
@@ -2043,19 +2116,23 @@ public class AuthRepository(
                 // seed already on file gets the cached one;
                 // first-login generates fresh bytes.
                 try {
-                    DeviceIdentityStore.ensureDeviceIdentitySeed(
-                        applicationContext,
-                        accountIdB64,
-                    )
+                    SignInKeyWrites.ifNotWiped(start.wipes, accountIdB64) {
+                        DeviceIdentityStore.ensureDeviceIdentitySeed(
+                            applicationContext,
+                            accountIdB64,
+                        )
+                    }
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "device-identity ensure (login) failed", cause)
                 }
                 // Upsert the marker with the account the finish named, so a
                 // cross-device first sign-in leaves the device knowing whose
                 // account it holds.
-                sessionStore.save(
-                    PersistedSession(accountIdB64 = accountIdB64, username = resolvedUsername),
-                )
+                SignInKeyWrites.required(start.wipes, accountIdB64) {
+                    sessionStore.save(
+                        PersistedSession(accountIdB64 = accountIdB64, username = resolvedUsername),
+                    )
+                }
 
                 // ADR-0017: the canonical AccountIdentity is seeded
                 // from the BIP39 phrase seed, NOT the export key. Read
@@ -2122,6 +2199,7 @@ public class AuthRepository(
                         accountIdentitySeed = accountIdentitySeed,
                         session = result.session,
                     ),
+                    wipes = start.wipes,
                 )
                 markSignedInNow(accountIdB64)
                 landedState = AuthState.Session(
@@ -2260,8 +2338,8 @@ public class AuthRepository(
                 val result = signInByName(
                     named = named,
                     call = {
-                        client.recover(it.handle, seed, newPassword, landingDeviceId(candidateAccount(named.username)))
-                            .bound()
+                        client.recover(it.handle, seed, newPassword, landingDeviceId(candidateAccount(named.username), wipes))
+                            .bound(wipes)
                     },
                     sessionTokenOf = { it.sessionToken },
                     rebind = ::rebindLoginHandleInBackground,
@@ -2272,14 +2350,18 @@ public class AuthRepository(
                 val resolvedUsername = named.username
                 openStoresFor(accountIdB64)
                 try {
+                    // Every key write below is refused when the account was
+                    // wiped after this route began ([SignInKeyWrites]).
                     val deviceRootKey =
                         deriveDeviceRootKey(result.exportKey, accountIdB64)
                     try {
-                        deviceKeyStore.putDeviceKey(
-                            context = applicationContext,
-                            accountIdB64 = accountIdB64,
-                            rootKey = deviceRootKey,
-                        )
+                        SignInKeyWrites.required(wipes, accountIdB64) {
+                            deviceKeyStore.putDeviceKey(
+                                context = applicationContext,
+                                accountIdB64 = accountIdB64,
+                                rootKey = deviceRootKey,
+                            )
+                        }
                     } finally {
                         deviceRootKey.fill(0)
                     }
@@ -2289,11 +2371,13 @@ public class AuthRepository(
                     // password; the upsert here overwrites it
                     // cleanly. Best-effort.
                     try {
-                        ExportKeyStore.putExportKey(
-                            applicationContext,
-                            accountIdB64,
-                            result.exportKey,
-                        )
+                        SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                            ExportKeyStore.putExportKey(
+                                applicationContext,
+                                accountIdB64,
+                                result.exportKey,
+                            )
+                        }
                     } catch (cause: Throwable) {
                         Log.w("lakko-auth", "export-key persist (recover) failed", cause)
                     }
@@ -2304,11 +2388,13 @@ public class AuthRepository(
                     // identity without re-entering the phrase.
                     // Best-effort.
                     try {
-                        AccountIdentitySeedStore.putAccountIdentitySeed(
-                            applicationContext,
-                            accountIdB64,
-                            accountIdentitySeed,
-                        )
+                        SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                            AccountIdentitySeedStore.putAccountIdentitySeed(
+                                applicationContext,
+                                accountIdB64,
+                                accountIdentitySeed,
+                            )
+                        }
                     } catch (cause: Throwable) {
                         Log.w(
                             "lakko-auth",
@@ -2334,22 +2420,26 @@ public class AuthRepository(
                     // generates fresh bytes if the row is
                     // missing.
                     try {
-                        DeviceIdentityStore.ensureDeviceIdentitySeed(
-                            applicationContext,
-                            accountIdB64,
-                        )
+                        SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                            DeviceIdentityStore.ensureDeviceIdentitySeed(
+                                applicationContext,
+                                accountIdB64,
+                            )
+                        }
                     } catch (cause: Throwable) {
                         Log.w("lakko-auth", "device-identity ensure (recover) failed", cause)
                     }
                     // Persist the account marker — important on the
                     // fresh-device recover path where there was no
                     // cached row (idempotent upsert otherwise).
-                    sessionStore.save(
-                        PersistedSession(
-                            accountIdB64 = accountIdB64,
-                            username = resolvedUsername,
-                        ),
-                    )
+                    SignInKeyWrites.required(wipes, accountIdB64) {
+                        sessionStore.save(
+                            PersistedSession(
+                                accountIdB64 = accountIdB64,
+                                username = resolvedUsername,
+                            ),
+                        )
+                    }
                     // Restore-then-bootstrap on recover. If a backup sits on
                     // the server it is fetched, gated (ADR-0037) and applied
                     // before a fresh baseline is posted: contacts and the
@@ -2397,6 +2487,7 @@ public class AuthRepository(
                         ),
                         // This route ran the restore itself, just above.
                         retryBackupRestore = false,
+                        wipes = wipes,
                     )
                     markSignedInNow(accountIdB64)
                     // The live IdentitySecrets now owns the seed buffer
@@ -2525,7 +2616,10 @@ public class AuthRepository(
                 cached = null,
                 typed = trimmed,
                 source = loginHandleSource,
-                call = { client.totpRecover(it.handle, code, landingDeviceId(candidateAccount(trimmed))).bound() },
+                call = {
+                    client.totpRecover(it.handle, code, landingDeviceId(candidateAccount(trimmed), start.wipes))
+                        .bound(start.wipes)
+                },
                 sessionTokenOf = { it.sessionToken },
                 rebind = ::rebindLoginHandleInBackground,
             )
@@ -2551,6 +2645,7 @@ public class AuthRepository(
             accountIdB64 = accountIdB64,
             session = result.session,
             pushContext = "totp-recover",
+            wipes = start.wipes,
         )
     }
 
@@ -2671,7 +2766,7 @@ public class AuthRepository(
                         try {
                             // This device holds the account (its phrase): the
                             // id is known before the request.
-                            client.recoveryLogin(named.handle, seed, landingDeviceId(found.accountIdB64)).bound()
+                            client.recoveryLogin(named.handle, seed, landingDeviceId(found.accountIdB64, start.wipes)).bound(start.wipes)
                         } catch (cause: Throwable) {
                             if (cause is kotlinx.coroutines.CancellationException) throw cause
                             throw afterRefusedRecoveryLogin(found.accountIdB64, cause)
@@ -2704,6 +2799,7 @@ public class AuthRepository(
                 accountIdB64 = accountIdB64,
                 session = result.session,
                 pushContext = "three-words",
+                wipes = start.wipes,
             )
             threeWordsBudgetStore.clear(accountIdB64)
             return true
@@ -3683,7 +3779,7 @@ public class AuthRepository(
             EmailRecoverAction.SetPassword -> {
                 val start = signInStart()
                 val result = authClientFactory().use {
-                    it.emailRecoverSetPassword(ticket, newPassword, landingDeviceId(candidate))
+                    it.emailRecoverSetPassword(ticket, newPassword, landingDeviceId(candidate, start.wipes))
                 }
                 // Overtaken while the round trip was out: nothing lands.
                 start.standDownIfOvertaken()
@@ -3705,6 +3801,7 @@ public class AuthRepository(
                     accountIdB64 = accountIdB64,
                     session = result.session,
                     pushContext = "email-recover",
+                    wipes = start.wipes,
                 )
                 // The person typed the address: this device keeps it (the
                 // write is parked until the synced state is open).
@@ -3790,7 +3887,7 @@ public class AuthRepository(
                         newPassword = newPassword,
                         newSeed = seedCopy,
                         newSignaturePubkey = newSignaturePubkey,
-                        deviceId = landingDeviceId(accountIdB64),
+                        deviceId = landingDeviceId(accountIdB64, wipes),
                         oldRecoverySeed = oldRecoverySeed,
                     )
                 }
@@ -3924,6 +4021,11 @@ public class AuthRepository(
         // UX 17.8: a bare session may not set a password (whoever holds the
         // unlocked phone could, and then pass every proof).
         if (!passwordChangeUnlocked()) throw PasswordChangeNeedsProof()
+        // A sign-out or a Forget device while the reset is out wins: nothing
+        // of this session is written or installed after it (ADR-0077
+        // decisions 2 and 4).
+        val bound = accountBinding.capture()
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         val named = resolveNamedSignIn(null, session.account.username, loginHandleSource)
         // A copy: the in-memory secret is never the buffer that is wiped.
         val seed = secrets.accountIdentitySeed.copyOf()
@@ -3932,7 +4034,7 @@ public class AuthRepository(
                 signInByName(
                     named = named,
                     call = {
-                        client.recover(it.handle, seed, newPassword, landingDeviceId(session.account.accountIdB64))
+                        client.recover(it.handle, seed, newPassword, landingDeviceId(session.account.accountIdB64, wipes))
                     },
                     sessionTokenOf = { it.sessionToken },
                     rebind = ::rebindLoginHandleInBackground,
@@ -3946,8 +4048,11 @@ public class AuthRepository(
                     // session.
                     throw AuthClientArgError("the password reset answered for another account")
                 }
+                bound.ensureCurrent()
                 try {
-                    ExportKeyStore.putExportKey(applicationContext, accountIdB64, result.exportKey)
+                    SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                        ExportKeyStore.putExportKey(applicationContext, accountIdB64, result.exportKey)
+                    }
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "export-key persist (password change) failed", cause)
                 }
@@ -3961,6 +4066,7 @@ public class AuthRepository(
                         accountIdentitySeed = secrets.accountIdentitySeed.copyOf(),
                         session = result.session,
                     ),
+                    wipes = wipes,
                 )
                 mutableNewPasswordOwed.value = false
             } finally {
@@ -4016,6 +4122,10 @@ public class AuthRepository(
         accountIdB64: String,
         session: SessionPair,
         pushContext: String,
+        /** The calling route's wipe mark, taken when it began: its key
+         *  writes are refused when the account was wiped after it
+         *  ([SignInKeyWrites]). */
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
         /** The passkey route's hook for the COLD case: it runs after the
          *  recovery context is parked and before the restore prompt is
          *  shown, and returns `true` when it landed the session itself (the
@@ -4025,12 +4135,14 @@ public class AuthRepository(
         openStoresFor(accountIdB64)
         // Persist the account marker — important on a fresh device
         // where no row existed (idempotent upsert otherwise).
-        sessionStore.save(
-            PersistedSession(
-                accountIdB64 = accountIdB64,
-                username = username,
-            ),
-        )
+        SignInKeyWrites.required(wipes, accountIdB64) {
+            sessionStore.save(
+                PersistedSession(
+                    accountIdB64 = accountIdB64,
+                    username = username,
+                ),
+            )
+        }
 
         // ADR-0017 identity acquisition. These factors carried NO
         // password, so the ONLY same-device shortcut is a cached
@@ -4061,6 +4173,7 @@ public class AuthRepository(
                 accountIdB64 = accountIdB64,
                 accountIdentitySeed = accountIdentitySeed,
                 context = "access recover",
+                wipes = wipes,
             )
             // These routes involve no password, so the export key is whatever
             // an earlier password sign-in cached on this device, else empty.
@@ -4078,6 +4191,7 @@ public class AuthRepository(
                     accountIdentitySeed = accountIdentitySeed,
                     session = session,
                 ),
+                wipes = wipes,
             )
             markSignedInNow(accountIdB64)
             pendingRecovery.set(null)
@@ -4159,6 +4273,9 @@ public class AuthRepository(
         accountIdB64: String,
         accountIdentitySeed: ByteArray,
         context: String,
+        /** The calling route's wipe mark: the key is not written for an
+         *  account wiped after the route began ([SignInKeyWrites]). */
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
     ) {
         try {
             val existing =
@@ -4173,11 +4290,13 @@ public class AuthRepository(
                 accountIdB64,
             )
             try {
-                deviceKeyStore.putDeviceKey(
-                    context = applicationContext,
-                    accountIdB64 = accountIdB64,
-                    rootKey = deviceRootKey,
-                )
+                SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                    deviceKeyStore.putDeviceKey(
+                        context = applicationContext,
+                        accountIdB64 = accountIdB64,
+                        rootKey = deviceRootKey,
+                    )
+                }
             } finally {
                 deviceRootKey.fill(0)
             }
@@ -4230,10 +4349,14 @@ public class AuthRepository(
      * Typing the phrase proves the person holds it, so it is no longer owed
      * and is not shown back; a phrase they have not seen is still shown.
      */
-    private suspend fun restoreFromPhrase(mnemonicPhrase: String, phraseHeldByPerson: Boolean) {
-        // Before the parked context is read: a Forget device from here on
-        // refuses the phrase row written below.
-        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
+    private suspend fun restoreFromPhrase(
+        mnemonicPhrase: String,
+        phraseHeldByPerson: Boolean,
+        /** Taken before the parked context is read, or by the route that
+         *  calls this (a passkey sign-in, from its start): a Forget device
+         *  after it refuses the key and phrase rows written below. */
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark = me.lakko.app.account.AccountStoreGate.wipeMark(),
+    ) {
         val pending = pendingRecovery.get()
             ?: throw AuthClientArgError("no pending identity recovery — sign in first")
         // A sign-out while the checks below are out wins: it wiped `pending`
@@ -4268,16 +4391,19 @@ public class AuthRepository(
                 accountIdB64 = pending.accountIdB64,
                 accountIdentitySeed = accountIdentitySeed,
                 context = "provideRecoveryPhrase",
+                wipes = wipes,
             )
 
             // Cache the phrase seed under EncryptedSharedPreferences so
             // future warm logins skip the prompt. Best-effort.
             try {
-                AccountIdentitySeedStore.putAccountIdentitySeed(
-                    applicationContext,
-                    pending.accountIdB64,
-                    accountIdentitySeed,
-                )
+                SignInKeyWrites.ifNotWiped(wipes, pending.accountIdB64) {
+                    AccountIdentitySeedStore.putAccountIdentitySeed(
+                        applicationContext,
+                        pending.accountIdB64,
+                        accountIdentitySeed,
+                    )
+                }
             } catch (cause: Throwable) {
                 Log.w(
                     "lakko-auth",
@@ -4327,6 +4453,7 @@ public class AuthRepository(
                 ),
                 // This route ran the restore itself, just above.
                 retryBackupRestore = false,
+                wipes = wipes,
             )
             seedHandedOff = true
             pendingRecovery.set(null)
@@ -4583,15 +4710,20 @@ public class AuthRepository(
         // ---- the point of no return: persist before any further network call
         // The caller's old pair is superseded with everyone else's; install
         // the new one before the next request goes out.
-        persistSessionPairBestEffort(accountIdB64, reset.session)
+        // Every key write below is refused when the account was wiped after
+        // the route began ([SignInKeyWrites]).
+        persistSessionPairBestEffort(accountIdB64, reset.session, wipes)
         if (landHere) installSessionPair(accountIdB64, reset.session)
         bootstrapDeviceKeyFromSeedBestEffort(
             accountIdB64 = accountIdB64,
             accountIdentitySeed = seed,
             context = context,
+            wipes = wipes,
         )
         try {
-            AccountIdentitySeedStore.putAccountIdentitySeed(applicationContext, accountIdB64, seed)
+            SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                AccountIdentitySeedStore.putAccountIdentitySeed(applicationContext, accountIdB64, seed)
+            }
         } catch (cause: Throwable) {
             Log.w("lakko-auth", "fresh-identity seed persist failed", cause)
         }
@@ -4825,6 +4957,7 @@ public class AuthRepository(
         val assertion = runPasskeyCeremony(
             activityContext,
             accountIdB64Url = base64UrlEncodeNoPad(target.accountIdBytes),
+            wipes = me.lakko.app.account.AccountStoreGate.wipeMark(),
         )
         try {
             if (!accountIdOfAssertion(assertion).contentEquals(target.accountIdBytes)) {
@@ -5457,8 +5590,13 @@ public class AuthRepository(
         phraseEntropy: ByteArray,
         /** The pair the grant redeem issued, when it did; else the parked one. */
         session: SessionPair? = null,
+        /** The pairing flow's wipe mark, taken when the flow began
+         *  ([PairingOrchestrator.JoinRecoveryOutcome.wipes]); its key writes
+         *  are refused when the account was wiped after it
+         *  ([SignInKeyWrites]). Taken here when the caller has none. */
+        flowWipes: me.lakko.app.account.AccountStoreGate.WipeMark? = null,
     ) {
-        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
+        val wipes = flowWipes ?: me.lakko.app.account.AccountStoreGate.wipeMark()
         val pending = pendingRecovery.get()
         if (pending == null) {
             phraseEntropy.fill(0)
@@ -5468,7 +5606,7 @@ public class AuthRepository(
         // from the answer): bind before the pair is used.
         val bound = accountBinding.capture()
         @Suppress("NAME_SHADOWING")
-        val session = session?.let { boundSession(pending.accountIdB64, it) }
+        val session = session?.let { boundSession(pending.accountIdB64, it, wipes) }
         // Nothing is written before the check below.
         val keys = keysFromTransferredEntropy(phraseEntropy)
         val phraseSeed = keys.seed
@@ -5490,13 +5628,16 @@ public class AuthRepository(
                 accountIdB64 = pending.accountIdB64,
                 accountIdentitySeed = phraseSeed,
                 context = "completeFromPairing",
+                wipes = wipes,
             )
             try {
-                AccountIdentitySeedStore.putAccountIdentitySeed(
-                    applicationContext,
-                    pending.accountIdB64,
-                    phraseSeed,
-                )
+                SignInKeyWrites.ifNotWiped(wipes, pending.accountIdB64) {
+                    AccountIdentitySeedStore.putAccountIdentitySeed(
+                        applicationContext,
+                        pending.accountIdB64,
+                        phraseSeed,
+                    )
+                }
             } catch (cause: Throwable) {
                 Log.w(
                     "lakko-auth",
@@ -5520,6 +5661,7 @@ public class AuthRepository(
                     accountIdentitySeed = phraseSeed,
                     session = session ?: pendingRecovery.get()?.session ?: pending.session,
                 ),
+                wipes = wipes,
             )
             seedHandedOff = true
             pendingRecovery.set(null)
@@ -5587,12 +5729,17 @@ public class AuthRepository(
         session: SessionPair,
         persistJoin: suspend () -> Unit = {},
         forgotPassword: Boolean = false,
+        /** The restore flow's wipe mark, taken when the flow began, before
+         *  the pairing round trips ([PairingOrchestrator.JoinRecoveryOutcome.wipes]);
+         *  taken here when the caller has none. The route's key writes are
+         *  refused when the account was wiped after it ([SignInKeyWrites]). */
+        flowWipes: me.lakko.app.account.AccountStoreGate.WipeMark? = null,
     ) {
-        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
+        val wipes = flowWipes ?: me.lakko.app.account.AccountStoreGate.wipeMark()
         val start = signInStart()
         // ADR-0074 - the grant redeem named no device: bind before use.
         @Suppress("NAME_SHADOWING")
-        val session = boundSession(accountIdB64, session)
+        val session = boundSession(accountIdB64, session, wipes)
         // Its join state is written before the landing.
         openStoresFor(accountIdB64)
         // Nothing is written before the gates of [runCheckedDeviceRestore].
@@ -5668,14 +5815,19 @@ public class AuthRepository(
         session: SessionPair,
         wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
     ) {
+        // Every key write below is refused when the account was wiped after
+        // the route began ([SignInKeyWrites]); the session record is the one
+        // the route does not go on without.
         val deviceRootKey =
             deriveDeviceRootKeyFromIdentitySeed(phraseSeed, accountIdB64)
         try {
-            deviceKeyStore.putDeviceKey(
-                context = applicationContext,
-                accountIdB64 = accountIdB64,
-                rootKey = deviceRootKey,
-            )
+            SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                deviceKeyStore.putDeviceKey(
+                    context = applicationContext,
+                    accountIdB64 = accountIdB64,
+                    rootKey = deviceRootKey,
+                )
+            }
         } catch (cause: Throwable) {
             Log.w(
                 "lakko-auth",
@@ -5686,11 +5838,13 @@ public class AuthRepository(
             deviceRootKey.fill(0)
         }
         try {
-            AccountIdentitySeedStore.putAccountIdentitySeed(
-                applicationContext,
-                accountIdB64,
-                phraseSeed,
-            )
+            SignInKeyWrites.ifNotWiped(wipes, accountIdB64) {
+                AccountIdentitySeedStore.putAccountIdentitySeed(
+                    applicationContext,
+                    accountIdB64,
+                    phraseSeed,
+                )
+            }
         } catch (cause: Throwable) {
             Log.w(
                 "lakko-auth",
@@ -5700,12 +5854,14 @@ public class AuthRepository(
         }
         // This device now holds the phrase like the one that confirmed it.
         DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.DeviceRestore, wipes)
-        sessionStore.save(
-            PersistedSession(
-                accountIdB64 = accountIdB64,
-                username = username,
-            ),
-        )
+        SignInKeyWrites.required(wipes, accountIdB64) {
+            sessionStore.save(
+                PersistedSession(
+                    accountIdB64 = accountIdB64,
+                    username = username,
+                ),
+            )
+        }
         installIdentitySecrets(
             accountIdB64,
             IdentitySecrets(
@@ -5714,6 +5870,7 @@ public class AuthRepository(
                 accountIdentitySeed = phraseSeed,
                 session = session,
             ),
+            wipes = wipes,
         )
         markSignedInNow(accountIdB64)
         pendingRecovery.set(null)
@@ -5756,7 +5913,7 @@ public class AuthRepository(
         forgotPassword: Boolean = false,
     ) {
         val start = signInStart()
-        val assertion = runPasskeyCeremony(activityContext, accountIdB64Url = null)
+        val assertion = runPasskeyCeremony(activityContext, accountIdB64Url = null, wipes = start.wipes)
         val accountIdBytes = accountIdOfAssertion(assertion)
         val accountIdB64 = base64Encode(accountIdBytes)
         // The ceremony and its round trips took as long as the person did
@@ -5791,9 +5948,10 @@ public class AuthRepository(
                 accountIdB64 = accountIdB64,
                 session = assertion.session,
                 pushContext = "passkey-login",
+                wipes = start.wipes,
                 restoreKeys = {
                     try {
-                        val outcome = keysFromPasskeyAssertion(assertion)
+                        val outcome = keysFromPasskeyAssertion(assertion, start.wipes)
                         if (outcome != PasskeyKeysOutcome.Restored) {
                             mutableRestoreNotice.value = restoreNoticeOf(outcome)
                         }
@@ -5820,6 +5978,9 @@ public class AuthRepository(
      * leave the prompt up and set [restoreNotice].
      */
     public suspend fun restoreKeysWithPasskey(activityContext: Context): PasskeyKeysOutcome {
+        // The route's key writes are refused when the account is wiped after
+        // this point ([SignInKeyWrites]).
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         val pending = pendingRecovery.get() ?: throw AuthClientArgError(
             "no pending identity recovery",
             me.lakko.app.l10n.UiText("restore_identity.error.nothing"),
@@ -5827,6 +5988,7 @@ public class AuthRepository(
         val assertion = runPasskeyCeremony(
             activityContext,
             accountIdB64Url = base64UrlEncodeNoPad(pending.accountIdBytes),
+            wipes = wipes,
         )
         try {
             if (!accountIdOfAssertion(assertion).contentEquals(pending.accountIdBytes)) {
@@ -5835,7 +5997,7 @@ public class AuthRepository(
                     me.lakko.app.l10n.UiText("auth.passkey.error.wrong_account"),
                 )
             }
-            val outcome = keysFromPasskeyAssertion(assertion)
+            val outcome = keysFromPasskeyAssertion(assertion, wipes)
             if (outcome != PasskeyKeysOutcome.Restored) {
                 mutableRestoreNotice.value = restoreNoticeOf(outcome)
             }
@@ -5933,6 +6095,8 @@ public class AuthRepository(
     private suspend fun runPasskeyCeremony(
         activityContext: Context,
         accountIdB64Url: String?,
+        /** The calling route's wipe mark ([landingDeviceId]). */
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
     ): PasskeyLoginResult {
         val assertion = try {
             WebauthnClient().use {
@@ -5942,7 +6106,7 @@ public class AuthRepository(
                     // ADR-0074 - the account is known only when the ceremony
                     // was limited to it; a discoverable sign-in binds after.
                     deviceIdB64Url = accountIdB64Url
-                        ?.let { url -> landingDeviceId(base64Encode(base64UrlDecodeNoPad(url))) }
+                        ?.let { url -> landingDeviceId(base64Encode(base64UrlDecodeNoPad(url)), wipes) }
                         ?.let(::base64UrlEncodeNoPad),
                 )
             }
@@ -5962,7 +6126,7 @@ public class AuthRepository(
             // The callers refuse a malformed account id themselves.
             return landed
         }
-        return landed.withSession(boundSession(accountIdB64, landed.session))
+        return landed.withSession(boundSession(accountIdB64, landed.session, wipes))
     }
 
     private fun accountIdOfAssertion(assertion: PasskeyLoginResult): ByteArray {
@@ -5982,7 +6146,11 @@ public class AuthRepository(
 
     /** Ask the passkey that just signed in for the account's keys, while a
      *  recovery context is parked ([me.lakko.app.webauthn.keysFromPasskey]). */
-    private suspend fun keysFromPasskeyAssertion(assertion: PasskeyLoginResult): PasskeyKeysOutcome {
+    private suspend fun keysFromPasskeyAssertion(
+        assertion: PasskeyLoginResult,
+        /** The calling route's wipe mark ([SignInKeyWrites]). */
+        wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
+    ): PasskeyKeysOutcome {
         val credentialId = assertion.credentialId
         return me.lakko.app.webauthn.keysFromPasskey(
             prfOutput = assertion.prfOutput.takeIf { credentialId != null },
@@ -6004,7 +6172,7 @@ public class AuthRepository(
             providePhrase = { phrase ->
                 try {
                     // Opened from the passkey's vault: never typed.
-                    restoreFromPhrase(phrase, phraseHeldByPerson = false)
+                    restoreFromPhrase(phrase, phraseHeldByPerson = false, wipes = wipes)
                 } catch (_: PhraseMismatch) {
                     Log.w("lakko-auth", "the keys stored for this passkey are not this account's")
                     throw PasskeyPhraseNotThisAccount()
@@ -7091,7 +7259,16 @@ public class AuthRepository(
                 newSeed.fill(0)
                 throw IllegalStateException("the previous account key could not be kept; nothing was changed")
             }
-            AccountIdentitySeedStore.putAccountIdentitySeed(applicationContext, accountIdB64, newSeed)
+            // Not written over a wipe of the account since [wipes]: the
+            // adoption then ends as work of a session that is over.
+            try {
+                SignInKeyWrites.required(wipes, accountIdB64) {
+                    AccountIdentitySeedStore.putAccountIdentitySeed(applicationContext, accountIdB64, newSeed)
+                }
+            } catch (stale: me.lakko.app.StaleBindingException) {
+                newSeed.fill(0)
+                throw stale
+            }
             DevicePhrase.store(applicationContext, accountIdB64, phrase, DevicePhrase.LandingPath.KeyRotation, wipes)
             // The same proven-predecessor rule this device applies to its
             // contacts, for its own account.
@@ -7107,7 +7284,7 @@ public class AuthRepository(
             genesisRecorded.markRecorded(accountIdB64, base64Encode(newPubkey))
         }
         if (pair != null) {
-            persistSessionPairBestEffort(accountIdB64, pair)
+            persistSessionPairBestEffort(accountIdB64, pair, wipes)
             sessionTokenProvider.update(pair)
         }
         val session = pair ?: sessionTokenProvider.peek() ?: live.session
@@ -7494,7 +7671,7 @@ public class AuthRepository(
                             newPassword = newPassword,
                             newSeed = seedCopy,
                             newSignaturePubkey = newSignaturePubkey,
-                            deviceId = landingDeviceId(ui.accountIdB64),
+                            deviceId = landingDeviceId(ui.accountIdB64, wipes),
                             oldRecoverySeed = oldRecoverySeed,
                         )
                     }

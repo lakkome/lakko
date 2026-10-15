@@ -168,7 +168,12 @@ describe("AuthContext wiring", () => {
     "mintFreshIdentity",
   ])("%s captures the binding before its first await", (name) => {
     const body = method(name);
-    const captured = body.indexOf("const flow = startFlow();");
+    // `provideRecoveryPhrase` continues the mark of a route whose park this
+    // page completes in-process (`withParkRouteWipes`).
+    const captured = Math.max(
+      body.indexOf("const flow = startFlow();"),
+      body.indexOf("const flow = startFlow(parkRouteWipes ?? undefined);"),
+    );
     expect(captured).toBeGreaterThan(-1);
     expect(captured).toBeLessThan(body.indexOf("await "));
   });
@@ -198,8 +203,50 @@ describe("AuthContext wiring", () => {
     // The guest landing answers to a sign-out only.
     expect(method("signupGuest")).toMatch(/guest: true,\s*registered: true,/);
     expect(src).toMatch(
-      /const stillBound = args\.registered === true \? notSignedOut : binding\.capture\(\);/,
+      /const bound = args\.registered === true \? notSignedOut : binding\.capture\(\);/,
     );
+    // The sign-ups mint a new account, so no wipe mark stops them.
+    expect(method("signup")).not.toContain("wipes: flow.wipes");
+    expect(method("signupGuest")).not.toContain("wipes: flow.wipes");
+  });
+
+  it("a sign-in route opens its account's stores only if the account was not wiped since it began (ADR-0077)", () => {
+    // `flow.openStores` refuses a wipe since the flow's mark (a wipe before
+    // it does not count: the route lands the account); `flow.current()`
+    // asks the same once the flow named its account.
+    expect(src).toMatch(/const wipes = inherited \?\? takeWipeMark\(\);\s*let account: string \| null = null;/);
+    // An in-process park completion continues the route's mark, set only
+    // around its synchronous start.
+    expect(src).toContain("const flow = startFlow(parkRouteWipes ?? undefined);");
+    expect(src).toMatch(/parkRouteWipes = wipes;\s*try \{\s*return run\(\);\s*\} finally \{\s*parkRouteWipes = null;/);
+    expect(src).toContain("!openAccountStoresSince(wipes, accountStoreIds(accountIdB64))");
+    for (const name of ["login", "loginWithPasskey", "recover", "landEmailPasswordRecovery"]) {
+      const body = method(name);
+      expect(body).toContain("flow.openStores(accountIdB64);");
+      expect(body).not.toContain("openStoresFor(");
+    }
+    const access = src.slice(src.indexOf("\n  async function landAfterAccessRecovery("));
+    expect(access.slice(0, access.indexOf("installFlowSession("))).toContain("flow.openStores(accountIdB64);");
+    expect(method("completeFromDeviceRestore")).toContain("flow.openStores(accountIdB64);");
+    // The parked completions name the parked account.
+    for (const name of ["provideRecoveryPhrase", "completeFromPairing", "restoreKeysWithPasskey", "mintFreshIdentity"]) {
+      expect(method(name)).toContain("flow.forAccount(pending.accountIdB64);");
+    }
+    // Their landings carry the mark.
+    for (const name of ["login", "provideRecoveryPhrase", "completeFromPairing", "completeFromDeviceRestore"]) {
+      expect(method(name)).toContain("wipes: flow.wipes,");
+    }
+    // The only plain openings left: the landing itself, a landing without a
+    // route (page-load restore, the sign-ups), and the two post-reset paths.
+    expect(src.match(/openStoresFor\(/g)?.length).toBe(7);
+  });
+
+  it("a key reset's landing writes the keys only if the account was not wiped since the route began", () => {
+    const start = src.indexOf("\n  async function adoptKeyResetOutcome(");
+    const body = src.slice(start, src.indexOf("\n  /**\n", start + 1));
+    expect(body).toContain("putDeviceKey(ctx.accountIdB64, deviceKey, ctx.wipes)");
+    expect(body).toContain("if (keyWritesAllowed()) await putAccountIdentitySeed(");
+    expect(body).toContain('if (keyWritesAllowed()) await persistSessionPair(ctx.accountIdB64, ctx.reset.session, "reset");');
   });
 
   it("a key reset stores the new phrase before the publish and owes its screen", () => {
@@ -212,7 +259,7 @@ describe("AuthContext wiring", () => {
     expect(start).toBeGreaterThan(-1);
     const body = src.slice(start, src.indexOf("\n  /**\n", start + 1));
     const cached = body.indexOf(
-      'await storeDevicePhrase(ctx.accountIdB64, ctx.phrase, deviceKey, "fresh-identity");',
+      'await storeDevicePhrase(ctx.accountIdB64, ctx.phrase, deviceKey, "fresh-identity", ctx.wipes);',
     );
     const owed = body.indexOf("owePhraseScreen(ctx.accountIdB64);");
     const decided = body.indexOf("if (overtaken()) {");
@@ -226,7 +273,7 @@ describe("AuthContext wiring", () => {
     expect(shown).toBeLessThan(published);
     // Confirming the phrase is what clears the marker.
     expect(method("confirmFreshPhraseSaved")).toContain(
-      "clearSignupPhraseOwed(plainStorage(), pending.accountIdB64);",
+      "clearOwedPhraseScreen(pending.accountIdB64);",
     );
   });
 });

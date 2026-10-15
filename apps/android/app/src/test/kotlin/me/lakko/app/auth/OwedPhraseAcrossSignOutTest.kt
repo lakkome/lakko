@@ -95,7 +95,7 @@ class OwedPhraseAcrossSignOutTest {
         // The keys a passkey carried: opened from its vault, not typed.
         val passkey = source.substringAfter("    private suspend fun keysFromPasskeyAssertion(")
             .substringBefore("\n    }\n")
-        assertTrue("restoreFromPhrase(phrase, phraseHeldByPerson = false)" in passkey)
+        assertTrue("restoreFromPhrase(phrase, phraseHeldByPerson = false, wipes = wipes)" in passkey)
         // The email vault: opened by the device, never shown.
         val email = source.substringAfter("    public suspend fun emailRecoverFinish(").substringBefore("\n    }\n")
         assertTrue("recover(phrase, newPassword, named.username, phraseHeldByPerson = false)" in email)

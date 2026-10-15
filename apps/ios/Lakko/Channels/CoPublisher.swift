@@ -422,11 +422,22 @@ public enum CoPublisher {
     /// `accountIdB64` is the account whose `identity` this is, captured when
     /// the request began: the co-publisher mark is filed under it, and the
     /// request is not sent once another account is bound.
+    ///
+    /// `identity` is built from the account seed for this request
+    /// (`Identity.fromSeed`), so its MLS provider starts empty and lives in
+    /// memory. The proposal's KeyPackage private keys are put in it, and they
+    /// are the only thing that opens the Welcome the owner sends after
+    /// approving. They are made durable before the knock that carries the
+    /// proposal (``CoPublishRequestKeys``, fail closed: a request whose keys
+    /// are not on disk is never sent), and an earlier request for the same
+    /// channel is restored into `identity` first, so a request the owner
+    /// approved after the app was closed still opens on the next attempt.
     public static func requestToCoPublish(
         ds: DsClient,
         identity: Identity,
         accountIdB64: String?,
-        link: String
+        link: String,
+        requestKeys: CoPublishRequestKeys.Ports = .live
     ) async throws -> CoPublishRequest {
         // ADR-0028 amendment 2026-09-28 — `<origin>/g/<b64url sealed>#<secret>`:
         // the capability is sealed under the fragment's secret.
@@ -474,6 +485,17 @@ public enum CoPublisher {
         // with, registered before the knock.
         let replyGrant = try await ReachCenter.shared.newReplyGrant(
             purpose: ReplyPurpose.groupJoin(groupId))
+        // The keys of an earlier request for this channel (the app was closed
+        // while it waited): restored, so its Welcome opens too. A row that
+        // does not restore only loses that earlier request.
+        if let account = accountIdB64,
+           let earlier = CoPublishRequestKeys.snapshot(in: requestKeys.read(account), groupId: groupId) {
+            do {
+                try identity.restoreStorage(snapshot: earlier)
+            } catch {
+                NSLog("Channels: the keys of an earlier co-publisher request did not restore; it is not resumed")
+            }
+        }
         try await DsKnockJoin(
             knock: { payloads in
                 // ADR-0059 section 1 — this account's co-publisher key for the
@@ -490,6 +512,21 @@ public enum CoPublisher {
                     joinerSigningSeed: identity.ed25519Seed(),
                     capabilityBytes: wire,
                     replyGrant: replyGrant)
+            },
+            // ADR-0077 decision 5 — the proposal's KeyPackage private keys,
+            // durable BEFORE the proposal is published. A request whose keys
+            // are not on disk could be approved into a Welcome nobody can
+            // open once the app is closed. Refused (another account bound,
+            // the account's stores sealed or wiped) or failed: nothing is
+            // published.
+            persistBeforeKnock: {
+                guard let account = accountIdB64,
+                      account == AcceptedContactsStore.boundAccountIdB64 else {
+                    throw StaleBindingError()
+                }
+                let snapshot = try identity.snapshotStorage()
+                try requestKeys.writeDurable(
+                    account, CoPublishRequestKeys.frame(groupId: groupId, snapshot: snapshot))
             }
         ).run()
         return CoPublishRequest(
@@ -520,7 +557,8 @@ public enum CoPublisher {
         channelIdHex: String,
         // G-29 — reuse the persisted per-channel signing seed if this device
         // has co-published to the channel before (nil on a first join).
-        existingSigningSeed: Data? = nil
+        existingSigningSeed: Data? = nil,
+        requestKeys: CoPublishRequestKeys.Ports = .live
     ) async throws -> ChannelPublisherKeys? {
         let mailbox = try IdentityPseudonym.fromIdentity(pubkey: joinerKey).asBytes()
         let signer = dsMailboxSigner(identity: identity)
@@ -545,12 +583,20 @@ public enum CoPublisher {
         // skipped rather than ending the wait.
         var joined = false
         for welcome in candidates.reversed() {
-            if (try? Group.joinFromWelcome(welcome: welcome, identity: identity)) != nil {
+            // Only this channel's PublisherGroup counts: `identity` may hold
+            // the keys of an earlier request (``CoPublishRequestKeys``).
+            if let group = try? Group.joinFromWelcome(welcome: welcome, identity: identity),
+               (try? group.groupId()) == groupId {
                 joined = true
                 break
             }
         }
         guard joined else { return nil }
+        // The request is answered: its keys are not kept any longer.
+        if let account = accountIdB64,
+           CoPublishRequestKeys.snapshot(in: requestKeys.read(account), groupId: groupId) != nil {
+            requestKeys.delete(account)
+        }
         // ADR-0057 — a co-publisher never claims the journal (idempotent with
         // the mark set when the request was sent).
         CoPublishedJournals.shared.mark(
@@ -698,6 +744,70 @@ actor CoPublisherKeyBook {
 
     func key(groupId: Data, joinerKey: Data) -> Data? {
         keys[Self.slot(groupId: groupId, joinerKey: joinerKey)]
+    }
+}
+
+/// ADR-0077 decision 5 — the MLS provider of a co-publisher request's
+/// identity, kept durably from before the knock that carries the proposal
+/// until the request is answered.
+///
+/// One row per account: the request screen handles one link at a time, and a
+/// request for another channel replaces the row. The row names the
+/// PublisherGroup it was made for, so it is restored only into a request for
+/// the same channel. Stored with the DeviceGroup snapshot machinery
+/// (``DeviceGroupSnapshotStore``, a folder of its own: AES-GCM under the
+/// installation's Keychain wrap key, excluded from backup), refused through
+/// the account store gate once the account's session ended, and removed by
+/// Forget device (``AccountLocalDataWipe``).
+public enum CoPublishRequestKeys {
+    /// The folder under Application Support.
+    public static let directoryName = "lakko-copublish-requests"
+
+    /// The row of one account.
+    public struct Ports {
+        public var read: (_ accountIdB64: String) -> Data?
+        /// Throws when the row did not durably land, or was refused.
+        public var writeDurable: (_ accountIdB64: String, _ blob: Data) throws -> Void
+        public var delete: (_ accountIdB64: String) -> Void
+
+        public init(
+            read: @escaping (String) -> Data?,
+            writeDurable: @escaping (String, Data) throws -> Void,
+            delete: @escaping (String) -> Void
+        ) {
+            self.read = read
+            self.writeDurable = writeDurable
+            self.delete = delete
+        }
+
+        /// The production row.
+        public static var live: Ports {
+            let store = DeviceGroupSnapshotStore(directoryName: CoPublishRequestKeys.directoryName)
+            return Ports(
+                read: { store.getSnapshot(accountIdB64: $0) },
+                writeDurable: { try store.putSnapshotDurable(accountIdB64: $0, blob: $1) },
+                delete: { store.deleteSnapshot(accountIdB64: $0) })
+        }
+    }
+
+    /// `group_id_len (u16 BE) || group_id || provider snapshot`.
+    public static func frame(groupId: Data, snapshot: Data) -> Data {
+        let length = UInt16(clamping: groupId.count)
+        var out = Data([UInt8(length >> 8), UInt8(length & 0xFF)])
+        out.append(groupId.prefix(Int(length)))
+        out.append(snapshot)
+        return out
+    }
+
+    /// The provider snapshot in `blob` when the row was made for `groupId`,
+    /// else `nil` (no row, a row of another channel, a malformed row).
+    public static func snapshot(in blob: Data?, groupId: Data) -> Data? {
+        guard let blob, blob.count >= 2 else { return nil }
+        let bytes = [UInt8](blob)
+        let length = Int(bytes[0]) << 8 | Int(bytes[1])
+        guard length > 0, bytes.count > 2 + length,
+              Data(bytes[2..<(2 + length)]) == groupId else { return nil }
+        return Data(bytes[(2 + length)...])
     }
 }
 

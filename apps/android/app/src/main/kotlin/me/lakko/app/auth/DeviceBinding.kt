@@ -140,6 +140,19 @@ public fun bindDeviceOutcome(pair: SessionPair?, error: Throwable?): BindDeviceO
 public fun interface DeviceIdSource {
     /** `null` when the seed cannot be read or the key cannot be derived. */
     public fun deviceIdFor(accountIdB64: String): ByteArray?
+
+    /**
+     * [deviceIdFor] for a sign-in route that took [since] when it began: no
+     * device seed is minted for an account wiped after it, and `null` comes
+     * back (the landing then binds afterwards, and the route's own key
+     * writes refuse it; [SignInKeyWrites]). A source that mints nothing
+     * needs no gate.
+     */
+    public fun deviceIdFor(
+        accountIdB64: String,
+        since: me.lakko.app.account.AccountStoreGate.WipeMark,
+    ): ByteArray? =
+        if (me.lakko.app.account.AccountStoreGate.isWipedSince(accountIdB64, since)) null else deviceIdFor(accountIdB64)
 }
 
 /**
@@ -155,12 +168,37 @@ public fun interface DeviceIdSource {
  */
 public class OnDeviceIdSource(private val context: Context) : DeviceIdSource {
     override fun deviceIdFor(accountIdB64: String): ByteArray? {
-        val seed = try {
+        val seed = ensureSeed(accountIdB64) ?: return null
+        return idOf(seed)
+    }
+
+    /** The seed is created inside the store gate, so a wipe of the account
+     *  that starts meanwhile waits for it and then deletes it. */
+    override fun deviceIdFor(
+        accountIdB64: String,
+        since: me.lakko.app.account.AccountStoreGate.WipeMark,
+    ): ByteArray? {
+        var unreadable = false
+        val seed = me.lakko.app.account.AccountStoreGate.writeUnlessWipedSince(accountIdB64, since) {
+            ensureSeed(accountIdB64).also { unreadable = it == null }
+        }
+        if (seed == null) {
+            if (!unreadable) android.util.Log.i("lakko-auth", "device id: the account was wiped since the sign-in began")
+            return null
+        }
+        return idOf(seed)
+    }
+
+    private fun ensureSeed(accountIdB64: String): ByteArray? =
+        try {
             DeviceIdentityStore.ensureDeviceIdentitySeed(context.applicationContext, accountIdB64)
         } catch (cause: Throwable) {
             android.util.Log.w("lakko-auth", "device id: the device seed is not readable: ${cause.javaClass.simpleName}")
-            return null
+            null
         }
+
+    /** The signature key of [seed]; zeroes [seed]. */
+    private fun idOf(seed: ByteArray): ByteArray? {
         return try {
             Identity.fromSeed(seed).use { it.signaturePublicKey() }
         } catch (cancel: CancellationException) {

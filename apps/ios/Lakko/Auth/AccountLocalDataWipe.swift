@@ -315,6 +315,10 @@ enum AccountLocalDataWipe {
         step("co-published-journals") {
             CoPublishedJournals.shared.clear(accountIdB64: accountIdB64)
         }
+        // ADR-0077 decision 5 — the keys of an unanswered co-publisher request.
+        step("co-publish-request-keys") {
+            CoPublishRequestKeys.Ports.live.delete(accountIdB64)
+        }
         // ADR-0063 — the decrypted channel posts the feed reads.
         step("channel-post-log") { ChannelPostLogStore().delete(accountIdB64: accountIdB64) }
         // ADR-0059 — G-43 publisher roles learned this session (in memory,

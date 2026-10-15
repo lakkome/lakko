@@ -20,15 +20,19 @@ import {
   WIPED_MARKER_TTL_MS,
   accountSessionWritable,
   accountStoresWritable,
+  accountStoresWritableSince,
   finishAccountWipe,
   installAccountStorageGate,
   openAccountStores,
+  openAccountStoresSince,
   pruneWipedMarker,
   requireAccountStoresWritable,
   resetAccountStoreGateForTests,
   sealAccountSession,
   sealAccountStoresForWipe,
   storageKeyWritable,
+  takeWipeMark,
+  wipedSince,
 } from "./account-store-gate";
 import { accountStoreIds, wipeAccountLocalData } from "./wipe-account";
 import { base64Encode, base64UrlEncodeNoPad } from "./account-id";
@@ -372,6 +376,81 @@ describe("a session token write in flight at sign-out", () => {
 
 // Every store asks the gate at the point the write is issued; that it does,
 // and that a store added later is noticed, is pinned on the sources.
+describe("a wipe mark (ADR-0077: refused only if wiped since the work began)", () => {
+  it("a wipe that ended before the mark does not count, however sealed it left the account", () => {
+    const ids = accountStoreIds(A);
+    sealAccountStoresForWipe(ids, 1_000);
+    finishAccountWipe(ids);
+    const mark = takeWipeMark(2_000);
+    // The plain gate still refuses (the account has not landed again)...
+    expect(accountStoresWritable(A)).toBe(false);
+    // ...the work that began after the wipe is not stopped by it.
+    expect(wipedSince(mark, A)).toBe(false);
+    expect(accountStoresWritableSince(mark, A)).toBe(true);
+  });
+
+  it("a wipe during the work counts, and so does one still running", () => {
+    const ids = accountStoreIds(A);
+    const mark = takeWipeMark(1_000);
+    expect(wipedSince(mark, A)).toBe(false);
+    sealAccountStoresForWipe(ids, 2_000);
+    expect(wipedSince(mark, A)).toBe(true);
+    expect(wipedSince(mark, A_URL)).toBe(true);
+    finishAccountWipe(ids);
+    expect(wipedSince(mark, A)).toBe(true);
+    // Landing again does not undo the fact for the work that began before.
+    openAccountStores(ids);
+    expect(wipedSince(mark, A)).toBe(true);
+    expect(wipedSince(mark, B)).toBe(false);
+    // A wipe that began before the mark and is still running counts too.
+    sealAccountStoresForWipe(accountStoreIds(B), 3_000);
+    expect(wipedSince(takeWipeMark(4_000), B)).toBe(true);
+  });
+
+  it("a plain sign-out never counts", () => {
+    const mark = takeWipeMark(1_000);
+    sealAccountSession(A);
+    expect(wipedSince(mark, A)).toBe(false);
+    expect(accountStoresWritableSince(mark, A)).toBe(true);
+  });
+
+  it("a wipe in another tab is dated by the marker: after the mark it counts, before it not", () => {
+    // Tab 1 wipes A at t=5000.
+    sealAccountStoresForWipe(accountStoreIds(A), 5_000);
+    finishAccountWipe(accountStoreIds(A));
+    asAnotherTab();
+    // Tab 2's work began before the wipe: refused.
+    expect(wipedSince({ seq: 0, atMs: 4_000 }, A)).toBe(true);
+    // Work that began after it: not refused, though the account is sealed here.
+    expect(wipedSince({ seq: 0, atMs: 6_000 }, A)).toBe(false);
+    expect(accountStoresWritable(A)).toBe(false);
+  });
+
+  it("this tab's own wipe is not counted twice by its marker time", () => {
+    const ids = accountStoreIds(A);
+    sealAccountStoresForWipe(ids, 5_000);
+    finishAccountWipe(ids);
+    // A mark taken in the same millisecond, after the wipe.
+    const mark = takeWipeMark(5_000);
+    expect(wipedSince(mark, A)).toBe(false);
+  });
+
+  it("openAccountStoresSince opens only when not wiped since the mark", () => {
+    const ids = accountStoreIds(A);
+    sealAccountStoresForWipe(ids, 1_000);
+    finishAccountWipe(ids);
+    const mark = takeWipeMark(2_000);
+    // The earlier wipe: the route lands the account, which opens it.
+    expect(openAccountStoresSince(mark, ids)).toBe(true);
+    expect(accountStoresWritable(A)).toBe(true);
+    // A wipe during the route: refused, and the stores stay sealed.
+    sealAccountStoresForWipe(ids, 3_000);
+    finishAccountWipe(ids);
+    expect(openAccountStoresSince(mark, ids)).toBe(false);
+    expect(accountStoresWritable(A)).toBe(false);
+  });
+});
+
 describe("store wiring", () => {
   const src = fileURLToPath(new URL("..", import.meta.url));
 

@@ -180,7 +180,8 @@ export default function RestoreIdentityPrompt(): JSX.Element {
     setError(null);
     setBusy(true);
     try {
-      await auth.provideRecoveryPhrase(phrase());
+      // Typed by the person: an owed phrase screen is not shown back.
+      await auth.provideRecoveryPhrase(phrase(), "typed");
       setPhrase("");
       // No navigation: the state flips to `session` and the guard re-renders.
     } catch (err) {

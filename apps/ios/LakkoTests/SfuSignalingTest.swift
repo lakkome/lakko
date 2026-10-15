@@ -13,8 +13,9 @@ import XCTest
 ///
 ///   1. URLSessionWebSocketTask successfully upgrades to a
 ///      WebSocket against the dockerised SFU on
-///      `${LAKKO_SFU_E2E_URL}/v1/connect?token=${jwt}`
-///      with the `lakko-sfu-v1` subprotocol.
+///      `${LAKKO_SFU_E2E_URL}/v1/connect` offering the
+///      `lakko-sfu-v1` and `lakko-sfu-token.${jwt}`
+///      subprotocols (the token never rides the URL).
 ///   2. The very first server-side frame is a typed
 ///      `Welcome` carrying the same `call_id` the JWT's
 ///      claim encoded.
@@ -99,9 +100,9 @@ final class SfuSignalingTest: XCTestCase {
             return
         }
 
-        // The signaling endpoint demands `token` as a query
-        // arg + the `lakko-sfu-v1` subprotocol on the
-        // upgrade. Either omitted → 401 + dropped TCP.
+        // The signaling endpoint demands the admission token
+        // as a `lakko-sfu-token.<jwt>` subprotocol offered
+        // beside `lakko-sfu-v1`. No token → 401 + dropped TCP.
         var components = URLComponents(
             url: sfuBaseURL.appendingPathComponent("v1/connect"),
             resolvingAgainstBaseURL: false
@@ -111,12 +112,14 @@ final class SfuSignalingTest: XCTestCase {
         // `http` here, but the canonical shape on the
         // wire is ws/wss.
         components.scheme = (sfuBaseURL.scheme == "https") ? "wss" : "ws"
-        components.queryItems = [URLQueryItem(name: "token", value: jwt)]
         let wsURL = components.url!
 
         let session = URLSession(configuration: .default)
         var request = URLRequest(url: wsURL)
-        request.setValue("lakko-sfu-v1", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        request.setValue(
+            "lakko-sfu-v1, lakko-sfu-token.\(jwt)",
+            forHTTPHeaderField: "Sec-WebSocket-Protocol"
+        )
 
         let task = session.webSocketTask(with: request)
         task.resume()

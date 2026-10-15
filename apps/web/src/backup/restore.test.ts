@@ -544,13 +544,13 @@ describe("the phrase routes in AuthContext", () => {
     const start = source.indexOf("async function keysFromPasskey(");
     expect(start).toBeGreaterThan(-1);
     const passkey = code(source.slice(start, source.indexOf("\n  }\n", start)));
-    expect(passkey).toMatch(/await api\.provideRecoveryPhrase\(phrase\)/);
+    expect(passkey).toMatch(/api\.provideRecoveryPhrase\(phrase, "vault"\)/);
     // The email vault's phrase goes to the restore screen's route.
     const email = readFileSync(
       fileURLToPath(new URL("../auth/recover/EmailRecover.tsx", import.meta.url)),
       "utf8",
     );
-    expect(email).toMatch(/await auth\.recover\(phrase, password\(\), canonicalUsername\)/);
+    expect(email).toMatch(/await auth\.recover\(phrase, password\(\), canonicalUsername, "vault"\)/);
     // Three words are checked on a device that already holds the phrase and
     // the keys (ADR-0072): nothing is restored, so no backup is fetched.
     const words = code(method("recoverWithThreeWords", "verifyPassword"));
@@ -569,7 +569,7 @@ describe("the phrase routes in AuthContext", () => {
     };
     expect(slice("async function keepGuestAccount(")).toMatch(/void uploadBackupBaseline\(\{/);
     expect(slice("async function adoptKeyResetOutcome(")).toMatch(
-      /"fresh-identity"\);\s*markBackupDirty\(ctx\.accountIdB64\);/,
+      /"fresh-identity", ctx\.wipes\);\s*markBackupDirty\(ctx\.accountIdB64\);/,
     );
     expect(slice("async function adoptRotatedKeys(")).toMatch(
       /"key-rotation"\);\s*markBackupDirty\(ctx\.accountIdB64\);/,

@@ -10,7 +10,8 @@
  * "in progress" on every other phone for the freshness window, and whoever
  * taps Join lands in an empty room. The one party that knows a room is empty
  * is the SFU: the call ends there five seconds after the last socket goes,
- * and `GET /v1/calls/{call_id}?token=<call jwt>` says so. A member showing the
+ * and `GET /v1/calls/{call_id}` (`Authorization: Bearer <call jwt>`) says
+ * so. A member showing the
  * call as joinable asks every {@link SFU_CALL_STATE_PROBE_MS} and, on `ended`,
  * closes the chat's record itself by publishing the End signal — so the banner
  * goes on every device, not only its own.
@@ -27,12 +28,19 @@ export type SfuCallState = "unknown" | "live" | "closing" | "ended";
 
 /**
  * The state route for `callIdHex`, on the HTTP origin behind the SFU's
- * WebSocket base (`wss://host/sfu` -> `https://host/sfu`). The token is the
- * same call-admission JWT the socket uses, bound to this call id.
+ * WebSocket base (`wss://host/sfu` -> `https://host/sfu`). The token never
+ * rides the URL (invariant #5: a request line in a log must not name who
+ * asked about which call); it goes in the header of {@link sfuCallStateInit}.
  */
-export function sfuCallStateUrl(sfuBaseUrl: string, callIdHex: string, jwt: string): string {
+export function sfuCallStateUrl(sfuBaseUrl: string, callIdHex: string): string {
   const base = sfuBaseUrl.replace(/^wss:/i, "https:").replace(/^ws:/i, "http:").replace(/\/+$/, "");
-  return `${base}/v1/calls/${callIdHex}?token=${encodeURIComponent(jwt)}`;
+  return `${base}/v1/calls/${callIdHex}`;
+}
+
+/** The request for the state route: the same call-admission JWT the socket
+ *  uses, bound to this call id, as a bearer token. */
+export function sfuCallStateInit(jwt: string): RequestInit {
+  return { headers: { Authorization: `Bearer ${jwt}` } };
 }
 
 /** The route's answer, or `null` for anything that is not one of the four

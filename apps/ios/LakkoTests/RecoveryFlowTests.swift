@@ -469,6 +469,79 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(h.tokens.current?.sessionToken, "tok-access", "the old pair stays")
     }
 
+    /// ADR-0077 decision 3, rule 1: the new phrase is in the account's row
+    /// when the server step runs, so an app killed right after the answer
+    /// still holds it.
+    func testTheNewPhraseIsInTheAccountsRowBeforeTheServerStep() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        var rowAtReset: String?
+        h.reset.onReset = { rowAtReset = DevicePhrase.read(accountIdB64: account.b64) }
+
+        let phrase = try await mint(h)
+
+        XCTAssertEqual(rowAtReset, phrase)
+        XCTAssertEqual(DevicePhrase.read(accountIdB64: account.b64), phrase)
+    }
+
+    /// A server step that fails puts back the phrase the row held before.
+    func testAFailedServerStepPutsThePreviousPhraseBack() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let previous = RecoveryMnemonic.generate().phrase()
+        try PhraseStore().putPhrase(accountIdB64: account.b64, phraseBytes: Data(previous.utf8))
+        var rowAtReset: String?
+        h.reset.onReset = { rowAtReset = DevicePhrase.read(accountIdB64: account.b64) }
+        h.reset.resetError = AuthClientError.network(
+            endpoint: "/account/keys/reset/finish", underlying: URLError(.networkConnectionLost))
+
+        do {
+            _ = try await mint(h)
+            XCTFail("a failed server step must fail the flow")
+        } catch {}
+
+        XCTAssertNotNil(rowAtReset)
+        XCTAssertNotEqual(rowAtReset, previous, "the new phrase was written before the step")
+        XCTAssertEqual(DevicePhrase.read(accountIdB64: account.b64), previous)
+    }
+
+    /// ADR-0077 decision 3, rule 6: a phrase the person typed is a phrase
+    /// they hold, so it is not shown back as owed.
+    func testATypedPhraseClearsTheOwedMarker() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let mine = RecoveryMnemonic.generate()
+        h.directory.publishedKey = try identityKey(of: mine)
+        h.markers.markPhraseOwed(accountIdB64: account.b64)
+
+        try await h.repository.provideRecoveryPhrase(
+            mnemonicPhrase: mine.phrase(), phraseHeldByPerson: true)
+
+        XCTAssertFalse(h.markers.isPhraseOwed(accountIdB64: account.b64))
+        XCTAssertTrue(isSession(h.repository), "no phrase screen in front of the session")
+    }
+
+    /// A phrase the device brought itself (the kept row, a passkey's vault)
+    /// was never seen by the person: it stays owed and is shown.
+    func testAPhraseTheDeviceBroughtStaysOwed() async throws {
+        let account = newAccount()
+        let h = harness(routes: totpRoute(account.bytes))
+        try await parkWithoutKeys(h)
+        let mine = RecoveryMnemonic.generate()
+        h.directory.publishedKey = try identityKey(of: mine)
+        h.markers.markPhraseOwed(accountIdB64: account.b64)
+
+        try await h.repository.provideRecoveryPhrase(mnemonicPhrase: mine.phrase())
+
+        XCTAssertTrue(h.markers.isPhraseOwed(accountIdB64: account.b64))
+        if case .saveFreshPhrase = h.repository.state {} else {
+            XCTFail("the owed phrase is shown before the session")
+        }
+    }
+
     func testAKeyResetWithoutASavedPhraseShowsNoWordsAndLandsTheSession() async throws {
         let account = newAccount()
         let h = harness(routes: totpRoute(account.bytes))

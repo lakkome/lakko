@@ -5,7 +5,6 @@ package me.lakko.app.calls
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -18,18 +17,19 @@ class SfuCallStateTest {
     @Test
     fun `the state route is on the http origin behind the socket base`() {
         assertEquals(
-            "https://test.lakko.me/sfu/v1/calls/$id?token=a.b.c",
-            sfuCallStateUrl("wss://test.lakko.me/sfu", id, "a.b.c"),
+            "https://test.lakko.me/sfu/v1/calls/$id",
+            sfuCallStateUrl("wss://test.lakko.me/sfu", id),
         )
         assertEquals(
-            "http://127.0.0.1:9640/v1/calls/$id?token=t",
-            sfuCallStateUrl("ws://127.0.0.1:9640/", id, "t"),
+            "http://127.0.0.1:9640/v1/calls/$id",
+            sfuCallStateUrl("ws://127.0.0.1:9640/", id),
         )
     }
 
+    /** The token rides `Authorization`, never the URL (invariant #5). */
     @Test
-    fun `the token is escaped`() {
-        assertTrue(sfuCallStateUrl("wss://h/sfu", id, "a b&c").contains("token=a+b%26c"))
+    fun `the token is a bearer header`() {
+        assertEquals("Bearer a.b.c", sfuCallStateAuthorization("a.b.c"))
     }
 
     @Test

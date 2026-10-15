@@ -275,10 +275,12 @@ public final class RecoverViewModel: ObservableObject {
 
         Task {
             do {
+                // Typed by the person: they hold it (ADR-0077 decision 3).
                 try await repository.recover(
                     mnemonicPhrase: phraseSnapshot,
                     newPassword: passwordBytes,
-                    username: usernameSnapshot
+                    username: usernameSnapshot,
+                    phraseHeldByPerson: true
                 )
                 // `repository.recover` flipped AuthState to .session.
                 // The screen will be replaced by the home destination
@@ -351,6 +353,11 @@ public final class RecoverViewModel: ObservableObject {
                 confirm = ""
             } catch {
                 phraseRecallBusy = false
+                if error is FreshPhraseKeep.NotStored {
+                    // Refused before anything was sent (ADR-0077 decision 3).
+                    errorText = .key("restore_identity.lost.error.phrase_not_stored")
+                    return
+                }
                 switch RecallAnswers.refusal(of: error) {
                 case .refused:
                     // The window passed or the attempts ran out.
@@ -705,8 +712,10 @@ extension EmailRecoverModel.Ports {
             },
             restoreWithPhrase: { [weak repository] phrase, newPassword, username in
                 guard let repository else { throw SessionNotReady() }
+                // Opened from the email vault: never typed, never shown.
                 try await repository.recover(
-                    mnemonicPhrase: phrase, newPassword: newPassword, username: username)
+                    mnemonicPhrase: phrase, newPassword: newPassword, username: username,
+                    phraseHeldByPerson: false)
             },
             changePassword: { [weak repository] username, ticket, newPassword in
                 guard let repository else { throw SessionNotReady() }

@@ -74,7 +74,15 @@ public object PairingOrchestrator {
         public val session: me.lakko.app.auth.SessionPair?,
         public val accountId: ByteArray?,
         public val persistJoin: (suspend () -> Unit)? = null,
+        /** The wipe mark the join flow took when it began
+         *  ([prepareJoinFlow]): the restore's key writes are refused when
+         *  the account was wiped after it (ADR-0077 decision 4). */
+        public val wipes: me.lakko.app.account.AccountStoreGate.WipeMark? = null,
     ) {
+        /** This outcome, carrying the join flow's wipe mark [mark]. */
+        internal fun withWipes(mark: me.lakko.app.account.AccountStoreGate.WipeMark): JoinRecoveryOutcome =
+            JoinRecoveryOutcome(phraseEntropy, session, accountId, persistJoin, mark)
+
         public val sessionToken: String? get() = session?.accessToken
 
         public val sessionExpiresAtMs: Long? get() = session?.accessExpiresAtMs
@@ -130,6 +138,9 @@ public object PairingOrchestrator {
          *  once the account is known, zeroized on dispose. */
         private val unboundDeviceSeed: ByteArray?,
         private val context: Context,
+        /** Taken when the flow began: a wipe of the account after it
+         *  refuses the flow's key writes ([me.lakko.app.auth.SignInKeyWrites]). */
+        private val wipes: me.lakko.app.account.AccountStoreGate.WipeMark,
     ) {
         private var group: DeviceGroup? = null
         private var disposed = false
@@ -171,7 +182,7 @@ public object PairingOrchestrator {
         ): JoinRecoveryOutcome? {
             check(!disposed) { "JoinSession.accept called after dispose" }
             val account = known
-                ?: return acceptByName(welcomeBytes, welcomeCursor, recovery)
+                ?: return acceptByName(welcomeBytes, welcomeCursor, recovery)?.withWipes(wipes)
             // The deterministic group_id check inside
             // DeviceGroup.joinFromWelcome rejects a misrouted
             // Welcome before any state advance.
@@ -192,7 +203,7 @@ public object PairingOrchestrator {
 
             // ADR-0018 factor (a) — opt-in recovery payload.
             if (recovery && welcomeCursor != null) {
-                return runJoinerRecovery(joined, account, welcomeCursor)
+                return runJoinerRecovery(joined, account, welcomeCursor)?.withWipes(wipes)
             }
             return null
         }
@@ -282,7 +293,11 @@ public object PairingOrchestrator {
                                 override suspend fun persist() {
                                     if (written) return
                                     written = true
-                                    DeviceIdentityStore.putDeviceIdentitySeed(context, accountIdB64, seed)
+                                    // Not for an account wiped since the flow
+                                    // began: the restore then ends here.
+                                    me.lakko.app.auth.SignInKeyWrites.required(wipes, accountIdB64) {
+                                        DeviceIdentityStore.putDeviceIdentitySeed(context, accountIdB64, seed)
+                                    }
                                     DeviceGroupLifecycle.persistSnapshot(
                                         context = context,
                                         identity = identity,
@@ -584,6 +599,9 @@ public object PairingOrchestrator {
         loginHandle: ByteArray,
         known: KnownAccount?,
     ): JoinSession {
+        // The flow's key writes (the device seed by name, the restore that
+        // follows) are measured from here.
+        val wipes = me.lakko.app.account.AccountStoreGate.wipeMark()
         val seed = if (known != null) {
             DeviceIdentityStore.ensureDeviceIdentitySeed(
                 context = context,
@@ -617,6 +635,7 @@ public object PairingOrchestrator {
             known = known,
             unboundDeviceSeed = if (known == null) seed else null,
             context = context.applicationContext,
+            wipes = wipes,
         )
     }
 

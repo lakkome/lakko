@@ -36,8 +36,9 @@ import org.junit.runner.RunWith
  *
  * Mirror of `apps/ios/LakkoTests/SfuSignalingTest.swift`.
  * Opens a real WebSocket via ktor's OkHttp engine to
- * `${LAKKO_SFU_E2E_URL}/v1/connect?token=${jwt}` with the
- * `lakko-sfu-v1` subprotocol, asserts the first server
+ * `${LAKKO_SFU_E2E_URL}/v1/connect` offering the `lakko-sfu-v1`
+ * and `lakko-sfu-token.${jwt}` subprotocols (the token never
+ * rides the URL), asserts the first server
  * frame is a typed `Welcome` carrying the same `call_id`
  * the JWT's claim encoded.
  *
@@ -112,17 +113,19 @@ class SfuSignalingInstrumentedTest {
         val wsBase = sfuBaseUrl
             .replaceFirst("http://", "ws://")
             .replaceFirst("https://", "wss://")
-        val wsUrl = "$wsBase/v1/connect?token=$jwt"
+        val wsUrl = "$wsBase/v1/connect"
 
         try {
             runBlocking {
                 withTimeout(10.seconds) {
                     val session = client.webSocketSession(urlString = wsUrl) {
-                        // SFU refuses upgrades without the
-                        // `lakko-sfu-v1` subprotocol header
-                        // — matches the server's accept-
-                        // header check.
-                        header("Sec-WebSocket-Protocol", "lakko-sfu-v1")
+                        // The SFU refuses an upgrade that offers
+                        // no `lakko-sfu-token.<jwt>` subprotocol
+                        // beside `lakko-sfu-v1`.
+                        header(
+                            "Sec-WebSocket-Protocol",
+                            "lakko-sfu-v1,lakko-sfu-token.$jwt",
+                        )
                     }
 
                     val firstFrame = session.incoming.receive()

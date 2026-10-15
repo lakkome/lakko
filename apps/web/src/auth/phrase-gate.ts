@@ -238,3 +238,28 @@ export function owedPhraseCompletesPark(args: {
 }): boolean {
   return args.owed && args.deviceKeyPresent;
 }
+
+// ---------------------------------------------------------------------------
+// A phrase the person typed
+// ---------------------------------------------------------------------------
+
+/** Where the phrase a landing completes with came from. */
+export type PhraseSource =
+  /** The person typed it (the restore prompt, "Recover with the phrase"). */
+  | "typed"
+  /** This device's own row: the phrase a fresh identity still owes its
+   *  screen (`completeParkFromOwedPhrase`), or a guest's own phrase. */
+  | "device"
+  /** Opened from a vault the person never saw the words of: a passkey's,
+   *  or the recovery email's. */
+  | "vault";
+
+/**
+ * ADR-0077 decision 3 rule 6: a phrase the person typed clears the owed
+ * phrase screen, since they have shown they hold it; a phrase that came from
+ * this device or a vault does not, so a phrase never shown is still shown
+ * (the Android `phraseHeldByPerson`).
+ */
+export function phraseSourceClearsOwed(source: PhraseSource): boolean {
+  return source === "typed";
+}

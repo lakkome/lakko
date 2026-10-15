@@ -155,9 +155,10 @@ public interface GroupCallPort {
     /** The call-admission JWT. May throw. */
     public suspend fun mintCallJwt(sessionToken: String, callIdHex: String): String
 
-    /** `GET` the SFU's call-state route at [url] and return the body on a
-     *  200, else `null` (`SfuCallState.kt`). Never throws. */
-    public suspend fun fetchSfuCallState(url: String): String?
+    /** `GET` the SFU's call-state route at [url] with [authorization] as the
+     *  `Authorization` header and return the body on a 200, else `null`
+     *  (`SfuCallState.kt`). Never throws. */
+    public suspend fun fetchSfuCallState(url: String, authorization: String): String?
 
     /** Publish a group-call body to the group and fold it into the local record. */
     public suspend fun publishSignal(groupIdHex: String, body: FfiCallSignalingBody): Boolean
@@ -804,7 +805,8 @@ public class GroupCallHost(
         val token = p.sessionToken() ?: return
         val state = try {
             val jwt = p.mintCallJwt(token, callIdHex)
-            p.fetchSfuCallState(sfuCallStateUrl(base, callIdHex, jwt))?.let(::parseSfuCallState)
+            p.fetchSfuCallState(sfuCallStateUrl(base, callIdHex), sfuCallStateAuthorization(jwt))
+                ?.let(::parseSfuCallState)
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: Throwable) {

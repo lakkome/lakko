@@ -8,6 +8,7 @@ import me.lakko.app.profile.peerProfileOf
 import me.lakko.app.profile.toFfi
 import kotlinx.coroutines.CancellationException
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
@@ -445,12 +446,14 @@ internal class ChatRepositoryGroupCallPort(
     override suspend fun publishSignal(groupIdHex: String, body: FfiCallSignalingBody): Boolean =
         repository.publishGroupCallSignal(groupIdHex, body)
 
-    override suspend fun fetchSfuCallState(url: String): String? {
+    override suspend fun fetchSfuCallState(url: String, authorization: String): String? {
         val client = io.ktor.client.HttpClient(
             me.lakko.app.transport.AntiCensorshipEngine(me.lakko.app.transport.BaseHttpEngine.create()),
         )
         return try {
-            val response = client.get(url)
+            val response = client.get(url) {
+                header(io.ktor.http.HttpHeaders.Authorization, authorization)
+            }
             if (response.status.value == 200) response.bodyAsText() else null
         } catch (cancel: CancellationException) {
             throw cancel

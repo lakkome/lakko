@@ -45,6 +45,9 @@ use lakko_svc_sfu::{
     protocol::{ClientFrame, ErrorCode, RelayTarget, ServerFrame},
 };
 use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Request as ClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 // ---------------------------------------------------------
@@ -141,9 +144,34 @@ async fn spawn_server_with(cfg: Config, jwks: Jwks) -> std::net::SocketAddr {
     addr
 }
 
-/// Build the WS URL for a given server addr + JWT.
-fn ws_url(addr: &std::net::SocketAddr, jwt: &str) -> String {
-    format!("ws://{addr}/v1/connect?token={jwt}")
+/// Build the WS connect request for a given server addr + JWT: the
+/// token rides `Sec-WebSocket-Protocol` as `lakko-sfu-token.<jwt>`
+/// next to `lakko-sfu-v1`, never the URL.
+fn ws_url(addr: &std::net::SocketAddr, jwt: &str) -> ClientRequest {
+    ws_request_offering(addr, &format!("lakko-sfu-v1,lakko-sfu-token.{jwt}"))
+}
+
+/// A connect request offering exactly `protocols` (the raw
+/// `Sec-WebSocket-Protocol` value).
+fn ws_request_offering(addr: &std::net::SocketAddr, protocols: &str) -> ClientRequest {
+    let mut request = format!("ws://{addr}/v1/connect")
+        .into_client_request()
+        .expect("ws request");
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        HeaderValue::from_str(protocols).expect("protocol header"),
+    );
+    request
+}
+
+/// `GET` the call-state route with `Authorization: Bearer <jwt>`.
+async fn get_state(url: &str, jwt: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .get(url)
+        .bearer_auth(jwt)
+        .send()
+        .await
+        .expect("state request")
 }
 
 /// Read one ServerFrame from a tungstenite WS stream.
@@ -652,12 +680,11 @@ async fn a_call_left_empty_past_the_grace_is_over_for_the_next_joiner() {
         call,
         CallRole::Participant,
     );
-    let state = |jwt: &str| format!("http://{addr}/v1/calls/{call}?token={jwt}");
+    let state = format!("http://{addr}/v1/calls/{call}");
 
     // Never seen: a first join founds it.
-    let body: serde_json::Value = reqwest::get(state(&jwt_a))
+    let body: serde_json::Value = get_state(&state, &jwt_a)
         .await
-        .expect("state request")
         .json()
         .await
         .expect("state json");
@@ -670,9 +697,8 @@ async fn a_call_left_empty_past_the_grace_is_over_for_the_next_joiner() {
         recv_frame(&mut ws_a).await,
         ServerFrame::Welcome { .. }
     ));
-    let body: serde_json::Value = reqwest::get(state(&jwt_b))
+    let body: serde_json::Value = get_state(&state, &jwt_b)
         .await
-        .expect("state request")
         .json()
         .await
         .expect("state json");
@@ -682,18 +708,16 @@ async fn a_call_left_empty_past_the_grace_is_over_for_the_next_joiner() {
     // The last one out starts the grace.
     ws_a.close(None).await.expect("close");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let body: serde_json::Value = reqwest::get(state(&jwt_b))
+    let body: serde_json::Value = get_state(&state, &jwt_b)
         .await
-        .expect("state request")
         .json()
         .await
         .expect("state json");
     assert_eq!(body["state"], "closing");
 
     tokio::time::sleep(lakko_svc_sfu::call_lifetime::CALL_EMPTY_GRACE).await;
-    let body: serde_json::Value = reqwest::get(state(&jwt_b))
+    let body: serde_json::Value = get_state(&state, &jwt_b)
         .await
-        .expect("state request")
         .json()
         .await
         .expect("state json");
@@ -720,16 +744,84 @@ async fn the_state_route_answers_only_for_the_call_the_token_names() {
         "11111111111111111111111111111111",
         CallRole::Participant,
     );
-    let resp = reqwest::get(format!(
-        "http://{addr}/v1/calls/22222222222222222222222222222222?token={jwt}"
+    let url = format!("http://{addr}/v1/calls/22222222222222222222222222222222");
+    assert_eq!(get_state(&url, &jwt).await.status(), 403);
+    assert_eq!(get_state(&url, "not-a-jwt").await.status(), 401);
+}
+
+/// The state route reads the token from `Authorization` only: a request
+/// without the header, or with the token in the query string, is refused.
+#[tokio::test]
+async fn the_state_route_takes_the_token_from_authorization_only() {
+    let key = test_key(0x23);
+    let addr = spawn_server(key.jwks.clone()).await;
+    let call = "33333333333333333333333333333333";
+    let jwt = mint(
+        &key,
+        "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        call,
+        CallRole::Participant,
+    );
+    let url = format!("http://{addr}/v1/calls/{call}");
+    assert_eq!(get_state(&url, &jwt).await.status(), 200);
+    let bare = reqwest::get(&url).await.expect("state request");
+    assert_eq!(bare.status(), 401);
+    let query = reqwest::get(format!("{url}?token={jwt}"))
+        .await
+        .expect("state request");
+    assert_eq!(query.status(), 401);
+}
+
+/// The SFU answers with `lakko-sfu-v1` only, never echoing the token
+/// subprotocol the client offered.
+#[tokio::test]
+async fn ws_admission_answers_with_the_signaling_subprotocol_only() {
+    let key = test_key(0x24);
+    let addr = spawn_server(key.jwks.clone()).await;
+    let jwt = mint(
+        &key,
+        "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        "44444444444444444444444444444444",
+        CallRole::Participant,
+    );
+    // The browser form: a space after the comma.
+    let (_ws, response) = tokio_tungstenite::connect_async(ws_request_offering(
+        &addr,
+        &format!("lakko-sfu-v1, lakko-sfu-token.{jwt}"),
     ))
     .await
-    .expect("state request");
-    assert_eq!(resp.status(), 403);
-    let resp = reqwest::get(format!(
-        "http://{addr}/v1/calls/22222222222222222222222222222222?token=not-a-jwt"
-    ))
-    .await
-    .expect("state request");
-    assert_eq!(resp.status(), 401);
+    .expect("ws connect");
+    let selected = response
+        .headers()
+        .get_all("sec-websocket-protocol")
+        .iter()
+        .map(|v| v.to_str().expect("ascii").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(selected, vec!["lakko-sfu-v1".to_owned()]);
+}
+
+/// A connect with no token subprotocol, or with the token in the query
+/// string (the retired form), does not upgrade.
+#[tokio::test]
+async fn ws_admission_without_a_token_subprotocol_is_rejected() {
+    let key = test_key(0x25);
+    let addr = spawn_server(key.jwks.clone()).await;
+    let jwt = mint(
+        &key,
+        "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "55555555555555555555555555555555",
+        CallRole::Participant,
+    );
+    let bare = tokio_tungstenite::connect_async(ws_request_offering(&addr, "lakko-sfu-v1")).await;
+    assert!(bare.is_err(), "no token must not upgrade");
+
+    let mut query = format!("ws://{addr}/v1/connect?token={jwt}")
+        .into_client_request()
+        .expect("ws request");
+    query.headers_mut().insert(
+        "sec-websocket-protocol",
+        HeaderValue::from_static("lakko-sfu-v1"),
+    );
+    let query = tokio_tungstenite::connect_async(query).await;
+    assert!(query.is_err(), "a query-string token must not upgrade");
 }

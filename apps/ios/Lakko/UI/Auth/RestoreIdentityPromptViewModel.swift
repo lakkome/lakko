@@ -200,8 +200,10 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         let phraseSnapshot = phrase
         Task {
             do {
+                // Typed by the person: they hold it (ADR-0077 decision 3).
                 try await repository.provideRecoveryPhrase(
-                    mnemonicPhrase: phraseSnapshot
+                    mnemonicPhrase: phraseSnapshot,
+                    phraseHeldByPerson: true
                 )
                 busy = false
                 errorText = nil
@@ -327,7 +329,11 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
                     return
                 }
                 NSLog("[restore] WARN key reset failed: \(error)")
-                if let secs = RetryCountdown.attemptsRetryAfterSecs(error) {
+                if error is FreshPhraseKeep.NotStored {
+                    // Refused before anything was sent (ADR-0077 decision 3).
+                    resetRetryAfterSecs = nil
+                    self.errorText = .key("restore_identity.lost.error.phrase_not_stored")
+                } else if let secs = RetryCountdown.attemptsRetryAfterSecs(error) {
                     resetRetryAfterSecs = secs
                     errorText = nil
                 } else if case .network = error as? AuthClientError {

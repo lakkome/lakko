@@ -315,4 +315,31 @@ class AccountStoreGateTest {
         assertNull(AccountStoreGate.writeUnlessWipedSince(account, mark) { store["phrase"] = "words" })
         assertTrue(store.isEmpty())
     }
+
+    // ------------------------------------- wipe marks (required sign-in writes)
+
+    @Test
+    fun `a required sign-in write ends the caller only after a wipe since the mark`() {
+        // A sign-out and an earlier wipe refuse nothing.
+        AccountStoreGate.seal(account) { AccountStoreGate.markWiped(account) }
+        AccountStoreGate.seal(account)
+        val mark = AccountStoreGate.wipeMark()
+        assertFalse(AccountStoreGate.isWipedSince(account, mark))
+        assertEquals(1, AccountStoreGate.writeOrEndUnlessWipedSince(account, mark) { 1 })
+
+        // A wipe after the mark ends the caller, and the write is not made.
+        AccountStoreGate.seal(account) { AccountStoreGate.markWiped(account) }
+        assertTrue(AccountStoreGate.isWipedSince(account, mark))
+        var wrote = false
+        try {
+            AccountStoreGate.writeOrEndUnlessWipedSince(account, mark) { wrote = true }
+            fail("a write after a wipe since the mark must end the caller")
+        } catch (_: StaleBindingException) {
+            // expected: a cancellation
+        }
+        assertFalse(wrote)
+        // Still refused once the account landed again.
+        AccountStoreGate.open(account)
+        assertTrue(AccountStoreGate.isWipedSince(account, mark))
+    }
 }

@@ -44,8 +44,9 @@
 #   - **Signaling round-trip**: simulator + emulator both
 #     mint a JWT (via `cargo run --example mint_test_jwt`
 #     pre-step) and open a real WebSocket to
-#     `/v1/connect?token=<jwt>` with the `lakko-sfu-v1`
-#     subprotocol, asserting the first server frame is a
+#     `/v1/connect` offering the `lakko-sfu-v1` and
+#     `lakko-sfu-token.<jwt>` subprotocols (the token never
+#     rides the URL), asserting the first server frame is a
 #     typed `Welcome` echoing the JWT's `call_id`. Tests
 #     the full JWT verify path the SFU runs against the
 #     fixture JWKS.

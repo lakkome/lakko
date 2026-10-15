@@ -92,6 +92,43 @@ public enum ChannelPublishCounterStore {
         }
     }
 
+    /// What a read of the counter item found.
+    public enum Read: Equatable {
+        /// No item: the account has published to no channel on this device
+        /// (or the item was deleted together with the signing seeds).
+        case absent
+        case present(Data)
+        /// An item may exist but could not be read (the Keychain refused the
+        /// read, e.g. before the first unlock). Never the same as ``absent``:
+        /// reading it as "no floor" would start a counter at 0 under a
+        /// signing key and content seed that were read back fine (G-51).
+        case unreadable(status: OSStatus)
+    }
+
+    /// Read the persisted counter item, telling an absent item from one that
+    /// could not be read.
+    public static func read(accountIdB64: String) -> Read {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: serviceTag,
+            kSecAttrAccount: itemAccount(accountIdB64),
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+        ]
+        var out: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        return classify(status: status, data: out as? Data)
+    }
+
+    /// The pure half of ``read(accountIdB64:)``.
+    static func classify(status: OSStatus, data: Data?) -> Read {
+        switch status {
+        case errSecItemNotFound: return .absent
+        case errSecSuccess: return data.map { .present($0) } ?? .unreadable(status: status)
+        default: return .unreadable(status: status)
+        }
+    }
+
     /// Read the persisted counter blob, or `nil` when absent.
     public static func load(accountIdB64: String) -> Data? {
         let query: [CFString: Any] = [
@@ -135,4 +172,7 @@ public enum ChannelPublishCounterStore {
 /// A publish counter the Keychain did not take.
 public enum ChannelPublishCounterStoreError: Error, Equatable {
     case keychain(status: OSStatus)
+    /// The stored counters could not be read or decoded: no counter is
+    /// handed out and the stored item is not overwritten until they can.
+    case floorUnreadable
 }

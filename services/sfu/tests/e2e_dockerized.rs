@@ -148,18 +148,21 @@ async fn live_sfu_welcome_round_trip() {
     let account = "cafef00d0000000000000000000000bb";
     let jwt = mint_test_jwt(&signing, account, call_id, CallRole::Participant);
 
-    // Build the WS request with the token in the query
-    // string + the Lakko subprotocol header. The
-    // signaling endpoint refuses upgrades that omit
-    // either.
-    let url = format!("{}?token={}", live_ws_url(), jwt);
-    let mut request = url
+    // Build the WS request offering the Lakko subprotocol
+    // and the token subprotocol (`lakko-sfu-token.<jwt>`)
+    // in one `Sec-WebSocket-Protocol` header. The token
+    // never rides the URL; the signaling endpoint refuses
+    // an upgrade that offers no token.
+    let mut request = live_ws_url()
         .as_str()
         .into_client_request()
         .expect("WS URL is well-formed");
-    request
-        .headers_mut()
-        .insert("sec-websocket-protocol", "lakko-sfu-v1".parse().unwrap());
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        format!("lakko-sfu-v1,lakko-sfu-token.{jwt}")
+            .parse()
+            .unwrap(),
+    );
 
     let (mut ws, http_response) = tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -229,14 +232,14 @@ async fn live_sfu_welcome_round_trip() {
 #[tokio::test]
 #[ignore = "requires running ci/sfu-e2e docker compose stack — see ci/sfu-e2e/README.md"]
 async fn live_sfu_bad_jwt_returns_401() {
-    let url = format!("{}?token=not-a-jwt", live_ws_url());
-    let mut request = url
+    let mut request = live_ws_url()
         .as_str()
         .into_client_request()
         .expect("WS URL is well-formed");
-    request
-        .headers_mut()
-        .insert("sec-websocket-protocol", "lakko-sfu-v1".parse().unwrap());
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        "lakko-sfu-v1,lakko-sfu-token.not-a-jwt".parse().unwrap(),
+    );
 
     let res = tokio::time::timeout(
         std::time::Duration::from_secs(10),

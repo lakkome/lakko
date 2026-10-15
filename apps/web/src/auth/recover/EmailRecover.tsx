@@ -231,7 +231,9 @@ export function EmailRecover(props: {
   /** The existing phrase restore, with the phrase the vault held. */
   async function restoreWithPhrase(phrase: string): Promise<void> {
     try {
-      await auth.recover(phrase, password(), canonicalUsername);
+      // Opened from the email vault, never typed: an owed phrase screen
+      // stays owed.
+      await auth.recover(phrase, password(), canonicalUsername, "vault");
       openedPhrase = null;
       rememberOwnAction();
       setPassword("");

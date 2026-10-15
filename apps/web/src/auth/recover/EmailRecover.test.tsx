@@ -208,7 +208,8 @@ describe("after the new password", () => {
     await toCodeStep("alice", "alice@example.com");
     await enterCode("123456");
     await choosePassword("correct horse battery");
-    expect(auth.recover).toHaveBeenCalledWith(PHRASE, "correct horse battery", "alice");
+    // Opened from the vault, never typed: an owed phrase screen stays owed.
+    expect(auth.recover).toHaveBeenCalledWith(PHRASE, "correct horse battery", "alice", "vault");
     expect(m.calls.includes("recoverPassword")).toBe(false);
     expect(auth.landEmailPasswordRecovery).not.toHaveBeenCalled();
     expect(m.done).toHaveBeenCalledTimes(1);

@@ -229,7 +229,12 @@ import {
   liveGroupCallsFor,
 } from "./group-call-store";
 import type { SfuCallState } from "./sfu-call-session";
-import { SFU_CALL_STATE_PROBE_MS, parseSfuCallState, sfuCallStateUrl } from "./sfu-call-state";
+import {
+  SFU_CALL_STATE_PROBE_MS,
+  parseSfuCallState,
+  sfuCallStateInit,
+  sfuCallStateUrl,
+} from "./sfu-call-state";
 import { callEndedAtMs } from "./sfu-keepalive";
 import { createSfuCallUi, type SfuCallUiHandle } from "./sfu-call-ui";
 import { groupCallTileSources } from "./group-call-tile-sources";
@@ -1931,7 +1936,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       const jwt = new CallJwtClient(wasm);
       jwt.setSessionToken(secrets.sessionToken);
       const minted = await jwt.mint(callIdHex, "participant");
-      const res = await fetch(sfuCallStateUrl(base, callIdHex, minted.jwt));
+      const res = await fetch(sfuCallStateUrl(base, callIdHex), sfuCallStateInit(minted.jwt));
       if (!res.ok) return;
       const state = parseSfuCallState((await res.json()) as unknown);
       if (state !== "ended") return;

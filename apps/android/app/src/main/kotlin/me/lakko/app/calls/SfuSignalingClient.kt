@@ -38,6 +38,21 @@ import uniffi.lakko_ffi_uniffi.TunneledWsConnection
 /** The WebSocket subprotocol the SFU requires on the upgrade. */
 const val SFU_SUBPROTOCOL: String = "lakko-sfu-v1"
 
+/** Prefix of the subprotocol that carries the call-admission JWT
+ *  (`lakko_sfu_proto::TOKEN_SUBPROTOCOL_PREFIX`). */
+const val SFU_TOKEN_SUBPROTOCOL_PREFIX: String = "lakko-sfu-token."
+
+/**
+ * The `Sec-WebSocket-Protocol` value a connect sends: `lakko-sfu-v1` and
+ * `lakko-sfu-token.<jwt>`, comma-joined with no space. The token rides this
+ * header rather than the URL, so no request line (and no access log, proxy
+ * log or crash report that records one) names who joined which call
+ * (invariant #5). A JWS compact string is base64url segments joined by `.`,
+ * all valid token characters. The SFU answers with `lakko-sfu-v1` only.
+ */
+internal fun sfuSubprotocolHeader(jwt: String): String =
+    "$SFU_SUBPROTOCOL,$SFU_TOKEN_SUBPROTOCOL_PREFIX$jwt"
+
 /**
  * Handlers the caller wires in. Every method has a no-op default, so a
  * caller overrides only the frames it cares about. Dispatched from the
@@ -98,8 +113,9 @@ interface SfuSignalingCallbacks {
  * `apps/ios/Lakko/Calls/SfuSignalingClient.swift`, and both mirror the
  * web `apps/web/src/calls/sfu-signaling-client.ts`.
  *
- * Connects to the Rust SFU's `lakko-sfu-v1` WebSocket
- * (`{baseUrl}/v1/connect?token=<jwt>`), parses the typed server frames
+ * Connects to the Rust SFU's `lakko-sfu-v1` WebSocket (`{baseUrl}/v1/connect`,
+ * the JWT offered as a second subprotocol, see [sfuSubprotocolHeader]),
+ * parses the typed server frames
  * through the shared `lakko_sfu_proto` definition (via the UniFFI
  * `parseSfuServerFrame`), and sends the typed client frames via the
  * `composeSfu*` helpers — so the client and `services/sfu` agree on the
@@ -174,10 +190,10 @@ class SfuSignalingClient(
             .replaceFirst("http://", "ws://")
             .replaceFirst("https://", "wss://")
             .trimEnd('/')
-        val wsUrl = "$wsBase/v1/connect?token=$jwt"
+        val wsUrl = "$wsBase/v1/connect"
         val s = client.webSocketSession(urlString = wsUrl) {
-            // The SFU refuses upgrades without this subprotocol header.
-            header("Sec-WebSocket-Protocol", SFU_SUBPROTOCOL)
+            // The SFU refuses upgrades without the token subprotocol.
+            header("Sec-WebSocket-Protocol", sfuSubprotocolHeader(jwt))
         }
         if (closed) {
             // Closed while the upgrade was in flight: this socket belongs to
@@ -265,7 +281,7 @@ class SfuSignalingClient(
                     port,
                     config.deadlineMs,
                     innerUrl,
-                    SFU_SUBPROTOCOL,
+                    target.subprotocols,
                 )
             } catch (e: Throwable) {
                 callbacks.onClosed()
@@ -439,6 +455,8 @@ internal data class TunneledSignalingTarget(
     val host: String,
     val port: UShort,
     val innerUrl: String,
+    /** The `Sec-WebSocket-Protocol` value, the same as the direct path's. */
+    val subprotocols: String,
 )
 
 /**
@@ -447,7 +465,9 @@ internal data class TunneledSignalingTarget(
  * The inner URL is plain `ws://` (the obfuscated tunnel provides the
  * encryption) and keeps the base URL's path: an SFU served under a prefix
  * (`wss://test.lakko.me/sfu`) is reached at `/sfu/v1/connect`, exactly like the
- * direct path. `null` when the base URL does not parse or has no host.
+ * direct path. The admission token never rides the URL; it is offered in
+ * [TunneledSignalingTarget.subprotocols]. `null` when the base URL does not
+ * parse or has no host.
  */
 internal fun tunneledSignalingTarget(baseUrl: String, jwt: String): TunneledSignalingTarget? {
     val uri = try {
@@ -463,5 +483,10 @@ internal fun tunneledSignalingTarget(baseUrl: String, jwt: String): TunneledSign
         else -> 80
     }.toUShort()
     val path = (uri.rawPath ?: "").trimEnd('/')
-    return TunneledSignalingTarget(host, port, "ws://$host$path/v1/connect?token=$jwt")
+    return TunneledSignalingTarget(
+        host,
+        port,
+        "ws://$host$path/v1/connect",
+        sfuSubprotocolHeader(jwt),
+    )
 }

@@ -112,8 +112,13 @@ import { base64Decode, base64Encode, base64UrlDecodeNoPad } from "./account-id";
 import {
   installAccountStorageGate,
   openAccountStores,
+  openAccountStoresSince,
   sealAccountSession,
+  takeWipeMark,
+  wipedSince,
+  type WipeMark,
 } from "./account-store-gate";
+import { stageResetPhrase, type StagedResetPhrase } from "./reset-phrase-stage";
 import { resolveRecoverUsername } from "./recover-resolution";
 import {
   accessByName,
@@ -313,6 +318,8 @@ import {
   isSignupPhraseOwed,
   owedPhraseCompletesPark,
   markSignupPhraseOwed,
+  phraseSourceClearsOwed,
+  type PhraseSource,
 } from "./phrase-gate";
 import {
   clearProtectStepOwed,
@@ -858,6 +865,10 @@ export interface AuthApi {
     mnemonicPhrase: string,
     newPassword: string,
     username?: string,
+    /** Where the phrase came from (ADR-0077 decision 3 rule 6): only a
+     *  phrase the person typed clears an owed phrase screen. Default
+     *  `"vault"`: the screen stays owed. */
+    source?: PhraseSource,
   ): Promise<void>;
   /** ADR-0018 factor (c) — recover ACCESS with a TOTP authenticator
    *  code. Addressed by `username`'s login handle like `login`
@@ -1033,7 +1044,13 @@ export interface AuthApi {
    *  contacts, synced state and the list of conversations, never MLS
    *  state. A missing backup or a failed fetch does not fail the sign-in;
    *  a failed fetch is retried on the next session landing. */
-  provideRecoveryPhrase(mnemonicPhrase: string): Promise<void>;
+  provideRecoveryPhrase(
+    mnemonicPhrase: string,
+    /** Where the phrase came from (ADR-0077 decision 3 rule 6): only a
+     *  phrase the person typed clears an owed phrase screen. Default
+     *  `"vault"`: the screen stays owed. */
+    source?: PhraseSource,
+  ): Promise<void>;
   /** Whether the "Choose a new password" step (UX spec 7.1) is owed: a
    *  forgot-password route succeeded and this device holds the keys. The
    *  guards render the step while this is true. */
@@ -1425,19 +1442,64 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   const phraseOwedInMemory = new Set<string>();
   /** One sign-in flow's view of the binding it started under. */
   interface FlowBinding {
-    /** The binding is still the one the flow started under. */
+    /** The binding is still the one the flow started under, and (once the
+     *  flow names its account) that account was not wiped since. */
     current(): boolean;
     /** Throws `StaleBindingError` once it is not: the flow is abandoned. */
     require(): void;
+    /** What the flow took when it began: a Forget device of its account
+     *  since then refuses its writes (ADR-0077 decision 4). */
+    readonly wipes: WipeMark;
+    /** The flow acts for `accountIdB64` from here on: `current()` also asks
+     *  whether that account was wiped since the flow began. A wipe in another
+     *  tab ends no binding here, so this is what stops such a flow before it
+     *  writes or lands. */
+    forAccount(accountIdB64: string): void;
+    /** Where the flow first holds the account id of the session it was just
+     *  given: name the account, refuse if it was wiped since the flow began
+     *  (a wipe before it does not count), and open its stores. Throws
+     *  `StaleBindingError` when refused. */
+    openStores(accountIdB64: string): void;
+  }
+  /** The wipe mark of the sign-in route whose park this page is completing
+   *  in-process (`completeParkFromOwedPhrase`, `keysFromPasskey`): set only
+   *  around the synchronous start of `provideRecoveryPhrase`, which takes it
+   *  for its own flow, so the completion answers to a wipe since the ROUTE
+   *  began and not only since the completion did. */
+  let parkRouteWipes: WipeMark | null = null;
+  function withParkRouteWipes<T>(wipes: WipeMark, run: () => Promise<T>): Promise<T> {
+    parkRouteWipes = wipes;
+    try {
+      return run();
+    } finally {
+      parkRouteWipes = null;
+    }
   }
   /** Call BEFORE the flow's first await; `require()` after every await,
-   *  before any write or state change. */
-  function startFlow(): FlowBinding {
-    const current = binding.capture();
+   *  before any write or state change. `inherited`: the wipe mark of the
+   *  route this flow continues. */
+  function startFlow(inherited?: WipeMark): FlowBinding {
+    const bound = binding.capture();
+    const wipes = inherited ?? takeWipeMark();
+    let account: string | null = null;
+    const current = (): boolean => {
+      if (!bound()) return false;
+      return account === null || !accountStoreIds(account).some((id) => wipedSince(wipes, id));
+    };
     return {
       current,
       require: () => {
         if (!current()) throw new StaleBindingError();
+      },
+      wipes,
+      forAccount: (accountIdB64) => {
+        account = accountIdB64;
+      },
+      openStores: (accountIdB64) => {
+        account = accountIdB64;
+        if (!bound() || !openAccountStoresSince(wipes, accountStoreIds(accountIdB64))) {
+          throw new StaleBindingError();
+        }
       },
     };
   }
@@ -1456,6 +1518,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       console.warn("the owed-phrase marker could not be stored; it holds until this page is closed");
       phraseOwedInMemory.add(accountIdB64);
     }
+  }
+  /** `accountIdB64`'s phrase screen is no longer owed: the person confirmed
+   *  the phrase, or typed it. Never cleared by a sign-out. */
+  function clearOwedPhraseScreen(accountIdB64: string): void {
+    clearSignupPhraseOwed(plainStorage(), accountIdB64);
+    phraseOwedInMemory.delete(accountIdB64);
   }
   /** The account the auth state names, `null` for `anon` / `loading`. */
   function boundAccountId(): string | null {
@@ -2918,6 +2986,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     /** The anchor's phrase arm the attempt was checked against: recorded
      *  once the recall landed (the account's stores are sealed until then). */
     readonly phraseArm: boolean;
+    /** The phrase, staged in the account's row before the finish was sent
+     *  (ADR-0077 decision 3): kept while the answer is outstanding, so a
+     *  page that closes before it arrives still holds a phrase that may be
+     *  the account's. */
+    readonly staged: StagedResetPhrase;
   } | null = null;
 
   /** Take the account back (ADR-0074 part 1). From the server's answer on
@@ -3001,6 +3074,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     oldPhrase: string | null,
   ): Promise<RecallAttemptFailure | null> {
     const accountIdB64 = target.accountIdB64;
+    // The staged wipe this device ran when it was signed out came before;
+    // a Forget device of the account from here on refuses the staged phrase
+    // (ADR-0077).
+    const wipes = takeWipeMark();
     return withRecallLock(accountIdB64, async (): Promise<RecallAttemptFailure | null> => {
       if (!target.isCurrent()) return { kind: "closed" };
       let oldPhraseSeed: Uint8Array | null = null;
@@ -3039,18 +3116,31 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         console.warn("recall failed", err instanceof Error ? err.name : "unknown");
         return { kind: "error" };
       };
-      const dropPending = (): void => {
+      /** Forget the outstanding finish. `rollback`: its attempt is known not
+       *  to have landed, so its staged phrase comes out of the row again;
+       *  otherwise the row keeps it (it is the account's, or may be). */
+      const dropPending = async (rollback: boolean): Promise<void> => {
         const p = recallPending;
         if (p === null) return;
+        recallPending = null;
         p.seed.fill(0);
         p.finish.dispose();
-        recallPending = null;
+        if (!rollback) {
+          p.staged.close();
+        } else if ((await p.staged.rollback()) === "failed") {
+          // eslint-disable-next-line no-console
+          console.warn("the recall did not land, and the phrase row could not be put back");
+        }
       };
       let reset: RecallResult | null = null;
       let seed: Uint8Array;
       let phrase: string;
       let newPubkey: Uint8Array;
       let phraseArm: boolean;
+      let landedKey: CryptoKey;
+      // The earlier finish was answered with a refusal the server chose:
+      // that attempt did not land.
+      let earlierRefused = false;
       // ADR-0074 T5 item 25: a finish that was sent and never answered may
       // have LANDED. Ask it again with the same bytes (the server answers an
       // identical finish 200 again for the attempt's ten minutes) before
@@ -3068,6 +3158,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             }
             // The server chose an answer: that attempt did not land (or its
             // ten minutes are over). A new attempt follows.
+            earlierRefused = true;
           }
         }
       }
@@ -3076,9 +3167,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         phrase = earlier.phrase;
         newPubkey = earlier.newPubkey;
         phraseArm = earlier.phraseArm;
-        dropPending();
+        landedKey = earlier.staged.deviceKey;
+        await dropPending(false);
       } else {
-        dropPending();
+        // An earlier attempt past its window may have landed unseen: its
+        // phrase stays in the row, and the staging below keeps it as the row
+        // to put back if this attempt does not land either.
+        await dropPending(earlierRefused);
         // The anchor to prove against, confirmed now.
         const check = await target.check();
         if (check.kind === "closed" || check.kind === "exhausted") return { kind: "closed" };
@@ -3120,6 +3215,31 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           seed.fill(0);
           return failureOf(err);
         }
+        // The finish makes this phrase the account's: it goes into the
+        // account's row first (ADR-0077 decision 3, G-47). A row that cannot
+        // be written refuses the recall here, with nothing sent.
+        let staged: StagedResetPhrase;
+        try {
+          staged = await stageResetPhrase({
+            accountIdB64,
+            phrase,
+            seed,
+            deviceKey: target.deviceKey,
+            wipes,
+          });
+        } catch {
+          seed.fill(0);
+          prepared.dispose();
+          return { kind: "error" };
+        }
+        if (!target.isCurrent()) {
+          // The screen closed (or the record went) while the phrase was
+          // stored: nothing is sent, and the row is put back.
+          seed.fill(0);
+          prepared.dispose();
+          await staged.rollback();
+          return { kind: "closed" };
+        }
         // From here the request may land without its answer reaching this
         // device: the request bytes and the phrase are kept until it does.
         recallPending = {
@@ -3130,18 +3250,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           newPubkey,
           preparedAtMs: Date.now(),
           phraseArm,
+          staged,
         };
         try {
           reset = await client.recallFinish(prepared);
         } catch (err) {
           seed.fill(0);
           if (!(err instanceof AuthNetworkError || (err instanceof AuthHttpError && err.status >= 500))) {
-            // An answer the server chose: the attempt is over.
-            dropPending();
+            // An answer the server chose: the attempt is over, and did not
+            // land.
+            await dropPending(true);
           }
           return failureOf(err);
         }
-        dropPending();
+        landedKey = staged.deviceKey;
+        await dropPending(false);
       }
       // The account is this device's again: the stores the staged wipe
       // sealed open here, before the first write of the landing. The staged
@@ -3156,12 +3279,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdB64,
         accountIdBytes,
         username: target.username,
-        deviceKey: target.deviceKey,
+        deviceKey: landedKey,
         seed,
         phrase,
         newPubkey,
         reset,
         afterPersist: target.afterPersist,
+        wipes,
       });
       return null;
     });
@@ -3365,16 +3489,36 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
      *  server (guest signup). It is completed whatever else landed meanwhile;
      *  only a sign-out stops it. */
     registered?: boolean;
+    /** The wipe mark of the sign-in route this landing ends: a Forget device
+     *  of the account since the route began (in this tab or another) stops
+     *  the landing like a sign-out (ADR-0077 decision 4). Absent for a
+     *  landing that is not the end of such a route (a page-load restore, the
+     *  sign-ups, which mint a new account). */
+    wipes?: WipeMark;
   }): Promise<void> {
     // A landing runs across many awaits, and Sign out is on screen during
     // some of them (the restore prompt). A sign-out that lands in one must
     // win: nothing below may install a session after it. So must another
     // account's landing: this one was started for a binding that is gone.
     const notSignedOut = binding.captureSignOut();
-    const stillBound = args.registered === true ? notSignedOut : binding.capture();
+    const bound = args.registered === true ? notSignedOut : binding.capture();
+    const wipes = args.wipes;
+    const notWiped = (): boolean =>
+      wipes === undefined || !accountStoreIds(args.accountIdB64).some((id) => wipedSince(wipes, id));
+    const stillBound = (): boolean => bound() && notWiped();
     const mine = ++landingSeq;
     const requireNotSignedOut = (): void => {
       if (stillBound()) return;
+      if (bound()) {
+        // The account was wiped since its route began: undo what THIS
+        // landing installed for it, unless a later flow has installed since.
+        if (landingSeq === mine) {
+          keyPackageAccount = null;
+          chats.clear();
+          dropSession();
+        }
+        throw new StaleBindingError();
+      }
       // Undo what THIS landing installed after the sign-out cleared the
       // session - unless a later flow has installed since, whose installs
       // these would be, or an account is on screen (it landed meanwhile and
@@ -3386,7 +3530,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       throw new StaleBindingError();
     };
-    openStoresFor(args.accountIdB64);
+    if (wipes === undefined) openStoresFor(args.accountIdB64);
+    else if (!openAccountStoresSince(wipes, accountStoreIds(args.accountIdB64))) {
+      throw new StaleBindingError();
+    }
     const canonical = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
     // The keys are on this device now; nothing is left to explain.
     setRestoreNotice(null);
@@ -3625,7 +3772,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     flow: FlowBinding,
     restoreKeys?: () => Promise<boolean>,
   ): Promise<void> {
-    openStoresFor(accountIdB64);
+    // Refused when the account was wiped since the route began (a wipe
+    // before it does not count: this landing is what undoes it).
+    flow.openStores(accountIdB64);
     // Install the fresh session everywhere a request draws on it.
     installFlowSession(accountIdB64, session);
     // Persist the localStorage account marker so a reload knows
@@ -3701,6 +3850,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         exportKey: cachedExportKey ?? new Uint8Array(0),
         session,
         username,
+        wipes: flow.wipes,
       });
       return;
     }
@@ -3793,7 +3943,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     }
     if (phrase === null) return false;
     try {
-      await api.provideRecoveryPhrase(phrase);
+      // This device's own row: the phrase was never shown, so it stays owed
+      // and the landing shows it.
+      await withParkRouteWipes(flow.wipes, () => api.provideRecoveryPhrase(phrase, "device"));
       return true;
     } catch (err) {
       if (err instanceof StaleBindingError) throw err;
@@ -3925,6 +4077,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       readonly prfOutput: Uint8Array | null;
     },
     sessionToken: string,
+    /** The wipe mark of the sign-in route asking (ADR-0077). */
+    wipes: WipeMark,
   ): Promise<PasskeyKeysOutcome> {
     let blobStored = false;
     let phrase: string | null = null;
@@ -3948,7 +4102,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     let matched = false;
     if (phrase !== null) {
       try {
-        await api.provideRecoveryPhrase(phrase);
+        await withParkRouteWipes(wipes, () => api.provideRecoveryPhrase(phrase, "vault"));
         matched = true;
       } catch (err) {
         if (!(err instanceof SupersessionPhraseMismatch)) throw err;
@@ -4338,6 +4492,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     readonly reset: KeyResetResult;
     /** Runs once everything local is stored, before the state moves. */
     readonly afterPersist?: () => void | Promise<void>;
+    /** The wipe mark the route took when it began: the phrase is not written
+     *  back over a Forget device of the account that ran since (it staged
+     *  the phrase under the same mark before the server step). */
+    readonly wipes: WipeMark;
   }): Promise<void> {
     // 3. Persist immediately, before any further network call: the new
     // pair (the old one is superseded by the same transaction), the seed
@@ -4355,6 +4513,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       freshPhraseDisposition({ mintedFor: ctx.accountIdB64, boundAccount: boundAccountId() }) ===
       "owe";
     openStoresFor(ctx.accountIdB64);
+    // The reset cannot be taken back, so the landing goes on; but the KEYS are
+    // not written back over a Forget device of the account that ran since the
+    // route began (ADR-0077 decision 4, the Android `SignInKeyWrites`). A wipe
+    // before this point is caught here; one after the open above seals the
+    // stores again and the store gate refuses the write itself.
+    const keyWritesAllowed = (): boolean =>
+      !accountStoreIds(ctx.accountIdB64).some((id) => wipedSince(ctx.wipes, id));
     if (!overtaken()) installFlowSession(ctx.accountIdB64, ctx.reset.session);
     let deviceKey = ctx.deviceKey;
     if (deviceKey === null) {
@@ -4368,24 +4533,25 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         ctx.accountIdB64,
       );
       try {
-        await putDeviceKey(ctx.accountIdB64, deviceKey);
+        await putDeviceKey(ctx.accountIdB64, deviceKey, ctx.wipes);
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("device-key persist (reset) failed", err);
       }
     }
     try {
-      await putAccountIdentitySeed(ctx.accountIdB64, ctx.seed, deviceKey);
+      if (keyWritesAllowed()) await putAccountIdentitySeed(ctx.accountIdB64, ctx.seed, deviceKey);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("account-identity-seed persist (reset) failed", err);
     }
-    await persistSessionPair(ctx.accountIdB64, ctx.reset.session, "reset");
+    if (keyWritesAllowed()) await persistSessionPair(ctx.accountIdB64, ctx.reset.session, "reset");
     // The device holds the new keys, so it holds the new phrase (the local
     // three-word check, the hand-over to a new device, "Show recovery
-    // phrase"). The signup-phrase marker makes a reload show the words
-    // first, once nothing is owed.
-    await storeDevicePhrase(ctx.accountIdB64, ctx.phrase, deviceKey, "fresh-identity");
+    // phrase"). It was staged before the server step; written again here,
+    // which also ends a three-word suspension. The signup-phrase marker
+    // makes a reload show the words first, once nothing is owed.
+    await storeDevicePhrase(ctx.accountIdB64, ctx.phrase, deviceKey, "fresh-identity", ctx.wipes);
     // A reset (and a recall, which is one) ends with new keys under a new
     // phrase: the account backup is uploaded again under it by the automatic
     // backup once the session lands (no MLS state, as always).
@@ -5368,7 +5534,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const accountIdB64 = base64Encode(accountId);
       // The first place that holds the account id of the session it was
       // just given: open its stores, then let the screen write.
-      openStoresFor(accountIdB64);
+      flow.openStores(accountIdB64);
       whenOpened?.();
       setRestoreNotice(null);
       explicitSignInThisPage = true;
@@ -5877,7 +6043,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const accountIdB64 = base64Encode(accountIdBytes);
       explicitSignInThisPage = true;
       // Install the fresh session for any protected writes that follow.
-      openStoresFor(accountIdB64);
+      // Refused when the account was wiped since this sign-in began.
+      flow.openStores(accountIdB64);
       installFlowSession(accountIdB64, result.session);
       // The password was proven just now: keep the fresh-auth grant (memory
       // only). A sign-in that brought none drops whatever an earlier one
@@ -5994,6 +6161,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         exportKey: result.exportKey,
         session: result.session,
         username: resolvedUsername,
+        wipes: flow.wipes,
       });
     },
     async loginWithPasskey(usernameHint, options) {
@@ -6014,7 +6182,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const assertionSession = sessionPairOf(assertion);
       setRestoreNotice(null);
       explicitSignInThisPage = true;
-      openStoresFor(accountIdB64);
+      flow.openStores(accountIdB64);
       installFlowSession(accountIdB64, assertionSession);
       const cached = loadPersisted();
       const username =
@@ -6036,7 +6204,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         flow,
         async () => {
           try {
-            const outcome = await keysFromPasskey(assertion, assertionSession.sessionToken);
+            const outcome = await keysFromPasskey(assertion, assertionSession.sessionToken, flow.wipes);
             if (outcome === "restored") return true;
             setRestoreNotice(outcome === "no-keys" ? "passkey-no-keys" : "passkey-unusable");
           } catch (err) {
@@ -6055,13 +6223,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         throw new KeyedError("restore_identity.error.nothing");
       }
       const flow = startFlow();
+      flow.forAccount(pending.accountIdB64);
       const assertion = await runPasskeyCeremony(pending.accountIdB64);
       // Signed out, or another account landed, behind the passkey sheet.
       requireStillParked(pending, flow);
       if (assertion.account_id_b64 !== pending.accountIdB64) {
         throw new KeyedError("auth.passkey.error.wrong_account");
       }
-      const outcome = await keysFromPasskey(assertion, assertion.session_token);
+      const outcome = await keysFromPasskey(assertion, assertion.session_token, flow.wipes);
       if (outcome !== "restored") {
         setRestoreNotice(outcome === "no-keys" ? "passkey-no-keys" : "passkey-unusable");
       }
@@ -6169,7 +6338,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         seed.fill(0);
       }
     },
-    async provideRecoveryPhrase(mnemonicPhrase) {
+    async provideRecoveryPhrase(mnemonicPhrase, source = "vault") {
       // ADR-0017 fresh-device fail-safe completion. Only valid while
       // a `pendingRecovery` is parked (set by login / passkey when
       // the auth succeeded but no AccountIdentity seed was cached).
@@ -6179,7 +6348,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           "no pending identity recovery — sign in first",
         );
       }
-      const flow = startFlow();
+      const flow = startFlow(parkRouteWipes ?? undefined);
+      // A wipe of the parked account since the route began (another tab's
+      // Forget device) stops this completion like a sign-out.
+      flow.forAccount(pending.accountIdB64);
       const wasm = await loadWasm();
       requireStillParked(pending, flow);
       // Parse the phrase → derive the BIP39 seed → fail-closed
@@ -6242,6 +6414,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // fetch fails, and it is what lets this device keep the backup current
       // afterwards.)
       await storeDevicePhrase(pending.accountIdB64, canonicalPhrase, deviceKey, "provide-phrase");
+      // Typed by the person: they hold it, so a phrase screen this account
+      // still owes is not shown back at the landing below. A phrase from this
+      // device's kept row or a passkey's vault leaves it owed.
+      if (phraseSourceClearsOwed(source)) clearOwedPhraseScreen(pending.accountIdB64);
       // On a bootstrapped key the pending session token was never
       // persisted (there was no key at park time) — land it now so a
       // reload re-attaches. Best-effort.
@@ -6277,6 +6453,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         session: pending.session,
         username: pending.username,
         restorePhrase: canonicalPhrase,
+        wipes: flow.wipes,
       });
     },
     async completeFromPairing(phraseEntropy, session, persistJoinState) {
@@ -6289,6 +6466,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         throw new Error("no pending identity recovery — sign in first");
       }
       const flow = startFlow();
+      flow.forAccount(pending.accountIdB64);
       const wasm = await loadWasm();
       if (!stillParked(pending) || !flow.current()) {
         phraseEntropy.fill(0);
@@ -6407,6 +6585,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         exportKey: pending.exportKey,
         session: effective,
         username: pending.username,
+        wipes: flow.wipes,
       });
     },
     async completeFromDeviceRestore(restoreArgs) {
@@ -6448,7 +6627,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // gate below passed.
       const landDeviceRestore = async (): Promise<void> => {
         requireCurrent();
-        openStoresFor(accountIdB64);
+        try {
+          // Refused when the account was wiped since this restore began.
+          flow.openStores(accountIdB64);
+        } catch (err) {
+          phraseSeed.fill(0);
+          throw err;
+        }
         // Bootstrap the device root key FROM the identity seed — there
         // is no password (hence no OPAQUE export key) on this device
         // yet. Later password logins PREFER this stored key over
@@ -6520,6 +6705,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           exportKey: new Uint8Array(0),
           session,
           username,
+          wipes: flow.wipes,
         });
       };
       // FAIL CLOSED FIRST — before ANY persistence. A mismatched /
@@ -6683,7 +6869,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           "no pending identity recovery — sign in first",
         );
       }
+      // A Forget device of this account from here on refuses the staged
+      // phrase (and so the reset); one before it does not (ADR-0077).
+      const wipes = takeWipeMark();
       const flow = startFlow();
+      flow.forAccount(pending.accountIdB64);
       const wasm = await loadWasm();
       requireStillParked(pending, flow);
 
@@ -6695,7 +6885,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
       // 1. A BRAND-NEW recovery phrase, its 64-byte BIP39 seed, and the
       // identity derived from it: a fresh random identity for the SAME
-      // account. Nothing is persisted and nothing is sent until step 2.
+      // account. Nothing is sent until step 3.
       const mnemonic = wasm.RecoveryMnemonic.generate();
       const phrase = mnemonic.phrase;
       const accountIdentitySeed = mnemonic.toSeed();
@@ -6704,13 +6894,36 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const newPubkey = canonical.signaturePublicKey;
       canonical.free();
 
-      // 2. The server reset: the point of no return. One transaction
+      // 2. The phrase goes into this account's own row of the phrase store
+      // BEFORE the server step (ADR-0077 decision 3, G-47). From that step on
+      // it is the account's only way back, and it must not exist in this
+      // call alone: the page can close right after the answer. A row that
+      // cannot be written refuses the reset here, with nothing changed.
+      let staged;
+      try {
+        staged = await stageResetPhrase({
+          accountIdB64: pending.accountIdB64,
+          phrase,
+          seed: accountIdentitySeed,
+          deviceKey: pending.deviceKey,
+          wipes,
+        });
+      } catch (err) {
+        accountIdentitySeed.fill(0);
+        throw err;
+      }
+
+      // 3. The server reset: the point of no return. One transaction
       // server-side (the generation bump, the recovery credential, every
       // passkey and vault and grant deleted, the attestation, the new pair).
-      // A failure here changes nothing anywhere: the generated phrase is
-      // discarded and the person is back on the restore prompt.
+      // A failure here, or a route overtaken just before it, changes nothing
+      // on the server: the staged phrase is taken out again and the person
+      // is back on the restore prompt.
       let reset;
       try {
+        // Signed out, another landing, or the account wiped while the phrase
+        // was stored: stop here, with the old keys still the account's.
+        requireStillParked(pending, flow);
         reset = await client.resetAccountKeys(
           pending.session.sessionToken,
           grant,
@@ -6719,6 +6932,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         );
       } catch (err) {
         accountIdentitySeed.fill(0);
+        if ((await staged.rollback()) === "failed") {
+          // eslint-disable-next-line no-console
+          console.warn("account keys not reset, and the phrase row could not be put back");
+        }
         if (
           err instanceof AuthHttpError &&
           isFreshAuthRequired({ status: err.status, errorCode: err.errorCode })
@@ -6730,20 +6947,22 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
         throw err;
       }
+      staged.close();
       // A successful reset spends every grant of the old generation, and the
       // pair it returns carries none.
       freshGrants.clear();
 
-      // 3-5. Persist, then publish: the one path a recall shares.
+      // 4-6. Persist, then publish: the one path a recall shares.
       await adoptKeyResetOutcome({
         accountIdB64: pending.accountIdB64,
         accountIdBytes: pending.accountIdBytes,
         username: pending.username,
-        deviceKey: pending.deviceKey,
+        deviceKey: staged.deviceKey,
         seed: accountIdentitySeed,
         phrase,
         newPubkey,
         reset,
+        wipes,
       });
       return phrase;
     },
@@ -6776,8 +6995,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       setPendingFreshPhrase(null);
       // The person has just confirmed the phrase is saved: it is no longer
       // owed, and the landing below must not show it a second time.
-      clearSignupPhraseOwed(plainStorage(), pending.accountIdB64);
-      phraseOwedInMemory.delete(pending.accountIdB64);
+      clearOwedPhraseScreen(pending.accountIdB64);
       await finishCanonicalSession({
         wasm,
         accountIdentitySeed: pending.seed,
@@ -6789,7 +7007,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         username: pending.username,
       });
     },
-    async recover(mnemonicPhrase, newPassword, username) {
+    async recover(mnemonicPhrase, newPassword, username, source = "vault") {
       // Every route on /recover that holds the whole phrase ends here (the
       // typed phrase, three words checked on this device, an email code).
       // The password is replaced on this path, so no new-password step is
@@ -6856,7 +7074,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         flow.require();
         const accountIdBytes = result.accountId;
         const accountIdB64 = base64Encode(accountIdBytes);
-        openStoresFor(accountIdB64);
+        // Refused when the account was wiped since this recovery began.
+        flow.openStores(accountIdB64);
         installFlowSession(accountIdB64, result.session);
         // Re-derive the device root key from the NEW export key.
         // The previous device key (if any) is no longer reachable
@@ -6963,6 +7182,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("phrase cache (recover) failed", err);
         }
+        // Typed by the person: a phrase screen this account still owes is
+        // not shown back. A phrase opened from the email vault leaves it.
+        if (phraseSourceClearsOwed(source)) clearOwedPhraseScreen(accountIdB64);
         flow.require();
         // ADR-0040 (G-35) — purge any pending-commit outbox entries for the old
         // session too; they reference the now-discarded MLS snapshot and must

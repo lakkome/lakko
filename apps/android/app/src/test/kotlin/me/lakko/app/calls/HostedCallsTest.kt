@@ -110,8 +110,10 @@ class HostedCallsTest {
         /** What the SFU's state route answers; `null` = unreachable. */
         var sfuCallStateBody: String? = null
         val probedUrls = mutableListOf<String>()
-        override suspend fun fetchSfuCallState(url: String): String? {
+        val probedAuthorizations = mutableListOf<String>()
+        override suspend fun fetchSfuCallState(url: String, authorization: String): String? {
             probedUrls += url
+            probedAuthorizations += authorization
             return sfuCallStateBody
         }
         /** When set, a Join publish suspends here BEFORE it is recorded. */
@@ -193,7 +195,9 @@ class HostedCallsTest {
         h.host.probeCallState(groupA, callHex)
         runCurrent()
         assertEquals(1, h.port.probedUrls.size)
-        assertTrue(h.port.probedUrls.first().startsWith("https://sfu.test/v1/calls/$callHex?token="))
+        // The token rides `Authorization`, never the URL (invariant #5).
+        assertEquals("https://sfu.test/v1/calls/$callHex", h.port.probedUrls.first())
+        assertEquals("Bearer jwt", h.port.probedAuthorizations.first())
         val end = h.port.published.single().second as FfiCallSignalingBody.End
         assertEquals(FfiCallEndReason.HUNG_UP, end.reason)
     }

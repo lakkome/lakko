@@ -2144,7 +2144,9 @@ public final class AuthRepository: ObservableObject {
         var matched = false
         if let phrase {
             do {
-                try await provideRecoveryPhrase(mnemonicPhrase: phrase, writes: writes)
+                // Opened from the passkey's vault: never typed.
+                try await provideRecoveryPhrase(
+                    mnemonicPhrase: phrase, writes: writes, phraseHeldByPerson: false)
                 matched = true
             } catch is PhraseMismatch {
                 NSLog("[auth] the keys stored for this passkey are not this account's")
@@ -2761,10 +2763,16 @@ public final class AuthRepository: ObservableObject {
     /// this device when the field is empty; the account id comes back in the
     /// finish response. No discovery lookup runs, so recover works on a
     /// FRESH device given the username + phrase.
+    ///
+    /// `phraseHeldByPerson` is `true` only when the person typed the phrase
+    /// (the restore screen): they have shown they hold it, so a phrase owed
+    /// to them (ADR-0077 decision 3, rule 6) is no longer owed. A phrase the
+    /// device opened itself (the recovery-email vault) leaves the marker.
     public func recover(
         mnemonicPhrase: String,
         newPassword: Data,
-        username: String? = nil
+        username: String? = nil,
+        phraseHeldByPerson: Bool = false
     ) async throws {
         let trimmedPhrase = mnemonicPhrase.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPhrase.isEmpty else {
@@ -2956,6 +2964,11 @@ public final class AuthRepository: ObservableObject {
         // The fetch suspended; the session must not land over a sign-out or
         // another account that landed meanwhile.
         try bound.require()
+        // Typed and accepted by the recovery proof: the person holds the
+        // phrase, so it is not owed (and is not shown back to them).
+        if phraseHeldByPerson {
+            markers.clearPhraseOwed(accountIdB64: accountIdB64)
+        }
 
         // ADR-0017: also carry the phrase seed (the canonical identity
         // seed downstream callers rebuild from). Cleared on logout.
@@ -3972,6 +3985,24 @@ public final class AuthRepository: ObservableObject {
         let mnemonic = RecoveryMnemonic.generate()
         let phrase = mnemonic.phrase()
         let seed = mnemonic.toSeed()
+        // ADR-0077 decision 3, rule 1: the new phrase is in the account's
+        // Keychain row before `recall/finish`, which makes it the account's
+        // only way back. The staged wipe sealed the account's stores before
+        // this route began, which the route's mark does not count. A row
+        // that cannot be written ends the attempt with nothing sent; the
+        // form says so as it does for any other failure.
+        let kept: FreshPhraseKeep
+        do {
+            kept = try FreshPhraseKeep.keep(
+                phrase: phrase, accountIdB64: record.accountIdB64,
+                since: writes.mark(record.accountIdB64), store: phraseStore)
+        } catch {
+            NSLog("[auth] recall refused: the new recovery phrase could not be stored on this device")
+            if let latest = recall {
+                applyRecall(RecallMachine.afterRefusal(latest, .failed))
+            }
+            return
+        }
         let landed: RecallLanded
         let newPubkey: Data
         do {
@@ -3987,6 +4018,9 @@ public final class AuthRepository: ObservableObject {
                     newSignaturePubkey: newPubkey,
                     deviceId: nil))
         } catch {
+            // The account was not taken back: the row goes back to what it
+            // held (nothing, after the staged wipe).
+            kept.undo()
             guard let latest = recall else { return }
             switch RecallAnswers.refusal(of: error) {
             case .wrongPassword:
@@ -4090,16 +4124,35 @@ public final class AuthRepository: ObservableObject {
         let phrase = mnemonic.phrase()
         let seed = mnemonic.toSeed()
         let newPubkey = try Identity.fromSeed(seed: seed).signaturePublicKey()
-        let landed = try await recallOperations.takeBack(
-            RecallAttempt(
-                record: record,
-                anchorSeq: offer.window.anchorSeq,
-                oldPassword: Data(),
-                oldPhraseSeed: oldSeed,
-                newPassword: newPassword,
-                newSeed: seed,
-                newSignaturePubkey: newPubkey,
-                deviceId: nil))
+        // ADR-0077 decision 3, rule 1: the new phrase is in the account's
+        // Keychain row before `recall/finish`; a row that cannot be written
+        // throws ``FreshPhraseKeep/NotStored`` with nothing sent, and a
+        // take-back that does not land puts the row back.
+        let kept: FreshPhraseKeep
+        do {
+            kept = try FreshPhraseKeep.keep(
+                phrase: phrase, accountIdB64: accountIdB64,
+                since: writes.mark(accountIdB64), store: phraseStore)
+        } catch {
+            NSLog("[auth] recall by phrase refused: the new recovery phrase could not be stored on this device")
+            throw FreshPhraseKeep.NotStored()
+        }
+        let landed: RecallLanded
+        do {
+            landed = try await recallOperations.takeBack(
+                RecallAttempt(
+                    record: record,
+                    anchorSeq: offer.window.anchorSeq,
+                    oldPassword: Data(),
+                    oldPhraseSeed: oldSeed,
+                    newPassword: newPassword,
+                    newSeed: seed,
+                    newSignaturePubkey: newPubkey,
+                    deviceId: nil))
+        } catch {
+            kept.undo()
+            throw error
+        }
         // Removed from this device while the take-back was out: nothing of
         // it is written here again.
         if writes.isWiped(accountIdB64) { throw AccountStoreGate.Sealed() }
@@ -4230,14 +4283,24 @@ public final class AuthRepository: ObservableObject {
     /// socially-engineered wrong phrase overwrite the published
     /// identity. Throws ``PhraseMismatch`` on a mismatch,
     /// ``IdentityVerificationUnavailable`` on a 404 / fetch failure.
-    public func provideRecoveryPhrase(mnemonicPhrase: String) async throws {
-        try await provideRecoveryPhrase(mnemonicPhrase: mnemonicPhrase, writes: SignInKeyWrites())
+    ///
+    /// `phraseHeldByPerson` is `true` only when the person typed the phrase
+    /// (the restore prompt): they have shown they hold it, so a phrase owed
+    /// to them (ADR-0077 decision 3, rule 6) is not shown back. A phrase the
+    /// device brought itself (the row kept for an owed phrase, a passkey's
+    /// vault) leaves the marker as it is.
+    public func provideRecoveryPhrase(mnemonicPhrase: String, phraseHeldByPerson: Bool = false) async throws {
+        try await provideRecoveryPhrase(
+            mnemonicPhrase: mnemonicPhrase, writes: SignInKeyWrites(),
+            phraseHeldByPerson: phraseHeldByPerson)
     }
 
-    /// ``provideRecoveryPhrase(mnemonicPhrase:)`` for a route that began
-    /// earlier (a passkey sign-in asking its passkey for the keys): `writes`
-    /// is that route's ``SignInKeyWrites``.
-    private func provideRecoveryPhrase(mnemonicPhrase: String, writes: SignInKeyWrites) async throws {
+    /// ``provideRecoveryPhrase(mnemonicPhrase:phraseHeldByPerson:)`` for a
+    /// route that began earlier (a passkey sign-in asking its passkey for the
+    /// keys): `writes` is that route's ``SignInKeyWrites``.
+    private func provideRecoveryPhrase(
+        mnemonicPhrase: String, writes: SignInKeyWrites, phraseHeldByPerson: Bool = false
+    ) async throws {
         guard let pending = pendingRecovery else {
             throw AuthClientError.argument(
                 "no pending identity recovery — sign in first"
@@ -4326,6 +4389,12 @@ public final class AuthRepository: ObservableObject {
             throw StaleBindingError()
         }
 
+        // Typed and accepted: the person holds the phrase, so it is not owed
+        // and the landing below does not show it back to them. Before the
+        // landing, which reads the marker.
+        if phraseHeldByPerson {
+            markers.clearPhraseOwed(accountIdB64: pending.accountIdB64)
+        }
         let landed = pending.currentSession(tokenProvider)
         finishCanonicalSession(
             accountIdentitySeed: accountIdentitySeed,
@@ -4905,7 +4974,9 @@ public final class AuthRepository: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self, bound.isCurrent else { return }
             do {
-                try await self.provideRecoveryPhrase(mnemonicPhrase: phrase)
+                // Completed from the kept row: the person has not seen it,
+                // so it stays owed and is shown at the landing.
+                try await self.provideRecoveryPhrase(mnemonicPhrase: phrase, phraseHeldByPerson: false)
             } catch {
                 if error is StaleBindingError { return }
                 NSLog("[auth] the kept recovery phrase did not complete the restore: \(error)")
@@ -4940,9 +5011,13 @@ public final class AuthRepository: ObservableObject {
     /// ``AuthState/needsRecoveryPhrase(_:)``) and ONLY via the explicit,
     /// typed-confirmation button. Order:
     ///
-    ///   1. Generate the phrase + seed; derive the new identity.
+    ///   1. Generate the phrase + seed; derive the new identity; write the
+    ///      phrase to this account's Keychain row (``FreshPhraseKeep``). A
+    ///      row that cannot be written throws ``FreshPhraseKeep/NotStored``
+    ///      and nothing is sent (ADR-0077 decision 3).
     ///   2. The server step. A failure here changes nothing: `start` stores
-    ///      nothing, `finish` is one transaction, the phrase is discarded.
+    ///      nothing, `finish` is one transaction, the phrase is discarded and
+    ///      the row is put back as step 1 found it.
     ///   3. PERSIST IMMEDIATELY, before any further network call: the new
     ///      pair (the old one is superseded with every other device's), the
     ///      seed and the phrase under the device key, the "phrase owed"
@@ -5009,6 +5084,24 @@ public final class AuthRepository: ObservableObject {
         let seed = mnemonic.toSeed()
         let newPubkey = try Identity.fromSeed(seed: seed).signaturePublicKey()
 
+        // ADR-0077 decision 3, rule 1: the phrase goes into this account's
+        // own Keychain row BEFORE the server step. From that step on it is
+        // the account's only way back, and it must not exist in this call
+        // alone: the app can be killed right after the answer. A row that
+        // cannot be written refuses the reset here, where nothing
+        // irreversible has happened; a failed server step puts the row back.
+        // No wait sits between this write and the server call, so there is
+        // no binding check in between to fail.
+        let kept: FreshPhraseKeep
+        do {
+            kept = try FreshPhraseKeep.keep(
+                phrase: phrase, accountIdB64: pending.accountIdB64,
+                since: writes.mark(pending.accountIdB64), store: phraseStore)
+        } catch {
+            NSLog("[auth] key reset refused: the new recovery phrase could not be stored on this device")
+            throw FreshPhraseKeep.NotStored()
+        }
+
         // 2. The server step: the point of no return.
         // ADR-0074 "T1 as built" point 10: the pair a reset returns keeps the
         // device the bearer names, so the client-side note moves with it.
@@ -5025,6 +5118,8 @@ public final class AuthRepository: ObservableObject {
                 attestation: answered.attestation,
                 session: answered.session.naming(deviceIdB64: bearer.deviceIdB64))
         } catch {
+            // Nothing was reset: the row goes back to what it held.
+            kept.undo()
             if FreshAuthRefusal.isRequired(error) {
                 // The grant expired on the way (or was spent): ask again.
                 freshAuth.clear()

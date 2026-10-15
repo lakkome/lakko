@@ -60,6 +60,19 @@
  * disk. Skipping it would be the harmful outcome. The one row a late write
  * must not bring back after a sign-out is the session token.
  *
+ * ## Work that writes before its landing
+ *
+ * A wiped account stays sealed until it lands again, which is the right
+ * answer for a late write of a session that is over and the wrong one for a
+ * sign-in route (or a key reset) that writes before it lands: a wipe that ran
+ * before the route began must not stop it, and one that ran DURING it must.
+ * Such work takes a {@link WipeMark} when it begins and asks
+ * {@link wipedSince} / {@link accountStoresWritableSince} /
+ * {@link openAccountStoresSince} against it (the iOS `SignInKeyWrites` and
+ * Android `WipeMark` rule). A wipe in another tab is dated by the marker's
+ * time, so it is seen only while its marker entry lives
+ * ({@link WIPED_MARKER_TTL_MS}) or after this tab has asked about the account.
+ *
  * ## Memory
  *
  * The gate guards stores, not memory. A cache that holds an account's rows
@@ -132,6 +145,16 @@ const known = new Set<string>();
  *  these sealed, so a landing that races the wipe cannot write between its
  *  deletes. */
 const wiping = new Set<string>();
+/** Counts the wipes this realm started; what a {@link WipeMark} remembers. */
+let wipeSeq = 0;
+/** The {@link wipeSeq} of the latest wipe of each account in this realm. */
+const lastLocalWipe = new Map<string, number>();
+/** The marker time of the latest wipe of each account in ANOTHER tab that
+ *  this realm has read from the marker. */
+const lastForeignWipeAtMs = new Map<string, number>();
+/** The marker entries this realm wrote itself (`digest:at`): its own wipes
+ *  are counted by {@link lastLocalWipe}, not by their wall-clock time. */
+const ownMarkerEntries = new Set<string>();
 
 let markerStorage: GateStorage | null | undefined;
 let installed = false;
@@ -190,8 +213,19 @@ function writeWiped(entries: readonly WipedEntry[]): void {
 function absorb(entries: readonly WipedEntry[]): void {
   if (entries.length === 0) return;
   const digests = new Set(entries.map((e) => e.h));
+  // When each digest was last wiped by another tab (its own entries left out).
+  const foreignAt = new Map<string, number>();
+  for (const e of entries) {
+    if (ownMarkerEntries.has(`${e.h}:${e.at}`)) continue;
+    foreignAt.set(e.h, Math.max(foreignAt.get(e.h) ?? Number.NEGATIVE_INFINITY, e.at));
+  }
   for (const id of known) {
-    if (!sealed.has(id) && digests.has(idDigest(id))) sealed.add(id);
+    const digest = idDigest(id);
+    if (!sealed.has(id) && digests.has(digest)) sealed.add(id);
+    const at = foreignAt.get(digest);
+    if (at !== undefined) {
+      lastForeignWipeAtMs.set(id, Math.max(lastForeignWipeAtMs.get(id) ?? Number.NEGATIVE_INFINITY, at));
+    }
   }
 }
 
@@ -217,6 +251,69 @@ export function accountStoresWritable(accountId: string): boolean {
  *  {@link AccountStoresSealedError} instead of answering `false`. */
 export function requireAccountStoresWritable(accountId: string): void {
   if (!accountStoresWritable(accountId)) throw new AccountStoresSealedError();
+}
+
+/**
+ * What a piece of work remembers when it begins, so it can tell later whether
+ * an account was wiped AFTER it began (ADR-0077 decision 4, the iOS and
+ * Android `WipeMark`).
+ *
+ * The plain gate answers "sealed now", and a wiped account stays sealed until
+ * it lands again. That is the wrong question for a sign-in route or a key
+ * reset that writes before its landing: a wipe that ran before the work began
+ * is history the work itself is about to undo (it lands the account), while a
+ * wipe that ran during it is the person dropping this device's data, which the
+ * work must not write back.
+ */
+export interface WipeMark {
+  /** {@link wipeSeq} when the mark was taken. */
+  readonly seq: number;
+  /** Wall-clock time when the mark was taken: what a wipe in another tab is
+   *  compared against (the marker carries that tab's time). */
+  readonly atMs: number;
+}
+
+/** Take a {@link WipeMark}: call when the work begins, before its first
+ *  await. */
+export function takeWipeMark(nowMs: number = Date.now()): WipeMark {
+  return { seq: wipeSeq, atMs: nowMs };
+}
+
+/**
+ * Whether `accountId` was wiped after `mark` was taken, in this tab or (as far
+ * as the marker tells) in another; also `true` while a wipe of it is running
+ * here, whose deletes may still follow a write. A wipe that ended before the
+ * mark is not counted, however sealed it left the account.
+ */
+export function wipedSince(mark: WipeMark, accountId: string): boolean {
+  known.add(accountId);
+  if (wiping.has(accountId)) return true;
+  if ((lastLocalWipe.get(accountId) ?? -1) > mark.seq) return true;
+  absorbMarker();
+  return (lastForeignWipeAtMs.get(accountId) ?? Number.NEGATIVE_INFINITY) >= mark.atMs;
+}
+
+/**
+ * The gate for a write made under a {@link WipeMark}: `false` only when the
+ * account was wiped since the mark (a plain sign-out never refuses it). Ask
+ * synchronously, immediately before the transaction, like
+ * {@link accountStoresWritable}.
+ */
+export function accountStoresWritableSince(mark: WipeMark, accountId: string): boolean {
+  return !wipedSince(mark, accountId);
+}
+
+/**
+ * {@link openAccountStores} for work that began under `mark`: `false`, and
+ * nothing opened, when the account was wiped since the mark. A route opens
+ * the account's stores this way where it first holds the account id, so a
+ * wipe that ran before the route began does not stop it and one that ran
+ * during it does.
+ */
+export function openAccountStoresSince(mark: WipeMark, ids: readonly string[]): boolean {
+  if (ids.some((id) => wipedSince(mark, id))) return false;
+  openAccountStores(ids);
+  return true;
 }
 
 /** The session-token store: also closed by a plain sign-out in this realm. */
@@ -254,12 +351,15 @@ export function sealAccountSession(accountId: string): void {
  */
 export function sealAccountStoresForWipe(ids: readonly string[], nowMs: number = Date.now()): void {
   const fresh = ids.filter((id) => id.length > 0);
+  wipeSeq += 1;
   for (const id of fresh) {
     known.add(id);
     sealed.add(id);
     wiping.add(id);
+    lastLocalWipe.set(id, wipeSeq);
   }
   const digests = fresh.map(idDigest);
+  for (const h of digests) ownMarkerEntries.add(`${h}:${nowMs}`);
   const kept = readWiped().filter(
     (e) => nowMs - e.at < WIPED_MARKER_TTL_MS && !digests.includes(e.h),
   );
@@ -353,5 +453,9 @@ export function resetAccountStoreGateForTests(storage?: GateStorage | null): voi
   sessionSealed.clear();
   wiping.clear();
   known.clear();
+  wipeSeq = 0;
+  lastLocalWipe.clear();
+  lastForeignWipeAtMs.clear();
+  ownMarkerEntries.clear();
   markerStorage = storage;
 }

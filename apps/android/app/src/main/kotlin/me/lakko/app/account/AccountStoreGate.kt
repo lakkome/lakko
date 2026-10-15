@@ -230,6 +230,22 @@ public object AccountStoreGate {
             if (wipedSince(accountIdB64, since)) null else write()
         }
 
+    /**
+     * [writeUnlessWipedSince] for a write the sign-in must not go on without
+     * (the device root key): refused, it ends the caller with
+     * [StaleBindingException], a cancellation, so the route stops instead of
+     * landing an account whose keys a wipe removed.
+     */
+    public inline fun <T> writeOrEndUnlessWipedSince(accountIdB64: String, since: WipeMark, write: () -> T): T =
+        lock.read {
+            if (wipedSince(accountIdB64, since)) throw StaleBindingException()
+            write()
+        }
+
+    /** Whether a [writeUnlessWipedSince] of [accountIdB64] would be refused now. */
+    public fun isWipedSince(accountIdB64: String, since: WipeMark): Boolean =
+        lock.read { wipedSince(accountIdB64, since) }
+
     public fun isWiped(accountIdB64: String): Boolean = lock.read { key(accountIdB64) in wiped }
 
     /** Run [write] unless [accountIdB64] was wiped; `null` when refused. The

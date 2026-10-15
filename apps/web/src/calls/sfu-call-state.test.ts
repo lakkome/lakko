@@ -3,20 +3,27 @@
 
 import { describe, expect, it } from "vitest";
 
-import { SFU_CALL_STATE_PROBE_MS, parseSfuCallState, sfuCallStateUrl } from "./sfu-call-state";
+import {
+  SFU_CALL_STATE_PROBE_MS,
+  parseSfuCallState,
+  sfuCallStateInit,
+  sfuCallStateUrl,
+} from "./sfu-call-state";
 
 describe("sfuCallStateUrl", () => {
-  it("asks the HTTP origin behind the WebSocket base, token in the query", () => {
-    expect(sfuCallStateUrl("wss://test.lakko.me/sfu", "ab".repeat(16), "a.b.c")).toBe(
-      `https://test.lakko.me/sfu/v1/calls/${"ab".repeat(16)}?token=a.b.c`,
+  it("asks the HTTP origin behind the WebSocket base, with no token in the URL", () => {
+    expect(sfuCallStateUrl("wss://test.lakko.me/sfu", "ab".repeat(16))).toBe(
+      `https://test.lakko.me/sfu/v1/calls/${"ab".repeat(16)}`,
     );
-    expect(sfuCallStateUrl("ws://127.0.0.1:9640/", "cd".repeat(16), "t")).toBe(
-      `http://127.0.0.1:9640/v1/calls/${"cd".repeat(16)}?token=t`,
+    expect(sfuCallStateUrl("ws://127.0.0.1:9640/", "cd".repeat(16))).toBe(
+      `http://127.0.0.1:9640/v1/calls/${"cd".repeat(16)}`,
     );
   });
+});
 
-  it("escapes the token", () => {
-    expect(sfuCallStateUrl("wss://h/sfu", "00".repeat(16), "a b&c")).toContain("token=a%20b%26c");
+describe("sfuCallStateInit", () => {
+  it("carries the token as a bearer header", () => {
+    expect(sfuCallStateInit("a.b.c")).toEqual({ headers: { Authorization: "Bearer a.b.c" } });
   });
 });
 

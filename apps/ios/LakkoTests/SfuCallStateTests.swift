@@ -10,16 +10,20 @@ final class SfuCallStateTests: XCTestCase {
     func testTheStateRouteIsOnTheHttpOriginBehindTheSocketBase() {
         let id = String(repeating: "ab", count: 16)
         XCTAssertEqual(
-            SfuCallStateProbe.url(sfuBaseUrl: "wss://test.lakko.me/sfu", callIdHex: id, jwt: "a.b.c")?.absoluteString,
-            "https://test.lakko.me/sfu/v1/calls/\(id)?token=a.b.c")
+            SfuCallStateProbe.url(sfuBaseUrl: "wss://test.lakko.me/sfu", callIdHex: id)?.absoluteString,
+            "https://test.lakko.me/sfu/v1/calls/\(id)")
         XCTAssertEqual(
-            SfuCallStateProbe.url(sfuBaseUrl: "ws://127.0.0.1:9640/", callIdHex: id, jwt: "t")?.absoluteString,
-            "http://127.0.0.1:9640/v1/calls/\(id)?token=t")
+            SfuCallStateProbe.url(sfuBaseUrl: "ws://127.0.0.1:9640/", callIdHex: id)?.absoluteString,
+            "http://127.0.0.1:9640/v1/calls/\(id)")
     }
 
-    func testTheTokenIsEscaped() {
-        let url = SfuCallStateProbe.url(sfuBaseUrl: "wss://h/sfu", callIdHex: String(repeating: "00", count: 16), jwt: "a b&c")
-        XCTAssertTrue(url?.absoluteString.contains("token=a%20b%26c") == true)
+    /// The token rides `Authorization`, never the URL (invariant #5).
+    func testTheTokenIsABearerHeaderNotAQuery() {
+        let id = String(repeating: "00", count: 16)
+        let request = SfuCallStateProbe.request(sfuBaseUrl: "wss://h/sfu", callIdHex: id, jwt: "a.b.c")
+        XCTAssertEqual(request?.url?.absoluteString, "https://h/sfu/v1/calls/\(id)")
+        XCTAssertNil(request?.url?.query)
+        XCTAssertEqual(request?.value(forHTTPHeaderField: "Authorization"), "Bearer a.b.c")
     }
 
     func testTheFourWordsAreRead() {

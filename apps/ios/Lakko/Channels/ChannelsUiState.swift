@@ -97,6 +97,14 @@ public final class ChannelsUiState: ObservableObject {
     /// scope here.)
     @Published public private(set) var counterByChannel: [String: UInt64] = [:]
 
+    /// The account's stored publish counters exist but could not be read or
+    /// decoded at ``bind(accountIdB64:)``. While set, no counter is handed
+    /// out and the stored item is never overwritten: the signing seeds and
+    /// content seeds are a separate Keychain item that may have read back
+    /// fine, and a counter restarted at 0 under them would reuse an AEAD
+    /// `(key, nonce)` (G-51). ``nextCounter(channelId:)`` reads again first.
+    private var publishCountersUnreadable = false
+
     /// Per-channel subscriber-side X25519 keypair (Phase 4b
     /// G4-3c). The secret half is persisted in the hardware-backed
     /// Keychain (``ChannelSubscriberKeyStore``, G-29) so a relaunch
@@ -161,7 +169,15 @@ public final class ChannelsUiState: ObservableObject {
         // Restore the account's per-channel publish counters so a relaunched
         // publisher never restarts the AEAD counter at 0 under the stable
         // content seed + epoch (nonce-reuse defence).
-        counterByChannel = Self.loadPublishCounters(accountIdB64: accountIdB64)
+        if let counters = Self.publishCounters(
+            from: ChannelPublishCounterStore.read(accountIdB64: accountIdB64)) {
+            counterByChannel = counters
+            publishCountersUnreadable = false
+        } else {
+            NSLog("Channels: the stored publish counters could not be read; publishing waits until they can")
+            counterByChannel = [:]
+            publishCountersUnreadable = true
+        }
         if let payload = logStore.get(accountIdB64: accountIdB64) {
             channels = payload.channelHandles
             subscribedSeedsByChannel = payload.subscribedSeedsByChannel
@@ -404,12 +420,32 @@ public final class ChannelsUiState: ObservableObject {
     /// session has ended (``AccountStoreGate/Sealed``), or the Keychain
     /// refused the write. The caller publishes nothing then; the value is
     /// skipped, never reused.
+    ///
+    /// Also throws ``ChannelPublishCounterStoreError/floorUnreadable`` while
+    /// the stored counters cannot be read: a channel absent from a map that
+    /// failed to load is not a channel that never published (G-51).
     public func nextCounter(channelId: String) throws -> UInt64 {
+        guard let account = boundAccountIdB64 else { throw StaleBindingError() }
+        if publishCountersUnreadable {
+            try rereadPublishCounters(accountIdB64: account)
+        }
         let current = counterByChannel[channelId] ?? 0
         counterByChannel[channelId] = current + 1
-        guard boundAccountIdB64 != nil else { throw StaleBindingError() }
         try persistPublishCounters()
         return current
+    }
+
+    /// Read the stored counters again after ``bind(accountIdB64:)`` could
+    /// not, and keep the higher of each stored and in-memory value. Throws
+    /// ``ChannelPublishCounterStoreError/floorUnreadable`` while they still
+    /// cannot be read.
+    private func rereadPublishCounters(accountIdB64: String) throws {
+        guard let stored = Self.publishCounters(
+            from: ChannelPublishCounterStore.read(accountIdB64: accountIdB64)) else {
+            throw ChannelPublishCounterStoreError.floorUnreadable
+        }
+        counterByChannel = Self.higherFloors(counterByChannel, stored)
+        publishCountersUnreadable = false
     }
 
     /// Install / replace the subscriber-side X25519
@@ -462,6 +498,8 @@ public final class ChannelsUiState: ObservableObject {
         subscribedSeedsByChannel = [:]
         publisherSigningSeedByChannel = [:]
         publisherContentSeedByChannel = [:]
+        // Every signing seed goes with the counters, so no floor is needed.
+        publishCountersUnreadable = false
         persistSubscriberKeys()
         persistPublisherKeys()
         // Wipe the persisted publish counters (logout / reset). A fresh account
@@ -648,6 +686,9 @@ public final class ChannelsUiState: ObservableObject {
         // clear post header on the wire). An empty set wipes the item
         // (remove-all / reset). Unbound: nothing is written.
         guard let account = boundAccountIdB64 else { return }
+        // Never written over a stored item that could not be read: it may
+        // hold floors this map does not know.
+        if publishCountersUnreadable { throw ChannelPublishCounterStoreError.floorUnreadable }
         if counterByChannel.isEmpty {
             ChannelPublishCounterStore.delete(accountIdB64: account)
             return
@@ -660,21 +701,32 @@ public final class ChannelsUiState: ObservableObject {
         try ChannelPublishCounterStore.save(data, accountIdB64: account)
     }
 
-    private static func loadPublishCounters(accountIdB64: String) -> [String: UInt64] {
-        guard
-            let data = ChannelPublishCounterStore.load(accountIdB64: accountIdB64),
-            let rows = try? JSONDecoder().decode(
-                [PersistedPublishCounter].self,
-                from: data
-            )
-        else {
-            return [:]
+    /// The counters a read found: empty for no item, `nil` for an item that
+    /// could not be read or decoded (never read as "no floor", G-51).
+    nonisolated static func publishCounters(
+        from read: ChannelPublishCounterStore.Read
+    ) -> [String: UInt64]? {
+        let data: Data
+        switch read {
+        case .absent: return [:]
+        case .unreadable: return nil
+        case .present(let bytes): data = bytes
+        }
+        guard let rows = try? JSONDecoder().decode([PersistedPublishCounter].self, from: data) else {
+            return nil
         }
         var out: [String: UInt64] = [:]
         for row in rows {
-            out[row.channelId] = row.counter
+            out[row.channelId] = max(out[row.channelId] ?? 0, row.counter)
         }
         return out
+    }
+
+    /// Per channel, the higher of the two floors.
+    nonisolated static func higherFloors(
+        _ a: [String: UInt64], _ b: [String: UInt64]
+    ) -> [String: UInt64] {
+        a.merging(b) { max($0, $1) }
     }
 }
 
