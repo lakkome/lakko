@@ -459,6 +459,36 @@ loaded waits in memory, so an app closed in that moment loses the address
 and asks for it again. A username change keeps the recovery email when the
 device holds the address ([ADR-0076](0076-username-change.md)).
 
+## Amended 2026-10-16: what keeps the vault from whom, and the logs
+
+What protects a mail-protected account's vault, stated per party:
+
+- **A copy of the database alone** opens nothing: the vault body is wrapped
+  at rest under `LAKKO_VAULT_ENC_KEY`, and the address is stored only as
+  `email_key`, keyed by `LAKKO_AUTH_EMAIL_PEPPER`; both live in the
+  environment, not in the database. A thief with the database and the
+  environment still has to know the person's address; that stops a mass
+  opening, not a targeted one.
+- **The operator** sees the address whenever a letter is sent (enrol and
+  recovery) and holds both environment secrets, so it can open the vault of
+  any account whose address it records. Nothing but not recording it stands
+  in the way; this is the invariant #2 exception this ADR states, unchanged.
+- **The mail relay** (on the test stack, an external SMTP provider) sees
+  every address it delivers to and keeps whatever logs it keeps; it does not
+  see the vault or the account.
+
+What changed: the recovery-email log lines no longer carry the account id
+(seven `info!` lines and the password-replaced line). With the account id
+beside the moment a letter left, the service log and the relay's log
+together named the address of the account. A route test drives enrol, a
+recovery by mailed code and the vault release under a log capture and
+fails if the output holds the address (as typed or normalised) or the
+account id (URL-safe base64, standard base64, hex): `recovery_email_tests::
+the_recovery_flow_logs_neither_the_address_nor_the_account`. The address
+itself was never logged, and a relay error is reduced to its kind because
+the relay's answer can quote the recipient. The client logs carry error
+types only.
+
 ## References
 
 ADR-0017, ADR-0049 (the passkey vault's blob shape), ADR-0054 (login handle,

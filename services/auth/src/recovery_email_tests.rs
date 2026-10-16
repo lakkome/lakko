@@ -2847,3 +2847,85 @@ async fn an_unnamed_account_is_deleted_on_its_session_and_an_old_one_keeps_its_n
     let (st, body) = release_handle(&rig.state, &bearer, Some(&grant(&old.session))).await;
     assert_eq!(st, StatusCode::OK, "{}", text(&body));
 }
+
+// ----------------------------------------------------------------
+// Logs (ADR-0078 section 11, ADR-0075)
+// ----------------------------------------------------------------
+
+/// Everything the service logs while it runs one test, at info and above.
+#[derive(Clone, Default)]
+struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl CapturedLog {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("log buffer")).into_owned()
+    }
+}
+
+/// The address and the account never reach the log: enrol with a vault, a
+/// recovery by mailed code, the vault released. The operator's relay sees
+/// the address when it delivers a letter; a log line that put the account
+/// beside that moment would join the two, and the email vault is keyed by
+/// the address (ADR-0075).
+#[tokio::test(flavor = "current_thread")]
+async fn the_recovery_flow_logs_neither_the_address_nor_the_account() {
+    let pool = db_or_skip!("the_recovery_flow_logs_neither_the_address_nor_the_account");
+    let captured = CapturedLog::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(captured.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let rig = rig(pool);
+    let who = person(&rig.state).await;
+    let address = fresh_address();
+    enrol(&rig, &who, &address, Some(&sealed_vault())).await;
+    let ticket = ticket_for(&rig, &who.account.handle, &address).await;
+    let (st, body) = post(
+        &rig.state,
+        "/recovery-email/recover/open",
+        None,
+        &json!({ "ticket": ticket["ticket"] }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{}", text(&body));
+
+    let log = captured.text();
+    assert!(
+        log.contains("recovery email: vault released"),
+        "the capture saw the flow: {log}"
+    );
+    let id = who.account.id;
+    for needle in [
+        address.clone(),
+        address.trim().to_lowercase(),
+        URL_SAFE_NO_PAD.encode(id),
+        B64.encode(id),
+        id.iter().fold(String::new(), |mut out, b| {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{b:02x}");
+            out
+        }),
+    ] {
+        assert!(!log.contains(&needle), "the log carries {needle}: {log}");
+    }
+}
