@@ -263,7 +263,6 @@ enum AccountLocalDataWipe {
 
         // 5. Contacts and profiles.
         step("verified-bindings") { VerifiedBindingStore.clear(ownerAccountIdB64: accountIdB64) }
-        step("reset-continuity") { Continuity.clearMarker(accountIdB64: accountIdB64) }
         // ADR-0073 R.5-R.7 — the successor-claim state, the continuity
         // bookkeeping, the held messages and the unsent-lineage marker.
         step("lineage-mirror") { ConversationLineageMirror.clear(accountIdB64: accountIdB64) }

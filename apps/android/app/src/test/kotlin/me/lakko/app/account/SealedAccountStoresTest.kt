@@ -190,9 +190,6 @@ class SealedAccountStoresTest {
     @Test
     fun `the stores added for key resets and contact keys refuse a sealed account`() {
         AccountStoreGate.seal(account)
-        me.lakko.app.reach.ContinuityMarkerStore.write(context, account, me.lakko.app.reach.ContinuityMarker(2L, 5L))
-        assertNull(me.lakko.app.reach.ContinuityMarkerStore.read(context, account))
-
         val links = me.lakko.app.contacts.SharedPrefsProvenLinkStore(context)
         links.save(account, emptyList())
         assertTrue(

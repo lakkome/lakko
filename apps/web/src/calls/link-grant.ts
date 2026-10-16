@@ -3,61 +3,31 @@
 
 /**
  * ADR-0078 - the `link` reach grant a `/c/` call link carries names the
- * owner's mailbox through its mailbox binding, and the core does not check it
- * against anything (only `/i/` capabilities are checked in the core). The
- * joiner checks it here, against the owner's ACCOUNT key: the account the
- * capability's one-time KeyPackage is bound to (ADR-0050), or - for an
- * unbound KeyPackage - the owner key the capability is signed with.
+ * owner's mailbox through its mailbox binding. The check lives in the core:
+ * `CallInviteCapability.verifiedLinkGrantMailboxPk()` verifies the one-time
+ * KeyPackage, the KeyPackage's account binding (ADR-0050) and the grant's
+ * mailbox binding against the owner's account key, and returns the owner's
+ * verified mailbox key, or throws.
  *
- * A capability whose grant fails is refused as damaged (fail closed): the
+ * A capability whose check throws is refused as damaged (fail closed): the
  * grant would otherwise point a cold-start write at a mailbox the owner
- * cannot show is theirs.
+ * cannot show is theirs. A write under the grant seals to and addresses the
+ * returned key, never a key derived from anything else.
  */
-
-/** The part of the wasm surface the check needs, structurally. */
-export interface LinkGrantWasm {
-  keyPackageAccountKey(keyPackage: Uint8Array): Uint8Array | undefined;
-}
 
 /** The part of a `CallInviteCapability` the check reads. */
 export interface LinkGrantCapability {
-  readonly oneTimeKeyPackage: Uint8Array;
-  readonly ownerSignaturePubkey: Uint8Array;
-  readonly linkGrant: { mailboxPkVerified(ownerAccountPk: Uint8Array): Uint8Array; free(): void };
+  verifiedLinkGrantMailboxPk(): Uint8Array;
 }
 
-/** The owner account key the link grant must verify against. */
-export function callLinkOwnerAccountKey(wasm: LinkGrantWasm, cap: LinkGrantCapability): Uint8Array {
-  let bound: Uint8Array | undefined;
+/** The owner's verified mailbox key of a `/c/` link, or `null` when the
+ *  core refuses the link grant. Never throws; logs without identifiers. */
+export function callLinkGrantMailboxPk(cap: LinkGrantCapability): Uint8Array | null {
   try {
-    bound = wasm.keyPackageAccountKey(cap.oneTimeKeyPackage);
-  } catch {
-    bound = undefined;
-  }
-  return bound ?? cap.ownerSignaturePubkey;
-}
-
-/** Whether the `/c/` link grant's mailbox binding verifies against the
- *  owner's account key. Never throws; logs without identifiers. */
-export function callLinkGrantVerifies(wasm: LinkGrantWasm, cap: LinkGrantCapability): boolean {
-  let grant: LinkGrantCapability["linkGrant"];
-  try {
-    grant = cap.linkGrant;
-  } catch {
-    return false;
-  }
-  try {
-    grant.mailboxPkVerified(callLinkOwnerAccountKey(wasm, cap));
-    return true;
+    return cap.verifiedLinkGrantMailboxPk();
   } catch {
     // eslint-disable-next-line no-console
     console.warn("ADR-0078: a call link was refused; its link grant's mailbox binding did not verify");
-    return false;
-  } finally {
-    try {
-      grant.free();
-    } catch {
-      /* already freed */
-    }
+    return null;
   }
 }

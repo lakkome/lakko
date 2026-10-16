@@ -784,13 +784,16 @@ pub(crate) struct OwnerListResponse {
 /// the SELECT projection so a column-list rearrangement breaks
 /// the build immediately.
 type OwnerListRow = (
-    Vec<u8>,                            // blob_id (6 bytes)
-    Vec<u8>,                            // label (UTF-8 bytes)
-    bool,                               // bootstrap_referral
-    u64,                                // expiry_ms
-    u32,                                // max_uses
-    u32,                                // used_count
-    sqlx::types::chrono::NaiveDateTime, // created_at
+    Vec<u8>, // blob_id (6 bytes)
+    Vec<u8>, // label (UTF-8 bytes)
+    bool,    // bootstrap_referral
+    u64,     // expiry_ms
+    u32,     // max_uses
+    u32,     // used_count
+    // `created_at` is a TIMESTAMP column, which sqlx decodes only as
+    // `DateTime<Utc>`; a `NaiveDateTime` (the DATETIME mapping) failed every
+    // list that held a row.
+    sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>, // created_at
 );
 
 /// `POST /discovery/invite/by-owner` — owner-signed list of all
@@ -972,14 +975,8 @@ pub(crate) async fn list_by_owner(
             used_count,
             label,
             bootstrap_referral,
-            // `NaiveDateTime` serialises as
-            // `"YYYY-MM-DDTHH:MM:SS[.fff]"` via the default
-            // `serde::Serialize` impl in `sqlx::types::chrono`.
-            // That's the same shape `fetch_mailbox` returns —
-            // clients parse it as ISO-8601-ish without TZ
-            // (server stores UTC; treating it as UTC client-side
-            // is the conventional read).
-            created_at: created_at.and_utc().to_rfc3339(),
+            // RFC 3339 in UTC, the shape clients parse.
+            created_at: created_at.to_rfc3339(),
         });
     }
 
@@ -1184,6 +1181,57 @@ mod tests {
         );
     }
 
+    /// List `account_id`'s links through `list_by_owner` and find `blob_id`
+    /// with `label` among them (the owner's identity bundle is written first,
+    /// since the handler verifies the signed query against it).
+    async fn assert_owner_lists(
+        state: &AppState,
+        signing: &lakko_crypto::signing::SigningKey,
+        account_id: [u8; ACCOUNT_ID_LEN],
+        blob_id: &str,
+        label: &str,
+    ) {
+        use axum::extract::State;
+        use axum::{Extension, Json};
+        use lakko_crypto::agreement::SecretKey as X25519SecretKey;
+
+        sqlx::query(
+            "INSERT INTO identity_bundles (account_id, signature_pubkey, x25519_pubkey)
+             VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE signature_pubkey = VALUES(signature_pubkey)",
+        )
+        .bind(account_id.to_vec())
+        .bind(signing.verifying_key().to_bytes().to_vec())
+        .bind(X25519SecretKey::generate().public_key().to_bytes().to_vec())
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let listed_at = current_unix_ms();
+        let Json(listed) = list_by_owner(
+            State(state.clone()),
+            Extension(crate::auth::AuthenticatedAccount(account_id)),
+            Json(OwnerListRequest {
+                owner_account_id: B64.encode(account_id),
+                signed_at_ms: listed_at,
+                signature: B64.encode(
+                    signing
+                        .sign(&owner_list_canonical_bytes(&account_id, listed_at))
+                        .to_bytes(),
+                ),
+            }),
+        )
+        .await
+        .expect("the owner lists their links");
+        let entry = listed
+            .invites
+            .iter()
+            .find(|e| e.blob_id_slug == blob_id)
+            .expect("the uploaded link is listed");
+        assert_eq!(entry.label, label);
+        assert!(entry.bootstrap_referral);
+        assert!(!entry.created_at.is_empty());
+    }
+
     /// A maximal sealed invite survives the real ledger: upload stores the
     /// sealed blob with its clear fields, fetch returns it byte for byte,
     /// the link secret opens it, the owner list reads the clear label, and
@@ -1262,7 +1310,12 @@ mod tests {
         .fetch_all(&state.db)
         .await
         .unwrap();
-        assert!(rows.contains(&(label.into_bytes(), true)));
+        assert!(rows.contains(&(label.clone().into_bytes(), true)));
+
+        // The owner list through its handler: it reads every column of the
+        // row, `created_at` included, which a wrong Rust type once failed for
+        // any list that held a row.
+        assert_owner_lists(&state, &signing, account_id, &stored.blob_id, &label).await;
 
         // A revoke signed by another key is a 404; the issuer's is a 204.
         let blob_id = crate::ledger_id::parse_blob_id(&stored.blob_id).unwrap();

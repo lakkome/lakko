@@ -27,7 +27,7 @@
  *
  * Everything that decides is pure; the storage and the signal are thin.
  */
-import { createSignal, type Accessor } from "solid-js";
+import { createSignal, untrack, type Accessor } from "solid-js";
 
 import { registerAccountMemory } from "../auth/account-memory";
 
@@ -263,13 +263,13 @@ export function bindAddedNotice(accountIdB64: string | null): void {
     setCurrent(null);
     return;
   }
-  if (current()?.accountIdB64 === accountIdB64) return;
+  if (untrack(current)?.accountIdB64 === accountIdB64) return;
   setCurrent({ accountIdB64, state: loadNoticeState(accountIdB64) });
 }
 
 function update(accountIdB64: string, next: AddedNoticeState): void {
   saveNoticeState(accountIdB64, next);
-  if (current()?.accountIdB64 === accountIdB64) setCurrent({ accountIdB64, state: next });
+  if (untrack(current)?.accountIdB64 === accountIdB64) setCurrent({ accountIdB64, state: next });
 }
 
 /** Reactive: what the banner and the Devices list show. */
@@ -277,10 +277,10 @@ export const addedNotice: Accessor<AddedNoticeView> = () => noticeView(current()
 
 /** Fold a roster of `accountIdB64`; returns how many devices became pending. */
 export function recordRoster(accountIdB64: string, roster: RosterObservation, nowMs: number): number {
-  const before =
-    current()?.accountIdB64 === accountIdB64
-      ? (current()?.state ?? null)
-      : loadNoticeState(accountIdB64);
+  // Read untracked: the watcher calls this from an effect, and a tracked read
+  // of the state it then writes re-ran that effect without end.
+  const held = untrack(current);
+  const before = held?.accountIdB64 === accountIdB64 ? held.state : loadNoticeState(accountIdB64);
   const result = observeRoster(before, roster, nowMs);
   if (result.state !== null) update(accountIdB64, result.state);
   return result.added.length;

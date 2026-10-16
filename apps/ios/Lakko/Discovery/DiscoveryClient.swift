@@ -1919,15 +1919,15 @@ public final class DiscoveryClient {
         return blobId
     }
 
-    /// The `/i/` sealed-blob ceiling (`lakko_contacts::invite::MAX_SEALED_LEN`).
-    fileprivate static let maxCapabilityBytes: Int = 254
+    /// The `/i/` sealed-blob ceiling (`lakko_contacts::invite::MAX_SEALED_LEN`,
+    /// discovery migration 0030): the capability carries a `link` reach grant
+    /// with the owner's mailbox binding (ADR-0060, ADR-0078).
+    fileprivate static let maxCapabilityBytes: Int = 404
 
-    /// Mirror of `services/discovery`'s `MAX_CALL_CAPABILITY_BYTES`
-    /// — the call-invite ledger uses an 8192-byte ceiling
-    /// (vs. contact-invite's 2048) because `CallInviteCapability`
-    /// embeds a one-time MLS KeyPackage (~4 KiB upper bound per
-    /// `MAX_KEY_PACKAGE_LEN`).
-    fileprivate static let maxCallCapabilityBytes: Int = 4338
+    /// The `/c/` sealed-blob ceiling
+    /// (`lakko_contacts::call_invite::MAX_SEALED_LEN`, discovery migration
+    /// 0030): a one-time MLS KeyPackage plus the same `link` grant.
+    fileprivate static let maxCallCapabilityBytes: Int = 4488
 
     /// Mirror of `services/discovery`'s group-invite `MAX_CAPABILITY_BYTES`
     /// (ADR-0028) — the group join-ticket wire is leaner than a call-invite

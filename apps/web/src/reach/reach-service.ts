@@ -80,7 +80,6 @@ import {
   type ReceivedGrants,
 } from "./received-grants";
 import { loadReachRow, saveReachRow } from "./reach-store";
-import { continuityKeyWanted, readContinuityMarker } from "./continuity";
 import { markServiceEnvelopeDirty, setServiceEnvelopeComposer } from "./service-envelope-outbox";
 import { nextStamp } from "./visibility-store";
 
@@ -531,31 +530,6 @@ export class ReachSession {
     if (mustApply && error !== null) throw error;
   }
 
-  /** The continuity key this account wants registered now (R.4), or `null`:
-   *  only on a device that holds the marker of its own reset, and only
-   *  before the expiry. Never throws. */
-  private wantedContinuityKey(nowMs: number): ResolvedReachKey | null {
-    try {
-      const storage = typeof localStorage === "undefined" ? undefined : localStorage;
-      const wanted = continuityKeyWanted(readContinuityMarker(storage, this.accountIdB64), nowMs);
-      if (wanted === null) return null;
-      const seed = this.wasm.continuityReachSeed(
-        base64Decode(this.accountIdB64),
-        BigInt(wanted.keyGeneration),
-      );
-      try {
-        return {
-          publicKeyHex: journalHex(this.wasm.reachVerifyingKey(seed)),
-          expiresAtMs: wanted.expiresAtMs,
-        };
-      } finally {
-        seed.fill(0);
-      }
-    } catch {
-      return null;
-    }
-  }
-
   private publicKeyHex(cls: ReachClassName, scopeHex: string, version: number): string {
     const scope = isAccountWideClass(cls) ? new Uint8Array(0) : hexToBytes(scopeHex);
     const seed = this.wasm.reachSeed(this.accountSeed, wasmClass(this.wasm, cls), scope, version);
@@ -654,12 +628,10 @@ export class ReachSession {
       publicKeyHex: this.publicKeyHex(w.cls, w.scopeHex, w.version),
       expiresAtMs: w.expiresAtMs,
     }));
-    // ADR-0073 R.4 - after a reset of THIS account, the continuity key stays
-    // registered on the new mailbox until its expiry, so a peer that accepted
-    // the reset can deliver a Welcome. Derived from public values; removed by
-    // the diff once it is no longer wanted.
-    const continuity = this.wantedContinuityKey(now);
-    if (continuity !== null) resolved.push(continuity);
+    // ADR-0078: the ADR-0073 R.4 continuity key is no longer registered on
+    // this account's mailbox after a reset. The mailbox address is not
+    // derivable from the account id or the identity key any more, so no peer
+    // can address a write under that key; a registration would be dead.
     const diff = reachDiff(resolved, book.registered, everyone, book.open);
     if (book !== this.book) {
       this.book = book;

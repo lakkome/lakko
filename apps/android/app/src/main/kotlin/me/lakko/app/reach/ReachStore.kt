@@ -114,12 +114,6 @@ internal data class ReachDoc(
      *  reach keys; `null` before any rotation (the key the session first
      *  bound). */
     val registeredForKeyHex: String? = null,
-    /** ADR-0073 R.4 - the continuity key this device registered after its
-     *  own account-key reset, and the mailbox (hex) it registered it on. Kept
-     *  beside [registered], not in it: the key derives from the account id
-     *  and the key generation, not from a reach class of the account seed. */
-    val continuityRegistered: RegisteredContinuityKey? = null,
-    val continuityMailboxHex: String? = null,
     /** ADR-0074 section 3.5a rule 3 - the account key (hex) the profile
      *  still has to be re-sent under to every conversation, set when the
      *  reach keys moved to it and cleared once every conversation took the

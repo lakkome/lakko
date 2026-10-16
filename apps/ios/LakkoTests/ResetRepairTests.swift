@@ -245,56 +245,7 @@ final class ResetRepairTests: XCTestCase {
         XCTAssertNil(AddMemberKey.boundKeyB64(keyPackage: Data([1, 2, 3])), "an unparseable KeyPackage is refused")
     }
 
-    // MARK: - The continuity key
-
-    func testTheContinuityKeyIsWantedUntilItsExpiry() {
-        XCTAssertEqual(Continuity.keyTtlMs, 30 * 24 * 60 * 60 * 1000)
-        let marker = Continuity.Marker(keyGeneration: 3, signedAtMs: 1_000)
-        XCTAssertNil(Continuity.keyWanted(marker: nil, nowMs: 0))
-        XCTAssertEqual(
-            Continuity.keyWanted(marker: marker, nowMs: 2_000),
-            Continuity.Wanted(keyGeneration: 3, expiresAtMs: 1_000 + Continuity.keyTtlMs))
-        XCTAssertNil(Continuity.keyWanted(marker: marker, nowMs: 1_000 + Continuity.keyTtlMs))
-        XCTAssertTrue(Continuity.keyUsable(signedAtMs: 1_000, nowMs: 1_000 + Continuity.keyTtlMs - 1))
-        XCTAssertFalse(Continuity.keyUsable(signedAtMs: 1_000, nowMs: 1_000 + Continuity.keyTtlMs))
-    }
-
-    func testTheMarkerRoundTripsAndIsCleared() {
-        let name = "continuity-tests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defaults.removePersistentDomain(forName: name)
-        XCTAssertNil(Continuity.readMarker(accountIdB64: "me", defaults: defaults))
-        let marker = Continuity.Marker(keyGeneration: 2, signedAtMs: 55)
-        Continuity.writeMarker(marker, accountIdB64: "me", defaults: defaults)
-        XCTAssertEqual(Continuity.readMarker(accountIdB64: "me", defaults: defaults), marker)
-        XCTAssertNil(Continuity.readMarker(accountIdB64: "other", defaults: defaults))
-        Continuity.clearMarker(accountIdB64: "me", defaults: defaults)
-        XCTAssertNil(Continuity.readMarker(accountIdB64: "me", defaults: defaults))
-    }
-
-    func testTheSignedAtOfAnAttestationIsReadFromItsLayout() {
-        var bytes = [UInt8](repeating: 0, count: 177)
-        bytes[105...112] = [0, 0, 0, 0, 0, 0, 0x01, 0x02]
-        XCTAssertEqual(Continuity.attestationSignedAtMs(Data(bytes)), 258)
-        XCTAssertNil(Continuity.attestationSignedAtMs(Data(repeating: 0, count: 176)))
-    }
-
-    func testAPeerSignsWithTheContinuityKeyOnlyForAKeyAResetRepinnedAndInsideTheWindow() {
-        let accountB64 = anna.base64EncodedString()
-        let reset = PeerPinStore.AccountPubkeyPin(
-            pinnedSignaturePubkeyB64: "new", rotationMarker: 0, acceptedKeyGeneration: 2, resetSignedAtMs: 1_000)
-        let plain = PeerPinStore.AccountPubkeyPin(
-            pinnedSignaturePubkeyB64: "bob", rotationMarker: 0, acceptedKeyGeneration: 1)
-        let pins = [accountB64: reset, "Ym9i": plain]
-        XCTAssertEqual(
-            Continuity.auth(targetAccountKeyB64: "new", pins: pins, nowMs: 2_000),
-            Continuity.Auth(accountId: anna, keyGeneration: 2))
-        XCTAssertNil(Continuity.auth(targetAccountKeyB64: "bob", pins: pins, nowMs: 2_000), "never reset")
-        XCTAssertNil(Continuity.auth(targetAccountKeyB64: "old", pins: pins, nowMs: 2_000), "a retired key")
-        XCTAssertNil(
-            Continuity.auth(targetAccountKeyB64: "new", pins: pins, nowMs: 1_000 + Continuity.keyTtlMs),
-            "past the window")
-    }
+    // MARK: - The continuity seed (core; no longer registered, ADR-0078)
 
     func testTheContinuitySeedIsDerivedFromPublicValuesAndDiffersPerGeneration() throws {
         let a = try continuityReachSeed(accountId: anna, keyGeneration: 2)

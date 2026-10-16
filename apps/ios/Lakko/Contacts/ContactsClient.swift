@@ -16,13 +16,13 @@ import LakkoCore
 /// Three operations (ADR-0078: every mailbox row is sealed to a VERIFIED
 /// mailbox key, with its kind inside the seal):
 ///
-///   * ``sendContactRequest(senderSigningSeed:senderAccountId:senderSignaturePubkey:senderMailboxAddress:recipientUsername:profile:introMessage:reach:)``
+///   * ``sendContactRequest(senderSigningSeed:senderAccountId:senderSignaturePubkey:recipientUsername:profile:introMessage:reach:)``
 ///     — resolve `@username` → `account_id` → identity bundle, compose
 ///     the request via UniFFI `composeContactRequest`, seal it as a
 ///     contact-request row to the mailbox the reach plan names, and
 ///     publish it.
 ///
-///   * ``sendContactRequestToBundle(senderSigningSeed:senderAccountId:senderSignaturePubkey:senderMailboxAddress:recipientAccountId:recipientSignaturePubkey:recipientX25519Pubkey:profile:introMessage:reach:)``
+///   * ``sendContactRequestToBundle(senderSigningSeed:senderAccountId:senderSignaturePubkey:recipientAccountId:recipientSignaturePubkey:recipientX25519Pubkey:profile:introMessage:reach:)``
 ///     — same compose+publish path but skipping the lookup +
 ///     identityFetch round-trips when the caller already has the
 ///     recipient's bundle in hand (the invite-link flow).
@@ -878,7 +878,6 @@ public final class ContactsClient {
         senderSigningSeed: Data,
         senderAccountId: Data,
         senderSignaturePubkey: Data,
-        senderMailboxAddress: Data,
         recipientUsername: String,
         profile: FfiProfile? = nil,
         introMessage: Data,
@@ -925,7 +924,6 @@ public final class ContactsClient {
             senderSigningSeed: senderSigningSeed,
             senderAccountId: senderAccountId,
             senderSignaturePubkey: senderSignaturePubkey,
-            senderMailboxAddress: senderMailboxAddress,
             recipientSignaturePubkey: recipientSignaturePub,
             recipientX25519Pubkey: recipientX25519Pub,
             profile: profile,
@@ -955,7 +953,6 @@ public final class ContactsClient {
         senderSigningSeed: Data,
         senderAccountId: Data,
         senderSignaturePubkey: Data,
-        senderMailboxAddress: Data,
         recipientAccountId: Data,
         recipientSignaturePubkey: Data,
         recipientX25519Pubkey: Data,
@@ -980,7 +977,6 @@ public final class ContactsClient {
             senderSigningSeed: senderSigningSeed,
             senderAccountId: senderAccountId,
             senderSignaturePubkey: senderSignaturePubkey,
-            senderMailboxAddress: senderMailboxAddress,
             recipientSignaturePubkey: recipientSignaturePubkey,
             recipientX25519Pubkey: recipientX25519Pubkey,
             profile: profile,
@@ -996,6 +992,20 @@ public final class ContactsClient {
         )
     }
 
+    /// ADR-0078 — the `fromPseudonym` of one outgoing contact request: 32
+    /// bytes from the system CSPRNG, fresh per request. A failure of the
+    /// entropy source refuses the send rather than falling back to a
+    /// predictable value.
+    static func freshRequestPseudonym() throws -> Data {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        guard status == errSecSuccess else {
+            throw ContactsError.wrap(
+                ContactsError.simple("SecRandomCopyBytes failed: \(status)"))
+        }
+        return Data(bytes)
+    }
+
     /// Shared compose-and-publish path used by both send surfaces.
     /// Mirror of the Kotlin private method — pulled out so the two
     /// public flows don't drift on subtle details (mailbox-pseudonym
@@ -1004,7 +1014,6 @@ public final class ContactsClient {
         senderSigningSeed: Data,
         senderAccountId: Data,
         senderSignaturePubkey: Data,
-        senderMailboxAddress: Data,
         recipientSignaturePubkey: Data,
         recipientX25519Pubkey: Data,
         profile: FfiProfile?,
@@ -1020,10 +1029,13 @@ public final class ContactsClient {
             NSLog("ADR-0078: no verified mailbox for the recipient; the request was not sent")
             throw ContactsError.requestRefused
         }
-        // The request's `fromPseudonym` is matched by the ack it answers; it
-        // routes nothing (the ack goes back under the reply grant's binding).
-        // The sender's own mailbox address is the value it carries.
-        let senderPseudonym = senderMailboxAddress
+        // ADR-0078 — the request's `fromPseudonym` is 32 fresh random bytes.
+        // It routes nothing (the ack goes back under the reply grant's
+        // binding) and nothing matches an ack against it (an ack is paired
+        // with its sent request by the accepter's account id), so carrying
+        // the sender's own mailbox address here only told the recipient a
+        // stable address the sender never chose to hand out.
+        let senderPseudonym = try Self.freshRequestPseudonym()
 
         let validAfterMs = UInt64(Date().timeIntervalSince1970 * 1000)
 
@@ -1379,7 +1391,8 @@ public struct IncomingContactRequest: Equatable, Codable {
     /// this and the UI surfaces a "legacy request" message when
     /// it's missing.
     public let fromAccountId: Data?
-    /// Sender's per-recipient pseudonym (32 bytes).
+    /// The request's `from_pseudonym` (32 bytes): random per request
+    /// since ADR-0078; it routes nothing.
     public let fromPseudonym: Data
     public let validAfterMs: UInt64
     /// UTF-8-decoded intro message, or `nil` when there was no
@@ -1417,9 +1430,9 @@ public struct IncomingContactRequest: Equatable, Codable {
 /// The accept-reply that closes the `sendContactRequest`
 /// handshake from the original sender's perspective. The
 /// Ed25519 signature on the ack has already been verified
-/// against ``accepterPubkey``; the caller still has to match
-/// ``ackToPseudonym`` against the pending-sent table to pair
-/// it with the original request the user fired off.
+/// against ``accepterPubkey``. The caller pairs it with the
+/// original request by ``accepterAccountId`` (the pending-sent
+/// table is keyed on the recipient's account id).
 public struct IncomingContactAck: Equatable {
     public let messageId: Int64
     /// Accepter's Ed25519 identity public key (32 bytes). The
@@ -1432,10 +1445,9 @@ public struct IncomingContactAck: Equatable {
     /// book so future replies can be sealed without a fresh
     /// discovery round-trip.
     public let accepterX25519Pubkey: Data
-    /// The original request's `from_pseudonym` field — the
-    /// receiver matches this against their own identity
-    /// pseudonym (and the pending-sent table) to confirm the
-    /// ack is for them.
+    /// The original request's `from_pseudonym` field echoed back.
+    /// Since ADR-0078 that is 32 random bytes chosen per request;
+    /// nothing on this client matches against it.
     public let ackToPseudonym: Data
     /// When the accepter pressed Accept (ms since epoch).
     /// Sender-attested; not authoritative — the DS

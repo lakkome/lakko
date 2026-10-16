@@ -148,3 +148,25 @@ describe("parseNoticeState", () => {
     }
   });
 });
+
+describe("recordRoster inside an effect", () => {
+  it("runs the effect a bounded number of times (it once re-ran itself without end)", async () => {
+    const { createEffect, createRoot, createSignal } = await import("solid-js");
+    const { bindAddedNotice, recordRoster } = await import("./added-notice");
+    const [rosterSignal, setRoster] = createSignal(roster(["me", "old"]));
+    let runs = 0;
+    const dispose = createRoot((done) => {
+      createEffect(() => bindAddedNotice("acc-loop"));
+      createEffect(() => {
+        runs += 1;
+        if (runs > 50) throw new Error("effect re-ran without end");
+        recordRoster("acc-loop", rosterSignal(), 1);
+      });
+      return done;
+    });
+    setRoster(roster(["me", "old", "new"]));
+    dispose();
+    expect(runs).toBeGreaterThanOrEqual(2);
+    expect(runs).toBeLessThanOrEqual(3);
+  });
+});

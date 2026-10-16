@@ -242,7 +242,6 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.committer-beacons.v1.${acct}.${G}`, "{}");
   put(`lakko.last-observed-owner.v1.${acct}.${G}`, "\"owner\"");
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
-  put(`lakko:reset-continuity:${acct}`, JSON.stringify({ keyGeneration: 2, signedAtMs: 1 }));
   put(`lakko.lineage.unsent.v1.${acct}`, "1");
   put(`lakko.recovery-email.unsent.v1.${acct}`, "1");
   markFirstPasswordOwed(local, acct);
@@ -599,7 +598,6 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.committer-beacons.v1": "account",
   "lakko.last-observed-owner.v1": "account",
   "lakko.leave-requested.v1": "account",
-  "lakko:reset-continuity:": "account",
   "lakko.lineage.unsent.v1.": "account",
   "lakko.recovery-email.unsent.v1.": "account",
   "lakko:first-password-owed:": "account",

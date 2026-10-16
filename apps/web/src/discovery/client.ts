@@ -383,9 +383,12 @@ export interface SealedInviteUpload {
 
 /** Largest sealed blob each ledger stores (the server's column widths, derived
  *  from each codec's `MAX_SEALED_LEN`, ADR-0028 amendment). Checked here so a
- *  misbehaving caller fails before a round trip. */
-export const MAX_SEALED_INVITE_BYTES = 254;
-export const MAX_SEALED_CALL_INVITE_BYTES = 4338;
+ *  misbehaving caller fails before a round trip. `/i/` and `/c/` carry a
+ *  `link` reach grant with the owner's mailbox binding (ADR-0060, ADR-0078),
+ *  discovery migration 0030; `max-sealed-invite.test.ts` pins `/i/` against
+ *  the longest capability the core composes. */
+export const MAX_SEALED_INVITE_BYTES = 404;
+export const MAX_SEALED_CALL_INVITE_BYTES = 4488;
 export const MAX_SEALED_GROUP_INVITE_BYTES = 938;
 
 function requireSealedUpload(upload: SealedInviteUpload, max: number): void {

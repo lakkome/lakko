@@ -33,7 +33,7 @@ import {
 } from "./mailbox-write";
 import { grantsWithVerifiedBindings } from "./grant-intake";
 import { joinReplyBindingVerifies } from "./join-replies";
-import { callLinkGrantVerifies, callLinkOwnerAccountKey } from "../calls/link-grant";
+import { callLinkGrantMailboxPk } from "../calls/link-grant";
 
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -240,30 +240,66 @@ describe("grants kept at receipt", () => {
 });
 
 describe("a /c/ call link's grant", () => {
-  it("is checked against the owner's ACCOUNT key (the KeyPackage's binding first, else the signing key)", () => {
+  // ADR-0078: the check is the core's (`verifiedLinkGrantMailboxPk`); the
+  // client reads the owner's verified mailbox key from it, or refuses.
+  function mintCallLink(
+    owner: wasm.Identity,
+    grantSeed: Uint8Array,
+    boundKeyPackage = true,
+  ): wasm.CallInviteCapability {
+    // The one-time KeyPackage comes from a device of the owner's account
+    // (ADR-0050), whose binding names the account key the grant is checked
+    // against.
+    const kpIdentity = boundKeyPackage
+      ? wasm.Identity.fromSeedBound(new Uint8Array(64).fill(0x50), owner.ed25519Seed, 1_700_000_000n)
+      : new wasm.Identity("call-link-kp");
+    const kp = kpIdentity.createKeyPackage();
+    const linkId = wasm.generateLinkId();
+    const grant = wasm.deriveReachGrant(grantSeed, wasm.ReachClass.Link, linkId, 0);
+    const mint = wasm.composeCallInviteCapability(
+      owner.ed25519Seed,
+      new Uint8Array(16).fill(0x4d),
+      new Uint8Array(16).fill(0x3c),
+      0n,
+      0,
+      true,
+      false,
+      kp,
+      "",
+      linkId,
+      grant,
+    );
+    try {
+      return wasm.CallInviteCapability.openLink(mint.sealed, mint.linkSecret);
+    } finally {
+      grant.free();
+      mint.free();
+      kpIdentity.free();
+    }
+  }
+
+  it("yields the owner's verified mailbox key, and refuses a grant naming someone else's mailbox", () => {
     const owner = person(0x4e);
     const mallory = person(0x4f);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const good = mintCallLink(owner, owner.ed25519Seed);
+    const swapped = mintCallLink(owner, mallory.ed25519Seed);
+    const unbound = mintCallLink(owner, owner.ed25519Seed, false);
+    const ownerMailbox = wasm.MailboxKey.fromAccountIdentity(owner);
     try {
-      const ownGrant = (): wasm.ReachGrant =>
-        wasm.deriveReachGrant(owner.ed25519Seed, wasm.ReachClass.Link, new Uint8Array(16).fill(2), 0);
-      const fakeWasm = { keyPackageAccountKey: (): Uint8Array | undefined => undefined };
-      const cap = (grant: wasm.ReachGrant, signer: Uint8Array) => ({
-        oneTimeKeyPackage: new Uint8Array([1]),
-        ownerSignaturePubkey: signer,
-        linkGrant: grant,
-      });
-      expect(callLinkGrantVerifies(fakeWasm, cap(ownGrant(), owner.signaturePublicKey))).toBe(true);
-      // The owner key does not match the grant's binding: refused.
-      expect(callLinkGrantVerifies(fakeWasm, cap(ownGrant(), mallory.signaturePublicKey))).toBe(false);
-      // A bound KeyPackage names the account key, which is what is checked.
-      const bound = { keyPackageAccountKey: (): Uint8Array | undefined => owner.signaturePublicKey };
-      expect(
-        hex(callLinkOwnerAccountKey(bound, cap(ownGrant(), mallory.signaturePublicKey))),
-      ).toBe(hex(owner.signaturePublicKey));
-      expect(callLinkGrantVerifies(bound, cap(ownGrant(), mallory.signaturePublicKey))).toBe(true);
+      const pk = callLinkGrantMailboxPk(good);
+      expect(pk).not.toBeNull();
+      expect(hex(pk!)).toBe(hex(ownerMailbox.publicKey()));
+      // Mallory's mailbox under the owner's link: the core throws, the client refuses.
+      expect(callLinkGrantMailboxPk(swapped)).toBeNull();
+      // A KeyPackage carrying no account binding: nothing to check against, refused.
+      expect(callLinkGrantMailboxPk(unbound)).toBeNull();
     } finally {
       warn.mockRestore();
+      ownerMailbox.free();
+      good.free();
+      swapped.free();
+      unbound.free();
       owner.free();
       mallory.free();
     }

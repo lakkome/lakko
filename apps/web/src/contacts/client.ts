@@ -342,10 +342,9 @@ export interface IncomingWelcome {
 /** A verified incoming `ContactAck` (Phase 1.9b1) — the
  *  accept-reply that closes the `sendContactRequest` handshake
  *  from the original sender's perspective. The Ed25519 signature
- *  on the ack has already been verified against `accepterPubkey`;
- *  the caller still has to match `ackToPseudonym` against the
- *  pending-sent table to pair it with the original request the
- *  user fired off. */
+ *  on the ack has already been verified against `accepterPubkey`,
+ *  which is what pairs it with the original request (and closes the
+ *  `reply` key that request handed out). */
 export interface IncomingContactAck {
   /** DS-assigned monotonic id — also serves as the cursor for
    *  the next poll. */
@@ -364,10 +363,9 @@ export interface IncomingContactAck {
    *  book so future replies can be sealed without a fresh
    *  discovery round-trip. */
   accepterX25519Pubkey: Uint8Array;
-  /** The original request's `from_pseudonym` field. The
-   *  receiver matches this against their own identity
-   *  pseudonym (and, in 1.9b1, against the pending-sent
-   *  table) to confirm the ack is for them. */
+  /** The original request's `from_pseudonym` field, echoed back. Since
+   *  ADR-0078 it is 32 random bytes chosen per request and nothing
+   *  matches on it; kept because the signed ack wire carries it. */
   ackToPseudonym: Uint8Array;
   /** When the accepter pressed Accept (ms since epoch). The
    *  client may surface this as "accepted at hh:mm" — the
@@ -697,6 +695,14 @@ function readProofExpiresAtSecs(proofBytes: Uint8Array): number {
 function newOutboxEntryId(): string {
   const b = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+/** ADR-0078 — the `from_pseudonym` of an outgoing contact request: 32 fresh
+ *  random bytes per request, never a function of the sender's identity key.
+ *  The receiver echoes it in its ack and nothing on either side routes or
+ *  matches on it. */
+export function randomFromPseudonym(): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(32));
 }
 
 /**
@@ -2680,16 +2686,13 @@ export class ContactsClient {
         new Error("contact request: the recipient key was superseded by a proven key rotation"),
       );
     }
-    // Sender's `from_pseudonym` field. For a first cold contact
-    // we use the sender's identity pseudonym; the receiver echoes
-    // it in its ack (`ackToPseudonym`), which the sender matches
-    // against its pending-sent table. ADR-0078: it is NOT a mailbox
-    // address any more (the ack goes to the mailbox the reply grant's
-    // binding names), and it rides inside the sealed row, so the
-    // Delivery Service never reads it.
-    const senderPseudonym = wasm.IdentityPseudonym.fromIdentity(
-      senderIdentity.signaturePublicKey,
-    ).asBytes();
+    // Sender's `from_pseudonym` field: 32 fresh random bytes per request
+    // (ADR-0078). It used to be the sender's identity pseudonym, a public
+    // function of the identity key; nothing routes or matches on it any
+    // more (the ack goes to the mailbox the reply grant's binding names,
+    // and an ack is paired by `accepterPubkey`, not by `ackToPseudonym`),
+    // so a value derived from the key would only be a linkable handle.
+    const senderPseudonym = randomFromPseudonym();
 
     const validAfterMs = BigInt(Date.now());
     // 1.9b2: Privacy Pass / App-Attest / Play-Integrity token.
@@ -2794,11 +2797,9 @@ export class ContactsClient {
    *
    * **Threat-model note:** the ack carries only public material
    * (pubkeys + account_id + a self-attested timestamp). The
-   * Ed25519 signature proves "this came from `accepterPubkey`";
-   * the freshness of `ackToPseudonym` (matched against the
-   * sender's pending-sent table on receive) drops replays and
-   * unrelated acks from a malicious accepter spamming arbitrary
-   * pseudonyms.
+   * Ed25519 signature proves "this came from `accepterPubkey`".
+   * `ackToPseudonym` is the request's random per-request value
+   * (ADR-0078) and is not matched on receive.
    */
   async sendContactAck(
     identity: IdentitySecrets | null,

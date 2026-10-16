@@ -451,17 +451,11 @@ public final class ReachCenter: ObservableObject {
             guard let pk = try? Self.publicKey(accountSeed: seed, spec: spec) else { continue }
             desired.append((pk, spec.expiresAtMs))
         }
-        // ADR-0073 R.4 — after a reset of THIS account, the continuity key
-        // stays registered on the new mailbox until its expiry, so a peer
-        // that accepted the reset can deliver a Welcome. Derived from public
-        // values; removed by the diff once it is no longer wanted.
-        if let wanted = Continuity.keyWanted(
-            marker: Continuity.readMarker(accountIdB64: accountIdB64), nowMs: Int64(now)),
-           let accountId = Data(base64Encoded: accountIdB64),
-           let continuitySeed = try? continuityReachSeed(accountId: accountId, keyGeneration: wanted.keyGeneration),
-           let pk = try? reachVerifyingKey(seed: continuitySeed) {
-            desired.append((pk, UInt64(wanted.expiresAtMs)))
-        }
+        // ADR-0078 — the ADR-0073 R.4 continuity key is no longer registered
+        // here: it was derivable from the account id so that peers could
+        // reach a reset account at the mailbox derived from its new identity
+        // key, and a mailbox is no longer derivable from an identity key. A
+        // key still registered from before is removed by the diff below.
         let registered = Set(record.registeredB64.compactMap { Data(base64Encoded: $0) })
         let diff = ReachRules.registrationDiff(desired: desired, registered: registered)
         let open = ReachRules.mailboxOpen(setting)
@@ -1136,9 +1130,8 @@ public final class ReachCenter: ObservableObject {
     // continuity key, at the address derived from the new identity key. A
     // mailbox address is no longer derivable from an identity key, and no
     // carrier yet brings the reset account's new mailbox binding, so the
-    // continuity key authorises no write here (``Continuity`` keeps the
-    // registration side only). A grant the new identity itself hands out is
-    // the only way to its mailbox.
+    // continuity key is neither registered nor used on this client. A grant
+    // the new identity itself hands out is the only way to its mailbox.
 
     // MARK: - Committer delegations (ADR-0060 section 6)
 

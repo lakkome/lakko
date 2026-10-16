@@ -155,9 +155,9 @@ class MailboxRowsTest {
 
     @Test
     fun `a received grant is kept only when it binds the sender's own mailbox`() {
-        // Profile grants (sender resolved at receipt), join-attribution reply
-        // grants (the joiner's resolved account) and `/c/` link grants (the
-        // capability's owner) all go through this one check.
+        // Profile grants (sender resolved at receipt) and join-attribution
+        // reply grants (the joiner's resolved account) go through this one
+        // check; a `/c/` link grant is verified in the core.
         val crypto = FakeCrypto()
         assertTrue(grantBindsTo(grant(alice, aliceMailbox), alice, crypto))
         assertFalse(grantBindsTo(grant(mallory, malloryMailbox), alice, crypto))

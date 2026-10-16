@@ -44,9 +44,11 @@ public class CallInviteAcceptor(
      *  JVM test that has no native library. */
     private val lengths: me.lakko.app.discovery.InviteLinkLengths =
         me.lakko.app.discovery.InviteLinkLengths.core,
-    /** ADR-0078 - the binding check of the link grant; a host JVM test
-     *  passes a fake. */
-    private val mailboxCrypto: me.lakko.app.contacts.MailboxCrypto = me.lakko.app.contacts.NativeMailboxCrypto,
+    /** ADR-0078 phase 1 - the owner's mailbox key the link grant names,
+     *  verified in the core ([CallInviteCapability.verifiedLinkGrantMailboxPk]);
+     *  throws when it does not verify. A host JVM test passes a fake. */
+    private val verifiedLinkGrantMailboxPk: (CallInviteCapability) -> ByteArray =
+        { it.verifiedLinkGrantMailboxPk() },
 ) {
 
     /**
@@ -202,10 +204,10 @@ public class CallInviteAcceptor(
         } catch (e: me.lakko.app.discovery.InviteLinkDamaged) {
             return Result.Damaged
         }
-        // ADR-0078: the link grant must name the owner's own mailbox (its
-        // binding verifies against the owner's account key, the key that
-        // signed the capability). One that does not is a damaged link.
-        if (!callLinkGrantBindsOwner(capability, mailboxCrypto)) {
+        // ADR-0078: the link grant must name the owner's own mailbox, verified
+        // in the core against the owner's account key. One that does not is a
+        // damaged link.
+        if (callLinkGrantOwnerMailboxOrNull(capability, verifiedLinkGrantMailboxPk) == null) {
             return Result.Damaged
         }
         // The consume dedup tag is computed over the PLAINTEXT capability.
@@ -262,15 +264,17 @@ public class CallInviteAcceptor(
     }
 }
 
-/** ADR-0078 - whether a `/c/` capability's link grant names its owner's
- *  mailbox: the grant's binding verifies against the owner's account key
- *  (the key the capability is signed by). Any failure is "no". */
-internal fun callLinkGrantBindsOwner(
+/** ADR-0078 phase 1 - the owner's mailbox key a `/c/` capability's link
+ *  grant names, as the core verified it ([verify], by default
+ *  [CallInviteCapability.verifiedLinkGrantMailboxPk]), or `null` when it
+ *  throws (`FfiException.Mailbox`: the KeyPackage or a binding does not
+ *  verify). `null` means the link is damaged. */
+internal fun callLinkGrantOwnerMailboxOrNull(
     capability: CallInviteCapability,
-    crypto: me.lakko.app.contacts.MailboxCrypto,
-): Boolean =
+    verify: (CallInviteCapability) -> ByteArray,
+): ByteArray? =
     try {
-        me.lakko.app.contacts.grantBindsTo(capability.linkGrant(), capability.ownerSignaturePubkey(), crypto)
-    } catch (_: Throwable) {
-        false
+        verify(capability)
+    } catch (_: Exception) {
+        null
     }

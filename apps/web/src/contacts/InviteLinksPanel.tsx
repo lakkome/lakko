@@ -160,7 +160,7 @@ export function InviteLinksPanel(): JSX.Element {
   async function load(): Promise<void> {
     try {
       const secrets = auth.identitySecrets();
-      const id = chats.identity();
+      const id = chats.accountIdentity();
       if (secrets === null || id === null) {
         throw new KeyedError("invite.links.error.sign_in_list");
       }
@@ -189,7 +189,11 @@ export function InviteLinksPanel(): JSX.Element {
     setNotice(null);
     setCreateBusy(true);
     try {
-      const id = chats.identity();
+      // The account key signs the capability, never this device's key: the
+      // link grant carries the account's mailbox binding and the core refuses
+      // a grant not bound to the capability's signer (ADR-0078). iOS and
+      // Android sign with the account seed as well.
+      const id = chats.accountIdentity();
       const secrets = auth.identitySecrets();
       if (id === null || secrets === null) {
         throw new KeyedError("invite.links.error.sign_in_create");
@@ -314,7 +318,7 @@ export function InviteLinksPanel(): JSX.Element {
     setNotice(null);
     setBusyKey(row.key);
     try {
-      const id = chats.identity();
+      const id = chats.accountIdentity();
       const secrets = auth.identitySecrets();
       if (id === null || secrets === null) throw new KeyedError("invite.links.error.sign_in_revoke");
       const slug = row.blobIdSlug;

@@ -36,7 +36,7 @@
  * "share this with the owner" step.
  */
 
-import { callLinkGrantVerifies, type LinkGrantCapability } from "./link-grant";
+import { callLinkGrantMailboxPk } from "./link-grant";
 import { loadWasm } from "../wasm";
 import {
   DiscoveryClient,
@@ -201,6 +201,7 @@ export async function acceptCallInviteFromSlug(
     readonly ownerFingerprint: string;
     readonly wire: Uint8Array;
     isValidNow(nowMs: bigint): boolean;
+    verifiedLinkGrantMailboxPk(): Uint8Array;
   };
   let blobId: Uint8Array | null;
   try {
@@ -224,10 +225,12 @@ export async function acceptCallInviteFromSlug(
     if (isDiscoveryRateLimited(err)) return { kind: "rateLimited" };
     throw err; // bubble up network / non-404 HTTP errors
   }
-  // ADR-0078 - the link grant's mailbox binding must verify against the
-  // owner's account key; a capability whose grant names another mailbox is
-  // refused as damaged.
-  if (!callLinkGrantVerifies(wasm, capability as unknown as LinkGrantCapability)) {
+  // ADR-0078 - the core verifies the link grant's mailbox binding against
+  // the owner's account key (and the KeyPackage it is bound through); a
+  // capability it refuses is damaged. Nothing here writes under the grant
+  // (the cold-start Welcome ferry is not wired on web); a writer would seal
+  // to and address the returned key.
+  if (callLinkGrantMailboxPk(capability) === null) {
     return { kind: "damaged" };
   }
   // The PLAINTEXT wire the joiner tag is computed over, never the sealed blob.

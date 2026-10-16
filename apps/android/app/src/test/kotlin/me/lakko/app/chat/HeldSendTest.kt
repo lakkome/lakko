@@ -6,13 +6,6 @@ package me.lakko.app.chat
 import me.lakko.app.calls.OneToOneCallTarget
 import me.lakko.app.calls.oneToOneCallEndsOnMove
 import me.lakko.app.calls.oneToOneCallTarget
-import me.lakko.app.reach.ContinuityMarker
-import me.lakko.app.reach.CONTINUITY_KEY_TTL_MS
-import me.lakko.app.reach.WantedContinuityKey
-import me.lakko.app.reach.continuityKeyUsable
-import me.lakko.app.reach.continuityKeyWanted
-import me.lakko.app.reach.decodeContinuityMarker
-import me.lakko.app.reach.encodeContinuityMarker
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -20,7 +13,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** ADR-0073 R.7 case 1 - the held send, the dead-session guard, the re-send
- *  marker, the call and the continuity key (mirror of the web tables). */
+ *  marker and the call (mirror of the web tables). */
 class HeldSendTest {
     @Test
     fun `a message into a dead one-to-one is held, an op is local, a group never is`() {
@@ -105,20 +98,6 @@ class HeldSendTest {
     }
 
     @Test
-    fun `the continuity key on the mailbox follows the wanted key`() {
-        val a = me.lakko.app.reach.RegisteredContinuityKey("aa", 100)
-        val b = me.lakko.app.reach.RegisteredContinuityKey("bb", 200)
-        fun change(w: me.lakko.app.reach.RegisteredContinuityKey?, r: me.lakko.app.reach.RegisteredContinuityKey?) =
-            me.lakko.app.reach.continuityChange(w, r)
-        assertTrue(change(null, null).isEmpty)
-        assertEquals(me.lakko.app.reach.ContinuityChange(null, "aa"), change(null, a))
-        assertEquals(me.lakko.app.reach.ContinuityChange(a, null), change(a, null))
-        assertTrue(change(a, a).isEmpty)
-        assertEquals(me.lakko.app.reach.ContinuityChange(a.copy(expiresAtMs = 5), null), change(a.copy(expiresAtMs = 5), a))
-        assertEquals(me.lakko.app.reach.ContinuityChange(b, "aa"), change(b, a))
-    }
-
-    @Test
     fun `a live one-to-one call ends when its conversation moves`() {
         assertFalse(oneToOneCallEndsOnMove(null, "old", "h"))
         assertTrue(oneToOneCallEndsOnMove("g", "old", "g"))
@@ -137,19 +116,5 @@ class HeldSendTest {
         assertEquals(OneToOneCallTarget.Unavailable, oneToOneCallTarget("g", "old", null, null))
         assertEquals(OneToOneCallTarget.Dial("h"), oneToOneCallTarget("g", "old", "h", null))
         assertEquals(OneToOneCallTarget.Unavailable, oneToOneCallTarget("g", "old", "h", "old2"))
-    }
-
-    @Test
-    fun `the continuity key is wanted and usable for thirty days from the signing`() {
-        val marker = ContinuityMarker(keyGeneration = 3, signedAtMs = 1_000)
-        assertNull(continuityKeyWanted(null, 0))
-        assertEquals(WantedContinuityKey(3, 1_000 + CONTINUITY_KEY_TTL_MS), continuityKeyWanted(marker, 2_000))
-        assertNull(continuityKeyWanted(marker, 1_000 + CONTINUITY_KEY_TTL_MS))
-        assertTrue(continuityKeyUsable(1_000, 1_000 + CONTINUITY_KEY_TTL_MS - 1))
-        assertFalse(continuityKeyUsable(1_000, 1_000 + CONTINUITY_KEY_TTL_MS))
-        assertEquals(30L * 24 * 60 * 60 * 1000, CONTINUITY_KEY_TTL_MS)
-        assertEquals(marker, decodeContinuityMarker(encodeContinuityMarker(marker)))
-        assertNull(decodeContinuityMarker("{}x"))
-        assertNull(decodeContinuityMarker("""{"keyGeneration":0,"signedAtMs":5}"""))
     }
 }

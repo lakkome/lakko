@@ -101,7 +101,6 @@ import { clearMemberBaselinesForAccount } from "../profile/membership-baseline";
 import { clearProfileRequestsForAccount } from "../profile/profile-request";
 import { clearGrantSignatures } from "../profile/grant-signatures";
 import { deleteReachRows } from "../reach/reach-store";
-import { clearContinuityMarker } from "../reach/continuity";
 import { clearContinuityStateForAccount } from "../chat/continuity-store";
 import { clearVerifiedBindingsForAccount } from "../contacts/verified-binding";
 import { deleteFeedState } from "../feed/feed-store";
@@ -313,12 +312,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     { name: "committer-beacons", run: () => clearBeaconObservationsForAccount(accountIdB64) },
     { name: "last-observed-owner", run: () => clearLastObservedOwnerForAccount(accountIdB64) },
     { name: "leave-requested", run: () => clearLeaveRequestedForAccount(accountIdB64) },
-    // ADR-0073 R.4 / R.5: this account's own continuity-key marker, and the
-    // "a lineage register is not confirmed sent" marker.
-    {
-      name: "reset-continuity-marker",
-      run: () => clearContinuityMarker(localStorage, accountIdB64),
-    },
+    // ADR-0073 R.5: the "a lineage register is not confirmed sent" marker.
     { name: "lineage-unsent", run: () => removeLocal(`lakko.lineage.unsent.v1.${accountIdB64}`) },
     // ADR-0075: the "recovery-email register is not confirmed sent" marker
     // (the address itself is in the synced state, deleted with it), and the

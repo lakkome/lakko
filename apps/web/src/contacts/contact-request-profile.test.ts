@@ -170,6 +170,16 @@ describe("contact request carries a profile", () => {
     expect(ds.publishMailbox).not.toHaveBeenCalled();
   });
 
+  it("ADR-0078: `from_pseudonym` is fresh random bytes per request, not the identity pseudonym", async () => {
+    const first = await roundTrip(undefined);
+    const second = await roundTrip(undefined);
+    const identityPseudonym = wasm.IdentityPseudonym.fromIdentity(first.aliceKey).asBytes();
+    expect(first.request.fromPseudonym.length).toBe(32);
+    expect(Array.from(first.request.fromPseudonym)).not.toEqual(Array.from(identityPseudonym));
+    expect(Array.from(second.request.fromPseudonym)).not.toEqual(Array.from(identityPseudonym));
+    expect(Array.from(first.request.fromPseudonym)).not.toEqual(Array.from(second.request.fromPseudonym));
+  });
+
   it("a failing profile source never stops the request", async () => {
     const { request } = await roundTrip(async () => {
       throw new Error("no profile");

@@ -168,11 +168,11 @@ public enum CallInviteAcceptor {
             return .damaged
         }
         // ADR-0078 — the link's grant names the owner's mailbox through its
-        // binding; it must verify against the owner's account key the
-        // capability carries. A link whose grant names a mailbox the owner did
-        // not bind is refused like a damaged one: nothing may ever be written
-        // under it.
-        guard Self.ownerMailbox(of: capability) != nil else {
+        // binding; the core verifies it against the owner's account key (the
+        // one-time KeyPackage's device binding, or the leaf key of an unbound
+        // leaf). A link whose grant names a mailbox the owner did not bind is
+        // refused like a damaged one: nothing may ever be written under it.
+        guard Self.linkGrantVerifies(capability) else {
             return .damaged
         }
         // The joiner tag is computed over the PLAINTEXT capability.
@@ -234,21 +234,17 @@ public enum CallInviteAcceptor {
         )
     }
 
-    /// ADR-0078 — the owner's mailbox the link's `link` grant names, its
-    /// binding verified against the owner's ACCOUNT key. A `/c/` capability
-    /// may be signed by the owner's device leaf key, so the account key is
-    /// the one the capability's one-time KeyPackage binds its leaf to (the
-    /// ADR-0050 device binding; a KeyPackage with no binding is an
-    /// account-key leaf, whose signature key IS the account key). `nil`
-    /// refuses the link: the grant would route a write to a mailbox the owner
-    /// does not read.
-    static func ownerMailbox(of capability: CallInviteCapability) -> MailboxTarget? {
-        let keyPackage = capability.oneTimeKeyPackage()
-        let boundAccountKey: Data? = (try? keyPackageAccountKey(keyPackage: keyPackage)) ?? nil
-        guard let accountKey = boundAccountKey ?? (try? keyPackageSignatureKey(keyPackage: keyPackage)) else {
-            NSLog("ADR-0078: a call link names no owner account key; refused")
-            return nil
+    /// ADR-0078 — whether the link's `link` grant names a mailbox the owner
+    /// bound, as the core decides it
+    /// (`CallInviteCapability.verifiedLinkGrantMailboxPk`). `false` refuses
+    /// the link as damaged, on every path that opens a `/c/` capability.
+    static func linkGrantVerifies(_ capability: CallInviteCapability) -> Bool {
+        do {
+            _ = try capability.verifiedLinkGrantMailboxPk()
+            return true
+        } catch {
+            NSLog("ADR-0078: a call link's grant does not verify; refused")
+            return false
         }
-        return MailboxTarget.verifiedOrNil(grant: capability.linkGrant(), accountKey: accountKey)
     }
 }

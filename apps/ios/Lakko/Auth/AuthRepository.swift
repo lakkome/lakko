@@ -5227,18 +5227,6 @@ public final class AuthRepository: ObservableObject {
             newSignaturePubkey: newPubkey
         )
         markers.markPublishOwed(record, accountIdB64: accountIdB64)
-        // ADR-0073 R.4 — part of the reset's client order: from now until the
-        // expiry this account's reach sync keeps the continuity key registered
-        // on the NEW mailbox (`ReachCenter`), so a former contact whose device
-        // accepted the reset can deliver a Welcome. The marker outlives the
-        // owed record above; the registration itself rides the reach sync,
-        // which is retried until it lands. An attestation whose layout is not
-        // the expected one writes no marker (the key is then not registered).
-        if let signedAtMs = Continuity.attestationSignedAtMs(reset.attestation) {
-            Continuity.writeMarker(
-                Continuity.Marker(keyGeneration: reset.session.keyGeneration, signedAtMs: signedAtMs),
-                accountIdB64: accountIdB64)
-        }
         gate.leave()
 
         switch landing {

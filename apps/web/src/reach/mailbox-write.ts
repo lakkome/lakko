@@ -58,8 +58,8 @@ export type WriteAuthKind = "own" | "explicit" | "kept" | "continuity" | "delega
 
 /**
  * ADR-0073 R.4 - the continuity reach key of an account whose reset this
- * device ACCEPTED: derived from the account id and the attested generation,
- * registered by the resetting device on its new mailbox.
+ * device ACCEPTED: derived from the account id and the attested generation.
+ * ADR-0078: the resetting device no longer registers it on its new mailbox.
  *
  * ADR-0078 open question: a Welcome under this key needs the reset account's
  * NEW mailbox, and no carrier names it (the address is no longer derivable

@@ -240,7 +240,6 @@ import {
   ThreeWordsSuspendedError,
   storedPhraseVerdict,
 } from "./recover/stale-phrase";
-import { writeContinuityMarker } from "../reach/continuity";
 import {
   attestationGate,
   clearKeyResetOwed,
@@ -4566,16 +4565,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       done: { directory: false, deviceGroup: false },
     };
     writeKeyResetOwed(plainStorage(), ctx.accountIdB64, record);
-    // ADR-0073 R.4 - part of the reset's client order: from now until the
-    // expiry this account's reach sync keeps the continuity key registered
-    // on the NEW mailbox (`reach/reach-service.ts`), so a former contact
-    // whose device accepted the reset can deliver a Welcome. The marker
-    // outlives the owed record above; the registration itself rides the
-    // reach sync, which is retried until it lands.
-    writeContinuityMarker(plainStorage(), ctx.accountIdB64, {
-      keyGeneration: Number(ctx.reset.session.keyGeneration),
-      signedAtMs: record.signedAtMs,
-    });
     // ADR-0074 section 3.5: a reset makes every predecessor, proven or not,
     // a superseded key, and ends a rotation this device was finishing.
     clearRotation(plainStorage(), ctx.accountIdB64);

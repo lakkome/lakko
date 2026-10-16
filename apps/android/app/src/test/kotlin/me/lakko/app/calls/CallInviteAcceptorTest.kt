@@ -12,8 +12,12 @@ import kotlinx.coroutines.test.runTest
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.discovery.TEST_INVITE_LINK_LENGTHS
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.lakko_ffi_uniffi.CallInviteCapability
+import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.NoHandle
 
@@ -164,6 +168,27 @@ class CallInviteAcceptorTest {
         assertTrue(
             "expected MalformedSlug, got $result",
             result is CallInviteAcceptor.Result.MalformedSlug,
+        )
+    }
+
+    @Test
+    fun `the link grant check is the core's, and a refusal means a damaged link`() {
+        // ADR-0078 phase 1 - the acceptor asks the core for the owner's
+        // verified mailbox key; it no longer checks the grant itself. The
+        // capability is a handle-less fake: the check must reach it only
+        // through the verifier it was given.
+        val capability = CallInviteCapability(NoHandle)
+        val ownerMailbox = ByteArray(32) { 7 }
+        var asked: CallInviteCapability? = null
+        assertArrayEquals(
+            ownerMailbox,
+            callLinkGrantOwnerMailboxOrNull(capability) { asked = it; ownerMailbox },
+        )
+        assertTrue(asked === capability)
+        assertNull(
+            callLinkGrantOwnerMailboxOrNull(capability) {
+                throw FfiException.Mailbox("binding does not verify")
+            },
         )
     }
 }

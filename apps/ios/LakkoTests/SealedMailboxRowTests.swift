@@ -147,7 +147,6 @@ final class SealedMailboxRowTests: XCTestCase {
             senderSigningSeed: sender.ed25519Seed(),
             senderAccountId: Data(repeating: 0xB0, count: 16),
             senderSignaturePubkey: sender.signaturePublicKey(),
-            senderMailboxAddress: MailboxKey.fromAccountIdentity(accountIdentity: sender).address(),
             recipientAccountId: Data(repeating: 0xA0, count: 16),
             recipientSignaturePubkey: recipient.signaturePublicKey(),
             recipientX25519Pubkey: recipient.x25519PublicKey(),
@@ -196,6 +195,34 @@ final class SealedMailboxRowTests: XCTestCase {
         let opened = try XCTUnwrap(MailboxRows.open(seen.body, key: aliceKey))
         XCTAssertEqual(opened.kind, .contactRequest)
         XCTAssertEqual(try ContactRequest.decodeAndVerify(wire: opened.body).fromPubkey(), bob.signaturePublicKey())
+    }
+
+    func testARequestsFromPseudonymIsFreshRandomBytesNotTheSendersMailbox() async throws {
+        let alice = try identity(0x61), bob = try identity(0x62)
+        let scope = DsAccessURLProtocol.freshScope()
+        DsAccessURLProtocol.script(scope, [
+            .init(status: 201, body: Data(#"{"id":5,"created_at":"now"}"#.utf8)),
+            .init(status: 201, body: Data(#"{"id":6,"created_at":"now"}"#.utf8)),
+        ])
+        let plan = MailboxWritePlan(
+            target: try ownTarget(alice),
+            candidates: [DsMailboxWriteAuth(reachSeed: Data(repeating: 0x33, count: 32))])
+        let reach = ContactRequestReach(replyGrant: { _ in nil }, plan: { _ in plan })
+        _ = try await sendRequest(to: alice, from: bob, reach: reach, scope: scope)
+        _ = try await sendRequest(to: alice, from: bob, reach: reach, scope: scope)
+
+        let aliceKey = MailboxKey.fromAccountIdentity(accountIdentity: alice)
+        let bobAddress = MailboxKey.fromAccountIdentity(accountIdentity: bob).address()
+        let pseudonyms = try DsAccessURLProtocol.requests(scope).map { seen -> Data in
+            let opened = try XCTUnwrap(MailboxRows.open(seen.body, key: aliceKey))
+            return try ContactRequest.decodeAndVerify(wire: opened.body).fromPseudonym()
+        }
+        XCTAssertEqual(pseudonyms.count, 2)
+        for pseudonym in pseudonyms {
+            XCTAssertEqual(pseudonym.count, 32)
+            XCTAssertNotEqual(pseudonym, bobAddress, "the sender's own mailbox address is not carried")
+        }
+        XCTAssertNotEqual(pseudonyms[0], pseudonyms[1], "a fresh value per request")
     }
 
     // MARK: - The `mailbox-write` token
@@ -307,10 +334,17 @@ final class SealedMailboxRowTests: XCTestCase {
         let owner = try identity(0x81)
         let good = try callLink(owner: owner, grantSeed: owner.ed25519Seed())
         XCTAssertEqual(
-            CallInviteAcceptor.ownerMailbox(of: good)?.address,
-            MailboxKey.fromAccountIdentity(accountIdentity: owner).address())
+            try good.verifiedLinkGrantMailboxPk(),
+            MailboxKey.fromAccountIdentity(accountIdentity: owner).publicKey())
+        XCTAssertTrue(CallInviteAcceptor.linkGrantVerifies(good))
         let foreign = try callLink(owner: owner, grantSeed: try identity(0x82).ed25519Seed())
-        XCTAssertNil(CallInviteAcceptor.ownerMailbox(of: foreign), "a grant naming another mailbox refuses the link")
+        XCTAssertThrowsError(try foreign.verifiedLinkGrantMailboxPk()) { error in
+            guard case FfiError.Mailbox = error else {
+                return XCTFail("expected FfiError.Mailbox, got \(error)")
+            }
+        }
+        XCTAssertFalse(
+            CallInviteAcceptor.linkGrantVerifies(foreign), "a grant naming another mailbox refuses the link")
     }
 
     // MARK: - The continuity Welcome (ADR-0078 open question)

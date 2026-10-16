@@ -175,9 +175,10 @@ public fun verifiedGrantDest(
 /**
  * Whether a grant received for the person known by [accountPk] (a profile
  * grant from a resolved sender, a join attribution's reply grant from the
- * joiner's resolved account, a link grant from a capability's owner) names
- * that person's mailbox: its binding verifies against [accountPk]. A grant
- * that does not is not kept. Logged without identifiers.
+ * joiner's resolved account) names that person's mailbox: its binding
+ * verifies against [accountPk]. A grant that does not is not kept. Logged
+ * without identifiers. A `/c/` link grant is verified in the core instead
+ * (`CallInviteCapability.verifiedLinkGrantMailboxPk`).
  */
 public fun grantBindsTo(grant: FfiReachGrant, accountPk: ByteArray, crypto: MailboxCrypto): Boolean =
     crypto.grantMailboxPkOrNull(grant, accountPk) != null

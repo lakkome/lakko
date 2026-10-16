@@ -382,6 +382,14 @@ public final class JoinCallLandingViewModel: ObservableObject {
                 loading = false
                 return
             }
+            // ADR-0078 — a capability whose link grant does not verify is
+            // damaged here too, as the acceptor refuses it.
+            guard CallInviteAcceptor.linkGrantVerifies(cap) else {
+                decoded = nil
+                damaged = true
+                loading = false
+                return
+            }
             var isOwner = false
             if let seed = authRepository.identitySecrets?.accountIdentitySeed {
                 let mine = try Identity.fromSeed(seed: seed).signaturePublicKey()

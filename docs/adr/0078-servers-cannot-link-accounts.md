@@ -384,6 +384,17 @@ link grant, the join-attribution reply grant, profile grants (against the
 sender's account key resolved at receipt), and every write under a stored
 grant.
 
+Aligned the same day on the three clients: a contact request's
+`from_pseudonym` is 32 random bytes (no client matches an ack against it; an
+ack is paired with its request by the accepter's key); a `/c/` link grant is
+checked by one core call, `lakko_calls::link_invite::verified_link_grant_mailbox_pk`
+(`CallInviteCapability.verifiedLinkGrantMailboxPk`), against the owner's
+account key from the one-time KeyPackage (iOS also refuses such a link on its
+landing screen; web and Android at accept); and the ADR-0073 continuity reach
+key is no longer registered on the resetting account's mailbox, with its
+marker and wipe step, since no peer can address that mailbox. The continuity
+Welcome stays a recorded no-op until the open question is decided.
+
 ### 2. Calls admitted anonymously (finding 2, 11)
 
 - **Admission by anonymous token.** `POST /call/jwt` stops taking a bearer.
