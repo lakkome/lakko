@@ -503,14 +503,25 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
   let playToken = 0;
   const uploading = (): boolean => typeof props.upload === "number";
 
+  // The poster follows the attachment: the sender's own bubble is drawn
+  // while the note uploads, before its poster exists, and gains the poster
+  // when the upload finishes. Loading it once at mount left the sender's
+  // own note a grey circle.
+  createEffect(
+    on(
+      () => props.attachment.thumb,
+      (thumb) => {
+        if (thumb === undefined || posterUrl() !== null) return;
+        void props.hub.loadThumb(thumb).then(
+          (url) => {
+            if (url !== null) setPosterUrl(url);
+          },
+          () => undefined,
+        );
+      },
+    ),
+  );
   onMount(() => {
-    const thumb = props.attachment.thumb;
-    if (thumb !== undefined) {
-      void props.hub.loadThumb(thumb).then(
-        (url) => setPosterUrl(url),
-        () => setPosterUrl(null),
-      );
-    }
     const local = props.hub.urlFor(props.mediaKey);
     if (local !== null) setVideoUrl(local);
   });
@@ -712,7 +723,25 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
         <Show when={mode() === "poster" || !mounted()}>
           <Show
             when={posterUrl()}
-            fallback={<span style={{ position: "absolute", inset: 0, display: "block", width: "100%", height: "100%" }} />}
+            fallback={
+              // No poster yet: the sender holds the recording itself, so its
+              // first frame stands in until the poster arrives.
+              <Show
+                when={mounted() ? null : videoUrl()}
+                fallback={<span style={{ position: "absolute", inset: 0, display: "block", width: "100%", height: "100%" }} />}
+              >
+                {(url) => (
+                  <video
+                    src={url()}
+                    muted
+                    playsinline
+                    preload="metadata"
+                    aria-hidden="true"
+                    style={{ position: "absolute", inset: 0 }}
+                  />
+                )}
+              </Show>
+            }
           >
             {(url) => <img src={url()} alt="" draggable={false} style={{ position: "absolute", inset: 0 }} />}
           </Show>

@@ -570,13 +570,27 @@ export default function Chat(props: { backTo?: string }): JSX.Element {
           keyed
           fallback={<GroupNotFound />}
         >
-          {(_id) => (
-            <ChatView
-              entry={entry() as ActiveGroup}
-              requireIdentity={requireIdentity}
-              onLeave={() => navigate(props.backTo ?? paths.home)}
-            />
-          )}
+          {(id) => {
+            // Navigating away clears the route param before this Show
+            // disposes the view, so for a moment `entry()` is undefined while
+            // the view's effects and its receive loop still read
+            // `props.entry`. A read that threw there broke the navigation
+            // itself. The view keeps the last entry of ITS chat until it is
+            // gone (a persist-abort reset still hands it the new entry).
+            let last = entry() as ActiveGroup;
+            const stableEntry = (): ActiveGroup => {
+              const current = entry();
+              if (current !== undefined && current.groupIdB64 === id) last = current;
+              return last;
+            };
+            return (
+              <ChatView
+                entry={stableEntry()}
+                requireIdentity={requireIdentity}
+                onLeave={() => navigate(props.backTo ?? paths.home)}
+              />
+            );
+          }}
         </Show>
       </Show>
     </article>
@@ -4522,7 +4536,7 @@ function ChatView(props: {
       // here and never sent: its target exists only in the old session.
       if (opRouteNow() === "send") {
         const envelopeBytes = await composeEditEnvelope(messageId, newText);
-        await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
+        await publishQuiet(envelopeBytes);
       }
       // Apply locally (no echo). Author == us, so the gate the
       // receive loop runs would accept it; we mirror that here.
@@ -4538,7 +4552,7 @@ function ChatView(props: {
   async function deleteOne(messageId: number): Promise<void> {
     if (opRouteNow() === "send") {
       const envelopeBytes = await composeDeleteEnvelope(messageId);
-      await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
+      await publishQuiet(envelopeBytes);
     }
     setMsgOps(applyOp(msgOps(), { op: "delete", target: messageId }));
     // Section 4.1 — a deleted message leaves the bar and its pin records
@@ -4602,7 +4616,7 @@ function ChatView(props: {
     try {
       if (opRouteNow() === "send") {
         const envelopeBytes = await composeReactionEnvelope(messageId, emoji);
-        await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
+        await publishQuiet(envelopeBytes);
       }
       // Our own identity, not our own leaf: the chip's "mine" test
       // and the peers' fold must agree on one value that survives a
@@ -4636,16 +4650,23 @@ function ChatView(props: {
    *  read-receipt) without an optimistic bubble. Swallows failures
    *  (these signals are non-essential; the next one supersedes a
    *  dropped one). */
+  /**
+   * Publish an envelope that wakes nobody: an edit, a deletion, a reaction,
+   * a typing signal or a read receipt. Only a message the person would want
+   * to be told about (text, media) is sent with a push wake (`sendMessage`);
+   * before this, every keystroke's typing signal woke the other person with
+   * "New message". The same rule as the iOS and Android clients.
+   */
+  async function publishQuiet(envelopeBytes: Uint8Array): Promise<void> {
+    await chat.broadcastControl(props.requireIdentity(), props.entry.group, envelopeBytes);
+  }
+
   async function publishEphemeral(envelopeBytes: Uint8Array): Promise<void> {
     // ADR-0073 R.7 case 1 — a typing signal or a read receipt is not sent
     // into a superseded one-to-one either (the publish would refuse it).
     if (opRouteNow() !== "send") return;
     try {
-      await chat.sendMessage(
-        props.requireIdentity(),
-        props.entry.group,
-        envelopeBytes,
-      );
+      await publishQuiet(envelopeBytes);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("publishEphemeral failed", err);

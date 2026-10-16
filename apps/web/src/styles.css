@@ -1569,6 +1569,10 @@ a.ghost.small.lk-wide-only {
 }
 
 .lk-composer {
+  /* The emoji / GIF picker is positioned against the composer; without this
+     it was placed against an ancestor at the top of the page and opened out
+     of view. */
+  position: relative;
   display: flex;
   align-items: flex-end;
   gap: 6px;
@@ -1576,6 +1580,11 @@ a.ghost.small.lk-wide-only {
   border-top: 1px solid var(--surface-border);
   background: var(--surface-elevated);
   flex: 0 0 auto;
+}
+/* Above the emoji button, which sits at the composer's right edge. */
+.lk-composer > .lakko-picker {
+  left: auto;
+  right: 12px;
 }
 .lk-composer .lk-icon-button {
   width: 40px;
