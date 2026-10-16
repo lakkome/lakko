@@ -50,9 +50,9 @@ class MutedPushWakeTest {
     ) : PushDecryptDeps {
         val mutedAsked = mutableListOf<Pair<String, String>>()
 
-        override fun lookupRoute(accountIdB64: String, pushGidHex: String): String? = null
-        override fun accountKnowsGroup(accountIdB64: String, groupHex: String): Boolean =
-            accountIdB64 == account.accountIdB64
+        // ADR-0078: the route maps the wake's `g` to itself for the bound account.
+        override fun lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?): String? =
+            if (accountIdB64 == account.accountIdB64) pushGidHex else null
         override fun loadIdentitySeed(accountIdB64: String): ByteArray = ByteArray(64) { 1 }
         override fun loadSnapshot(accountIdB64: String): ByteArray = ByteArray(8) { 2 }
         override fun openThrowawayGroup(

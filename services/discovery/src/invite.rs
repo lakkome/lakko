@@ -30,17 +30,23 @@
 //! which closes the substitution this module used to document as open.
 //! What the server still needs arrives in clear upload fields:
 //!
-//!   * `owner_account_id` — the session token's account (the capability's
-//!     own field was required to equal it before; the joiner reads the
-//!     authoritative value from the opened capability).
-//!   * `issuer_pubkey` — the key an owner-signed revoke verifies against.
+//!   * `revocation_pubkey` — a key minted for this one link
+//!     (`lakko_contacts::invite::revocation_public_key`); a revoke must be
+//!     signed by its seed, which the issuing device keeps beside the link
+//!     secret.
 //!   * `expiry_ms`, `max_uses` — the fetch expiry filter, the pruner and
 //!     the consume ceiling. An uploader who lies about them only changes
 //!     how their own link behaves.
-//!   * `label`, `bootstrap_referral` — the owner's own "active invites"
-//!     list across devices, which used to decode them from the stored
-//!     capability. They are the owner's metadata the server could read
-//!     before; sealing them for the owner too is a possible follow-up.
+//!
+//! ## No owner, no issuer (ADR-0078 section 10)
+//!
+//! The row used to carry the uploading session's account id and the
+//! issuer's identity key, which tied an account to every link it handed out.
+//! It carries neither: the session token on the upload and revoke routes is
+//! a rate-limit gate only and is never stored. The owner-list route that
+//! needed the owner column is gone; a client lists its own links from the
+//! record it keeps for each link it minted. Account deletion leaves rows to
+//! their expiry, their last use or a revocation.
 //!
 //! ## What 1.18d2+ leaves for follow-ups
 //!
@@ -77,11 +83,9 @@ use axum::Json;
 use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine as _;
 use lakko_contacts::invite::{
-    owner_list_canonical_bytes, revoke_canonical_bytes, JOINER_TAG_LEN, MAX_LABEL_LEN,
-    MAX_SEALED_LEN, REVOKE_REPLAY_WINDOW_MS,
+    revoke_canonical_bytes, JOINER_TAG_LEN, MAX_SEALED_LEN, REVOKE_REPLAY_WINDOW_MS,
 };
 use lakko_contacts::link_seal::LinkKind;
-use lakko_contacts::ACCOUNT_ID_LEN;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -107,22 +111,15 @@ pub(crate) struct UploadRequest {
     /// (`lakko_contacts::invite::seal_link` over the composed capability).
     /// Opaque to the server.
     pub(crate) sealed: String,
-    /// Standard-alphabet base64 of the 32-byte Ed25519 key that signed the
-    /// capability — the key an owner-signed revoke must verify against.
-    pub(crate) issuer_pubkey: String,
+    /// Standard-alphabet base64 of the 32-byte per-link revocation key
+    /// (ADR-0078 section 10) — the key a revoke must verify against. It
+    /// names nobody.
+    pub(crate) revocation_pubkey: String,
     /// The capability's `expiry_ms` (`0` = never expires), in clear for the
     /// fetch filter and the pruner.
     pub(crate) expiry_ms: u64,
     /// The capability's `max_uses` sentinel, in clear for the consume ceiling.
     pub(crate) max_uses: u32,
-    /// The capability's label (UTF-8, at most `MAX_LABEL_LEN` bytes), in
-    /// clear for the owner's own list. Empty when none.
-    #[serde(default)]
-    pub(crate) label: String,
-    /// The capability's `bootstrap_referral` flag, in clear for the owner's
-    /// own list.
-    #[serde(default)]
-    pub(crate) bootstrap_referral: bool,
 }
 
 #[derive(Serialize)]
@@ -135,9 +132,11 @@ pub(crate) struct UploadResponse {
 }
 
 /// `POST /discovery/invite` — store a sealed invite capability under a fresh id.
+///
+/// The session token (checked by the route layer) rations uploads per
+/// account; the account is not stored.
 pub(crate) async fn upload(
     State(state): State<AppState>,
-    axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<UploadRequest>,
 ) -> Result<Json<UploadResponse>, (StatusCode, String)> {
     let sealed = crate::ledger_id::parse_sealed_upload(
@@ -145,25 +144,12 @@ pub(crate) async fn upload(
         LinkKind::Contact,
         MAX_SEALED_BYTES,
     )?;
-    let issuer_pubkey = crate::ledger_id::parse_issuer_pubkey(&payload.issuer_pubkey)?;
-    if payload.label.len() > MAX_LABEL_LEN {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("label must be at most {MAX_LABEL_LEN} bytes"),
-        ));
-    }
-
-    // The row belongs to the uploading session's account. The capability's
-    // own `owner_account_id` is inside the seal; the server cannot check it
-    // any more, and nothing on the server depends on it.
-    let owner_account_id = authed.0;
+    let revocation_pk = crate::ledger_id::parse_revocation_pubkey(&payload.revocation_pubkey)?;
     let expiry_ms: u64 = payload.expiry_ms;
     // 1.18d2a: the consume handler enforces the ceiling in a single atomic
     // UPDATE. Sentinels (`0` = single-use, `0xFFFFFFFF` = unlimited) are
     // mapped to effective ceilings at consume time via a SQL CASE expression.
     let max_uses: u32 = payload.max_uses;
-    let label = payload.label.into_bytes();
-    let bootstrap_referral = payload.bootstrap_referral;
 
     // A random id, never an upsert: a collision is retried under a fresh id
     // and can never overwrite another link's row (the short-link amendment
@@ -172,22 +158,17 @@ pub(crate) async fn upload(
     let blob_id = crate::ledger_id::insert_with_fresh_id("invites", |id| {
         let db = db.clone();
         let sealed = sealed.clone();
-        let label = label.clone();
         async move {
             sqlx::query(
                 "INSERT INTO invites \
-                    (blob_id, sealed_capability, owner_account_id, issuer_pubkey, \
-                     expiry_ms, max_uses, label, bootstrap_referral) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (blob_id, sealed_capability, revocation_pk, expiry_ms, max_uses) \
+                 VALUES (?, ?, ?, ?, ?)",
             )
             .bind(id.to_vec())
             .bind(sealed)
-            .bind(owner_account_id.to_vec())
-            .bind(issuer_pubkey.to_vec())
+            .bind(revocation_pk.to_vec())
             .bind(expiry_ms)
             .bind(max_uses)
-            .bind(label)
-            .bind(bootstrap_referral)
             .execute(&db)
             .await
         }
@@ -195,13 +176,8 @@ pub(crate) async fn upload(
     .await?;
 
     let blob_id_b64url = B64URL.encode(blob_id);
-    tracing::info!(
-        blob_id = %blob_id_b64url,
-        owner_account_id = %B64.encode(owner_account_id),
-        expiry_ms = expiry_ms,
-        bytes = sealed.len(),
-        "invite stored",
-    );
+    // ADR-0078 section 11: no ledger id, account or key in a log line.
+    tracing::info!(bytes = sealed.len(), "invite stored");
     Ok(Json(UploadResponse {
         blob_id: blob_id_b64url,
     }))
@@ -466,10 +442,9 @@ pub(crate) async fn consume(
             )
         })?;
         tracing::info!(
-            blob_id = %blob_id_b64url,
             used_count,
             max_uses,
-            "invite already consumed by this joiner",
+            "invite already consumed by this joiner"
         );
         return Ok(Json(ConsumeResponse {
             used_count,
@@ -527,12 +502,7 @@ pub(crate) async fn consume(
                 "internal db error".to_string(),
             )
         })?;
-        tracing::info!(
-            blob_id = %blob_id_b64url,
-            used_count = row.0,
-            max_uses = row.1,
-            "invite consumed",
-        );
+        tracing::info!(used_count = row.0, max_uses = row.1, "invite consumed");
         return Ok(Json(ConsumeResponse {
             used_count: row.0,
             max_uses: row.1,
@@ -590,11 +560,9 @@ pub(crate) struct RevokeRequest {
 
 /// `DELETE /discovery/invite/{blob_id}` — owner-signed delete.
 ///
-/// Authorisation gate: the same Ed25519 key that signed the
-/// capability is the only key permitted to revoke. The server
-/// cannot read the sealed capability, so it verifies the request's
-/// signature against the `issuer_pubkey` the uploader supplied in
-/// clear beside the blob. Replay protection: `signed_at_ms` must
+/// Authorisation gate: the per-link revocation key the uploader
+/// supplied beside the blob (ADR-0078 section 10) is the only key
+/// permitted to revoke. Replay protection: `signed_at_ms` must
 /// be within `REVOKE_REPLAY_WINDOW_MS` of the server clock.
 ///
 /// Response model:
@@ -614,15 +582,10 @@ pub(crate) struct RevokeRequest {
 pub(crate) async fn revoke(
     State(state): State<AppState>,
     Path(blob_id_b64url): Path<String>,
-    // Phase 1.5b: session token required (route_layer'd in
-    // `build_app`). The Ed25519 signature on the body proves
-    // ownership of the capability; the session token proves
-    // ownership of *some* logged-in account — together they
-    // strictly stronger than either alone. We don't actively
-    // match `authed.0` against the capability's owner_account_id
-    // here because the signature verify below already does the
-    // hard work; the token is purely a rate-limit / DoS gate.
-    axum::Extension(_authed): axum::Extension<crate::auth::AuthenticatedAccount>,
+    // Phase 1.5b: a session token is required (route_layer'd in
+    // `build_app`) as a rate-limit / DoS gate only; the signature
+    // on the body is the authorisation, and the account is not
+    // recorded anywhere.
     Json(payload): Json<RevokeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let blob_id = crate::ledger_id::parse_blob_id(&blob_id_b64url)?;
@@ -661,12 +624,12 @@ pub(crate) async fn revoke(
     let signature = lakko_crypto::signing::Signature::from_bytes(&signature_bytes)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("malformed signature: {e}")))?;
 
-    // Look up the issuer key stored beside the sealed blob. We
+    // Look up the revocation key stored beside the sealed blob. We
     // deliberately fold "no row" into the same 404 the
     // signature-failure path returns below — see the function-level
     // doc.
     let row: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT issuer_pubkey FROM invites WHERE blob_id = ?")
+        sqlx::query_as("SELECT revocation_pk FROM invites WHERE blob_id = ?")
             .bind(&blob_id[..])
             .fetch_optional(&state.db)
             .await
@@ -677,13 +640,14 @@ pub(crate) async fn revoke(
                     "internal db error".to_string(),
                 )
             })?;
-    let Some(issuer_key) = row.and_then(|(k,)| crate::ledger_id::stored_issuer_key(&k)) else {
+    let Some(revocation_key) = row.and_then(|(k,)| crate::ledger_id::stored_revocation_key(&k))
+    else {
         return Err((StatusCode::NOT_FOUND, "invite not found".to_string()));
     };
 
-    // Build the canonical bytes the owner signed and verify.
+    // Build the canonical bytes the link's revocation key signed and verify.
     let canonical = revoke_canonical_bytes(&blob_id, payload.signed_at_ms);
-    if issuer_key.verify(&canonical, &signature).is_err() {
+    if revocation_key.verify(&canonical, &signature).is_err() {
         // Signature mismatch — fold into 404 (see doc comment).
         return Err((StatusCode::NOT_FOUND, "invite not found".to_string()));
     }
@@ -704,289 +668,8 @@ pub(crate) async fn revoke(
             )
         })?;
 
-    tracing::info!(
-        blob_id = %blob_id_b64url,
-        signed_at_ms = payload.signed_at_ms,
-        "invite revoked",
-    );
+    tracing::info!("invite revoked");
     Ok(StatusCode::NO_CONTENT)
-}
-
-// ============================================================================
-// POST /discovery/invite/by-owner — owner-signed list (Phase 1.18d2b-list)
-// ============================================================================
-
-#[derive(Deserialize)]
-pub(crate) struct OwnerListRequest {
-    /// Standard-alphabet base64 of the owner's 16-byte UUIDv7
-    /// `account_id`. Same shape every other discovery wire field
-    /// uses. The server verifies the bundled signature against
-    /// the `identity_bundles.signature_pubkey` row keyed by this
-    /// `account_id`; mismatch folds into a clean signature error.
-    pub(crate) owner_account_id: String,
-    /// UNIX millis at which the body was signed. Must be within
-    /// `REVOKE_REPLAY_WINDOW_MS` of the server clock (re-used —
-    /// both endpoints share the same ±10 min skew tolerance).
-    pub(crate) signed_at_ms: u64,
-    /// Standard-alphabet base64 of the 64-byte Ed25519 signature
-    /// over [`owner_list_canonical_bytes`].
-    pub(crate) signature: String,
-}
-
-/// One entry in the response list. Mirrors the row shape the
-/// `/contacts` UI's "Active invites" panel renders. Field names
-/// match the `InviteCapability` getters on each client's FFI
-/// surface so the JS / Swift / Kotlin types translate
-/// near-mechanically.
-#[derive(Serialize)]
-pub(crate) struct OwnerListEntry {
-    /// URL-safe base64 (no padding) of the 6-byte blob_id —
-    /// same slug that appears in the `https://lakko.me/i/<slug>`
-    /// share URL.
-    pub(crate) blob_id_slug: String,
-    /// UNIX millis the capability expires at. `0` = never
-    /// expires; the UI renders that as a permanent label.
-    pub(crate) expiry_ms: u64,
-    /// Wire-format `max_uses` sentinel: `0` = `SINGLE_USE`
-    /// (effective ceiling 1), `0xFFFFFFFF` = unlimited; any
-    /// other N = N consumes allowed.
-    pub(crate) max_uses: u32,
-    /// Server-counted consumes. Compared against the effective
-    /// ceiling derived from `max_uses` (see the
-    /// `effective_max_uses` mirror) when deciding whether to
-    /// gate further joiners.
-    pub(crate) used_count: u32,
-    /// Owner-supplied free-text label (empty string when not
-    /// set), from the clear `label` upload field — the server
-    /// cannot read it out of the sealed capability.
-    pub(crate) label: String,
-    /// Mirrors `InviteCapability.bootstrap_referral` — `true`
-    /// flags the link as a signup-deep-link that auto-Accepts
-    /// on the joiner side (Phase 1.9b4).
-    pub(crate) bootstrap_referral: bool,
-    /// ISO-8601 timestamp recording when the server first
-    /// accepted the upload. The UI uses this for the "Created
-    /// at" column; the client clock used to compose the
-    /// capability is not authoritative here.
-    pub(crate) created_at: String,
-}
-
-#[derive(Serialize)]
-pub(crate) struct OwnerListResponse {
-    pub(crate) invites: Vec<OwnerListEntry>,
-}
-
-/// SELECT row shape from the `invites` table for the owner-list
-/// query. Aliased so the call site can use a single named type
-/// instead of a six-element tuple — both kinder to clippy
-/// (`type_complexity`) and to a future reader trying to follow
-/// the destructuring. Columns are listed in the same order as
-/// the SELECT projection so a column-list rearrangement breaks
-/// the build immediately.
-type OwnerListRow = (
-    Vec<u8>, // blob_id (6 bytes)
-    Vec<u8>, // label (UTF-8 bytes)
-    bool,    // bootstrap_referral
-    u64,     // expiry_ms
-    u32,     // max_uses
-    u32,     // used_count
-    // `created_at` is a TIMESTAMP column, which sqlx decodes only as
-    // `DateTime<Utc>`; a `NaiveDateTime` (the DATETIME mapping) failed every
-    // list that held a row.
-    sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>, // created_at
-);
-
-/// `POST /discovery/invite/by-owner` — owner-signed list of all
-/// live invites this account has uploaded (Phase 1.18d2b-list).
-///
-/// Authorisation gate: the same Ed25519 identity key the owner
-/// used to sign every `InviteCapability` they own. The server
-/// resolves the owner's verifying key from
-/// `identity_bundles.signature_pubkey` (looked up by
-/// `owner_account_id`) and verifies the request signature
-/// against [`owner_list_canonical_bytes`]. Replay protection:
-/// `signed_at_ms` must be within `REVOKE_REPLAY_WINDOW_MS` of
-/// the server clock.
-///
-/// **Why a signed body + session-token middleware (belt + suspenders).**
-/// The signature is the actual ownership proof — only the
-/// holder of the identity Ed25519 key can authenticate. The
-/// session-token (route_layer'd in `build_app`, same as revoke)
-/// is a DoS gate: without it any unauthenticated bot could
-/// fan out SELECT-with-signature-verify load on the
-/// `invites` table. We don't actively match the session's
-/// `authed.0` against `owner_account_id` — the signature
-/// verification below already does the hard ownership work; the
-/// token is purely a rate-limit / DoS gate.
-///
-/// **Why the response is plaintext owner-rows (no per-row
-/// signatures).** A malicious server could omit rows from the
-/// response without the client being able to detect it. Phase
-/// 1 accepts this as a deliberate trade-off: the worst-case
-/// outcome is "the owner sees fewer invites than they actually
-/// have, which is the same UX as the client-side-tracking-only
-/// approach we explicitly rejected." A future Phase-2
-/// transparency layer (signed receipts per upload) would let
-/// the client cross-check the list against its own receipt
-/// archive; deferred.
-///
-/// Response model:
-///
-///   * **200 OK** — `application/json` carrying the `invites`
-///     array. Empty array on no live rows (a brand-new account
-///     with no invites yet — distinct from a malformed request).
-///   * **404 Not Found** — folded over "no identity bundle for
-///     `owner_account_id`" / "signature did not verify". Same
-///     attacker-probing-resistant fold as the revoke endpoint.
-///   * **400 Bad Request** — body shape failures (bad base64,
-///     wrong-sized signature, `signed_at_ms` outside the replay
-///     window). Distinct from 404 because they indicate a buggy
-///     client, not a probing attacker.
-#[allow(clippy::too_many_lines)]
-pub(crate) async fn list_by_owner(
-    State(state): State<AppState>,
-    // Session-token gate is purely DoS protection — see fn doc.
-    axum::Extension(_authed): axum::Extension<crate::auth::AuthenticatedAccount>,
-    Json(payload): Json<OwnerListRequest>,
-) -> Result<Json<OwnerListResponse>, (StatusCode, String)> {
-    // Decode `owner_account_id` first — body-shape gate before
-    // any DB work or replay-window check, mirrors the revoke
-    // path's argument-validation ordering.
-    let owner_bytes = B64.decode(&payload.owner_account_id).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid owner_account_id base64: {e}"),
-        )
-    })?;
-    if owner_bytes.len() != ACCOUNT_ID_LEN {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("owner_account_id must be {ACCOUNT_ID_LEN} bytes after decode"),
-        ));
-    }
-    let mut owner_account_id = [0u8; ACCOUNT_ID_LEN];
-    owner_account_id.copy_from_slice(&owner_bytes);
-
-    // Replay window — same constant as revoke; same ±10 min
-    // symmetric skew tolerance. Reject before DB work so an
-    // attacker spamming `signed_at_ms = 0` can't make us SELECT.
-    let now_ms = current_unix_ms();
-    if !within_replay_window(payload.signed_at_ms, now_ms) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "signed_at_ms {} outside the ±{}ms replay window (now = {})",
-                payload.signed_at_ms, REVOKE_REPLAY_WINDOW_MS, now_ms,
-            ),
-        ));
-    }
-
-    let signature_bytes = B64.decode(&payload.signature).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid signature base64: {e}"),
-        )
-    })?;
-    if signature_bytes.len() != lakko_crypto::signing::SIGNATURE_LEN {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "signature must be {} bytes",
-                lakko_crypto::signing::SIGNATURE_LEN,
-            ),
-        ));
-    }
-    let signature = lakko_crypto::signing::Signature::from_bytes(&signature_bytes)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("malformed signature: {e}")))?;
-
-    // Look up the owner's verifying key from `identity_bundles`.
-    // `identity_bundles.account_id` is the primary key; one row
-    // per account. A missing bundle folds into the same 404 the
-    // signature-failure path returns below — keeps the endpoint
-    // indistinguishable from an unknown-account probe.
-    let row: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT signature_pubkey FROM identity_bundles WHERE account_id = ?")
-            .bind(&owner_account_id[..])
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "list_by_owner identity_bundles SELECT");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal db error".to_string(),
-                )
-            })?;
-    let Some((pubkey_bytes,)) = row else {
-        return Err((StatusCode::NOT_FOUND, "owner not found".to_string()));
-    };
-    let verifying = match lakko_crypto::signing::VerifyingKey::from_bytes(&pubkey_bytes) {
-        Ok(v) => v,
-        Err(e) => {
-            // Bundle bytes don't decode as a valid Ed25519
-            // verifying key — corruption / post-upload schema
-            // drift. Fold into 404; we have no graceful recovery.
-            tracing::error!(error = %e, "list_by_owner: stored identity_bundle pubkey malformed");
-            return Err((StatusCode::NOT_FOUND, "owner not found".to_string()));
-        },
-    };
-
-    // Verify the signed query against the canonical bytes.
-    let canonical = owner_list_canonical_bytes(&owner_account_id, payload.signed_at_ms);
-    if verifying.verify(&canonical, &signature).is_err() {
-        // Fold into the same 404 the missing-bundle path returns.
-        return Err((StatusCode::NOT_FOUND, "owner not found".to_string()));
-    }
-
-    // Authorised. Pull the live rows. `expiry_ms = 0` = never
-    // expires (NEVER_EXPIRES sentinel from `lakko-contacts`);
-    // anything else gets a `> now_ms` filter so the response
-    // matches what the consume path would accept right now. The
-    // background pruner (1.18d2c) deletes expired rows out of
-    // band; the freshness check here is belt-and-suspenders for
-    // the brief window between expiry and the next pruner tick.
-    let rows: Vec<OwnerListRow> = sqlx::query_as(
-        "SELECT blob_id, label, bootstrap_referral, expiry_ms, max_uses, used_count, created_at
-         FROM invites
-         WHERE owner_account_id = ?
-           AND (expiry_ms = 0 OR expiry_ms > ?)
-         ORDER BY created_at DESC",
-    )
-    .bind(&owner_account_id[..])
-    .bind(now_ms)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "list_by_owner invites SELECT");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal db error".to_string(),
-        )
-    })?;
-
-    let mut entries: Vec<OwnerListEntry> = Vec::with_capacity(rows.len());
-    for (blob_id, label, bootstrap_referral, expiry_ms, max_uses, used_count, created_at) in rows {
-        // The upload handler accepted the label as a JSON string, so it is
-        // UTF-8; a lossy read only matters for a corrupted row.
-        let label = String::from_utf8_lossy(&label).into_owned();
-        entries.push(OwnerListEntry {
-            blob_id_slug: B64URL.encode(&blob_id),
-            expiry_ms,
-            max_uses,
-            used_count,
-            label,
-            bootstrap_referral,
-            // RFC 3339 in UTC, the shape clients parse.
-            created_at: created_at.to_rfc3339(),
-        });
-    }
-
-    tracing::info!(
-        owner_account_id = %B64.encode(owner_account_id),
-        count = entries.len(),
-        "invite owner-list query",
-    );
-
-    Ok(Json(OwnerListResponse { invites: entries }))
 }
 
 // ============================================================================
@@ -1105,31 +788,57 @@ mod tests {
     /// "everything past N bytes 500s in production".
     #[test]
     fn max_sealed_bytes_matches_column_width() {
-        let widened = include_str!("../migrations/0030_link_grant_mailbox_binding_width.sql");
-        let widened = widened.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(
-            widened.contains(&format!(
-                "MODIFY sealed_capability VARBINARY({MAX_SEALED_BYTES})"
-            )),
-            "MAX_SEALED_BYTES ({MAX_SEALED_BYTES}) must match invites.sealed_capability \
-             in 0030_link_grant_mailbox_binding_width.sql",
-        );
-        let migration = include_str!("../migrations/0022_sealed_invite_links.sql");
+        let migration = include_str!("../migrations/0031_ownerless_invite_ledgers.sql");
         let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            normalised.contains(&format!("label VARBINARY({MAX_LABEL_LEN})")),
-            "invites.label must be VARBINARY(MAX_LABEL_LEN)",
+            normalised.contains(&format!(
+                "sealed_capability VARBINARY({MAX_SEALED_BYTES}) NOT NULL COMMENT \
+                 'lakko_contacts::link_seal sealed InviteCapability"
+            )),
+            "MAX_SEALED_BYTES ({MAX_SEALED_BYTES}) must match invites.sealed_capability \
+             in 0031_ownerless_invite_ledgers.sql",
         );
         assert_eq!(MAX_SEALED_BYTES, 404);
     }
 
+    /// ADR-0078 section 10: no ledger table has an owner or an issuer
+    /// column, in the migration that last created them.
+    #[test]
+    fn no_ledger_table_has_an_owner_or_issuer_column() {
+        let migration = include_str!("../migrations/0031_ownerless_invite_ledgers.sql");
+        let ddl: String = migration
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for table in ["invites", "call_invites", "group_invites"] {
+            assert!(
+                ddl.contains(&format!("CREATE TABLE IF NOT EXISTS {table} (")),
+                "0031 must recreate {table}"
+            );
+        }
+        for forbidden in [
+            "owner_account_id",
+            "issuer_pubkey",
+            "owner",
+            "issuer",
+            "account",
+        ] {
+            assert!(
+                !ddl.contains(forbidden),
+                "no ledger column may name an owner, an issuer or an account: {forbidden}"
+            );
+        }
+        assert_eq!(ddl.matches("revocation_pk").count(), 3);
+    }
+
     #[test]
     fn blob_id_len_matches_column_width() {
-        let migration = include_str!("../migrations/0022_sealed_invite_links.sql");
+        let migration = include_str!("../migrations/0031_ownerless_invite_ledgers.sql");
         assert!(
             migration.contains(&format!("BINARY({BLOB_ID_LEN})")),
             "BLOB_ID_LEN ({BLOB_ID_LEN}) must match the BINARY width \
-             declared in 0022_sealed_invite_links.sql",
+             declared in 0031_ownerless_invite_ledgers.sql",
         );
     }
 
@@ -1163,11 +872,11 @@ mod tests {
     /// changes the column type would surface here.
     #[test]
     fn max_uses_column_type_is_int_unsigned() {
-        let migration = include_str!("../migrations/0022_sealed_invite_links.sql");
+        let migration = include_str!("../migrations/0031_ownerless_invite_ledgers.sql");
         let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             normalised.contains("max_uses INT UNSIGNED NOT NULL DEFAULT 0"),
-            "0022 migration must declare `max_uses INT UNSIGNED`",
+            "0031 migration must declare `max_uses INT UNSIGNED`",
         );
         // The default value is load-bearing: existing rows from
         // 1.18d1 (no max_uses column) get backfilled to `0`,
@@ -1181,66 +890,15 @@ mod tests {
         );
     }
 
-    /// List `account_id`'s links through `list_by_owner` and find `blob_id`
-    /// with `label` among them (the owner's identity bundle is written first,
-    /// since the handler verifies the signed query against it).
-    async fn assert_owner_lists(
-        state: &AppState,
-        signing: &lakko_crypto::signing::SigningKey,
-        account_id: [u8; ACCOUNT_ID_LEN],
-        blob_id: &str,
-        label: &str,
-    ) {
-        use axum::extract::State;
-        use axum::{Extension, Json};
-        use lakko_crypto::agreement::SecretKey as X25519SecretKey;
-
-        sqlx::query(
-            "INSERT INTO identity_bundles (account_id, signature_pubkey, x25519_pubkey)
-             VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE signature_pubkey = VALUES(signature_pubkey)",
-        )
-        .bind(account_id.to_vec())
-        .bind(signing.verifying_key().to_bytes().to_vec())
-        .bind(X25519SecretKey::generate().public_key().to_bytes().to_vec())
-        .execute(&state.db)
-        .await
-        .unwrap();
-        let listed_at = current_unix_ms();
-        let Json(listed) = list_by_owner(
-            State(state.clone()),
-            Extension(crate::auth::AuthenticatedAccount(account_id)),
-            Json(OwnerListRequest {
-                owner_account_id: B64.encode(account_id),
-                signed_at_ms: listed_at,
-                signature: B64.encode(
-                    signing
-                        .sign(&owner_list_canonical_bytes(&account_id, listed_at))
-                        .to_bytes(),
-                ),
-            }),
-        )
-        .await
-        .expect("the owner lists their links");
-        let entry = listed
-            .invites
-            .iter()
-            .find(|e| e.blob_id_slug == blob_id)
-            .expect("the uploaded link is listed");
-        assert_eq!(entry.label, label);
-        assert!(entry.bootstrap_referral);
-        assert!(!entry.created_at.is_empty());
-    }
-
     /// A maximal sealed invite survives the real ledger: upload stores the
     /// sealed blob with its clear fields, fetch returns it byte for byte,
-    /// the link secret opens it, the owner list reads the clear label, and
-    /// an owner-signed revoke verifies against the clear issuer key. Gated
+    /// the link secret opens it, the row names no account, and a revoke
+    /// verifies only against the link's own revocation key. Gated
     /// on `LAKKO_DISCOVERY_TEST_DATABASE_URL` (skips when unset).
     #[tokio::test]
     async fn a_sealed_invite_round_trips_through_the_ledger() {
         use axum::extract::{Path, State};
-        use axum::{Extension, Json};
+        use axum::Json;
         use lakko_contacts::invite::{compose, open_link, seal_link, sign_revocation};
         use lakko_contacts::link_seal::generate_link_secret;
         use lakko_crypto::agreement::SecretKey as X25519SecretKey;
@@ -1254,8 +912,9 @@ mod tests {
         let state = crate::anon_token_route_tests::state(db, false);
 
         let signing = SigningKey::generate();
-        let account_id = [0x31u8; ACCOUNT_ID_LEN];
-        let label = "L".repeat(MAX_LABEL_LEN);
+        let revocation = SigningKey::generate();
+        let account_id = [0x31u8; lakko_contacts::ACCOUNT_ID_LEN];
+        let label = "L".repeat(lakko_contacts::invite::MAX_LABEL_LEN);
         let expiry_ms = current_unix_ms() + 3_600_000;
         let wire = compose(
             &signing,
@@ -1282,14 +941,11 @@ mod tests {
 
         let Json(stored) = upload(
             State(state.clone()),
-            Extension(crate::auth::AuthenticatedAccount(account_id)),
             Json(UploadRequest {
                 sealed: B64.encode(&sealed),
-                issuer_pubkey: B64.encode(signing.verifying_key().to_bytes()),
+                revocation_pubkey: B64.encode(revocation.verifying_key().to_bytes()),
                 expiry_ms,
                 max_uses: 3,
-                label: label.clone(),
-                bootstrap_referral: true,
             }),
         )
         .await
@@ -1303,31 +959,26 @@ mod tests {
         assert_eq!(opened, wire);
         assert_eq!(cap.label, label);
 
-        let rows: Vec<(Vec<u8>, bool)> = sqlx::query_as(
-            "SELECT label, bootstrap_referral FROM invites WHERE owner_account_id = ?",
-        )
-        .bind(account_id.to_vec())
-        .fetch_all(&state.db)
-        .await
-        .unwrap();
-        assert!(rows.contains(&(label.clone().into_bytes(), true)));
-
-        // The owner list through its handler: it reads every column of the
-        // row, `created_at` included, which a wrong Rust type once failed for
-        // any list that held a row.
-        assert_owner_lists(&state, &signing, account_id, &stored.blob_id, &label).await;
-
-        // A revoke signed by another key is a 404; the issuer's is a 204.
+        // The stored row holds the revocation key and nothing that names
+        // the account or its identity key.
         let blob_id = crate::ledger_id::parse_blob_id(&stored.blob_id).unwrap();
+        let (stored_pk,): (Vec<u8>,) =
+            sqlx::query_as("SELECT revocation_pk FROM invites WHERE blob_id = ?")
+                .bind(blob_id.to_vec())
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(stored_pk, revocation.verifying_key().to_bytes().to_vec());
+        assert_ne!(stored_pk, signing.verifying_key().to_bytes().to_vec());
+
+        // A revoke signed by the identity key is a 404; the link key's is a 204.
         let now = current_unix_ms();
-        let other = SigningKey::generate();
         let Err((status, _)) = revoke(
             State(state.clone()),
             Path(stored.blob_id.clone()),
-            Extension(crate::auth::AuthenticatedAccount(account_id)),
             Json(RevokeRequest {
                 signed_at_ms: now,
-                signature: B64.encode(sign_revocation(&other, &blob_id, now)),
+                signature: B64.encode(sign_revocation(&signing, &blob_id, now)),
             }),
         )
         .await
@@ -1338,24 +989,23 @@ mod tests {
         let ok = revoke(
             State(state.clone()),
             Path(stored.blob_id.clone()),
-            Extension(crate::auth::AuthenticatedAccount(account_id)),
             Json(RevokeRequest {
                 signed_at_ms: now,
-                signature: B64.encode(sign_revocation(&signing, &blob_id, now)),
+                signature: B64.encode(sign_revocation(&revocation, &blob_id, now)),
             }),
         )
         .await
-        .expect("the issuer revokes");
+        .expect("the link's revocation key revokes");
         assert_eq!(ok, StatusCode::NO_CONTENT);
         assert!(fetch(State(state), Path(stored.blob_id)).await.is_err());
     }
 
     /// An upload whose blob is not an `/i/` seal, is over the ceiling, or
-    /// carries a label past `MAX_LABEL_LEN` is refused before any insert.
+    /// carries a revocation key that is not one is refused before any insert.
     #[tokio::test]
     async fn malformed_uploads_are_refused() {
         use axum::extract::State;
-        use axum::{Extension, Json};
+        use axum::Json;
         use lakko_contacts::link_seal::{generate_link_secret, seal, LinkKind};
 
         let Some(db) = crate::anon_token_route_tests::test_pool("invite_malformed_uploads").await
@@ -1370,29 +1020,22 @@ mod tests {
         );
         let call_blob = seal(LinkKind::Call, &generate_link_secret(), b"x").unwrap();
         let own_blob = seal(LinkKind::Contact, &generate_link_secret(), b"x").unwrap();
-        for (sealed, label, want) in [
-            (call_blob, String::new(), StatusCode::BAD_REQUEST),
+        for (sealed, revocation_pubkey, want) in [
+            (call_blob, key.clone(), StatusCode::BAD_REQUEST),
             (
                 vec![b'i'; MAX_SEALED_BYTES + 1],
-                String::new(),
+                key.clone(),
                 StatusCode::PAYLOAD_TOO_LARGE,
             ),
-            (
-                own_blob,
-                "z".repeat(MAX_LABEL_LEN + 1),
-                StatusCode::BAD_REQUEST,
-            ),
+            (own_blob, B64.encode([1u8; 31]), StatusCode::BAD_REQUEST),
         ] {
             let Err((status, _)) = upload(
                 State(state.clone()),
-                Extension(crate::auth::AuthenticatedAccount([0x32; 16])),
                 Json(UploadRequest {
                     sealed: B64.encode(sealed),
-                    issuer_pubkey: key.clone(),
+                    revocation_pubkey,
                     expiry_ms: 0,
                     max_uses: 0,
-                    label,
-                    bootstrap_referral: false,
                 }),
             )
             .await
@@ -1417,7 +1060,7 @@ mod tests {
     /// silently break dedup or leak orphan rows; surface here.
     #[test]
     fn invite_consumers_migration_shape() {
-        let migration = include_str!("../migrations/0022_sealed_invite_links.sql");
+        let migration = include_str!("../migrations/0031_ownerless_invite_ledgers.sql");
         // Side-table exists.
         assert!(
             migration.contains("CREATE TABLE IF NOT EXISTS invite_consumers"),

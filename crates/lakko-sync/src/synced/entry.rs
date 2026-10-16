@@ -2094,23 +2094,23 @@ mod tests {
         );
 
         let bytes = SyncEntry::Lineage(l(vec![0xAA, 0xBB], vec![0xCC])).canonical_bytes();
-        assert_eq!(bytes, [10, 0, 0, 0, 2, 0xAA, 0xBB, 0, 0, 0, 1, 0xCC]);
+        assert_eq!(bytes, [11, 0, 0, 0, 2, 0xAA, 0xBB, 0, 0, 0, 1, 0xCC]);
 
         // Decode refuses what validate refuses, and a hostile length.
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[10, 0, 0, 0, 1, 5, 0, 0, 0, 1, 5]),
+            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 1, 5, 0, 0, 0, 1, 5]),
             Err(CodecError::Bounds(BoundsError::LineageSelfReference))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[10, 0, 0, 0, 0, 0, 0, 0, 1, 5]),
+            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 0, 0, 0, 0, 1, 5]),
             Err(CodecError::Bounds(BoundsError::LineageIdLength))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[10, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
+            SyncEntry::from_canonical_bytes(&[11, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
             Err(CodecError::Bounds(BoundsError::LineageIdLength))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[10, 0, 0, 0, 4, 1]),
+            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 4, 1]),
             Err(CodecError::Truncated)
         );
     }
@@ -2165,9 +2165,9 @@ mod tests {
         };
         assert_eq!(
             e("a@b").canonical_bytes(),
-            [11, 0, 0, 0, 3, b'a', b'@', b'b']
+            [12, 0, 0, 0, 3, b'a', b'@', b'b']
         );
-        assert_eq!(e("").canonical_bytes(), [11, 0, 0, 0, 0]);
+        assert_eq!(e("").canonical_bytes(), [12, 0, 0, 0, 0]);
         assert_eq!(e("a@b").key(), RegisterKey::RecoveryEmail);
         assert_eq!(e("").key(), RegisterKey::RecoveryEmail);
         // The register sorts after every older kind.
@@ -2176,31 +2176,31 @@ mod tests {
         // Decode refuses what validate refuses, a hostile length, bytes that
         // are not UTF-8, and trailing bytes.
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 2, b'a', b'@']),
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 2, b'a', b'@']),
             Err(CodecError::Bounds(BoundsError::RecoveryEmailLength))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 3, b'a', b'b', b'c']),
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'a', b'b', b'c']),
             Err(CodecError::Bounds(BoundsError::RecoveryEmailShape))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 0xFF, b'a']),
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 0xFF, b'a']),
             Err(CodecError::Bounds(BoundsError::RecoveryEmailLength))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
+            SyncEntry::from_canonical_bytes(&[12, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
             Err(CodecError::Bounds(BoundsError::RecoveryEmailLength))
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 3, b'a', 0xFF, b'b']),
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'a', 0xFF, b'b']),
             Err(CodecError::NotUtf8)
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 3, b'a', b'@']),
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'a', b'@']),
             Err(CodecError::Truncated)
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[11, 0, 0, 0, 0, 0]),
+            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 0, 0]),
             Err(CodecError::Trailing)
         );
     }
@@ -2238,9 +2238,9 @@ mod tests {
         };
         assert_eq!(
             e("bob").canonical_bytes(),
-            [12, 0, 0, 0, 3, b'b', b'o', b'b']
+            [13, 0, 0, 0, 3, b'b', b'o', b'b']
         );
-        assert_eq!(e("").canonical_bytes(), [12, 0, 0, 0, 0]);
+        assert_eq!(e("").canonical_bytes(), [13, 0, 0, 0, 0]);
         assert_eq!(e("bob").key(), RegisterKey::OwnUsername);
         assert_eq!(e("").key(), RegisterKey::OwnUsername);
         // The register sorts after every older kind.
@@ -2248,31 +2248,31 @@ mod tests {
 
         let bounds = Err(CodecError::Bounds(BoundsError::OwnUsername));
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 2, b'a', b'b']),
+            SyncEntry::from_canonical_bytes(&[13, 0, 0, 0, 2, b'a', b'b']),
             bounds
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'B', b'o', b'b']),
+            SyncEntry::from_canonical_bytes(&[13, 0, 0, 0, 3, b'B', b'o', b'b']),
             bounds
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 33, b'a']),
+            SyncEntry::from_canonical_bytes(&[13, 0, 0, 0, 33, b'a']),
             bounds
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
+            SyncEntry::from_canonical_bytes(&[13, 0xFF, 0xFF, 0xFF, 0xFF, 1]),
             bounds
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'a', 0xFF, b'b']),
+            SyncEntry::from_canonical_bytes(&[13, 0, 0, 0, 3, b'a', 0xFF, b'b']),
             Err(CodecError::NotUtf8)
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 3, b'a', b'b']),
+            SyncEntry::from_canonical_bytes(&[13, 0, 0, 0, 3, b'a', b'b']),
             Err(CodecError::Truncated)
         );
         assert_eq!(
-            SyncEntry::from_canonical_bytes(&[12, 0, 0, 0, 0, 0]),
+            SyncEntry::from_canonical_bytes(&[13, 0, 0, 0, 0, 0]),
             Err(CodecError::Trailing)
         );
     }

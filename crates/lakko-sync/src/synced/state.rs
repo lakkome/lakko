@@ -1492,9 +1492,9 @@ mod tests {
         assert_eq!(b, before);
         // Nor does a state whose register breaks a bound: the whole state
         // is refused.
-        let mut bytes = vec![1, 0, 0, 0, 1];
+        let mut bytes = vec![2, 0, 0, 0, 1];
         bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
-        bytes.extend_from_slice(&[0, 0, 0, 7, 11, 0, 0, 0, 2, b'a', b'@']);
+        bytes.extend_from_slice(&[0, 0, 0, 7, 12, 0, 0, 0, 2, b'a', b'@']);
         assert_eq!(
             SyncedState::from_bytes(&bytes),
             Err(CodecError::Bounds(
@@ -1634,9 +1634,9 @@ mod tests {
         );
         assert_eq!(b, before);
         // A persisted state whose register breaks the rule is refused whole.
-        let mut bytes = vec![1, 0, 0, 0, 1];
+        let mut bytes = vec![2, 0, 0, 0, 1];
         bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
-        bytes.extend_from_slice(&[0, 0, 0, 8, 12, 0, 0, 0, 3, b'B', b'o', b'b']);
+        bytes.extend_from_slice(&[0, 0, 0, 8, 13, 0, 0, 0, 3, b'B', b'o', b'b']);
         assert_eq!(
             SyncedState::from_bytes(&bytes),
             Err(CodecError::Bounds(

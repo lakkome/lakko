@@ -603,7 +603,7 @@ mod tests {
     fn layout_refusals() {
         let vk = key().verifying_key();
         let wire = revoke().sign(&key());
-        for len in [0, 1, 73, 74, 137, 139, 177] {
+        for len in [0, 1, 73, 74, 137, 139, 145] {
             let bytes = vec![1u8; len];
             assert_eq!(
                 AccountStatement::decode_unverified(&bytes),

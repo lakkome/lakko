@@ -21,11 +21,10 @@ beforeAll(async () => {
 });
 
 const ACCOUNT_SEED = new Uint8Array(32).fill(0x42);
-const GROUP = new Uint8Array(32).fill(0x07);
 
 describe("profile v3 through the foreground sniff", () => {
   it("carries each grant as its 37-byte wire with class and version", () => {
-    const member = wasm.deriveReachGrant(ACCOUNT_SEED, wasm.ReachClass.Member, GROUP, 2);
+    const member = wasm.deriveReachGrant(ACCOUNT_SEED, wasm.ReachClass.Member, new Uint8Array(0), 2);
     const contact = wasm.deriveReachGrant(ACCOUNT_SEED, wasm.ReachClass.Contact, new Uint8Array(0), 1);
     // Read before composing: `composeProfileEnvelope` takes the grants by value.
     const memberKey = member.verifyingKey();

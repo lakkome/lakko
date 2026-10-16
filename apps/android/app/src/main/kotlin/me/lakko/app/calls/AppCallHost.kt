@@ -8,7 +8,6 @@ import me.lakko.app.profile.peerProfileOf
 import me.lakko.app.profile.toFfi
 import kotlinx.coroutines.CancellationException
 import io.ktor.client.request.get
-import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
@@ -26,13 +25,12 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import me.lakko.app.chat.ChatRepository
-import me.lakko.app.contacts.AcceptedContactsStore
 import uniffi.lakko_ffi_uniffi.FfiCallEndReason
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.callRingWindowMs
 import uniffi.lakko_ffi_uniffi.composeCallSignaling
-import uniffi.lakko_ffi_uniffi.sfuPeerTag
+import uniffi.lakko_ffi_uniffi.sfuRoomForCall
 
 /**
  * The process-wide call host: the one call slot, shared by the 1x1 call
@@ -286,14 +284,6 @@ public class ChatRepositoryCallPort(
     private val sessionTokenProvider: () -> String? = { null },
 ) : OneToOneCallPort<CallSession> {
 
-    /**
-     * One client for the process: it holds no per-call state, only the bearer
-     * token, which is rebound before every mint because login, recover and
-     * pairing all replace it and a credential minted against a stale one is
-     * refused by the relay.
-     */
-    private val turn = TurnCredentialClient()
-
     override fun createSession(
         groupIdHex: String,
         callId: ByteArray,
@@ -304,13 +294,14 @@ public class ChatRepositoryCallPort(
         onOutboundSignaling = outbound,
     ).also { session ->
         // Without this the session resolves STUN-only ICE, and two peers that
-        // cannot reach each other directly never connect. Fail-soft by
-        // contract: no token, or a credential the auth service declines to
-        // mint, leaves the call on STUN rather than refusing it.
-        val token = sessionTokenProvider()
-        if (!token.isNullOrEmpty()) {
-            turn.setSessionToken(token)
-            session.setTurnClient(turn)
+        // cannot reach each other directly never connect. The credential is
+        // minted beside a call token for this call's room, paid for by one
+        // anonymous `call-join` token (ADR-0078 section 2): no session reaches
+        // the issuer. Fail-soft by contract: no token to be had, or no relay,
+        // leaves the call on STUN rather than refusing it. Signed out, there
+        // is no token pool to draw from, so nothing is attempted.
+        if (!sessionTokenProvider().isNullOrEmpty()) {
+            session.setTurnClient(TurnCredentialClient.forCall(callId))
         }
     }
 
@@ -433,27 +424,26 @@ internal class ChatRepositoryGroupCallPort(
     override suspend fun readSettledGroup(groupIdHex: String, callId: ByteArray): SettledGroupRead =
         repository.readSettledCallKey(groupIdHex, callId)
 
-    override suspend fun mintCallJwt(sessionToken: String, callIdHex: String): String {
-        val client = CallJwtClient()
-        return try {
-            client.setSessionToken(sessionToken)
-            client.mint(callId = callIdHex).jwt
-        } finally {
-            client.close()
+    override suspend fun mintCallJwt(callId: ByteArray): MintCallJwtResult =
+        CallJwtClient().use { it.mint(callId) }
+
+    override fun sfuRoom(callId: ByteArray): String? =
+        try {
+            sfuRoomForCall(callId)
+        } catch (_: Throwable) {
+            null
         }
-    }
 
     override suspend fun publishSignal(groupIdHex: String, body: FfiCallSignalingBody): Boolean =
         repository.publishGroupCallSignal(groupIdHex, body)
 
-    override suspend fun fetchSfuCallState(url: String, authorization: String): String? {
+    override suspend fun fetchSfuCallState(url: String): String? {
         val client = io.ktor.client.HttpClient(
             me.lakko.app.transport.AntiCensorshipEngine(me.lakko.app.transport.BaseHttpEngine.create()),
         )
         return try {
-            val response = client.get(url) {
-                header(io.ktor.http.HttpHeaders.Authorization, authorization)
-            }
+            // No token, no credentials (ADR-0078 section 2).
+            val response = client.get(url)
             if (response.status.value == 200) response.bodyAsText() else null
         } catch (cancel: CancellationException) {
             throw cancel
@@ -472,7 +462,8 @@ internal class ChatRepositoryGroupCallPort(
 
     override fun createSession(request: GroupCallSessionRequest, ui: CallUiState): GroupCallSessionHandle {
         val profileNames = me.lakko.app.profile.ProfileDirectory.get(applicationContext)
-        val names = callPeerNameResolver(applicationContext, request.callIdHex, profileNames)
+        val names = callPeerNames(profileNames)
+        val callId = hexToBytesOrNull(request.callIdHex)
         val sfu = SfuCallUi(
             applicationContext = applicationContext,
             // Section 4.4: the user's own tile carries their own name from the
@@ -485,17 +476,19 @@ internal class ChatRepositoryGroupCallPort(
                 localLeaf = request.localLeaf,
                 audio = true,
                 video = request.video,
+                // ADR-0078 section 2: the SFU names nobody; each peer
+                // announces itself, verified against this group's roster.
+                peerAnnouncer = callId?.let { repository.callPeerAnnouncer(request.groupIdHex, it) },
             ),
             scope = scope,
             ui = ui,
-            resolveDisplayName = names::resolve,
+            peerNames = names,
         )
         // The SFU has a public address, so most clients reach it on a
         // server-reflexive candidate - but one behind a symmetric NAT has
-        // none, and for it the relay is the only way into the room.
-        sessionTokenProvider()?.takeIf { it.isNotEmpty() }?.let { token ->
-            sfu.session.setTurnClient(TurnCredentialClient().apply { setSessionToken(token) })
-        }
+        // none, and for it the relay is the only way into the room. The
+        // credential came with the call token (ADR-0078 section 2).
+        sfu.session.setTurnClient(TurnCredentialClient.preMinted(request.turn))
         // A profile that arrives during the call (the newcomer's introduce-
         // yourself request is answered within about half a minute) bumps the
         // directory's version; rename the tiles already on screen rather than
@@ -539,48 +532,29 @@ internal class ChatRepositoryGroupCallPort(
 }
 
 /**
- * ADR-0021 — names a call's peers from the people this device knows, for both
- * call kinds: the per-call peer_tag -> name resolver over BOTH sources of an
- * account id, the persisted accepted contacts and every stored profile that
- * carried one (ADR-0048 v2), so a group member who is not a contact still gets
- * a name on their tile. The tag is re-derived locally (the SFU never sends a
- * name); the name is [callNameOfPerson]'s (rename, profile name, verified
- * `@username`, then the claimed username as plain text); two keys behind one
- * tag hide it — see [buildPeerTagLabels]. A peer nobody here can name has an
- * empty name, which the call screen draws as its unnamed state; never a piece
- * of the account id (`CallTileName.kt`).
- *
- * Not frozen at call start: the map is rebuilt whenever the directory's
- * version moves (a profile received mid-call), read on every roster event and
- * by the host's reapply collector.
+ * Names a call's peers, for both call kinds (`CallPeerNames.kt`): a peer is
+ * the person its verified announcement names (ADR-0078 section 2), named by
+ * the one resolver (rename, profile name, verified `@username`), then the
+ * username their stored profile claims as plain text. A peer nobody here can
+ * name has an empty name, which the call screen draws as its unnamed state;
+ * never a piece of an id (`CallTileName.kt`).
  */
-internal fun callPeerNameResolver(
-    applicationContext: Context,
-    callIdHex: String,
-    profileNames: me.lakko.app.profile.ProfileDirectory,
-): GroupCallNameResolver = GroupCallNameResolver(
-    sourcesVersion = { profileNames.version.value },
-    sources = {
-        val fromContacts = AcceptedContactsStore.load(applicationContext).mapNotNull { contact ->
-            // A contact accepted before the acknowledgement carried an
-            // account id has none here; their profile, if one was received,
-            // is the other way their tile gets a name.
-            val accountId = contact.request.fromAccountId ?: return@mapNotNull null
-            PeerTagSource(
-                accountIdHex = accountId.joinToString("") { "%02x".format(it.toInt() and 0xff) },
-                signatureKeyB64 = java.util.Base64.getEncoder().encodeToString(contact.request.fromPubkey),
-            )
-        }
-        val fromProfiles = profileNames.accountIdsByKey().map { (keyB64, accountIdHex) ->
-            PeerTagSource(accountIdHex = accountIdHex, signatureKeyB64 = keyB64)
-        }
-        fromContacts + fromProfiles
-    },
-    tagOf = { accountIdHex -> sfuPeerTag(callId = callIdHex, accountId = accountIdHex) },
-    // ADR-0048 — the one resolver; a call tile shows the name alone.
-    labelOf = { keyB64 -> callNameOfPerson(profileNames, keyB64) },
-    warn = { message, error -> android.util.Log.w("AppCallHost", message, error) },
-)
+internal fun callPeerNames(profileNames: me.lakko.app.profile.ProfileDirectory): CallPeerNames =
+    CallPeerNames(
+        personName = { keyB64 -> personNameOrNull(profileNames.resolve(keyB64)) },
+        storedUsername = { keyB64 -> profileNames.claimedUsernameOf(keyB64) },
+        warn = { message, error -> android.util.Log.w("AppCallHost", message, error) },
+    )
+
+/** 32 lower-case hex characters -> 16 bytes, or `null`. */
+private fun hexToBytesOrNull(hex: String): ByteArray? {
+    if (hex.length % 2 != 0) return null
+    return try {
+        ByteArray(hex.length / 2) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+    } catch (_: NumberFormatException) {
+        null
+    }
+}
 
 /** The production [LinkCallPort]: [MultiJoinerCall] over the account identity. */
 internal class MultiJoinerLinkCallPort(
@@ -613,7 +587,6 @@ internal class MultiJoinerLinkCallPort(
             ownerAccountId = request.ownerAccountId,
             ownerSignatureKey = request.ownerSignatureKey,
             sfuBaseUrl = sfuBaseUrl,
-            sessionToken = request.sessionToken,
             audio = true,
             video = request.mediaVideo,
             ui = ui,
@@ -640,11 +613,12 @@ internal class MultiJoinerLinkCallPort(
                     }
                 }
             },
-            // Tiles are named by the one rule (`CallTileName.kt`): a person
-            // this device already knows is named before they announce, and a
-            // member's sealed profile is filed like a profile received in a
-            // chat, which is what verifies a claimed username.
-            names = callPeerNameResolver(applicationContext, hexKey(request.callId), profileNames),
+            // Tiles are named by the one rule (`CallTileName.kt`): a peer is
+            // the person its verified announcement names (ADR-0078 section 2),
+            // and a member's sealed profile is filed like a profile received
+            // in a chat, its account claim kept only when bound
+            // (`boundProfileClaim`).
+            names = callPeerNames(profileNames),
             onMemberProfile = { personKeyB64, profile ->
                 try {
                     profileNames.onProfileReceived(personKeyB64, peerProfileOf(profile))
@@ -717,6 +691,20 @@ internal class MultiJoinerLinkCallPort(
                 val blobId = composed.blobId
                 if (linkId != null && blobId != null) {
                     me.lakko.app.reach.ReachManager.peek()?.noteLinkBlob(linkId, blobId)
+                }
+                // ADR-0078 section 10: the link's revocation seed is kept on
+                // this device; the ledger names no owner.
+                if (blobId != null) {
+                    me.lakko.app.contacts.OwnLinkStores.current.put(
+                        me.lakko.app.auth.base64Encode(identity.accountId),
+                        me.lakko.app.contacts.OwnLinks.record(
+                            kind = me.lakko.app.contacts.OwnLink.KIND_CALL,
+                            blobId = blobId,
+                            seed = composed.revocationSeed,
+                            expiryMs = composed.expiryMs,
+                            maxUses = callInviteLinkMaxUses().toLong(),
+                        ),
+                    )
                 }
                 composed.url
             }

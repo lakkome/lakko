@@ -76,8 +76,6 @@ export function fakeStatementSigner(label: string, publicKey?: Uint8Array): Stat
       req({ segment: "registrars-set", signer: label, journalHex: hexOf(j), keys, ranks }),
     rootTransfer: (j, newRoot) =>
       req({ segment: "root", signer: label, journalHex: hexOf(j), newRoot }),
-    pushBinding: (j, pushGid) =>
-      req({ segment: "push-binding", signer: label, journalHex: hexOf(j), pushGid }),
     publicKey: () => publicKey ?? new Uint8Array(32).fill(label.charCodeAt(0)),
     free: () => undefined,
   };

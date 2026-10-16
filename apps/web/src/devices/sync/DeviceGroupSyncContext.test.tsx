@@ -96,6 +96,7 @@ vi.mock("../../wasm", () => ({
   }),
 }));
 vi.mock("../lifecycle", () => ({
+  deviceGroupIdOf: async () => new TextEncoder().encode("device-group"),
   ensureDeviceGroup: (_bytes: Uint8Array, account: string) =>
     new Promise((resolve) => {
       h.ensures.push({ account, resolve });

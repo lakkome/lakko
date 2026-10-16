@@ -351,18 +351,21 @@ describe("a call offer and a call end wake the group; nothing else does", () => 
   const CANDIDATE = new Uint8Array([0x62, 0x00]);
   const END = new Uint8Array([0x6a, 0x00]);
   const GROUP_START = new Uint8Array([0x72, 0x00]);
-  const PUSH_GID = new Uint8Array(32).fill(0x5c);
+  const SEALED = (kind: string): string => (kind === "call" ? "c" : "m").repeat(312);
 
   async function publishOne(
     frame: Uint8Array,
-    pushGidResolver: (groupId: Uint8Array) => Promise<Uint8Array | null> = async () => PUSH_GID,
+    wakeSealer: (groupId: Uint8Array, kind: "message" | "call") => Promise<string | null> = async (
+      _g,
+      kind,
+    ) => SEALED(kind),
     errors: unknown[] = [],
   ): Promise<ReturnType<typeof journalDs>> {
     const g = stampingGroup(freshGid(), 5);
     const recorded = journalDs();
     const chat = new ChatClient(recorded.ds, {
       identityProvider: () => IDENTITY_TOKEN,
-      pushGidResolver,
+      wakeSealer,
     });
     const publish = makeCallSignalingPublisher({
       chat,
@@ -374,22 +377,21 @@ describe("a call offer and a call end wake the group; nothing else does", () => 
     return recorded;
   }
 
-  it("wakes for an offer, at call priority, under the push_gid", async () => {
+  it("wakes for an offer, at call priority, sealed", async () => {
     const { wakes } = await publishOne(OFFER);
     expect(wakes.length).toBe(1);
-    expect(wakes[0]?.kind).toBe("call");
-    expect(Array.from(wakes[0]?.pushGid ?? [])).toEqual(Array.from(PUSH_GID));
+    expect(wakes[0]?.headerValue).toBe(SEALED("call"));
   });
 
   it("wakes for an end, so a cancelled call stops ringing a closed tab", async () => {
     const { wakes } = await publishOne(END);
     expect(wakes.length).toBe(1);
-    expect(wakes[0]?.kind).toBe("call");
+    expect(wakes[0]?.headerValue).toBe(SEALED("call"));
   });
 
   it("stays silent for answer, candidate and group control", async () => {
     for (const frame of [ANSWER, CANDIDATE, GROUP_START]) {
-      const resolver = vi.fn(async () => PUSH_GID);
+      const resolver = vi.fn(async () => SEALED("call"));
       const { wakes } = await publishOne(frame, resolver);
       expect(wakes).toEqual([null]);
       expect(resolver).not.toHaveBeenCalled();

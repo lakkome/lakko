@@ -1124,9 +1124,12 @@ impl RelayPacket {
 /// *their* `MediaPeer` instances, not by this one.
 pub struct MediaPeer {
     id: MediaPeerId,
-    /// The call this peer is admitted to. Set from the
-    /// signaling-layer admission (`crate::peer::Peer::call_id`)
-    /// when the peer's first SDP offer creates it. Media is
+    /// The call this peer is admitted to: the room id of its
+    /// admission token (`crate::peer::Peer::room`, ADR-0078
+    /// section 2 - a one-way function of the call id, so the
+    /// media half never sees the call id either; the field keeps
+    /// its old name). Set when the peer's first SDP offer
+    /// creates it. Media is
     /// fanned out ONLY between peers sharing a `call_id`
     /// (cross-call isolation — a hard SFU invariant); an
     /// empty value (a peer created by a stray pre-offer ICE
@@ -6019,7 +6022,7 @@ impl MediaPeer {
         }
         for cut in uplink.estimator.take_cut_notes() {
             tracing::info!(
-                origin = %self.id,
+                origin = %self.id.log_tag(),
                 rule = cut.rule,
                 from_kbps = cut.from_bps / 1000,
                 to_kbps = cut.to_bps / 1000,
@@ -6432,7 +6435,7 @@ impl MediaPeer {
                 if let Some(bps) = self.needs.estimate_before_idle {
                     if uplink.estimator.restore_after_idle(bps, now) {
                         tracing::info!(
-                            origin = %self.id,
+                            origin = %self.id.log_tag(),
                             estimate_kbps = uplink.estimator.estimate_bps() / 1000,
                             "media: a publisher's bitrate estimate was put back as a sender is switched on again"
                         );
@@ -6482,7 +6485,7 @@ impl MediaPeer {
             }
             let given_up = self.give_up_missing(mid, None);
             tracing::info!(
-                origin = %self.id,
+                origin = %self.id.log_tag(),
                 mid = ?mid,
                 given_up,
                 "media: a sender nobody is being sent has stopped"
@@ -6559,7 +6562,7 @@ impl MediaPeer {
             && !packet.is_fec()
             && self.request_keyframe_limited(packet.mid, None, now);
         tracing::info!(
-            origin = %self.id,
+            origin = %self.id.log_tag(),
             mid = ?packet.mid,
             role = role.as_str(),
             needed = told_on,
@@ -8289,7 +8292,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             if let Some(addr) = advertise_addr {
                 if let Err(e) = peer.add_local_host_candidate(addr) {
                     tracing::error!(
-                        peer = %peer.id(),
+                        peer = %peer.id().log_tag(),
                         candidate_addr = %addr,
                         error = %e,
                         "media: SFU host candidate rejected; refusing SDP offer \
@@ -8322,7 +8325,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             // peer's id, while this one is a random 30-char msid.
             if let Ok(answer) = &res {
                 tracing::info!(
-                    peer = %peer_id_for_backfill,
+                    peer = %peer_id_for_backfill.log_tag(),
                     media = %media_line_summary(answer),
                     "media: answered peer's own offer"
                 );
@@ -8372,7 +8375,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             match &res {
                 Ok(opened) => {
                     tracing::info!(
-                        peer = %peer_id,
+                        peer = %peer_id.log_tag(),
                         opened = opened.len(),
                         "media: subscriber answered the downstream-track offer"
                     );
@@ -8386,7 +8389,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
                     request_keyframes_for_opened(router, &peer_id, opened, Instant::now());
                 },
                 Err(e) => tracing::warn!(
-                    peer = %peer_id,
+                    peer = %peer_id.log_tag(),
                     error = %e,
                     "media: subscriber's answer to the downstream-track offer was refused"
                 ),
@@ -8405,7 +8408,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
         MediaCommand::RemovePeer { peer_id } => {
             let removed = router.remove_peer(&peer_id);
             tracing::info!(
-                peer = %peer_id,
+                peer = %peer_id.log_tag(),
                 removed,
                 peers_left = router.len(),
                 "media: peer removed after its signaling socket closed"
@@ -8424,14 +8427,14 @@ fn declare_light_tracks(peer: &mut MediaPeer, light_mids: &[String]) {
     }
     for (mid, why) in peer.declare_light_tracks(light_mids) {
         tracing::warn!(
-            peer = %peer.id(),
+            peer = %peer.id().log_tag(),
             mid = ?mid,
             reason = why.as_str(),
             "media: light-track declaration ignored"
         );
     }
     tracing::info!(
-        peer = %peer.id(),
+        peer = %peer.id().log_tag(),
         declared = light_mids.len(),
         light_mid = ?peer.light_mid(),
         "media: offer declared light tracks"
@@ -8453,7 +8456,7 @@ fn take_video_wants(router: &mut MediaRouter, subscriber: &MediaPeerId, wants: &
     };
     let count = peer.set_video_wants(wants);
     tracing::info!(
-        subscriber = %subscriber,
+        subscriber = %subscriber.log_tag(),
         named = wants.len(),
         main = count.main,
         middle = count.middle,
@@ -8473,14 +8476,14 @@ fn declare_middle_tracks(peer: &mut MediaPeer, middle_mids: &[String]) {
     }
     for (mid, why) in peer.declare_middle_tracks(middle_mids) {
         tracing::warn!(
-            peer = %peer.id(),
+            peer = %peer.id().log_tag(),
             mid = ?mid,
             reason = why.as_str(),
             "media: middle-track declaration ignored"
         );
     }
     tracing::info!(
-        peer = %peer.id(),
+        peer = %peer.id().log_tag(),
         declared = middle_mids.len(),
         middle_mid = ?peer.middle_mid(),
         "media: offer declared middle tracks"
@@ -8857,7 +8860,7 @@ fn drive_time(router: &mut MediaRouter, now: Instant) {
     for peer in router.peers_mut() {
         if let Err(e) = peer.handle_input(Input::Timeout(now)) {
             tracing::warn!(
-                peer = %peer.id(),
+                peer = %peer.id().log_tag(),
                 error = %e,
                 "media: timeout input failed; dropping peer"
             );
@@ -8921,8 +8924,8 @@ pub(crate) fn drive_playout_delay(router: &mut MediaRouter, now: Instant) -> usi
                 metrics::counter!(crate::prom::names::PLAYOUT_DELAY_RAISES_TOTAL).increment(1);
             }
             tracing::info!(
-                subscriber = %subscriber,
-                publisher = %publisher,
+                subscriber = %subscriber.log_tag(),
+                publisher = %publisher.log_tag(),
                 from_ms,
                 to_ms,
                 reason = reason.as_str(),
@@ -9019,7 +9022,7 @@ pub(crate) fn drive_burst_keyframes(
             // Packets stayed missing and none of them is taken for media
             // somebody needs: said, so the log shows every burst.
             tracing::info!(
-                origin = %publisher,
+                origin = %publisher.log_tag(),
                 mid = ?mid,
                 rid = ?rid,
                 lost = end.lost,
@@ -9068,7 +9071,7 @@ pub(crate) fn drive_burst_keyframes(
                 .map_or(0, |p| p.give_up_missing(mid, rid))
         };
         tracing::info!(
-            origin = %publisher,
+            origin = %publisher.log_tag(),
             mid = ?mid,
             rid = ?rid,
             lost = end.lost,
@@ -9218,7 +9221,7 @@ fn log_downlink_run(subscriber: &MediaPeerId, run: &DownlinkRun) {
         .increment(1);
         tracing::info!(
             %subscriber,
-            publisher = %change.publisher,
+            publisher = %change.publisher.log_tag(),
             from = change.from.as_str(),
             to = change.to.as_str(),
             wanted = change.wanted.as_str(),
@@ -9410,7 +9413,7 @@ pub(crate) fn drive_video_needed(
             continue;
         };
         tracing::info!(
-            publisher = %id,
+            publisher = %id.log_tag(),
             main = change.needed.main,
             middle = change.needed.middle,
             want_main = change.wanted.main,
@@ -9467,7 +9470,7 @@ pub(crate) fn drive_publish_budget(
         )
         .increment(1);
         tracing::info!(
-            publisher = %publisher.id(),
+            publisher = %publisher.id().log_tag(),
             estimate_kbps = change.inputs.estimate_bps / 1000,
             main_kbps = change.budget.main_kbps,
             middle_kbps = change.budget.middle_kbps,
@@ -9543,7 +9546,7 @@ fn log_downlinks(router: &MediaRouter, now: Instant) {
             continue;
         };
         tracing::info!(
-            subscriber = %peer.id(),
+            subscriber = %peer.id().log_tag(),
             budget_kbps = ?snap.budget_bps.map(|bps| bps / 1000),
             estimate_kbps = ?snap.estimate_bps.map(|bps| bps / 1000),
             carried_kbps = ?snap.carried_bps.map(|bps| bps / 1000),
@@ -9578,7 +9581,7 @@ fn log_uplink_estimates(router: &mut MediaRouter, now: Instant) {
             continue;
         };
         tracing::info!(
-            origin = %peer.id(),
+            origin = %peer.id().log_tag(),
             estimate_kbps = snap.estimate_bps / 1000,
             arriving_kbps = snap.arriving_bps / 1000,
             state = snap.state.as_str(),
@@ -9597,7 +9600,7 @@ fn log_uplink_estimates(router: &mut MediaRouter, now: Instant) {
 /// counters are cumulative as str0m keeps them.
 fn log_ingress_stats(peer: &MediaPeerId, st: &str0m::stats::MediaIngressStats) {
     tracing::info!(
-        peer = %peer,
+        peer = %peer.log_tag(),
         mid = ?st.mid,
         rid = ?st.rid,
         bytes = st.bytes,
@@ -9620,11 +9623,11 @@ fn log_egress_stats(
 ) {
     let upstream = media_peer.origin_for_downstream_mid(st.mid);
     tracing::info!(
-        peer = %peer,
+        peer = %peer.log_tag(),
         mid = ?st.mid,
         rid = ?st.rid,
-        origin = ?upstream.as_ref().map(|t| t.source_peer.to_string()),
         origin_mid = ?upstream.as_ref().map(|t| t.source_mid),
+        origin = ?upstream.as_ref().map(|t| t.source_peer.log_tag()),
         role = ?upstream.as_ref().map(|t| t.role.as_str()),
         bytes = st.bytes,
         packets = st.packets,
@@ -9640,7 +9643,7 @@ fn log_egress_stats(
 /// including the egress bandwidth estimate the layer policy reads.
 fn log_peer_stats(peer: &MediaPeerId, st: &str0m::stats::PeerStats) {
     tracing::info!(
-        peer = %peer,
+        peer = %peer.log_tag(),
         bwe_tx = ?st.bwe_tx,
         bytes_rx = st.bytes_rx,
         bytes_tx = st.bytes_tx,
@@ -9803,8 +9806,7 @@ async fn drain_outputs(
                         // publisher never got its media line negotiated and
                         // nothing downstream is worth looking at.
                         tracing::info!(
-                            peer = %origin,
-                            call = %peer.call_id(),
+                            peer = %origin.log_tag(),
                             mid = ?added.mid,
                             kind = ?added.kind,
                             direction = ?added.direction,
@@ -9832,12 +9834,12 @@ async fn drain_outputs(
                     // receiving for seconds at a time is either paced or
                     // disconnected, and only this line tells the two apart.
                     Event::IceConnectionStateChange(state) => {
-                        tracing::info!(peer = %origin, state = ?state, "media: ICE connection state");
+                        tracing::info!(peer = %origin.log_tag(), state = ?state, "media: ICE connection state");
                     },
                     Event::Connected => {
                         // From here on the fanout may write to this peer.
                         peer.mark_connected();
-                        tracing::info!(peer = %origin, "media: peer transport connected");
+                        tracing::info!(peer = %origin.log_tag(), "media: peer transport connected");
                     },
                     Event::MediaIngressStats(st) => log_ingress_stats(&origin, &st),
                     Event::MediaEgressStats(st) => log_egress_stats(&origin, peer, &st),
@@ -9853,7 +9855,7 @@ async fn drain_outputs(
                     // str0m does not flip for every error, so flip it
                     // here or the peer lives on and every later write
                     // to it fails.
-                    tracing::warn!(peer = %origin, error = %e, "media: poll_output failed; dropping peer");
+                    tracing::warn!(peer = %origin.log_tag(), error = %e, "media: poll_output failed; dropping peer");
                     peer.disconnect();
                     break;
                 },
@@ -9882,7 +9884,7 @@ fn late_simulcast_track(peer: &mut MediaPeer, packet: &RelayPacket) -> Option<Tr
     }
     let track = peer.note_simulcast_track_in(packet.mid)?;
     tracing::info!(
-        peer = %peer.id(),
+        peer = %peer.id().log_tag(),
         mid = ?track.mid,
         "media: track found to be simulcast from its packets"
     );
@@ -10207,7 +10209,7 @@ impl FanoutLedger {
         origins.sort_by(|a, b| a.0.cmp(&b.0));
         for ((origin, mid), t) in origins {
             tracing::info!(
-                origin = %origin,
+                origin = %origin.log_tag(),
                 mid = ?mid,
                 packets = t.packets,
                 frames = t.frames,
@@ -10225,8 +10227,8 @@ impl FanoutLedger {
         targets.sort_by(|a, b| a.0.cmp(&b.0));
         for ((target, origin, mid, role), o) in targets {
             tracing::info!(
-                target = %target,
-                origin = %origin,
+                target = %target.log_tag(),
+                origin = %origin.log_tag(),
                 origin_mid = ?mid,
                 role = role.as_str(),
                 sent = o.sent,
@@ -10428,7 +10430,7 @@ pub(crate) fn fanout_packets_into(
                 }
                 if let MediaForward::WriteFailed(detail) = &forwarded {
                     tracing::warn!(
-                        target_peer = %peer.id(),
+                        target_peer = %peer.id().log_tag(),
                         role = role.as_str(),
                         error = %detail,
                         "media: forward write failed"
@@ -10524,9 +10526,8 @@ fn backfill_existing_tracks(router: &mut MediaRouter, joiner: &MediaPeerId) {
             // than there, which is the difference between "the call had
             // nothing to give it" and "the call had tracks and withheld them".
             tracing::info!(
-                origin = %origin,
-                target = %joiner,
-                call = %call,
+                origin = %origin.log_tag(),
+                target = %joiner.log_tag(),
                 mid = ?track.mid,
                 kind = ?track.kind,
                 "media: opened pre-existing track on joining subscriber"
@@ -10605,7 +10606,7 @@ pub(crate) fn request_keyframe_from_publisher(
         // the subscriber is expected within the encoder's keyframe latency —
         // not at the publisher's next natural keyframe, whenever that is.
         tracing::info!(
-            origin = %track.source_peer,
+            origin = %track.source_peer.log_tag(),
             mid = ?track.source_mid,
             rid = ?track.rid,
             reason = reason.as_str(),
@@ -10623,7 +10624,7 @@ pub(crate) fn send_owed_keyframe_requests(router: &mut MediaRouter, now: Instant
         let requests = peer.send_owed_keyframe_requests(now);
         for (mid, rid) in &requests {
             tracing::info!(
-                origin = %peer.id(),
+                origin = %peer.id().log_tag(),
                 mid = ?mid,
                 rid = ?rid,
                 reason = KeyframeReason::Owed.as_str(),
@@ -11022,7 +11023,7 @@ fn poll_uplink_fallbacks(
                 )
                 .increment(1);
                 tracing::info!(
-                    origin = %origin,
+                    origin = %origin.log_tag(),
                     mid = ?mid,
                     from = t.direction.from_str(),
                     to = t.direction.to_str(),
@@ -11166,7 +11167,7 @@ fn send_fallback_keyframe_requests(
         if sent {
             sent_count += 1;
             tracing::info!(
-                origin = %key.0,
+                origin = %key.0.log_tag(),
                 mid = ?mid,
                 rid = ?rid,
                 reason = reason.as_str(),
@@ -11289,9 +11290,8 @@ pub(crate) fn propagate_new_tracks_in(router: &mut MediaRouter, new_tracks: &[Pe
                 // against a present point 1 means cross-call isolation or the
                 // peer walk dropped it, not the negotiation.
                 tracing::info!(
-                    origin = %event.origin,
-                    target = %peer.id(),
-                    call = %origin_call,
+                    origin = %event.origin.log_tag(),
+                    target = %peer.id().log_tag(),
                     mid = ?event.track.mid,
                     kind = ?event.track.kind,
                     "media: opened downstream track on subscriber"
@@ -11332,7 +11332,7 @@ async fn drive_renegotiations(router: &mut MediaRouter, peers: &PeerRegistry) {
                 Ok(None) => None,
                 Err(e) => {
                     tracing::warn!(
-                        peer = %peer.id(),
+                        peer = %peer.id().log_tag(),
                         error = %e,
                         "media: negotiate_if_needed failed"
                     );
@@ -11345,14 +11345,14 @@ async fn drive_renegotiations(router: &mut MediaRouter, peers: &PeerRegistry) {
     for (peer_id, sdp) in pending {
         let Some(peer) = peers.peer(&peer_id).await else {
             tracing::warn!(
-                peer = %peer_id,
+                peer = %peer_id.log_tag(),
                 "media: cannot dispatch SdpOffer — peer not in registry"
             );
             continue;
         };
         let Some(tx) = peer.outbound.as_ref() else {
             tracing::warn!(
-                peer = %peer_id,
+                peer = %peer_id.log_tag(),
                 "media: cannot dispatch SdpOffer — peer has no outbound channel"
             );
             continue;
@@ -11368,7 +11368,7 @@ async fn drive_renegotiations(router: &mut MediaRouter, peers: &PeerRegistry) {
                 // without seeing the offer. It is a single compact field, not
                 // a line per extension.
                 tracing::info!(
-                    peer = %peer_id,
+                    peer = %peer_id.log_tag(),
                     extmaps = %extmaps,
                     "media: offered downstream track to subscriber"
                 );
@@ -11379,7 +11379,7 @@ async fn drive_renegotiations(router: &mut MediaRouter, peers: &PeerRegistry) {
                 // close. Log + move on; the next tick
                 // retries.
                 tracing::warn!(
-                    peer = %peer_id,
+                    peer = %peer_id.log_tag(),
                     "media: outbound channel full; renegotiation SdpOffer dropped"
                 );
             },
@@ -15197,7 +15197,7 @@ mod tests {
     fn the_companions_stream_id_carries_the_suffix_through_strs_filter() {
         let t0 = Instant::now();
         let mut sub = MediaPeer::new(pid("sub"), t0);
-        let source = crate::peer::PeerId::fresh();
+        let source = crate::peer::PeerId::from_string("00112233445566778899aabbccddeeff".into());
         assert_eq!(
             MediaPeer::downstream_stream_id(&source, TrackRole::Main),
             source.to_string()

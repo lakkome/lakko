@@ -715,20 +715,16 @@ public final class ChatRepository: ObservableObject {
         self.chatClient.dsAuthProvider = { [weak self] groupIdHex in
             self?.dsAuth(groupIdHex: groupIdHex)
         }
-        // ADR-0057 obligation 8, second security pass finding 5 — the journal
-        // is bound to a minted or rotated routing secret's `push_gid` BEFORE
-        // the secret is broadcast.
         // A routing row is worked on per `(account, group)` and that work
-        // outlives a sign-out. The device pseudonym a group subscription is
-        // made under belongs to the signed-in account's session, so the
-        // gateway is reached only for the account that is bound here.
+        // outlives a sign-out. A subscription carries this device's tokens
+        // sealed for the signed-in account's group (ADR-0078), so the gateway
+        // is reached only for the account that is bound here.
         self.pushRouting.accountIsBound = { [weak self] accountIdB64 in
             self?.currentAccountIdB64 == accountIdB64
         }
-        self.pushRouting.bindSecret = { [weak self] accountIdB64, groupIdHex, secret in
-            guard let self, self.currentAccountIdB64 == accountIdB64 else { return .notPermitted }
-            return await self.bindPushRouting(groupIdHex: groupIdHex, secret: secret)
-        }
+        // ADR-0078 — every subscription of the signed-in account is sent again
+        // through this routing when the device's tokens change.
+        PushSubscriber.shared.routing = self.pushRouting
         // ADR-0074 part 3 — a pairing state bundle may bring the account's
         // own predecessors to a session that is already running.
         stateBundleObserver = NotificationCenter.default.addObserver(
@@ -2290,7 +2286,7 @@ public final class ChatRepository: ObservableObject {
             return nil
         }
         guard let record = groups[groupIdHex] else {
-            NSLog("deriveCallKey: no group handle for %@", groupIdHex)
+            NSLog("deriveCallKey: no group handle")
             return nil
         }
         do {
@@ -2306,6 +2302,19 @@ public final class ChatRepository: ObservableObject {
             NSLog("deriveCallKey: exporter failed: %@", String(describing: error))
             return nil
         }
+    }
+
+    /// The peer announcer of a group call in `groupIdHex` (ADR-0078 section
+    /// 2): this device signs who it is with its leaf key, and every other
+    /// peer's announcement is verified against the group's roster as it is
+    /// when the announcement arrives. `nil` before bootstrap.
+    func callPeerAnnouncer(groupIdHex: String, callId: Data) -> CallPeerAnnouncer? {
+        guard let identity = canonicalIdentity, callId.count == 16 else { return nil }
+        return CallPeerAnnouncer.forGroup(
+            identity: identity,
+            callId: callId,
+            group: { [weak self] in self?.groups[groupIdHex]?.group }
+        )
     }
 
     /// Number of members in the live MLS group for `groupIdHex`, or
@@ -3701,11 +3710,27 @@ public final class ChatRepository: ObservableObject {
         // the inline form, which carries the sealed blob; a refusal from the
         // server (401, 400, 5xx) surfaces.
         let bearer = try bearerDiscovery()
+        // ADR-0078 section 10: the ledger row carries a key minted for this
+        // link alone, never the issuer's identity key; its seed is kept in
+        // this device's record of the link and is the only thing that revokes
+        // it.
+        let revocation: (seed: Data, publicKey: Data)
+        do {
+            revocation = try LinkRevocationKey.fresh()
+        } catch {
+            throw ChatError.wrapped("link revocation key", underlying: error)
+        }
         let base: String
         do {
             let blobId = try await bearer.uploadGroupInvite(
-                mint: mint, expiryMs: 0, maxUses: UInt32.max)
+                mint: mint, revocationPubkey: revocation.publicKey, expiryMs: 0, maxUses: UInt32.max)
             base = try GroupInviteUrl.composePointerGroupInviteUrl(blobId: blobId)
+            if let accountIdB64 = currentAccountIdB64 {
+                OwnLinkStore.shared.put(accountIdB64: accountIdB64, OwnLink(
+                    kind: .group, slug: base64UrlEncodeNoPad(blobId), revocationSeed: revocation.seed,
+                    label: "", expiryMs: 0, maxUses: Int64(UInt32.max), bootstrapReferral: false,
+                    mintedAtMs: Int64(Date().timeIntervalSince1970 * 1000)))
+            }
         } catch let error where Self.groupInviteUploadFallsBackInline(error) {
             NSLog("group invite upload failed (\(Self.discoveryFailureSummary(error))); "
                 + "sharing the inline link")
@@ -3763,9 +3788,11 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0028 revoke — the issuer revokes a previously-created group invite
     /// link. Only the server-backed pointer form (a 6-byte `blob_id`) is
     /// revocable; an inline link has no ledger row. Returns `true` when a ledger
-    /// row was revoked, `false` for an inline / malformed link (nothing to do).
+    /// row was revoked, `false` for an inline / malformed link, or one this
+    /// device keeps no revocation key for (ADR-0078 section 10: it lives until
+    /// it expires).
     public func revokeGroupInviteLink(link: String) async throws -> Bool {
-        guard let identity = conversationAccountIdentity else {
+        guard let accountIdB64 = currentAccountIdB64 else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
         }
         // The slug ends where the fragment begins: the link key after `#` is
@@ -3785,16 +3812,20 @@ public final class ChatRepository: ObservableObject {
         case .inline:
             return false
         case .pointer(let blobId):
-            // Session-gated like the upload (`require_session`); the issuer
-            // signature is the authorisation, the bearer the DoS gate.
+            // Session-gated like the upload (`require_session`); the signature
+            // by the link's own revocation key is the authorisation, the
+            // bearer the DoS gate.
+            let slug = base64UrlEncodeNoPad(blobId)
+            guard let own = OwnLinkStore.shared.link(accountIdB64: accountIdB64, kind: .group, slug: slug),
+                  let seed = own.seed else { return false }
             let bearer = try bearerDiscovery()
             do {
-                _ = try await bearer.revokeGroupInvite(
-                    blobId: blobId, signingSeed: identity.ed25519Seed())
+                _ = try await bearer.revokeGroupInvite(blobId: blobId, signingSeed: seed)
             } catch {
                 NSLog("group invite revoke failed (\(Self.discoveryFailureSummary(error)))")
                 throw ChatError.wrapped("group invite revoke failed", underlying: error)
             }
+            OwnLinkStore.shared.remove(accountIdB64: accountIdB64, kind: .group, slug: slug)
             return true
         }
     }
@@ -4295,7 +4326,8 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
         let bound = binding.capture()
-        let pushWake = wake.flatMap { pushWake(groupIdHex: groupIdHex, kind: $0) }
+        var pushWake: DsWake?
+        if let wake { pushWake = await self.pushWake(groupIdHex: groupIdHex, kind: wake) }
         let client = chatClient
         let group = record.group
         let result = try await Self.$sendBinding.withValue(bound) {
@@ -4363,25 +4395,43 @@ public final class ChatRepository: ObservableObject {
         )
     }
 
-    /// ADR-0054 decision 1 over ADR-0042 — the wake a publish to
-    /// `groupIdHex` carries, named by the group's opaque `push_gid`, NOT the
-    /// DS `group_id`. When this device holds no secret for the group yet the
-    /// answer is `nil` and the publish carries no header rather than leaking
-    /// the `group_id` (invariant #5) — recipients still receive the message on
-    /// their next foreground poll. A publisher is a member, so it normally
-    /// holds the secret.
+    /// ADR-0054 decision 1 over ADR-0042, sealed by ADR-0078 section 3 — the
+    /// wake a publish to `groupIdHex` carries: the group's `push_gid`, the
+    /// kind, a nonce, this device's clock, the group's unlock key and a
+    /// signature by the group's wake key, sealed to push-gw's key
+    /// (``PushWakeKey``), so the DS forwards a blob it cannot read. When this
+    /// device holds no secret for the group yet, or push-gw's key cannot be
+    /// had, the answer is `nil` and the publish carries no header rather than
+    /// leaking the `group_id` (invariant #5) — recipients still receive the
+    /// message on their next foreground poll.
     ///
     /// ``DsWake/Kind/call`` raises the provider urgency so a closed app rings.
-    /// The delivered payload is identical either way: a group pseudonym and a
-    /// journal pointer, nothing about the call (invariants #2 and #5).
-    func pushWake(groupIdHex: String, kind: DsWake.Kind) -> DsWake? {
+    /// The delivered payload is identical either way: a group pseudonym, the
+    /// subscription id and a journal pointer, nothing about the call.
+    /// push-gw's wake key (``PushWakeKey``); replaceable so a test supplies
+    /// a fixed key instead of a fetch.
+    var pushWakeKeyProvider: @MainActor () async -> Data? = { await PushWakeKey.key() }
+
+    func pushWake(groupIdHex: String, kind: DsWake.Kind) async -> DsWake? {
         guard let accountIdB64 = currentAccountIdB64,
-              let pushGid = pushRouting.pushGid(
+              let secret = pushRouting.secret(
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex) else {
             // No secret held yet: do NOT wake under the DS key.
             return nil
         }
-        return DsWake(pushGid: pushGid, kind: kind)
+        guard let gwKey = await pushWakeKeyProvider() else { return nil }
+        let nowMs = UInt64(max(0, Date().timeIntervalSince1970 * 1000))
+        do {
+            let value = try LakkoCore.pushWakeHeaderValue(
+                pushGwKey: gwKey,
+                secret: secret,
+                kind: kind == .call ? .call : .message,
+                timestampMs: nowMs)
+            return DsWake(headerValue: value)
+        } catch {
+            NSLog("push wake sealing failed; publishing without a wake")
+            return nil
+        }
     }
 
     // MARK: - ADR-0042 opaque push routing
@@ -4618,7 +4668,13 @@ public final class ChatRepository: ObservableObject {
         let selfEvicted = readIsActive { try record.group.isActive() } == false
         // The local group ended: it is no longer "a conversation a restored
         // backup named that this device has yet to join".
-        if selfEvicted { dropRestoredKnownGroup(groupIdHex: groupIdHex) }
+        if selfEvicted {
+            dropRestoredKnownGroup(groupIdHex: groupIdHex)
+            // ADR-0078 section 9 — the group's members hold this account's
+            // one `group` and `member` key: the registration sees the group
+            // gone and rotates both, republishing in every remaining group.
+            ReachCenter.shared.sync()
+        }
         // ADR-0060 section 3 — a departed member held this account's `group`
         // and `member` keys for this group: rotate both (whatever this
         // device's role — every member owns its own keys), after the removal
@@ -4698,7 +4754,7 @@ public final class ChatRepository: ObservableObject {
     /// from. The routing work that calls this is queued per `(account,
     /// group)` and outlives a sign-out; a secret of one account is never
     /// sealed and sent by another that signed in meanwhile and is in the same
-    /// group (the same rule as ``PushGroupRouting/bindSecret``).
+    /// group (the same rule as ``PushGroupRouting/accountIsBound``).
     private func broadcastPushRoutingControl(
         accountIdB64: String, groupIdHex: String, bytes: Data
     ) async throws {
@@ -8273,22 +8329,6 @@ public final class ChatRepository: ObservableObject {
         NSLog("ADR-0057: root takeover %@", String(describing: outcome))
     }
 
-    /// ADR-0057 obligation 8, second security pass finding 5 — bind the
-    /// journal to `derivePushGid(secret)` with the root (owner) or the admin
-    /// registrar key, BEFORE the secret is broadcast (``PushGroupRouting``
-    /// calls this). Members do not bind.
-    private func bindPushRouting(groupIdHex: String, secret: Data) async -> PushBindOutcome {
-        guard let record = groups[groupIdHex],
-              let pushGid = PushGroupRouting.derivePushGid(secret: secret) else { return .failed }
-        guard let authority = journalAuthority(record: record, groupIdHex: groupIdHex),
-              authority.isRootOrAdmin else {
-            NSLog("ADR-0057: push binding skipped, no root or admin registrar key")
-            return .notPermitted
-        }
-        return await JournalOwnership.bindPush(
-            signer: authority.signer, journalId: record.groupId, pushGid: pushGid, ds: dsClient)
-    }
-
     // MARK: - ADR-0060 Welcome delivery
 
     /// The account keys of leaves this device fetched to propose or add, by
@@ -8668,8 +8708,13 @@ public final class ChatRepository: ObservableObject {
 
     /// Every conversation group this device is in (ADR-0060: the `member` and
     /// `group` reach scopes).
+    /// The ids of every group this device is still a member of: a group the
+    /// account was removed from (or left) is not among them, so the reach
+    /// registration sees it as left (ADR-0078 section 9).
     public func allGroupIds() -> [Data] {
-        groups.values.map(\.groupId)
+        groups.values.compactMap { record in
+            readIsActive { try record.group.isActive() } == false ? nil : record.groupId
+        }
     }
 
     /// ADR-0053 point 7 — whether this device reads the knock queue: the

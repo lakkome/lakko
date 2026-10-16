@@ -54,24 +54,20 @@ import { journalHex } from "../ds/access";
 import { installAddressRecheck } from "../reach/mailbox-write";
 import { reachSession, reachSessionSignal } from "../reach/reach-service";
 import { DiscoveryClient } from "../discovery/client";
-import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { waitingSentRequests } from "./contact-list-model";
 import { forgetInviteLinkSecret } from "./invite-link-secrets";
-import { forgetMintedLink, isInlineLinkSlug, listMintedLinks, mintedLinkFor } from "./minted-links";
+import { listMintedLinks } from "./minted-links";
+import { revokeMintedLink, type OwnLinkRevokeOutcome } from "./own-links";
 import { forgetSentRequest, loadSentRequests, recordSentRequest } from "./sent-requests";
 import { forgetSentIntro, sentIntroFor } from "./sent-request-intros";
 import {
   installSpentRunners,
-  linkRevokeOutcome,
   requestsToResend,
-  revocationSeedOrder,
   spentFailureOutcome,
-  localLinkRevokeOutcome,
   localLinkSpent,
   readSpendOwed,
   runOwedSpendRound,
-  type LocalRevokeAttempt,
-  type RevokeAttempt,
   type SpentOutcome,
 } from "./rotation-spent";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
@@ -216,103 +212,27 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   installSpentRunners({
     links: async (rotatedAtMs) => {
       const secrets = auth.identitySecrets();
-      const current = chats.accountIdentity();
-      const predecessors = chats.ownPredecessorIdentities();
-      if (secrets === null || current === null || predecessors.length === 0) return null;
+      if (secrets === null) return null;
       const accountIdB64 = base64Encode(secrets.accountId);
-      // The owner list is answered to the key the directory publishes NOW.
-      const currentSeed = current.ed25519Seed;
-      let listed;
-      try {
-        listed = await spentDiscovery.listInvitesByOwner(secrets.accountId, currentSeed);
-      } catch (err) {
-        return [spentFailureOutcome(err)];
-      } finally {
-        currentSeed.fill(0);
-      }
-      // A ledger that lists nothing for this owner still leaves the links
-      // this device keeps a row for (below).
-      const listedInvites = listed.kind === "list" ? listed.invites : [];
-      // A link is signed by the account key of the moment it was minted: a
-      // predecessor's. The current seed is never tried, so a link minted
-      // after the rotation is not this step's to revoke.
-      const seeds = revocationSeedOrder(predecessors.map((p) => p.ed25519Seed));
+      // ADR-0078 section 10: no ledger row names its owner, so there is no
+      // owner list to walk. Every device revokes the links IT minted before
+      // the keys changed, each with the link's own revocation seed from its
+      // record; a link with no record here is another device's to revoke (or
+      // lives until it expires).
       const outcomes: SpentOutcome[] = [];
-      const handled = new Set<string>();
-      try {
-        for (const invite of listedInvites) {
-          const blobId = base64UrlDecodeNoPad(invite.blobIdSlug);
-          const attempts: RevokeAttempt[] = [];
-          for (const seed of seeds) {
-            try {
-              const result = await spentDiscovery.revokeInvite(blobId, seed);
-              attempts.push(result.kind === "revoked" ? "revoked" : "not-owner");
-            } catch (err) {
-              attempts.push(spentFailureOutcome(err) === "unreachable" ? "unreachable" : "not-owner");
-            }
-            const last = attempts[attempts.length - 1];
-            if (last === "revoked" || last === "unreachable") break;
-          }
-          const outcome = linkRevokeOutcome(attempts);
-          outcomes.push(outcome);
-          if (outcome !== "done") continue;
-          // Out of every local list of own links: the link's reach key, the
-          // kept secret and the kept link id.
-          const local = await mintedLinkFor(accountIdB64, "contact", invite.blobIdSlug);
-          if (local !== null) await reachSession()?.revokeLink(local.linkId).catch(() => undefined);
-          await forgetMintedLink(accountIdB64, "contact", invite.blobIdSlug);
-          forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), invite.blobIdSlug);
-          handled.add(invite.blobIdSlug);
-        }
-        // The links THIS device minted before the keys changed and still
-        // keeps a row for. On the rotating device the pass above has taken
-        // its `/i/` links already; on a kept device the ledger no longer
-        // lists them (the rotating device revoked them), and the local rows
-        // and their reach keys are what is left. `/c/` call links are signed
-        // by the device key and are revoked at the call-invite ledger.
-        const deviceSeed = chats.identity()?.ed25519Seed ?? null;
+      for (const link of await listMintedLinks(accountIdB64)) {
+        if (!localLinkSpent(link.mintedAtMs, rotatedAtMs)) continue;
+        let outcome: OwnLinkRevokeOutcome;
         try {
-          for (const link of await listMintedLinks(accountIdB64)) {
-            if (!localLinkSpent(link.mintedAtMs, rotatedAtMs)) continue;
-            if (link.kind === "contact" && handled.has(link.blobIdSlug)) continue;
-            const attempts: LocalRevokeAttempt[] = [];
-            if (!isInlineLinkSlug(link.blobIdSlug)) {
-              const signers = link.kind === "contact" ? seeds : deviceSeed === null ? [] : [deviceSeed];
-              if (link.kind === "call" && deviceSeed === null) attempts.push("unreachable");
-              let blobId: Uint8Array | null = null;
-              try {
-                blobId = base64UrlDecodeNoPad(link.blobIdSlug);
-              } catch {
-                blobId = null;
-              }
-              for (const seed of blobId === null ? [] : signers) {
-                try {
-                  const result =
-                    link.kind === "contact"
-                      ? await spentDiscovery.revokeInvite(blobId as Uint8Array, seed)
-                      : await spentDiscovery.revokeCallInvite(blobId as Uint8Array, seed);
-                  attempts.push(result.kind === "revoked" ? "revoked" : "gone");
-                } catch (err) {
-                  attempts.push(spentFailureOutcome(err) === "unreachable" ? "unreachable" : "gone");
-                }
-                const last = attempts[attempts.length - 1];
-                if (last === "revoked" || last === "unreachable") break;
-              }
-            }
-            const outcome = localLinkRevokeOutcome(attempts);
-            outcomes.push(outcome);
-            if (outcome !== "done") continue;
-            await reachSession()?.revokeLink(link.linkId).catch(() => undefined);
-            await forgetMintedLink(accountIdB64, link.kind, link.blobIdSlug);
-            if (link.kind === "contact") {
-              forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), link.blobIdSlug);
-            }
-          }
-        } finally {
-          deviceSeed?.fill(0);
+          outcome = await revokeMintedLink(spentDiscovery, accountIdB64, link);
+        } catch (err) {
+          outcomes.push(spentFailureOutcome(err));
+          continue;
         }
-      } finally {
-        for (const seed of seeds) seed.fill(0);
+        outcomes.push(outcome === "unreachable" ? "unreachable" : "done");
+        if (outcome !== "unreachable" && link.kind === "contact") {
+          forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), link.blobIdSlug);
+        }
       }
       return outcomes;
     },
@@ -597,8 +517,8 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
                 (c) => c.signaturePubkeyB64 === base64Encode(ev.ack.accepterPubkey),
               )?.displayName ?? "",
             acceptedAtMs: Date.now(),
-            // ADR-0021 — the peer's account_id (hex) so the SFU group-call
-            // roster can resolve to this contact's name.
+            // The peer's account_id (hex), kept with the contact (founding a
+            // one-to-one, the backup).
             accountIdHex: groupIdHex(ev.ack.accepterAccountId),
           };
           // Durable, and keyed by the captured account: recorded even when

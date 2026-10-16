@@ -34,7 +34,7 @@ pub mod refusal;
 pub mod welcome_rendezvous;
 
 pub use device_binding::{account_key_of_credential, DeviceBinding, DEVICE_BINDING_LEN};
-pub use device_group::{AccountId, DeviceGroup, MAX_SERVICE_ENVELOPE_LEN};
+pub use device_group::{AccountId, AccountSeed, DeviceGroup, MAX_SERVICE_ENVELOPE_LEN};
 pub use error::{Error, Result};
 pub use group::{
     epoch_after_message, epoch_of_message, is_external_join_proposal_for, Group, Incoming,
@@ -45,7 +45,7 @@ pub use group_proposals::{ProposalKind, ProposalRecord};
 pub use group_roles::{account_committer_rank, committer_rank, OutgoingOwner, Role, RoleTable};
 pub use identity::Identity;
 pub use publisher_group::{
-    channel_id_from_group_id, ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN,
+    publisher_group_id_for, ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN,
 };
 pub use refusal::{RefusalDisposition, RefusalReason};
 pub use welcome_rendezvous::WelcomeRendezvous;

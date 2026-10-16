@@ -99,10 +99,19 @@ fn test_key(seed: u8) -> TestKey {
     }
 }
 
-/// Mint a valid call-admission JWT for the given account +
-/// call id. Both must be 32-char lowercase hex per the
-/// `lakko-call-jwt` contract.
-fn mint(key: &TestKey, account_id: &str, call_id: &str, role: CallRole) -> String {
+/// The room of a 32-hex call id (`lakko_sfu_proto::room_hex`).
+fn room_of(call_id: &str) -> String {
+    let mut bytes = [0u8; 16];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&call_id[i * 2..i * 2 + 2], 16).expect("hex call id");
+    }
+    lakko_sfu_proto::room_hex(&bytes)
+}
+
+/// Mint a valid call-admission JWT (ADR-0078 section 2): `peer` is a hex
+/// string left-padded to the 32-hex peer id, `call_id` a 32-hex call id
+/// whose room the token names. No account, no call id in the token.
+fn mint(key: &TestKey, peer: &str, call_id: &str, role: CallRole) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -110,8 +119,8 @@ fn mint(key: &TestKey, account_id: &str, call_id: &str, role: CallRole) -> Strin
     let claims = CallJwtClaims {
         iss: JWT_ISSUER.into(),
         aud: JWT_AUDIENCE.into(),
-        sub: account_id.into(),
-        call_id: call_id.into(),
+        room: room_of(call_id),
+        peer_id: format!("{peer:0>32}"),
         role,
         iat: now,
         exp: now + JWT_TTL_SECS,
@@ -165,13 +174,8 @@ fn ws_request_offering(addr: &std::net::SocketAddr, protocols: &str) -> ClientRe
 }
 
 /// `GET` the call-state route with `Authorization: Bearer <jwt>`.
-async fn get_state(url: &str, jwt: &str) -> reqwest::Response {
-    reqwest::Client::new()
-        .get(url)
-        .bearer_auth(jwt)
-        .send()
-        .await
-        .expect("state request")
+async fn get_state(url: &str) -> reqwest::Response {
+    reqwest::get(url).await.expect("state request")
 }
 
 /// Read one ServerFrame from a tungstenite WS stream.
@@ -242,9 +246,13 @@ async fn ws_admission_with_valid_jwt_emits_welcome() {
     let frame = recv_frame(&mut ws).await;
     match frame {
         ServerFrame::Welcome {
-            call_id, roster, ..
+            peer_id,
+            room,
+            roster,
+            ..
         } => {
-            assert_eq!(call_id, "0123456789abcdef0123456789abcdef");
+            assert_eq!(room, room_of("0123456789abcdef0123456789abcdef"));
+            assert_eq!(peer_id, "deadbeefdeadbeefdeadbeefdeadbeef");
             assert!(roster.is_empty(), "first peer sees empty roster");
         },
         other => panic!("expected Welcome, got {other:?}"),
@@ -462,7 +470,7 @@ async fn ping_round_trip() {
     let addr = spawn_server(key.jwks.clone()).await;
     let jwt = mint(
         &key,
-        "p1",
+        "a7",
         "5555555555555555ffffffffffffffff",
         CallRole::Publisher,
     );
@@ -487,13 +495,13 @@ async fn cross_call_isolation() {
 
     let alice_jwt = mint(
         &key,
-        "x1",
+        "e1",
         "6666666666666666aaaaaaaaaaaaaaaa",
         CallRole::Publisher,
     );
     let eve_jwt = mint(
         &key,
-        "x2",
+        "e2",
         "7777777777777777bbbbbbbbbbbbbbbb",
         CallRole::Publisher,
     );
@@ -680,14 +688,10 @@ async fn a_call_left_empty_past_the_grace_is_over_for_the_next_joiner() {
         call,
         CallRole::Participant,
     );
-    let state = format!("http://{addr}/v1/calls/{call}");
+    let state = format!("http://{addr}/v1/rooms/{}", room_of(call));
 
     // Never seen: a first join founds it.
-    let body: serde_json::Value = get_state(&state, &jwt_a)
-        .await
-        .json()
-        .await
-        .expect("state json");
+    let body: serde_json::Value = get_state(&state).await.json().await.expect("state json");
     assert_eq!(body["state"], "unknown");
 
     let (mut ws_a, _) = tokio_tungstenite::connect_async(ws_url(&addr, &jwt_a))
@@ -697,30 +701,18 @@ async fn a_call_left_empty_past_the_grace_is_over_for_the_next_joiner() {
         recv_frame(&mut ws_a).await,
         ServerFrame::Welcome { .. }
     ));
-    let body: serde_json::Value = get_state(&state, &jwt_b)
-        .await
-        .json()
-        .await
-        .expect("state json");
+    let body: serde_json::Value = get_state(&state).await.json().await.expect("state json");
     assert_eq!(body["state"], "live");
     assert_eq!(body["peers"], 1);
 
     // The last one out starts the grace.
     ws_a.close(None).await.expect("close");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let body: serde_json::Value = get_state(&state, &jwt_b)
-        .await
-        .json()
-        .await
-        .expect("state json");
+    let body: serde_json::Value = get_state(&state).await.json().await.expect("state json");
     assert_eq!(body["state"], "closing");
 
     tokio::time::sleep(lakko_svc_sfu::call_lifetime::CALL_EMPTY_GRACE).await;
-    let body: serde_json::Value = get_state(&state, &jwt_b)
-        .await
-        .json()
-        .await
-        .expect("state json");
+    let body: serde_json::Value = get_state(&state).await.json().await.expect("state json");
     assert_eq!(body["state"], "ended");
 
     // A late joiner is told so in place of the Welcome, and the socket closes.
@@ -733,43 +725,72 @@ async fn a_call_left_empty_past_the_grace_is_over_for_the_next_joiner() {
     }
 }
 
-/// A token for another call learns nothing about this one.
+/// ADR-0078 section 2: the probe route takes no token at all - knowing the
+/// room id is the capability - and refuses a path that is not a room id.
 #[tokio::test]
-async fn the_state_route_answers_only_for_the_call_the_token_names() {
+async fn the_room_probe_needs_no_jwt() {
     let key = test_key(0x22);
     let addr = spawn_server(key.jwks.clone()).await;
-    let jwt = mint(
-        &key,
-        "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
-        "11111111111111111111111111111111",
-        CallRole::Participant,
+    let url = format!(
+        "http://{addr}/v1/rooms/{}",
+        room_of("22222222222222222222222222222222")
     );
-    let url = format!("http://{addr}/v1/calls/22222222222222222222222222222222");
-    assert_eq!(get_state(&url, &jwt).await.status(), 403);
-    assert_eq!(get_state(&url, "not-a-jwt").await.status(), 401);
+    let bare = reqwest::get(&url).await.expect("state request");
+    assert_eq!(bare.status(), 200);
+    let body: serde_json::Value = bare.json().await.expect("state json");
+    assert_eq!(body["state"], "unknown");
+    assert_eq!(body["peers"], 0);
+    for bad in [
+        "22222222222222222222222222222222",
+        "nothex",
+        &"A".repeat(64),
+    ] {
+        let resp = reqwest::get(format!("http://{addr}/v1/rooms/{bad}"))
+            .await
+            .expect("state request");
+        assert_eq!(resp.status(), 400, "{bad}");
+    }
 }
 
-/// The state route reads the token from `Authorization` only: a request
-/// without the header, or with the token in the query string, is refused.
+/// The old token-gated `/v1/calls/{call_id}` route is gone.
 #[tokio::test]
-async fn the_state_route_takes_the_token_from_authorization_only() {
+async fn the_call_id_route_is_gone() {
     let key = test_key(0x23);
     let addr = spawn_server(key.jwks.clone()).await;
-    let call = "33333333333333333333333333333333";
+    let resp = reqwest::get(format!(
+        "http://{addr}/v1/calls/33333333333333333333333333333333"
+    ))
+    .await
+    .expect("state request");
+    assert_eq!(resp.status(), 404);
+}
+
+/// One token admits one live connection: a second socket presenting the
+/// same token (the same peer id) while the first is up gets no Welcome.
+#[tokio::test]
+async fn a_token_admits_one_live_socket() {
+    let key = test_key(0x25);
+    let addr = spawn_server(key.jwks.clone()).await;
     let jwt = mint(
         &key,
-        "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
-        call,
+        "f6",
+        "55555555555555555555555555555555",
         CallRole::Participant,
     );
-    let url = format!("http://{addr}/v1/calls/{call}");
-    assert_eq!(get_state(&url, &jwt).await.status(), 200);
-    let bare = reqwest::get(&url).await.expect("state request");
-    assert_eq!(bare.status(), 401);
-    let query = reqwest::get(format!("{url}?token={jwt}"))
+    let (mut first, _) = tokio_tungstenite::connect_async(ws_url(&addr, &jwt))
         .await
-        .expect("state request");
-    assert_eq!(query.status(), 401);
+        .expect("ws connect");
+    assert!(matches!(
+        recv_frame(&mut first).await,
+        ServerFrame::Welcome { .. }
+    ));
+    let (mut second, _) = tokio_tungstenite::connect_async(ws_url(&addr, &jwt))
+        .await
+        .expect("ws connect");
+    let next = tokio::time::timeout(std::time::Duration::from_secs(2), second.next()).await;
+    if let Ok(Some(Ok(Message::Text(t)))) = next {
+        panic!("second socket got a frame: {t}");
+    }
 }
 
 /// The SFU answers with `lakko-sfu-v1` only, never echoing the token

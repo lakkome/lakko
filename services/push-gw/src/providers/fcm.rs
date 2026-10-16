@@ -408,8 +408,8 @@ impl AndroidConfig {
 
 #[derive(Serialize)]
 struct WakeData {
-    /// Hex device pseudonym.
-    d: String,
+    /// Hex subscription id (ADR-0078).
+    s: String,
     /// Hex group pseudonym (optional). Empty string when absent —
     /// FCM rejects `null` data values.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -429,7 +429,7 @@ struct WakeData {
 impl WakeData {
     fn from_payload(p: &WakePayload) -> Self {
         Self {
-            d: hex::encode(p.device_pseudonym),
+            s: hex::encode(p.subscription_id),
             g: p.group_pseudonym.map(hex::encode),
             p: p.envelope_pointer.map(|n| n.to_string()),
             k: p.kind.wire_tag(),
@@ -468,7 +468,7 @@ mod tests {
 
     fn wake(kind: WakeKind) -> WakePayload {
         WakePayload {
-            device_pseudonym: [0x01; 32],
+            subscription_id: [0x01; 16],
             group_pseudonym: Some([0x02; 32]),
             envelope_pointer: Some(99),
             kind,
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn wake_data_omits_optional_fields_when_absent() {
         let data = WakeData::from_payload(&WakePayload {
-            device_pseudonym: [0; 32],
+            subscription_id: [0; 16],
             group_pseudonym: None,
             envelope_pointer: None,
             kind: WakeKind::Message,

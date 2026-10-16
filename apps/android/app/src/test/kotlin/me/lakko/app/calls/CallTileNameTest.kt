@@ -24,8 +24,8 @@ import org.junit.Test
  * person's name" — for both call kinds, and the two link-call mechanics that
  * keep a tile from staying unnamed or being named for somebody else.
  *
- * The tag derivation is injected (a stand-in for `sfuPeerTag`), so no UniFFI
- * `.so` is needed.
+ * Who a peer is comes from its verified announcement (ADR-0078 section 2),
+ * given here as `peerIdentified`, so no UniFFI `.so` is needed.
  */
 class CallTileNameTest {
     init {
@@ -36,10 +36,9 @@ class CallTileNameTest {
     private val key: ByteArray = ByteArray(32) { 0xa1.toByte() }
     private val keyB64: String = Base64.getEncoder().encodeToString(key)
 
-    /** The start of an account id, as the SFU reports it. Never a name. */
-    private val pseudonym = "01a0a045"
-
-    private val tagOf: (String) -> String = { accountIdHex -> "tag:$accountIdHex" }
+    private val otherKey: ByteArray = ByteArray(32) { 0xb2.toByte() }
+    private val otherKeyB64: String = Base64.getEncoder().encodeToString(otherKey)
+    private val ownerAccount: ByteArray = ByteArray(16) { 0x0a }
 
     private fun directory(): ProfileDirectory = ProfileDirectory(
         persistence = InMemoryProfilePersistence(),
@@ -48,14 +47,10 @@ class CallTileNameTest {
         passesRule = { it.matches(Regex("[a-z0-9_]{3,32}")) },
     )
 
-    /** The production wiring of `callPeerNameResolver`, over [directory]. */
-    private fun resolver(directory: ProfileDirectory): GroupCallNameResolver = GroupCallNameResolver(
-        sourcesVersion = { directory.version.value },
-        sources = {
-            directory.accountIdsByKey().map { (keyB64, accountIdHex) -> PeerTagSource(accountIdHex, keyB64) }
-        },
-        tagOf = tagOf,
-        labelOf = { keyB64 -> callNameOfPerson(directory, keyB64) },
+    /** The production wiring of `callPeerNames`, over [directory]. */
+    private fun resolver(directory: ProfileDirectory): CallPeerNames = CallPeerNames(
+        personName = { keyB64 -> personNameOrNull(directory.resolve(keyB64)) },
+        storedUsername = { keyB64 -> directory.claimedUsernameOf(keyB64) },
     )
 
     // ---- the rule --------------------------------------------------------
@@ -161,22 +156,34 @@ class CallTileNameTest {
     // ---- a group call ----------------------------------------------------
 
     @Test
-    fun `a peer nobody can name has an empty name, with no number and no pseudonym`() {
+    fun `a peer nobody can name has an empty name, with no number and no id`() {
         val names = resolver(directory())
-        assertEquals("", names.resolve("p1", pseudonym, "tag:aa"))
-        assertEquals("", names.resolve("p2", "0fe1d2c3", ""))
+        assertEquals("", names.name("p1"))
+        assertEquals("", names.name("p2"))
         // Asked again (the welcome snapshot, then peer-joined): still nothing.
-        assertEquals("", names.resolve("p1", pseudonym, "tag:aa"))
+        assertEquals("", names.name("p1"))
+    }
+
+    @Test
+    fun `a peer is named only once its announcement verifies`() {
+        val directory = directory()
+        directory.onProfileReceived(keyB64, PeerProfile("Anna", null, 1uL))
+        val names = resolver(directory)
+        assertEquals("", names.name("p1"))
+        assertTrue(names.peerIdentified("p1", keyB64, "aa"))
+        assertEquals("Anna", names.name("p1"))
+        assertFalse("a re-announcement changes nothing", names.peerIdentified("p1", keyB64, "aa"))
     }
 
     @Test
     fun `a group member with a stored username and no display name is named by it`() {
         val directory = directory()
         val names = resolver(directory)
-        directory.onProfileReceived(keyB64, PeerProfile(null, "alice", 1uL, accountIdHex = "aa"))
-        assertEquals("alice", names.resolve("p1", pseudonym, "tag:aa"))
+        directory.onProfileReceived(keyB64, PeerProfile(null, "alice", 1uL))
+        names.peerIdentified("p1", keyB64, "aa")
+        assertEquals("alice", names.name("p1"))
         directory.attachUsernameResolver { UsernameResolution.Found(keyB64) }
-        assertEquals("@alice", names.resolve("p1", pseudonym, "tag:aa"))
+        assertEquals("@alice", names.name("p1"))
     }
 
     // ---- a link call -----------------------------------------------------
@@ -186,19 +193,12 @@ class CallTileNameTest {
         val directory = directory()
         val names = resolver(directory)
         val ui = CallUiState(CoroutineScope(Dispatchers.Unconfined))
-        ui.setParticipants(listOf(remote("peer-p1", names.resolve("p1", pseudonym, "tag:aa"))))
+        ui.setParticipants(listOf(remote("peer-p1", names.name("p1"))))
         assertEquals(listOf(""), ui.participants.value.map { it.displayName })
 
-        val profile = PeerProfile(null, "alice", 1uL, accountIdHex = "aa")
-        val file = names.memberAnnounced(
-            peerId = "p1",
-            senderKeyB64 = keyB64,
-            displayName = profile.displayName,
-            username = profile.username,
-            claimedAccountIdHex = profile.accountIdHex,
-        )
-        assertTrue(file)
-        directory.onProfileReceived(keyB64, profile)
+        names.peerIdentified("p1", keyB64, "aa")
+        names.memberAnnounced(peerId = "p1", senderLeafKeyHex = "aa", displayName = null, username = "alice")
+        directory.onProfileReceived(keyB64, PeerProfile(null, "alice", 1uL))
         names.reapply(ui) { "peer-$it" }
         assertEquals(listOf("alice"), ui.participants.value.map { it.displayName })
 
@@ -209,94 +209,72 @@ class CallTileNameTest {
     }
 
     @Test
-    fun `the viewer's own name for a contact applies to a filed member`() {
+    fun `the viewer's own name for a contact applies to an identified member`() {
         val directory = directory()
         val names = resolver(directory)
-        names.resolve("p1", pseudonym, "tag:aa")
+        names.name("p1")
         directory.setRenames(mapOf(keyB64 to "Mum"))
-        assertTrue(names.memberAnnounced("p1", keyB64, "Elena", null, "aa"))
-        directory.onProfileReceived(keyB64, PeerProfile("Elena", null, 1uL, accountIdHex = "aa"))
-        assertEquals("Mum", names.resolve("p1", pseudonym, "tag:aa"))
+        names.peerIdentified("p1", keyB64, "aa")
+        names.memberAnnounced("p1", "aa", "Elena", null)
+        assertEquals("Mum", names.name("p1"))
     }
 
     @Test
-    fun `a profile claiming another account is not filed and binds nobody`() {
-        val directory = directory()
-        val names = resolver(directory)
-        // The SFU admitted p1 as account bb; its profile claims account aa.
-        names.resolve("p1", pseudonym, "tag:bb")
-        val file = names.memberAnnounced(
-            peerId = "p1",
-            senderKeyB64 = keyB64,
-            displayName = "Anna",
-            username = "anna",
-            claimedAccountIdHex = "aa",
-        )
-        assertFalse(file)
-        // The tile still shows what was announced, as plain text.
-        assertEquals("Anna", names.resolve("p1", pseudonym, "tag:bb"))
-
-        // Even were that key known to the store under a rename, the peer is
-        // not bound to it: the rename does not reach the tile.
-        directory.setRenames(mapOf(keyB64 to "Mum"))
-        assertEquals("Anna", names.resolve("p1", pseudonym, "tag:bb"))
-    }
-
-    @Test
-    fun `a profile with no claim, no tag or no resolved sender is not filed`() {
+    fun `a profile relayed by another peer names nobody`() {
         val names = resolver(directory())
-        names.resolve("p1", pseudonym, "tag:aa")
-        names.resolve("p2", pseudonym, "")
-        assertFalse(names.memberAnnounced("p1", keyB64, null, "anna", null))
-        assertFalse(names.memberAnnounced("p2", keyB64, null, "anna", "aa"))
-        assertFalse(names.memberAnnounced("p1", null, null, "anna", "aa"))
-        // A peer the roster never reported has no tag to match.
-        assertFalse(names.memberAnnounced("p9", keyB64, null, "anna", "aa"))
-        // Rule 3 still names the tile, without the at sign.
-        assertEquals("anna", names.resolve("p1", pseudonym, "tag:aa"))
-    }
-
-    @Test
-    fun `a person this device already knows is named before they announce`() {
-        val directory = directory()
-        directory.onProfileReceived(keyB64, PeerProfile("Anna", null, 1uL, accountIdHex = "aa"))
-        val names = resolver(directory)
-        assertEquals("Anna", names.resolve("p1", pseudonym, "tag:aa"))
+        names.name("p1")
+        names.peerIdentified("p1", keyB64, "aa")
+        // A copy of someone else's profile (sealed by leaf bb), relayed by p1.
+        names.memberAnnounced("p1", "bb", "Boris", "boris")
+        assertEquals("", names.name("p1"))
+        // Nor does a profile from a peer that has not announced itself.
+        names.name("p2")
+        names.memberAnnounced("p2", "cc", "Carol", null)
+        assertEquals("", names.name("p2"))
     }
 
     @Test
     fun `a peer that left and came back under the same id starts unnamed`() {
         val names = resolver(directory())
-        names.resolve("p1", pseudonym, "tag:bb")
-        names.memberAnnounced("p1", keyB64, "Anna", null, null)
-        assertEquals("Anna", names.resolve("p1", pseudonym, "tag:bb"))
+        names.name("p1")
+        names.peerIdentified("p1", otherKeyB64, "bb")
+        names.memberAnnounced("p1", "bb", "Anna", null)
+        assertEquals("Anna", names.name("p1"))
         names.forget("p1")
-        assertEquals("", names.resolve("p1", pseudonym, "tag:bb"))
+        assertEquals("", names.name("p1"))
     }
 
     @Test
     fun `a later announcement without a name clears the earlier one`() {
         val names = resolver(directory())
-        names.resolve("p1", pseudonym, "tag:bb")
-        names.memberAnnounced("p1", keyB64, "Anna", "anna", null)
-        names.memberAnnounced("p1", keyB64, "  ", "anna", null)
-        assertEquals("anna", names.resolve("p1", pseudonym, "tag:bb"))
+        names.name("p1")
+        names.peerIdentified("p1", otherKeyB64, "bb")
+        names.memberAnnounced("p1", "bb", "Anna", "anna")
+        names.memberAnnounced("p1", "bb", "  ", "anna")
+        assertEquals("anna", names.name("p1"))
     }
 
-    // ---- who may be filed ------------------------------------------------
+    // ---- whose profile claim is kept -------------------------------------
 
     @Test
-    fun `the claimed account must be the one the SFU admitted the peer as`() {
-        assertTrue(profileClaimMatchesPeer("aa", "tag:aa", tagOf))
-        assertFalse(profileClaimMatchesPeer("bb", "tag:aa", tagOf))
-        assertFalse(profileClaimMatchesPeer(null, "tag:aa", tagOf))
-        assertFalse(profileClaimMatchesPeer("aa", null, tagOf))
-        assertFalse(profileClaimMatchesPeer("aa", "", tagOf))
-    }
-
-    @Test
-    fun `a tag that cannot be derived refuses the claim`() {
-        assertFalse(profileClaimMatchesPeer("zz", "tag:zz") { error("not an account id") })
+    fun `only the owner's claim of the owner's account is kept`() {
+        val cert = ByteArray(153) { 0x5c }
+        val claim = uniffi.lakko_ffi_uniffi.FfiProfile(
+            displayName = "Anna", username = "anna", updatedAtMs = 5uL,
+            accountId = ownerAccount, usernameCertificate = cert, grants = emptyList(),
+        )
+        val kept = boundProfileClaim(claim, fromOwner = true, ownerAccountId = ownerAccount)
+        assertTrue(kept.accountId!!.contentEquals(ownerAccount))
+        assertTrue(kept.usernameCertificate!!.contentEquals(cert))
+        for (stripped in listOf(
+            boundProfileClaim(claim, fromOwner = false, ownerAccountId = ownerAccount),
+            boundProfileClaim(claim, fromOwner = true, ownerAccountId = ByteArray(16) { 0x0b }),
+        )) {
+            assertNull(stripped.accountId)
+            assertNull(stripped.usernameCertificate)
+            assertEquals("Anna", stripped.displayName)
+            assertEquals("anna", stripped.username)
+        }
     }
 
     // ---- early relays ----------------------------------------------------

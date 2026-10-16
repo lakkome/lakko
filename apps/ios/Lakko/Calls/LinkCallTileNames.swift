@@ -13,14 +13,14 @@ import LakkoCore
 /// per SFU peer, what that peer announced and the person it was bound to, and
 /// names the tile from them:
 ///
-///   * a peer this device already knows (ADR-0021 peer tag over the accepted
-///     contacts and the stored profiles) is named before it announces itself;
-///   * a sealed profile is filed in the profile store, and its peer bound to
-///     the person who sealed it, only when the account id the profile claims
-///     is the account the SFU admitted that peer as
-///     (``CallTileName/profileClaimMatchesPeer(claimedAccountId:peerTag:tagOf:)``).
-///     Filed, it is a profile like any received in a chat: a claimed username
-///     is verified and the viewer's own name for a contact applies;
+///   * a peer is bound to a person by its own sealed, signed announcement,
+///     verified against the call group's roster (ADR-0078 section 2,
+///     ``CallRelay``): the SFU knows no account;
+///   * a sealed profile is filed in the profile store under the person who
+///     sealed it, its account claim kept only when bound
+///     (``CallTileName/boundProfileClaim(_:fromOwner:ownerAccountId:)``), and
+///     its announced name names the peer only when that peer announced the
+///     leaf that sealed it;
 ///   * otherwise the tile shows what was announced, as plain text.
 ///
 /// Owned by ``MultiJoinerCall``, which decodes the envelope and resolves its
@@ -32,9 +32,6 @@ final class LinkCallTileNames {
     /// What the names are resolved through. The defaults know nobody and file
     /// nothing, so a tile is named from what its peer announced alone.
     struct Ports {
-        /// ADR-0021 — the person (base64 account key) behind a peer tag, when
-        /// this device already knows them.
-        var knownPerson: @MainActor (_ peerTag: String) -> MemberIdentity? = { _ in nil }
         /// What the one resolver calls a person (rename, profile name,
         /// verified `@username`), or `nil` when it has only its placeholder.
         var personName: @MainActor (_ person: MemberIdentity) -> String? = { _ in nil }
@@ -43,39 +40,36 @@ final class LinkCallTileNames {
         /// File a member's profile under the person who sealed it: the entry
         /// point a profile received in a chat goes through.
         var fileProfile: @MainActor (_ profile: ProfileClaim, _ person: MemberIdentity) -> Void = { _, _ in }
-        /// The ADR-0021 peer tag of an account id (lowercase hex) in this call.
-        var tagOf: (_ accountIdHex: String) -> String = { _ in "" }
         /// Fires when anything a resolved name depends on changed (the profile
         /// directory's `revision` in production).
         var changes: AnyPublisher<UInt64, Never>?
 
-        /// The production ports: the per-call peer-tag map the group call
-        /// uses, the app's one display-name resolver and its profile store.
+        /// The production ports: the app's one display-name resolver and its
+        /// profile store.
         @MainActor
-        static func live(callIdHex: String, directory: ProfileDirectory) -> Ports {
-            let known = GroupCallNameResolver.live(callIdHex: callIdHex, directory: directory)
+        static func live(directory: ProfileDirectory) -> Ports {
             // The account this call runs under, taken when the call's names
             // are set up: a profile a peer sealed is filed under it, and under
             // no account signed in while the call was still winding down.
             let callAccountIdB64 = directory.accountIdB64
             return Ports(
-                knownPerson: { known.person(peerTag: $0).map { base64Encode($0) } },
                 personName: { directory.resolve(signatureKeyB64: $0).flatMap(CallTileName.personName) },
                 storedUsername: { directory.storedProfile(signatureKeyB64: $0)?.username },
                 fileProfile: { profile, person in
                     directory.acceptReceived(
                         profile, signatureKeyB64: person, accountIdB64: callAccountIdB64)
                 },
-                tagOf: { sfuPeerTag(callId: callIdHex, accountId: $0) },
                 changes: directory.$revision.eraseToAnyPublisher()
             )
         }
     }
 
     private let ports: Ports
-    /// SFU peer id -> the `peer_tag` the SFU reported for it. Every peer on
-    /// the roster has an entry; it is what a tile is named again from.
-    private var peerTags: [String: String] = [:]
+    /// Every remote peer on the roster: what a tile is named again from.
+    private var peers: Set<String> = []
+    /// SFU peer id -> the leaf key its verified announcement names
+    /// (ADR-0078 section 2).
+    private var memberKeys: [String: String] = [:]
     /// SFU peer id -> the display name that peer's sealed profile carries.
     private var announcedNames: [String: String] = [:]
     /// SFU peer id -> the username that peer's sealed profile claims.
@@ -88,36 +82,52 @@ final class LinkCallTileNames {
         self.ports = ports
     }
 
-    /// The tile name for a roster event; empty while the person is unnamed.
-    func name(peerId: String, peerTag: String) -> String {
-        peerTags[peerId] = peerTag
+    /// The tile name of `peerId`, which is now on the roster.
+    func name(peerId: String) -> String {
+        peers.insert(peerId)
         return currentName(peerId)
     }
 
-    /// A member announced its profile inside the call. `sender` is the
-    /// MLS-authenticated sender resolved to the person at receipt (C-68).
-    func memberProfile(from peerId: String, sender: MemberIdentity?, profile: ProfileClaim) {
-        announcedNames[peerId] = Self.nonBlank(profile.displayName)
-        claimedUsernames[peerId] = Self.nonBlank(profile.username)
-        if let sender,
-           CallTileName.profileClaimMatchesPeer(
-               claimedAccountId: profile.accountId, peerTag: peerTags[peerId], tagOf: ports.tagOf) {
-            persons[peerId] = sender
-            // A username with no certificate can never verify, and the store
-            // keeps the first profile it sees for a stamp: filing this one
-            // would shut out the certified one that follows it. The tile shows
-            // the username as plain text either way.
-            if profile.username == nil || profile.usernameCertificate != nil {
-                ports.fileProfile(profile, sender)
-            }
-        } else {
-            persons.removeValue(forKey: peerId)
+    /// `peerId`'s sealed announcement verified (ADR-0078 section 2): it is the
+    /// person `person`, through the leaf `memberKeyHex`.
+    func peerIdentified(_ peerId: String, person: MemberIdentity, memberKeyHex: String) {
+        persons[peerId] = person
+        memberKeys[peerId] = memberKeyHex
+    }
+
+    /// A member sealed its profile into the call. The announced name and
+    /// username name `peerId` only when `peerId` announced the leaf that
+    /// sealed it (a relayed copy of someone else's profile names nobody); the
+    /// profile is filed under the person who sealed it, its account claim kept
+    /// only when bound (``CallTileName/boundProfileClaim(_:fromOwner:ownerAccountId:)``).
+    func memberProfile(
+        from peerId: String,
+        sender: MemberIdentity?,
+        senderLeafKeyHex: String?,
+        fromOwner: Bool,
+        ownerAccountId: Data,
+        profile: ProfileClaim
+    ) {
+        if let senderLeafKeyHex, memberKeys[peerId] == senderLeafKeyHex {
+            announcedNames[peerId] = Self.nonBlank(profile.displayName)
+            claimedUsernames[peerId] = Self.nonBlank(profile.username)
+        }
+        guard let sender else { return }
+        let bound = CallTileName.boundProfileClaim(
+            profile, fromOwner: fromOwner, ownerAccountId: ownerAccountId)
+        // A username with no certificate can never verify, and the store keeps
+        // the first profile it sees for a stamp: filing this one would shut out
+        // the certified one that follows it. The tile shows the username as
+        // plain text either way.
+        if bound.username == nil || bound.usernameCertificate != nil {
+            ports.fileProfile(bound, sender)
         }
     }
 
     /// The peer left: a return under the same id starts unnamed again.
     func peerLeft(_ peerId: String) {
-        peerTags.removeValue(forKey: peerId)
+        peers.remove(peerId)
+        memberKeys.removeValue(forKey: peerId)
         announcedNames.removeValue(forKey: peerId)
         claimedUsernames.removeValue(forKey: peerId)
         persons.removeValue(forKey: peerId)
@@ -125,7 +135,7 @@ final class LinkCallTileNames {
 
     /// Re-run the naming rule for every remote tile on `ui`.
     func relabel(_ ui: CallUiState) {
-        for peerId in peerTags.keys {
+        for peerId in peers {
             ui.setParticipantName(SfuCallUi.participantId(forPeer: peerId), currentName(peerId))
         }
     }
@@ -144,7 +154,7 @@ final class LinkCallTileNames {
     }
 
     private func currentName(_ peerId: String) -> String {
-        let person = persons[peerId] ?? peerTags[peerId].flatMap { ports.knownPerson($0) }
+        let person = persons[peerId]
         return CallTileName.name(
             resolved: person.flatMap { ports.personName($0) },
             announcedName: announcedNames[peerId],

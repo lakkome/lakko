@@ -22,7 +22,7 @@ const hooks = vi.hoisted(() => ({
   captured: null as {
     onWelcome?: (
       selfPeerId: string,
-      roster: ReadonlyArray<{ peer_id: string; account_pseudonym: string; peer_tag?: string }>,
+      roster: ReadonlyArray<{ peer_id: string }>,
     ) => void;
     onPeerLeft?: (peerId: string) => void;
     onRemoteTrack?: (rt: { streamId: string; track: unknown; stream: unknown }) => void;
@@ -103,7 +103,7 @@ const camOn = (peerId: string): boolean | undefined =>
   callState.participants().find((p) => p.id === `peer-${peerId}`)?.camOn;
 
 function seedRosterWithPeerX(): void {
-  hooks.captured?.onWelcome?.("self", [{ peer_id: "peerX", account_pseudonym: "abcdef0123" }]);
+  hooks.captured?.onWelcome?.("self", [{ peer_id: "peerX" }]);
 }
 
 let handle: SfuCallUiHandle | null = null;
@@ -207,8 +207,8 @@ describe("createSfuCallUi: the light companion track", () => {
   it("is pruned with its peer", () => {
     handle = createSfuCallUi(baseConfig());
     hooks.captured?.onWelcome?.("self", [
-      { peer_id: "peerX", account_pseudonym: "abcdef0123" },
-      { peer_id: "peerY", account_pseudonym: "0123abcdef" },
+      { peer_id: "peerX" },
+      { peer_id: "peerY" },
     ]);
     const lightY = fakeRemote("peerY~light");
     hooks.captured?.onRemoteTrack?.(fakeRemote("peerX~light").rt);
@@ -318,8 +318,8 @@ describe("createSfuCallUi: the middle track", () => {
   it("is pruned with its peer, and only that peer's", () => {
     handle = createSfuCallUi(baseConfig());
     hooks.captured?.onWelcome?.("self", [
-      { peer_id: "peerX", account_pseudonym: "abcdef0123" },
-      { peer_id: "peerY", account_pseudonym: "0123abcdef" },
+      { peer_id: "peerX" },
+      { peer_id: "peerY" },
     ]);
     const middleY = fakeRemote("peerY~mid");
     hooks.captured?.onRemoteTrack?.(fakeRemote("peerX~mid").rt);

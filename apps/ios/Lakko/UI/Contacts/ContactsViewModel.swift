@@ -107,8 +107,8 @@ public final class ContactsViewModel: ObservableObject {
 
     /// Give every one-to-one peer a contact row (see
     /// `ContactsRepository.adoptOneToOnePeer`). The account id, when a profile
-    /// has carried one (ADR-0048 v2), rides along so the row can name the
-    /// person in a group call like an accepted one does.
+    /// has carried one (ADR-0048 v2), rides along as it does on an accepted
+    /// row.
     public func adoptOneToOnePeers() {
         guard let chatRepository else { return }
         var accountIds: [String: Data] = [:]

@@ -104,12 +104,11 @@ final class ContactsPresentationTests: XCTestCase {
             maxUses: 0, createdAtMs: createdAtMs)
     }
 
-    func testUsesLeftCopyFollowsTheSentinels() {
-        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 0, usedCount: 0), "1 use left")
-        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 0, usedCount: 1), "Used up")
-        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 10, usedCount: 7), "3 uses left")
-        XCTAssertEqual(InviteLinkRows.usesLeftCopy(maxUses: 10, usedCount: 12), "Used up", "never negative")
-        XCTAssertNil(InviteLinkRows.usesLeftCopy(maxUses: UInt32.max, usedCount: 3), "unlimited shows no count")
+    func testLimitCopyFollowsTheSentinels() {
+        XCTAssertEqual(InviteLinkRows.limitCopy(maxUses: 0), "single-use")
+        XCTAssertEqual(InviteLinkRows.limitCopy(maxUses: 1), "single-use")
+        XCTAssertEqual(InviteLinkRows.limitCopy(maxUses: 10), "up to 10 uses")
+        XCTAssertEqual(InviteLinkRows.limitCopy(maxUses: UInt32.max), "unlimited")
     }
 
     func testMergeKeepsServerRowsFirstAddsUnknownSessionRowsAndDropsExpired() throws {
@@ -135,7 +134,7 @@ final class ContactsPresentationTests: XCTestCase {
             secrets: secrets)
         XCTAssertEqual(rows.map(\.slug), ["new", "srv"], "newest first; the server copy wins over the session copy")
         XCTAssertEqual(rows[1].title, "Team")
-        XCTAssertEqual(rows[1].usesLeft, "8 uses left")
+        XCTAssertEqual(rows[1].limit, "up to 10 uses")
         XCTAssertEqual(rows[1].origin, .server)
         // The link must point at the stack the account lives on, so the
         // prefix comes from configuration (`ApiEndpoints.webOrigin`) and a
@@ -149,14 +148,14 @@ final class ContactsPresentationTests: XCTestCase {
             active: [active(slug: "elsewhere", expiryMs: nowMs + 60_000, maxUses: 0, used: 0,
                             createdAt: "2026-09-10T10:00:00Z")],
             sessionGenerated: [], now: now, accountIdB64: "acct", secrets: secrets)
-        XCTAssertNil(other.first?.url, "a link made on another device offers Revoke only")
+        XCTAssertNil(other.first?.url, "a link whose secret this device lacks offers Revoke only")
         let otherAccount = InviteLinkRows.merge(
             active: [active(slug: "srv", expiryMs: nowMs + 60_000, maxUses: 0, used: 0,
                             createdAt: "2026-09-10T10:00:00Z")],
             sessionGenerated: [], now: now, accountIdB64: "someone-else", secrets: secrets)
         XCTAssertNil(otherAccount.first?.url, "the secrets are per account")
         XCTAssertEqual(rows[0].title, "Invite link")
-        XCTAssertEqual(rows[0].usesLeft, "1 use left")
+        XCTAssertEqual(rows[0].limit, "single-use")
         if case .session(let blobId) = rows[0].origin {
             XCTAssertEqual(blobId.count, 6)
         } else {

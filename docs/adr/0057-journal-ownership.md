@@ -13,6 +13,13 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   ownership transfer (rank `root` in the envelope); see *What the S2 client
   work found*. Deployed to the test stack; not walked live.
 - **Date:** 2026-09-28
+- **Amended by [ADR-0078](0078-servers-cannot-link-accounts.md) phase 6 (2026-10-16):**
+  the attested root reset (the ADR-0073 amendment) is removed: `reset` takes
+  the signed statement alone and is heard only from the root. DeviceGroup and
+  PublisherGroup journal ids are derived from secrets (the account seed; the
+  owner's account seed and the channel id), so "same root re-claims a
+  re-founded DeviceGroup" now holds within one seed, and a key reset names a
+  new journal.
 - **Context:** Phase 3 (product hardening); the HIGH finding of the
   2026-09-28 `lakko-security` pass on [ADR-0053](0053-ds-journal-authorisation.md)
 - **Amends:** ADR-0053 (who may register an epoch key, how a journal is claimed

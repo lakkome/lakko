@@ -668,7 +668,7 @@ private fun GeneratedInvite.toRow(): InviteLinkRow = InviteLinkRow(
     label = label,
     createdAtMs = createdAtMs,
     expiryMs = expiryMs,
-    usesLeft = invitesUsesLeft(maxUses, 0L),
+    maxUses = maxUses,
     fromSession = true,
 )
 
@@ -679,9 +679,9 @@ private fun ActiveInvite.toRow(heldUrls: Map<String, String>): InviteLinkRow = I
     // another device is not.
     url = heldUrls[blobIdSlug],
     label = label,
-    createdAtMs = null,
+    createdAtMs = createdAtMs,
     expiryMs = expiryMs,
-    usesLeft = invitesUsesLeft(maxUses, usedCount),
+    maxUses = maxUses,
     fromSession = false,
 )
 
@@ -752,7 +752,7 @@ private fun InviteLinksSheet(
                                 add(t("invite.links.created", mapOf("date" to dateFormat.format(Date(it)))))
                             }
                             add(describeInviteExpiry(row.expiryMs, now).text())
-                            describeUsesLeft(row.usesLeft)?.let { add(it.text()) }
+                            add(describeInviteLimit(row.maxUses).text())
                         },
                     )
                     val share = inviteRowShare(row)

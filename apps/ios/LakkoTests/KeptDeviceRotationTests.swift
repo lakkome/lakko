@@ -321,7 +321,7 @@ final class KeptDeviceAdoptionTests: XCTestCase {
             grantNowMs: { now },
             attestationVerifier: Verifier(),
             keyResetHooks: AuthRepository.KeyResetHooks(
-                republishOwnKeyPackage: { _ in }, refoundDeviceGroup: { _, _, _, _ in }),
+                republishOwnKeyPackage: { _ in }, refoundDeviceGroup: { _, _, _ in }),
             wipeAfterKeyReset: { [weak store] account in
                 log.noteFull(account)
                 store?.clear()
@@ -1078,124 +1078,6 @@ private final class RecordingDs: DsStatementSending {
     func putStatement(_ request: DsStatementRequest) async throws {
         sent.append(request)
         if !answers.isEmpty, let error = answers.removeFirst() { throw error }
-    }
-}
-
-final class RootEndorsementTests: XCTestCase {
-
-    private let journalId = Data(repeating: 0x77, count: 32)
-    private let newAccountSeed = Data(repeating: 0x21, count: 64)
-    private let oldAccountSeed = Data(repeating: 0x12, count: 64)
-
-    private func json(_ request: DsStatementRequest) throws -> [String: Any] {
-        try XCTUnwrap(JSONSerialization.jsonObject(with: Data(request.bodyJson.utf8)) as? [String: Any])
-    }
-
-    private func root(_ seed: Data) throws -> DsStatementSignerProtocol {
-        try dsJournalRootSigner(accountIdentity: try Identity.fromSeed(seed: seed), journalId: journalId)
-    }
-
-    /// Part A: the attested reset a key reset AND a recall end with carries
-    /// the endorsement by the NEW account key over the journal, the
-    /// generation and the reset's signer key.
-    func testTheAttestedResetSendsTheRootEndorsement() async throws {
-        let ds = RecordingDs()
-        let newRoot = try root(newAccountSeed)
-        let attestation = Data(repeating: 0xA7, count: 177)
-
-        try await JournalOwnership.attestedReset(
-            root: newRoot, journalId: journalId, epoch: 1,
-            epochKey: try Identity.fromSeed(seed: Data(repeating: 5, count: 32)).signaturePublicKey(),
-            attestation: attestation,
-            endorse: { rootKey in
-                try RootEndorsement.sign(
-                    accountIdentitySeed: self.newAccountSeed, journalId: self.journalId,
-                    keyGeneration: 3, rootKey: rootKey)
-            },
-            ds: ds)
-
-        XCTAssertEqual(ds.sent.count, 1)
-        XCTAssertTrue(ds.sent[0].path.hasSuffix("/reset"))
-        let body = try json(ds.sent[0])
-        XCTAssertEqual(body["key_reset_attest_b64"] as? String, attestation.base64EncodedString())
-        let endorsement = try XCTUnwrap(
-            (body["root_endorsement_b64"] as? String).flatMap { Data(base64Encoded: $0) })
-        XCTAssertEqual(endorsement.count, Int(dsRootEndorsementLen()))
-        // Ed25519 is deterministic: exactly the core's signature over the
-        // reset's SIGNER key (the key that becomes the root).
-        XCTAssertEqual(
-            endorsement,
-            try signDsRootEndorsement(
-                newAccountEd25519Seed: try Identity.fromSeed(seed: newAccountSeed).ed25519Seed(),
-                journalId: journalId, keyGeneration: 3, rootKey: newRoot.publicKey()))
-        XCTAssertNotNil(body["statement_b64"])
-    }
-
-    func testTheEndorsementBindsTheGenerationAndTheRootKey() throws {
-        let key = try root(newAccountSeed).publicKey()
-        let endorsed = try RootEndorsement.sign(
-            accountIdentitySeed: newAccountSeed, journalId: journalId, keyGeneration: 3, rootKey: key)
-        XCTAssertNotEqual(
-            endorsed,
-            try RootEndorsement.sign(
-                accountIdentitySeed: newAccountSeed, journalId: journalId, keyGeneration: 4, rootKey: key))
-        XCTAssertNotEqual(
-            endorsed,
-            try RootEndorsement.sign(
-                accountIdentitySeed: newAccountSeed, journalId: journalId, keyGeneration: 3,
-                rootKey: try root(oldAccountSeed).publicKey()))
-        XCTAssertNotEqual(
-            endorsed,
-            try RootEndorsement.sign(
-                accountIdentitySeed: oldAccountSeed, journalId: journalId, keyGeneration: 3, rootKey: key),
-            "signed by the NEW account key, not the old one")
-    }
-
-    /// Part B step 9: the rotation's root transfer is signed by the OLD root,
-    /// names the new root, and endorses the NEW root key (the transfer's
-    /// `new_root`, not its signer).
-    func testTheRotationsRootTransferIsByTheOldRootAndEndorsesTheNewRoot() throws {
-        let oldRoot = try root(oldAccountSeed)
-        let newRootKey = try root(newAccountSeed).publicKey()
-        let attestation = Data(repeating: 0xA7, count: 177)
-        var endorsedKey: Data?
-        var endorsedGeneration: UInt64?
-
-        let request = try RootRotationRequest.build(
-            oldRoot: oldRoot, newRootKey: newRootKey, journalId: journalId,
-            attestation: attestation, keyGeneration: 5,
-            endorse: { rootKey, generation in
-                endorsedKey = rootKey
-                endorsedGeneration = generation
-                return Data(repeating: 0xEE, count: 64)
-            })
-
-        XCTAssertTrue(request.path.hasSuffix("/root"))
-        XCTAssertEqual(endorsedKey, newRootKey)
-        XCTAssertNotEqual(endorsedKey, oldRoot.publicKey())
-        XCTAssertEqual(endorsedGeneration, 5)
-        let body = try json(request)
-        XCTAssertEqual(body["key_reset_attest_b64"] as? String, attestation.base64EncodedString())
-        XCTAssertEqual(
-            body["root_endorsement_b64"] as? String, Data(repeating: 0xEE, count: 64).base64EncodedString())
-        // The statement itself is the plain transfer by the old root.
-        let plain = try oldRoot.rootTransfer(journalId: journalId, newRoot: newRootKey)
-        XCTAssertEqual(request.path, plain.path)
-    }
-
-    func testWithoutAnAttestationTheTransferGoesPlain() throws {
-        let oldRoot = try root(oldAccountSeed)
-        let request = try RootRotationRequest.build(
-            oldRoot: oldRoot, newRootKey: try root(newAccountSeed).publicKey(), journalId: journalId,
-            attestation: nil, keyGeneration: nil,
-            endorse: { _, _ in
-                XCTFail("nothing to endorse")
-                return Data()
-            })
-        let body = try json(request)
-        XCTAssertNil(body["key_reset_attest_b64"])
-        XCTAssertNil(body["root_endorsement_b64"])
-        XCTAssertNotNil(body["statement_b64"])
     }
 }
 

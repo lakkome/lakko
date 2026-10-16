@@ -1610,17 +1610,6 @@ public class DeviceGroupSyncRepository(
                     statements = root,
                     refounded = unconfirmed,
                     put = { make -> ds.putStatement(make) },
-                    // ADR-0073 section 5 — after a reset of the account keys
-                    // the chain on the DS belongs to the old root; the
-                    // attestation is what lets this root reset it.
-                    keyResetEvidence = if (unconfirmed && accountIdB64 != null) {
-                        { rootKey ->
-                            me.lakko.app.devices.DeviceGroupJournalAccess
-                                .pendingResetEvidence(applicationContext, accountIdB64, groupId, rootKey)
-                        }
-                    } else {
-                        null
-                    },
                 )
                 Log.i(LOG_TAG, "DeviceGroup journal claim: $outcome")
                 val landed = outcome != me.lakko.app.ds.JournalClaimOutcome.ALREADY_CLAIMED

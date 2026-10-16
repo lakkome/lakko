@@ -9,8 +9,16 @@
 //! identity key of that generation. `services/auth` mints it inside the one
 //! transaction of `POST /account/keys/reset/finish`; discovery requires it
 //! before it lets a published identity key change without a supersession
-//! proof, and the Delivery Service requires it before it lets a stranger
-//! re-root the account's DeviceGroup journal.
+//! proof.
+//!
+//! Until ADR-0078 phase 6 it also named the account's DeviceGroup journal id
+//! and the Delivery Service accepted it to let a stranger re-root that
+//! journal. Since phase 6 the DeviceGroup id is derived from the account seed
+//! (`lakko_mls::DeviceGroup::group_id_for`), which auth does not hold and must
+//! not learn: an attestation naming it would put the account id and its
+//! journal in one request. A reset changes the seed, so the re-founded
+//! DeviceGroup lives at a fresh journal the resetting device claims plainly;
+//! nothing is re-rooted and the DS sees no attestation.
 //!
 //! Read the semantics plainly, as with the genesis attestation: this is a
 //! **binding of the authenticated account to a client-asserted key at
@@ -20,29 +28,22 @@
 //! whose key is not the attested one.
 //!
 //! ```text
-//! wire           = version(1) ‖ account_ref(32) ‖ device_group_journal_id(32)
+//! wire           = version(1) = 2 ‖ account_ref(32)
 //!                  ‖ key_generation(8, big-endian u64) ‖ new_signature_pubkey(32)
 //!                  ‖ signed_at_unix_millis(8, big-endian i64) ‖ Ed25519_sig(64)
-//!                = 177 bytes
-//! signing input  = DOMAIN ‖ version ‖ account_ref ‖ device_group_journal_id
+//!                = 145 bytes
+//! signing input  = DOMAIN ‖ version ‖ account_ref
 //!                  ‖ key_generation ‖ new_signature_pubkey ‖ signed_at
 //! DOMAIN         = b"lakko/key-reset-attest/v1"
 //! account_ref    = BLAKE3-derive-key("lakko/key-reset/account-ref/v1", account_id)
-//! device_group_journal_id = BLAKE3("lakko-device-group/v1" ‖ account_id)
 //! ```
 //!
 //! Why these fields:
 //!
-//! - **`account_ref`, not `account_id`.** The DS verifies this blob, and the
-//!   DS must never learn an account id (invariant #5). `account_ref` is a
-//!   one-way per-account value only auth and discovery can relate to an
-//!   account; it is a fresh domain rather than the KT-log `username_hash` so
-//!   the DS cannot link its journal to a public log entry either.
-//! - **`device_group_journal_id`.** The DS checks it against the path of the
-//!   reset route without computing it from an account id it does not have.
-//!   The derivation is `lakko_mls::DeviceGroup::group_id_for`'s, repeated here
-//!   so neither auth nor a client needs the MLS crate to compute it; the
-//!   golden test pins the bytes.
+//! - **`account_ref`, not `account_id`.** A one-way per-account value only
+//!   auth and discovery can relate to an account; a fresh domain rather than
+//!   the KT-log `username_hash`, so the attestation, which discovery may
+//!   serve, links to no public log entry by equality.
 //! - **`new_signature_pubkey`.** Binds the attestation to the identity the
 //!   reset installs.
 //! - **`signed_at`.** For audit, and for the one freshness check that exists:
@@ -51,8 +52,8 @@
 //! Two verify entry points. Neither checks the generation against stored
 //! state: that comparison belongs to the party that holds the stored value.
 //!
-//! - [`verify_key_reset_binding`] — signature plus the three field bindings,
-//!   **no freshness**. Discovery and the DS use this: the generation's strict
+//! - [`verify_key_reset_binding`] — signature plus the two field bindings,
+//!   **no freshness**. Discovery uses this: the generation's strict
 //!   monotonicity makes a replay harmless (an applied generation cannot be
 //!   applied again), and a reset upload may legitimately be retried days after
 //!   the mint when the resetting device crashed between the server reset and
@@ -73,24 +74,18 @@ use thiserror::Error;
 /// every previously-issued key-reset attestation.
 const DOMAIN: &[u8] = b"lakko/key-reset-attest/v1";
 
-/// Wire-format version. The verifier refuses any other value.
-const VERSION: u8 = 1;
+/// Wire-format version. The verifier refuses any other value. `2` since
+/// ADR-0078 phase 6 dropped the DeviceGroup journal id (flag day).
+const VERSION: u8 = 2;
 
 /// BLAKE3 derive-key context of [`key_reset_account_ref`].
 pub const ACCOUNT_REF_DOMAIN: &str = "lakko/key-reset/account-ref/v1";
-
-/// Domain tag of the deterministic DeviceGroup journal id — byte-identical to
-/// `lakko_mls::device_group::GROUP_ID_DOMAIN`.
-const DEVICE_GROUP_ID_DOMAIN: &[u8] = b"lakko-device-group/v1";
 
 /// Length of a raw account id (UUIDv7 bytes).
 pub const ACCOUNT_ID_LEN: usize = 16;
 
 /// Length of `account_ref` (a BLAKE3 output).
 pub const ACCOUNT_REF_LEN: usize = 32;
-
-/// Length of the DeviceGroup journal id (a BLAKE3 output).
-pub const JOURNAL_ID_LEN: usize = 32;
 
 /// Length of the big-endian `u64` key generation.
 const GENERATION_LEN: usize = 8;
@@ -107,34 +102,16 @@ const SIGNED_AT_LEN: usize = 8;
 const MAX_CLOCK_SKEW_MILLIS: i64 = 5 * 60 * 1_000;
 
 /// Total serialized key-reset-attestation length:
-/// `version + account_ref + journal_id + generation + pubkey + signed_at + sig`.
-pub const KEY_RESET_ATTESTATION_LEN: usize = 1
-    + ACCOUNT_REF_LEN
-    + JOURNAL_ID_LEN
-    + GENERATION_LEN
-    + PUBKEY_LEN
-    + SIGNED_AT_LEN
-    + SIGNATURE_LEN;
+/// `version + account_ref + generation + pubkey + signed_at + sig`.
+pub const KEY_RESET_ATTESTATION_LEN: usize =
+    1 + ACCOUNT_REF_LEN + GENERATION_LEN + PUBKEY_LEN + SIGNED_AT_LEN + SIGNATURE_LEN;
 
 /// Derive the per-account pseudonym a key-reset attestation names:
 /// `BLAKE3-derive-key("lakko/key-reset/account-ref/v1", account_id)`.
-/// One-way; auth and discovery recompute it from the session's account id,
-/// the DS only ever compares it.
+/// One-way; auth and discovery recompute it from the session's account id.
 #[must_use]
 pub fn key_reset_account_ref(account_id: &[u8; ACCOUNT_ID_LEN]) -> [u8; ACCOUNT_REF_LEN] {
     hash::blake3_derive_key_from_material(ACCOUNT_REF_DOMAIN, account_id)
-}
-
-/// The account's DeviceGroup journal id:
-/// `BLAKE3("lakko-device-group/v1" ‖ account_id)`, the same bytes
-/// `lakko_mls::DeviceGroup::group_id_for` returns (pinned by a golden test
-/// here and by an equality test in `lakko-ffi-uniffi`, which links both).
-#[must_use]
-pub fn device_group_journal_id(account_id: &[u8; ACCOUNT_ID_LEN]) -> [u8; JOURNAL_ID_LEN] {
-    let mut buf = [0u8; 21 + ACCOUNT_ID_LEN];
-    buf[..21].copy_from_slice(DEVICE_GROUP_ID_DOMAIN);
-    buf[21..].copy_from_slice(account_id);
-    hash::blake3(&buf)
 }
 
 /// Why a key-reset attestation was rejected.
@@ -156,9 +133,6 @@ pub enum KeyResetAttestError {
     /// The attested `account_ref` does not match the expected one.
     #[error("key-reset attestation account_ref does not match the expected account")]
     AccountRefMismatch,
-    /// The attested DeviceGroup journal id does not match the expected one.
-    #[error("key-reset attestation journal id does not match the expected journal")]
-    JournalMismatch,
     /// The attested new signature pubkey does not match the expected one.
     #[error("key-reset attestation pubkey does not match the expected key")]
     PubkeyMismatch,
@@ -172,8 +146,6 @@ pub enum KeyResetAttestError {
 pub struct KeyResetAttestation {
     /// [`key_reset_account_ref`] of the account that reset its keys.
     pub account_ref: [u8; ACCOUNT_REF_LEN],
-    /// [`device_group_journal_id`] of that account.
-    pub device_group_journal_id: [u8; JOURNAL_ID_LEN],
     /// The key generation the reset moved the account to (`1` is genesis, so
     /// a reset mints `2` or above).
     pub key_generation: u64,
@@ -188,22 +160,20 @@ impl KeyResetAttestation {
     #[must_use]
     pub const fn new(
         account_ref: [u8; ACCOUNT_REF_LEN],
-        device_group_journal_id: [u8; JOURNAL_ID_LEN],
         key_generation: u64,
         new_signature_pubkey: [u8; PUBKEY_LEN],
         signed_at_unix_millis: i64,
     ) -> Self {
         Self {
             account_ref,
-            device_group_journal_id,
             key_generation,
             new_signature_pubkey,
             signed_at_unix_millis,
         }
     }
 
-    /// Construct claims for `account_id`, deriving `account_ref` and the
-    /// DeviceGroup journal id. The auth-side constructor.
+    /// Construct claims for `account_id`, deriving `account_ref`. The
+    /// auth-side constructor.
     #[must_use]
     pub fn for_account(
         account_id: &[u8; ACCOUNT_ID_LEN],
@@ -213,7 +183,6 @@ impl KeyResetAttestation {
     ) -> Self {
         Self::new(
             key_reset_account_ref(account_id),
-            device_group_journal_id(account_id),
             key_generation,
             new_signature_pubkey,
             signed_at_unix_millis,
@@ -223,18 +192,11 @@ impl KeyResetAttestation {
     /// The exact bytes the signature covers (domain-separated).
     fn signing_input(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(
-            DOMAIN.len()
-                + 1
-                + ACCOUNT_REF_LEN
-                + JOURNAL_ID_LEN
-                + GENERATION_LEN
-                + PUBKEY_LEN
-                + SIGNED_AT_LEN,
+            DOMAIN.len() + 1 + ACCOUNT_REF_LEN + GENERATION_LEN + PUBKEY_LEN + SIGNED_AT_LEN,
         );
         buf.extend_from_slice(DOMAIN);
         buf.push(VERSION);
         buf.extend_from_slice(&self.account_ref);
-        buf.extend_from_slice(&self.device_group_journal_id);
         buf.extend_from_slice(&self.key_generation.to_be_bytes());
         buf.extend_from_slice(&self.new_signature_pubkey);
         buf.extend_from_slice(&self.signed_at_unix_millis.to_be_bytes());
@@ -252,8 +214,6 @@ impl KeyResetAttestation {
         let mut off = 1;
         out[off..off + ACCOUNT_REF_LEN].copy_from_slice(&self.account_ref);
         off += ACCOUNT_REF_LEN;
-        out[off..off + JOURNAL_ID_LEN].copy_from_slice(&self.device_group_journal_id);
-        off += JOURNAL_ID_LEN;
         out[off..off + GENERATION_LEN].copy_from_slice(&self.key_generation.to_be_bytes());
         off += GENERATION_LEN;
         out[off..off + PUBKEY_LEN].copy_from_slice(&self.new_signature_pubkey);
@@ -286,9 +246,6 @@ impl KeyResetAttestation {
         let mut account_ref = [0u8; ACCOUNT_REF_LEN];
         account_ref.copy_from_slice(&bytes[off..off + ACCOUNT_REF_LEN]);
         off += ACCOUNT_REF_LEN;
-        let mut device_group_journal_id = [0u8; JOURNAL_ID_LEN];
-        device_group_journal_id.copy_from_slice(&bytes[off..off + JOURNAL_ID_LEN]);
-        off += JOURNAL_ID_LEN;
         let mut gen_bytes = [0u8; GENERATION_LEN];
         gen_bytes.copy_from_slice(&bytes[off..off + GENERATION_LEN]);
         off += GENERATION_LEN;
@@ -303,7 +260,6 @@ impl KeyResetAttestation {
             .map_err(|_| KeyResetAttestError::BadSignature)?;
         let claims = Self {
             account_ref,
-            device_group_journal_id,
             key_generation: u64::from_be_bytes(gen_bytes),
             new_signature_pubkey,
             signed_at_unix_millis: i64::from_be_bytes(signed_at),
@@ -326,9 +282,9 @@ impl KeyResetAttestation {
     }
 }
 
-/// Verify a key-reset attestation's signature and its `account_ref` /
-/// journal id / new pubkey bindings, **without** a freshness check. The entry
-/// point for discovery and the DS, which compare the returned
+/// Verify a key-reset attestation's signature and its `account_ref` / new
+/// pubkey bindings, **without** a freshness check. The entry point for
+/// discovery, which compares the returned
 /// `key_generation` with the one they recorded (strictly greater, else
 /// refuse) — a replay of an applied generation is harmless, and a legitimate
 /// retry may be days old.
@@ -337,22 +293,17 @@ impl KeyResetAttestation {
 ///
 /// Propagates [`KeyResetAttestation::open`] errors, then
 /// [`KeyResetAttestError::AccountRefMismatch`] /
-/// [`KeyResetAttestError::JournalMismatch`] /
 /// [`KeyResetAttestError::PubkeyMismatch`] if the (now-authenticated) claims
 /// do not match what the caller expects.
 pub fn verify_key_reset_binding(
     bytes: &[u8],
     verifying: &VerifyingKey,
     expected_account_ref: &[u8; ACCOUNT_REF_LEN],
-    expected_journal_id: &[u8; JOURNAL_ID_LEN],
     expected_pubkey: &[u8; PUBKEY_LEN],
 ) -> Result<KeyResetAttestation, KeyResetAttestError> {
     let att = KeyResetAttestation::open(bytes, verifying)?;
     if &att.account_ref != expected_account_ref {
         return Err(KeyResetAttestError::AccountRefMismatch);
-    }
-    if &att.device_group_journal_id != expected_journal_id {
-        return Err(KeyResetAttestError::JournalMismatch);
     }
     if &att.new_signature_pubkey != expected_pubkey {
         return Err(KeyResetAttestError::PubkeyMismatch);
@@ -373,259 +324,15 @@ pub fn verify_key_reset_fresh(
     bytes: &[u8],
     verifying: &VerifyingKey,
     expected_account_ref: &[u8; ACCOUNT_REF_LEN],
-    expected_journal_id: &[u8; JOURNAL_ID_LEN],
     expected_pubkey: &[u8; PUBKEY_LEN],
     now_unix_millis: i64,
     max_age_millis: i64,
 ) -> Result<KeyResetAttestation, KeyResetAttestError> {
-    let att = verify_key_reset_binding(
-        bytes,
-        verifying,
-        expected_account_ref,
-        expected_journal_id,
-        expected_pubkey,
-    )?;
+    let att = verify_key_reset_binding(bytes, verifying, expected_account_ref, expected_pubkey)?;
     if !att.is_fresh(now_unix_millis, max_age_millis) {
         return Err(KeyResetAttestError::Stale);
     }
     Ok(att)
-}
-
-/// Domain separator of a root endorsement, followed by one `0x00` byte.
-/// Distinct from every other thing an account identity key signs (account
-/// statements, supersession proofs, device bindings, DS proofs).
-pub const ROOT_ENDORSEMENT_DOMAIN: &[u8] = b"lakko/ds/root-endorsement/v1";
-
-/// Length of a root endorsement: one Ed25519 signature.
-pub const ROOT_ENDORSEMENT_LEN: usize = SIGNATURE_LEN;
-
-/// Why a root endorsement was rejected.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum RootEndorsementError {
-    /// The byte slice is not [`ROOT_ENDORSEMENT_LEN`] long.
-    #[error("root endorsement has wrong length: {got} bytes")]
-    BadLength {
-        /// The actual length received.
-        got: usize,
-    },
-    /// The attested key is not a usable Ed25519 key, or the signature does
-    /// not verify under it.
-    #[error("root endorsement signature is invalid")]
-    BadSignature,
-}
-
-/// The bytes a root endorsement signs: the domain, one zero byte, the
-/// journal, the key generation and the root key being endorsed.
-fn root_endorsement_input(
-    journal_id: &[u8; JOURNAL_ID_LEN],
-    key_generation: u64,
-    root_key: &[u8; PUBKEY_LEN],
-) -> Vec<u8> {
-    let mut buf =
-        Vec::with_capacity(ROOT_ENDORSEMENT_DOMAIN.len() + 1 + JOURNAL_ID_LEN + 8 + PUBKEY_LEN);
-    buf.extend_from_slice(ROOT_ENDORSEMENT_DOMAIN);
-    buf.push(0);
-    buf.extend_from_slice(journal_id);
-    buf.extend_from_slice(&key_generation.to_be_bytes());
-    buf.extend_from_slice(root_key);
-    buf
-}
-
-/// Sign a **root endorsement** ([ADR-0074] section 4.6, decision D11): the
-/// identity key a key-reset attestation names says which key may become the
-/// root of the account's DeviceGroup journal under that attestation.
-///
-/// A key-reset attestation alone says "this account moved to this key at
-/// this generation"; it does not say who may act on it. The Delivery Service
-/// hears an attested journal `reset` from any signer, so without this an
-/// attestation that anyone can read (ADR-0073 R.3 has discovery serve it)
-/// would let anyone become the root. With it, the attestation is useless to
-/// everyone but the holder of the attested identity key.
-///
-/// `identity` is the NEW account identity's signing key (the one whose
-/// public half is the attestation's `new_signature_pubkey`); `root_key` is
-/// the key that becomes the journal's root: the signer of a `reset`
-/// statement, the `new_root` of a `root` transfer.
-///
-/// [ADR-0074]: ../../../docs/adr/0074-account-takeover-resistance.md
-#[must_use]
-pub fn sign_root_endorsement(
-    identity: &SigningKey,
-    journal_id: &[u8; JOURNAL_ID_LEN],
-    key_generation: u64,
-    root_key: &[u8; PUBKEY_LEN],
-) -> [u8; ROOT_ENDORSEMENT_LEN] {
-    identity
-        .sign(&root_endorsement_input(
-            journal_id,
-            key_generation,
-            root_key,
-        ))
-        .to_bytes()
-}
-
-/// Verify a root endorsement against an attestation the caller has ALREADY
-/// verified: the signature must be by the attestation's
-/// `new_signature_pubkey` over its journal, its generation and `root_key`.
-///
-/// # Errors
-///
-/// [`RootEndorsementError::BadLength`]; [`RootEndorsementError::BadSignature`]
-/// for a small-order or undecodable attested key and for a signature that
-/// does not verify.
-pub fn verify_root_endorsement(
-    attestation: &KeyResetAttestation,
-    root_key: &[u8; PUBKEY_LEN],
-    endorsement: &[u8],
-) -> Result<(), RootEndorsementError> {
-    if endorsement.len() != ROOT_ENDORSEMENT_LEN {
-        return Err(RootEndorsementError::BadLength {
-            got: endorsement.len(),
-        });
-    }
-    let sig = Signature::from_bytes(endorsement).map_err(|_| RootEndorsementError::BadSignature)?;
-    let key = VerifyingKey::from_bytes(&attestation.new_signature_pubkey)
-        .map_err(|_| RootEndorsementError::BadSignature)?;
-    // A small-order key verifies forged signatures.
-    if key.is_weak() {
-        return Err(RootEndorsementError::BadSignature);
-    }
-    key.verify(
-        &root_endorsement_input(
-            &attestation.device_group_journal_id,
-            attestation.key_generation,
-            root_key,
-        ),
-        &sig,
-    )
-    .map_err(|_| RootEndorsementError::BadSignature)
-}
-
-#[cfg(test)]
-mod endorsement_tests {
-    use super::*;
-
-    const ACCOUNT: [u8; 16] = [0xAB; 16];
-    const ROOT: [u8; 32] = [0x52; 32];
-
-    fn identity() -> SigningKey {
-        SigningKey::from_seed(&[0x61; 32])
-    }
-
-    fn attestation(generation: u64) -> KeyResetAttestation {
-        KeyResetAttestation::for_account(
-            &ACCOUNT,
-            generation,
-            identity().verifying_key().to_bytes(),
-            1_000,
-        )
-    }
-
-    #[test]
-    fn an_endorsement_by_the_attested_key_verifies_for_exactly_what_it_names() {
-        let att = attestation(3);
-        let sig = sign_root_endorsement(
-            &identity(),
-            &att.device_group_journal_id,
-            att.key_generation,
-            &ROOT,
-        );
-        assert_eq!(sig.len(), 64);
-        verify_root_endorsement(&att, &ROOT, &sig).unwrap();
-
-        // Another root key, another generation, another journal, another
-        // signer: each refused.
-        assert_eq!(
-            verify_root_endorsement(&att, &[0x53; 32], &sig),
-            Err(RootEndorsementError::BadSignature)
-        );
-        assert_eq!(
-            verify_root_endorsement(&attestation(4), &ROOT, &sig),
-            Err(RootEndorsementError::BadSignature)
-        );
-        let other_account = KeyResetAttestation::for_account(
-            &[0xAC; 16],
-            3,
-            identity().verifying_key().to_bytes(),
-            1_000,
-        );
-        assert_eq!(
-            verify_root_endorsement(&other_account, &ROOT, &sig),
-            Err(RootEndorsementError::BadSignature)
-        );
-        let stranger = sign_root_endorsement(
-            &SigningKey::from_seed(&[0x62; 32]),
-            &att.device_group_journal_id,
-            att.key_generation,
-            &ROOT,
-        );
-        assert_eq!(
-            verify_root_endorsement(&att, &ROOT, &stranger),
-            Err(RootEndorsementError::BadSignature)
-        );
-    }
-
-    #[test]
-    fn malformed_endorsements_and_weak_attested_keys_are_refused() {
-        let att = attestation(3);
-        let sig = sign_root_endorsement(
-            &identity(),
-            &att.device_group_journal_id,
-            att.key_generation,
-            &ROOT,
-        );
-        assert_eq!(
-            verify_root_endorsement(&att, &ROOT, &sig[..63]),
-            Err(RootEndorsementError::BadLength { got: 63 })
-        );
-        assert_eq!(
-            verify_root_endorsement(&att, &ROOT, &[]),
-            Err(RootEndorsementError::BadLength { got: 0 })
-        );
-        let mut flipped = sig;
-        flipped[10] ^= 1;
-        assert_eq!(
-            verify_root_endorsement(&att, &ROOT, &flipped),
-            Err(RootEndorsementError::BadSignature)
-        );
-        // The identity point (small order) as the attested key: a forged
-        // all-zero-R signature must not pass.
-        let mut weak = [0u8; 32];
-        weak[0] = 1;
-        let weak_att = KeyResetAttestation::for_account(&ACCOUNT, 3, weak, 1_000);
-        assert_eq!(
-            verify_root_endorsement(&weak_att, &ROOT, &sig),
-            Err(RootEndorsementError::BadSignature)
-        );
-    }
-
-    #[test]
-    fn the_signed_bytes_are_pinned() {
-        let journal = [0x4A; 32];
-        let input = root_endorsement_input(&journal, 7, &ROOT);
-        assert_eq!(input.len(), 28 + 1 + 32 + 8 + 32);
-        assert_eq!(&input[..28], b"lakko/ds/root-endorsement/v1");
-        assert_eq!(input[28], 0);
-        assert_eq!(&input[29..61], &journal);
-        assert_eq!(&input[61..69], &7u64.to_be_bytes());
-        assert_eq!(&input[69..], &ROOT);
-    }
-
-    #[test]
-    fn an_endorsement_is_not_an_account_statement_or_an_attestation() {
-        // The endorsement is 64 bytes: every other kind in this crate is
-        // longer and refuses it by length before any signature is checked.
-        let att = attestation(3);
-        let sig = sign_root_endorsement(
-            &identity(),
-            &att.device_group_journal_id,
-            att.key_generation,
-            &ROOT,
-        );
-        let vk = identity().verifying_key();
-        assert!(KeyResetAttestation::open(&sig, &vk).is_err());
-        assert!(crate::AccountStatement::open(&sig, &vk).is_err());
-    }
 }
 
 #[cfg(test)]
@@ -655,41 +362,25 @@ mod tests {
         })
     }
 
-    /// `BLAKE3("lakko-device-group/v1" || [0xAA; 16])`, the value
-    /// `lakko_mls::DeviceGroup::group_id_for(&[0xAA; 16])` returns.
-    const GOLDEN_JOURNAL_ID: &str =
-        "9b160c2a2c8aba9b292dc4240461b9297d284a485958e071d013a6722d92baae";
-
     /// `BLAKE3-derive-key("lakko/key-reset/account-ref/v1", [0xAA; 16])`.
     const GOLDEN_ACCOUNT_REF: &str =
         "303c3e68e91fe8d3c2b063f9280cc11d0e72b02d87e3b9ef351f9e01fa0fb7f1";
 
     #[test]
     fn wire_layout_is_pinned() {
-        assert_eq!(KEY_RESET_ATTESTATION_LEN, 177);
+        assert_eq!(KEY_RESET_ATTESTATION_LEN, 145);
         let wire = sample().sign(&key());
-        assert_eq!(wire.len(), 177);
-        assert_eq!(wire[0], 1);
+        assert_eq!(wire.len(), 145);
+        assert_eq!(wire[0], 2);
         assert_eq!(&wire[1..33], &key_reset_account_ref(&ACCOUNT));
-        assert_eq!(&wire[33..65], &device_group_journal_id(&ACCOUNT));
-        assert_eq!(&wire[65..73], &2u64.to_be_bytes());
-        assert_eq!(&wire[73..105], &[0xCC; 32]);
-        assert_eq!(&wire[105..113], &1_000_000i64.to_be_bytes());
+        assert_eq!(&wire[33..41], &2u64.to_be_bytes());
+        assert_eq!(&wire[41..73], &[0xCC; 32]);
+        assert_eq!(&wire[73..81], &1_000_000i64.to_be_bytes());
     }
 
     #[test]
     fn derivations_are_pinned() {
-        // `device_group_journal_id` must equal
-        // `lakko_mls::DeviceGroup::group_id_for` byte for byte; the FFI crate,
-        // which links both, asserts the equality against the live MLS crate.
-        // These goldens stop either derivation drifting silently.
-        assert_eq!(hex(&device_group_journal_id(&ACCOUNT)), GOLDEN_JOURNAL_ID);
         assert_eq!(hex(&key_reset_account_ref(&ACCOUNT)), GOLDEN_ACCOUNT_REF);
-        assert_ne!(
-            key_reset_account_ref(&ACCOUNT),
-            device_group_journal_id(&ACCOUNT),
-            "the two per-account values must not be linkable by equality"
-        );
         assert_ne!(
             key_reset_account_ref(&ACCOUNT),
             key_reset_account_ref(&[0xAB; 16])
@@ -705,7 +396,6 @@ mod tests {
             &wire,
             &sk.verifying_key(),
             &key_reset_account_ref(&ACCOUNT),
-            &device_group_journal_id(&ACCOUNT),
             &[0xCC; 32],
         )
         .expect("valid attestation verifies");
@@ -718,9 +408,9 @@ mod tests {
         let sk = key();
         let wire = sample().sign(&sk);
         let vk = sk.verifying_key();
-        // One byte in each region: account_ref, journal id, generation,
-        // pubkey, signed_at, signature.
-        for idx in [1usize, 40, 70, 80, 110, KEY_RESET_ATTESTATION_LEN - 1] {
+        // One byte in each region: account_ref, generation, pubkey,
+        // signed_at, signature.
+        for idx in [1usize, 36, 50, 76, KEY_RESET_ATTESTATION_LEN - 1] {
             let mut bad = wire;
             bad[idx] ^= 0x01;
             assert_eq!(
@@ -747,24 +437,19 @@ mod tests {
         let wire = sample().sign(&sk);
         let vk = sk.verifying_key();
         let account_ref = key_reset_account_ref(&ACCOUNT);
-        let journal = device_group_journal_id(&ACCOUNT);
         assert_eq!(
-            verify_key_reset_binding(&wire, &vk, &[0x00; 32], &journal, &[0xCC; 32]),
+            verify_key_reset_binding(&wire, &vk, &[0x00; 32], &[0xCC; 32]),
             Err(KeyResetAttestError::AccountRefMismatch)
         );
         assert_eq!(
-            verify_key_reset_binding(&wire, &vk, &account_ref, &[0x00; 32], &[0xCC; 32]),
-            Err(KeyResetAttestError::JournalMismatch)
-        );
-        assert_eq!(
-            verify_key_reset_binding(&wire, &vk, &account_ref, &journal, &[0x00; 32]),
+            verify_key_reset_binding(&wire, &vk, &account_ref, &[0x00; 32]),
             Err(KeyResetAttestError::PubkeyMismatch)
         );
         // Another account's attestation never binds to this account.
         let other =
             KeyResetAttestation::for_account(&[0xAB; 16], 2, [0xCC; 32], 1_000_000).sign(&sk);
         assert_eq!(
-            verify_key_reset_binding(&other, &vk, &account_ref, &journal, &[0xCC; 32]),
+            verify_key_reset_binding(&other, &vk, &account_ref, &[0xCC; 32]),
             Err(KeyResetAttestError::AccountRefMismatch)
         );
     }
@@ -775,17 +460,8 @@ mod tests {
         let wire = sample().sign(&sk); // signed_at = 1_000_000
         let vk = sk.verifying_key();
         let account_ref = key_reset_account_ref(&ACCOUNT);
-        let journal = device_group_journal_id(&ACCOUNT);
         let ok = |now: i64, max_age: i64| {
-            verify_key_reset_fresh(
-                &wire,
-                &vk,
-                &account_ref,
-                &journal,
-                &[0xCC; 32],
-                now,
-                max_age,
-            )
+            verify_key_reset_fresh(&wire, &vk, &account_ref, &[0xCC; 32], now, max_age)
         };
         assert!(ok(1_000_000, 0).is_ok(), "signed exactly now");
         assert!(ok(1_500_000, 500_000).is_ok(), "at the edge of the window");
@@ -802,7 +478,7 @@ mod tests {
         assert!(ok(i64::MAX, i64::MAX).is_ok(), "saturating arithmetic");
         // The binding entry point ignores signed_at entirely: a reset upload
         // may be retried days after the mint.
-        assert!(verify_key_reset_binding(&wire, &vk, &account_ref, &journal, &[0xCC; 32]).is_ok());
+        assert!(verify_key_reset_binding(&wire, &vk, &account_ref, &[0xCC; 32]).is_ok());
     }
 
     #[test]
@@ -814,18 +490,23 @@ mod tests {
             Err(KeyResetAttestError::BadLength { got: 10 })
         );
         assert_eq!(
-            KeyResetAttestation::open(&[0u8; 176], &vk),
-            Err(KeyResetAttestError::BadLength { got: 176 })
+            KeyResetAttestation::open(&[0u8; 144], &vk),
+            Err(KeyResetAttestError::BadLength { got: 144 })
         );
         assert_eq!(
-            KeyResetAttestation::open(&[0u8; 178], &vk),
-            Err(KeyResetAttestError::BadLength { got: 178 })
+            KeyResetAttestation::open(&[0u8; 146], &vk),
+            Err(KeyResetAttestError::BadLength { got: 146 })
+        );
+        // The retired 177-byte version-1 layout is refused by its length.
+        assert_eq!(
+            KeyResetAttestation::open(&[1u8; 177], &vk),
+            Err(KeyResetAttestError::BadLength { got: 177 })
         );
         let mut wire = sample().sign(&sk);
-        wire[0] = 2;
+        wire[0] = 1;
         assert_eq!(
             KeyResetAttestation::open(&wire, &vk),
-            Err(KeyResetAttestError::BadVersion(2))
+            Err(KeyResetAttestError::BadVersion(1))
         );
     }
 
@@ -839,19 +520,13 @@ mod tests {
         let opened = KeyResetAttestation::open(&g2, &vk).unwrap();
         assert_eq!(opened.key_generation, 2);
         let mut forged = g2;
-        forged[65..73].copy_from_slice(&3u64.to_be_bytes());
+        forged[33..41].copy_from_slice(&3u64.to_be_bytes());
         assert_eq!(
             KeyResetAttestation::open(&forged, &vk),
             Err(KeyResetAttestError::BadSignature)
         );
         assert_eq!(
-            verify_key_reset_binding(
-                &g2,
-                &vk,
-                &key_reset_account_ref(&ACCOUNT),
-                &device_group_journal_id(&ACCOUNT),
-                &[0x02; 32]
-            ),
+            verify_key_reset_binding(&g2, &vk, &key_reset_account_ref(&ACCOUNT), &[0x02; 32]),
             Err(KeyResetAttestError::PubkeyMismatch)
         );
     }
@@ -861,7 +536,7 @@ mod tests {
         // Domain separation is load-bearing: under the SHARED auth attest key a
         // key-reset attestation and each of the four other auth-signed kinds
         // (plus the discovery-signed username certificate) must be
-        // non-interchangeable. The length (177) differs from every other kind,
+        // non-interchangeable. The length (145) differs from every other kind,
         // so (a) proves the length gate both ways and (b) proves the domain
         // prefix by splicing signatures across kinds.
         let sk = key();

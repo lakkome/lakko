@@ -12,24 +12,19 @@ import org.junit.Test
  * there. The same URL and the same reading of the answer as web and iOS.
  */
 class SfuCallStateTest {
-    private val id = "ab".repeat(16)
+    private val room = "ab".repeat(32)
 
+    /** ADR-0078 section 2: the route names the room and carries no token. */
     @Test
     fun `the state route is on the http origin behind the socket base`() {
         assertEquals(
-            "https://test.lakko.me/sfu/v1/calls/$id",
-            sfuCallStateUrl("wss://test.lakko.me/sfu", id),
+            "https://test.lakko.me/sfu/v1/rooms/$room",
+            sfuCallStateUrl("wss://test.lakko.me/sfu", room),
         )
         assertEquals(
-            "http://127.0.0.1:9640/v1/calls/$id",
-            sfuCallStateUrl("ws://127.0.0.1:9640/", id),
+            "http://127.0.0.1:9640/v1/rooms/$room",
+            sfuCallStateUrl("ws://127.0.0.1:9640/", room),
         )
-    }
-
-    /** The token rides `Authorization`, never the URL (invariant #5). */
-    @Test
-    fun `the token is a bearer header`() {
-        assertEquals("Bearer a.b.c", sfuCallStateAuthorization("a.b.c"))
     }
 
     @Test

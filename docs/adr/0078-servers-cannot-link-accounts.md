@@ -440,6 +440,91 @@ Welcome stays a recorded no-op until the open question is decided.
   credential (`<expiry>:<random>`); credentials are issued beside the call
   JWT through the same anonymous exchange, not through a bearer route.
 
+#### Phase 2 as built (2026-10-16)
+
+Built in the core, `services/auth` (migrations `0034`, `0035`),
+`services/sfu`, both FFI surfaces and the three clients; host-tested only,
+not deployed, no call placed against it.
+
+- **Room.** `lakko_sfu_proto::room_id(call_id)` =
+  `BLAKE3-derive-key("lakko/sfu/room/v1", call_id)`, 32 bytes, sent as 64
+  lower-case hex; golden-pinned (`084b368a...` for the call id `00..0f`). On
+  UniFFI and wasm as `sfuRoomForCall`.
+- **Token.** `lakko-call-jwt` claims are exactly `iss`, `aud`, `room`,
+  `peer_id` (32 lower-case hex, random per token), `role`, `iat`, `exp`, and
+  the claim set is closed (`deny_unknown_fields`): a token carrying `sub` or
+  `call_id` does not decode. `mint_test_jwt` takes `--peer-id` and derives
+  the room from `--call-id`.
+- **Auth.** `call-join` is `TokenContext` wire byte 12. `POST /call/jwt`
+  has no session: body `{room, role}` (anything else refused before a token
+  is spent), then one `call-join` token from `x-lakko-anon-token` (the
+  shared gate over the spent-set migration `0034`, byte for byte the shared
+  crate's schema), then the room cap, then the mint. The answer is
+  `{jwt, expires_at_unix_secs, turn}`. The issuance quota is 100 a day, and
+  8 for an account younger than a day (`LAKKO_ANON_TOKEN_QUOTA_CALL_JOIN`,
+  `LAKKO_ANON_TOKEN_QUOTA_CALL_JOIN_YOUNG`,
+  `LAKKO_AUTH_YOUNG_ACCOUNT_AGE_SECS`); all three chosen, not measured. The
+  token is spent before the cap is asked, so a refused admission still
+  costs it.
+- **Room cap.** In auth, in memory: at most 100 admissions per room per 60
+  s (`LAKKO_AUTH_ROOM_ADMISSION_LIMIT`, `0` disables;
+  `LAKKO_AUTH_ROOM_ADMISSION_WINDOW_SECS`); over it, `429
+  room-admission-limit`. Chosen, not measured. It is per auth process: a
+  restart forgets it and two instances do not share it. Migration `0035`
+  drops `call_admission_events` and `throttled_calls`; `throttle.rs` is
+  gone.
+- **TURN.** `POST /call/turn-credential` is gone. A credential rides the
+  `/call/jwt` answer with a username tag of 16 random bytes. A one-to-one
+  call, which uses no SFU, mints a call token for its own call's room only
+  to obtain the credential, so it too spends a `call-join` token.
+- **SFU.** `Peer` is `{id, room, outbound}`; the peer id is the token's
+  `peer_id` and a second live socket with the same id is refused. `Welcome`
+  carries `peer_id`, `room`, the roster (each entry the peer id alone) and
+  `server_ts`; `PeerJoined` carries the peer id. `peer_tag`,
+  `account_pseudonym` and the account prefix in logs are removed; the
+  admission and roster log lines name neither the room nor a peer, while
+  the media loop's logs still carry the random peer id and the room (left
+  to section 11, phase 8). `GET
+  /v1/rooms/{room}` answers with no token and `400` for anything that is
+  not 64 lower-case hex; `GET /v1/calls/{call_id}` is gone. nginx routes the
+  new path in both configurations.
+- **Relay.** `lakko_calls::relay`: `RelayKey` =
+  `BLAKE3-derive-key("lakko/call/relay/v1", call_seed)`; a sealed payload is
+  `version(0x01) || nonce(12) || ChaCha20-Poly1305` with AAD
+  `"lakko/call/relay/v1\0" || version`, plaintext at most 1024 bytes. A peer
+  announcement is `"lakko/call/peer-announce/v1\0" || 0x01 || call_id(16) ||
+  peer_id_len || peer_id || signer_key(32) || sig(64)`, the signature over
+  `"lakko/call/peer-announce/sig/v1\0" || call_id || peer_id_len ||
+  peer_id`. `verify_peer_announcement` requires the call id, the relay
+  `from` to equal the announced peer id, the signer to be a leaf of the
+  group, the signature, and an account binding on that leaf (ADR-0050); it
+  returns the leaf, its key and the account key. The camera media state is
+  sealed under the same key; an unsealed one is no longer accepted. Fuzz
+  `lakko-calls/relay_open`. FFI: `CallRelayKey`,
+  `classifyCallRelayPlaintext`, `composeCallPeerAnnouncement`,
+  `verifyCallPeerAnnouncement` on UniFFI (refusals as the appended
+  `FfiError::CallRelay`) and wasm.
+- **Clients.** Each keeps the current and the previous epoch's relay key,
+  announces itself after the Welcome, on every rekey, when a peer joins and
+  every 15 s (chosen, not measured: an announcement sealed under a key a
+  peer does not hold yet is lost to it), and names a tile only from a
+  verified announcement; the peer-tag resolvers are deleted (web
+  `peer-tag-map.ts`, iOS `GroupCallPeerTags.swift`, Android
+  `PeerTagLabels.kt`). The probe computes the room and sends no token. In a
+  link call the committer election binds a peer to a member only from its
+  announcement or from the KeyPackage the committer admitted, no longer
+  from whoever relayed an MLS message; a member's sealed profile names a
+  peer only when that peer announced the leaf that sealed it; and its
+  account claim with the username certificate is kept only for a profile
+  the owner sealed naming the capability's owner account
+  (`boundProfileClaim`), since no server ties a joiner to an account any
+  more, so another joiner's username reads as claimed, never verified.
+- **Residuals.** A joiner holds no group before its Welcome, so before it
+  it cannot see whether the owner is present. Until a peer's announcement
+  arrives its tile is unnamed. The SFU still learns the set of peer ids in
+  a room and their timing (class (c)). Nothing was run against a deployed
+  SFU, auth or TURN.
+
 ### 3. Push without a bipartite graph (finding 8)
 
 - **The wake is sealed to push-gw.** The `x-lakko-wake` header becomes a
@@ -469,6 +554,91 @@ Welcome stays a recorded no-op until the open question is decided.
   Mitigations (cover wakes, batching) blur it; separating the push operator
   (section 12) is what removes it. FCM topics would move the set to Google;
   APNs has no general topic mechanism.
+
+#### Phase 3 as built (2026-10-16)
+
+Built in `lakko-contacts` (`push_routing.rs` derivations, new `push_wake.rs`),
+`lakko-ds-proof` (the `push-binding` statement and its kind byte 6 retired;
+the byte is refused), `services/push-gw` (migration
+`0006_sealed_subscriptions.sql`), `services/ds` (migration
+`0011_drop_push_bindings.sql`), `services/auth` (the `push-register` quota),
+UniFFI and wasm (`push_wake.rs`; the NSE surface is unchanged, see below) and
+the three clients including their background paths (web service worker, iOS
+NSE and VoIP handler, Android FCM service). Host-tested only; nothing
+deployed or walked.
+
+- **Derivations.** `derive_push_wake_signing_seed` = keyed-BLAKE3(secret,
+  `lakko/push/wake-sign/v1`) as an Ed25519 seed; `derive_push_wake_unlock_key`
+  = keyed-BLAKE3(secret, `lakko/push/wake-unlock/v1`); both golden-pinned in
+  the crate and on both FFI surfaces (`derivePushWakePublicKey`,
+  `derivePushWakeUnlockKey`).
+- **The sealed wake** is `version(1) = 0x01 ‖ ephemeral X25519 key(32) ‖
+  ChaCha20-Poly1305` over a 185-byte plaintext `push_gid(32) ‖ kind(1) ‖
+  nonce(16) ‖ timestamp_ms(8 BE) ‖ unlock_key(32) ‖ wake_pk(32) ‖ sig(64)`,
+  234 bytes, sent as 312 base64url characters. The box is the
+  `lakko-contacts::envelope` construction under its own labels
+  (`lakko/push-wake/v1/key`, `/nonce`, AAD = domain ‖ version). The signature
+  is by the wake key over a domain-separated encoding of the other fields, so
+  a wake names exactly one group, kind, time and nonce. `open_push_wake` is
+  fail-closed and fuzzed (`lakko-contacts/fuzz` target `push_wake_open`).
+- **push-gw's key** is generated at first boot and stored in its own
+  database (`push_wake_key`), not taken from the environment (decided here:
+  a key in the env file would be one more secret to provision and rotate by
+  hand, and the database already holds everything push-gw needs). Published
+  at `GET /push/wake-key`. Clients pin it at build time
+  (`VITE_LAKKO_PUSH_WAKE_KEY`, Info.plist `LakkoPushWakeKey`,
+  `BuildConfig.LAKKO_PUSH_WAKE_KEY`) or fetch it once per process; a wake
+  that cannot be sealed is simply not sent (the message is still delivered
+  on the next poll).
+- **A subscription row** is `(sub_id, push_gid, wake_pk, sealed)`, `sealed`
+  = ChaCha20-Poly1305 under the unlock key over a list of the device's
+  tokens `(provider, token)`, zero-padded to 256-byte steps (AAD binds the
+  `push_gid` and the `sub_id`). It carries a LIST because an iOS device holds
+  two tokens (alert and PushKit) and push-gw's delivery rule (a call goes to
+  the call token when there is one) needs the whole set. `sub_id` is 16
+  random bytes the device keeps per `(account, push_gid)` beside its route
+  row; nothing else names the device. `POST /push/subscribe` upserts by
+  `sub_id`; `POST /push/unsubscribe` deletes by `sub_id`; both spend one
+  `push-register` token.
+- **Delivery.** The DS forwards the header blob unread (it checks only the
+  version byte and the length, and caps wakes per journal). push-gw opens
+  the wake, verifies the signature, refuses a timestamp more than 10 minutes
+  off its clock and a nonce it has seen (an in-memory set, so a restart
+  re-admits a wake replayed within the skew window), caps wakes per
+  `push_gid`, selects the rows whose `(push_gid, wake_pk)` match, opens each
+  with the unlock key and sends. A token the provider reports invalid is
+  removed by re-sealing the row without it (or deleting the row when it was
+  the last), conditional on the row not having changed meanwhile. The
+  delivered payload carries the subscription id as `s` instead of the device
+  pseudonym `d`; every background path handles a wake only when the bound
+  account's route row for `g` holds that `s`.
+- **Per-device wakes removed.** `/push/register` and `/push/unregister` are
+  gone with `push_tokens`: nothing used a device-addressed wake, and keeping
+  one would have kept the device pseudonym. The raw-group-id fallback of the
+  pre-ADR-0042 wake is removed on every client.
+- **Re-subscribe.** A token change (APNs, PushKit, FCM, Web Push
+  subscription change), a sign-in and a second account signing in on the
+  same device send every subscription of the signed-in account again (the
+  previous account's rows are removed first). auth's default `push-register`
+  quota goes from 100 to 400 a day for that reason (chosen, not measured).
+  At sign-out the subscription ids are read before the route rows are wiped
+  and every row is removed by id.
+- **The NSE surface is unchanged.** The extension never seals or opens a
+  wake; it reads `s` from the payload and checks it against the route row the
+  app wrote, in Swift.
+- **Residuals.** The class (b) residual above stands, and three more are
+  specific to this design: (1) a live DS and push-gw that compare notes can
+  link a journal to its `push_gid` by timing (a forwarded wake arrives at
+  push-gw the moment the publish lands); (2) an evicted member keeps the
+  routing secret until the next rotation (ADR-0043) and can sign wakes for
+  the group until then, rate-capped by push-gw; (3) an operator who is also a
+  member of a group can decrypt that group's subscription rows (it holds the
+  unlock key), so it learns the tokens of that group's members; (4) a device
+  re-sending all its subscriptions after a token change is one burst of
+  writes from one address, a class (c) link.
+- **Found while building:** the Android FCM handler required a `v` key that
+  the FCM provider never sent, so no FCM wake parsed on Android before this
+  change; the check is gone.
 
 ### 4. Knocks sealed to the group (finding 7, 13)
 
@@ -519,6 +689,73 @@ Welcome stays a recorded no-op until the open question is decided.
   hold (the owner's journal root seed and the channel id), not from the
   channel id alone. `lakko_mls::channel_id_from_group_id` (FFI `channelIdFromPublisherGroupId`) goes away; a
   co-publisher capability carries the channel id inside its sealed link.
+
+#### Phase 6 as built (2026-10-16)
+
+Built in `lakko-mls`, `lakko-contacts`, `lakko-attest`, both FFI surfaces,
+`services/ds`, `services/auth` and `services/discovery` (tests and docs
+only there) and web / iOS / Android, together with G-50 (the channel
+PublisherGroup commit record, which touches the same group). Host-tested;
+not walked live, not deployed. Indexed as C-79 (ids) and C-82 (G-50).
+
+- **DeviceGroup id.** `DeviceGroup::group_id_for(&account_seed)` =
+  `BLAKE3-derive-key("lakko/device-group/id/v2", account_seed)`, golden-pinned;
+  `create_founder` and `load` take the seed, `load_by_group_id` opens a group
+  joined by Welcome under its own id, and `join_from_welcome` binds no id (it
+  cannot: a fresh device does not hold the seed yet). The seed every client
+  passes is the **lineage seed**: the oldest own predecessor after an ADR-0074
+  rotation, else the current account seed. A rotation therefore keeps the
+  DeviceGroup and its journal, and the rotation's root move is a plain
+  `root` transfer from the old root to the new one. An ADR-0073 key reset
+  clears the own predecessors (web already did; iOS and Android now do), so
+  the new seed names a new journal, which the resetting device founds and
+  claims with an ordinary claim. FFI: `deviceGroupIdFor(accountIdentity)`,
+  `loadDeviceGroup(identity, accountId, accountIdentity)`,
+  `loadDeviceGroupById`, `DeviceGroup.createFounder(identity, accountId,
+  accountIdentity)`.
+- **The key-reset attestation lost its journal id** (`lakko-attest`
+  `KeyResetAttestation` version 2, 145 bytes, version 1 refused). Decided
+  while building, not in the ADR: auth mints it, and naming the journal
+  would need auth to learn the seed-derived id, which is exactly what this
+  section takes away. With it went the DS's attested reset arm, the ADR-0074
+  root endorsement (`sign_ds_root_endorsement`, the `root_endorsement_b64`
+  field, both client implementations) and `ds_group_owner.key_generation`
+  (migration `0012`); the DS no longer depends on `lakko-attest` or reads
+  `LAKKO_DS_ATTEST_KEY`. The attested root transfer of a rotation became a
+  plain transfer. Discovery's key-change rule is unchanged.
+- **PublisherGroup id.** `publisher_group_id_for(owner_account_seed,
+  channel_id)` = `BLAKE3-derive-key("lakko/pubgrp/id/v3", owner_account_seed ‖
+  channel_id)`. Decided while building: the input is the owner's account seed
+  (the one the channel provider runs on: the lineage seed above), not the
+  journal root seed the section names, because the journal root seed is
+  itself derived from the journal id, which would be circular. `create` /
+  `load` / `open_or_create` derive it from the identity they are given;
+  `load_joined(identity, group_id, channel_id)` opens a co-published group
+  under the id the link conveyed and never creates. `channel_id_from_group_id`
+  and `channelIdFromPublisherGroupId` are removed.
+- **The co-publisher link.** The `/g/` capability's sealed preview has a
+  second kind (`lakko-contacts` preview kind 2): a channel preview carrying
+  the 16-byte channel id and an optional channel name, never an inviter or a
+  member count. `composeCoPublisherInviteCapability(seed, groupId, expiry,
+  channelId, channelName)` mints it; the joiner opens the preview under the
+  link secret it already holds, so the co-publisher needs nothing else from
+  the owner: the group id is in the capability, the channel id in the
+  preview, and the joiner records the channel -> group pair (web the channel
+  log, iOS and Android the per-account co-published marks) to reopen the
+  group later. Tests: the channel-preview round trip, a damaged channel
+  preview refused, a channel preview with an inviter or a count refused; the
+  existing `group_invite_preview_decode` fuzz target reaches the new branch.
+- **Tests the phasing asks for** (invariant #3): proptests
+  `group_id_is_not_computable_from_the_account_id` and
+  `group_id_is_not_computable_from_the_channel_id` (the id an identifier
+  alone gives, by the retired derivation, never matches; two different seeds
+  never give the same id; a PublisherGroup id does not contain the channel
+  id), goldens for both, and
+  `publisher_group_ids_do_not_collide_with_other_group_ids` in
+  `tests/group_id_width.rs`.
+- **Found while building, on iOS:** the channel PublisherGroup provider was
+  never durable (each screen founded a fresh group); it now is
+  (`ChannelPublisherIdentity`), see G-50.
 
 ### 7. No periodic discovery sweep by account id (finding 5, 12)
 
@@ -614,6 +851,90 @@ Welcome stays a recorded no-op until the open question is decided.
   (hashes and nonces in diagnostics), reviewed like code.
 - nginx access logs off and error logs at `crit` (the parallel infra
   change); coturn logging reviewed on the same terms.
+
+#### Phase 8 (sections 8 to 11) as built (2026-10-16)
+
+Built in the core, the services, both FFI surfaces and the three clients;
+host-tested only, not deployed, not walked live.
+
+- **Tokens (section 8).** All three pools refill on a schedule that does
+  not look at spending: when a session is bound each context is topped up to
+  its target once at a random moment within 20 s, then at independent random
+  intervals of 30 to 90 minutes (web `anon-token-pool.ts`, iOS
+  `AnonTokenPool.swift`, Android `AnonTokenPool.kt`, the same numbers on all
+  three). Targets per context, chosen, not measured: `discovery-lookup` 16,
+  `push-register` 8, `ds-knock` 8, `vault-claim` 8, `invite-consume` 4,
+  `channel-subscribe` 4, `directory-search` 4, `blob-upload` 4, `blob-read`
+  4, `mailbox-write` 4, `discovery-register` 2; the daily quotas in
+  `services/auth` are above them. A take never issues: an empty context
+  waits only for a refill the schedule runs (this session's first, or one in
+  flight), else fails with the network copy until the next scheduled refill.
+  The one exception is the detached take a sign-out's push unregister makes
+  after the session is gone (one token, never pooled), kept because the
+  session it was issued to is the one ending. Issuance and spending travel
+  on separate connections: on web the issuance is a credentialed `fetch`
+  and every spend `credentials: "omit"` (the browser keeps them in separate
+  connection pools; a page cannot do more); on iOS the issuance rides the
+  bearer `URLSession` and every spend an ephemeral one; on Android the
+  issuer has its own Ktor client and every spend goes out on `AnonymousHttp`.
+  `services/auth` was already pruning `anon_token_issuance` below the
+  previous epoch (checked, no change).
+- **Reach keys (section 9).** `lakko_contacts::reach`: every class but
+  `link` and `reply` is account-wide, so a `group`, `member` or `channel`
+  derivation with a scope is refused (`ScopeIdNotEmpty`); flag day, the
+  per-scope keys are no longer derivable. The clients register one key per
+  class (`member` while in any group, `group` while the setting allows any
+  joined group, `channel` while it allows any channel) and rotate:
+  `group` + `member` when a group shrinks (kept) and when the account leaves
+  or is removed from a group, `channel` when it leaves a channel, `group` +
+  `channel` when the setting is changed on this device (a setting adopted
+  from another device arrives with that device's counters). A departure is
+  a set difference between the groups / channels at the last registration
+  and now, an empty current list read as "not loaded yet" (web
+  `departuresOf`, iOS `ReachRules.departures`, Android `reachDeparted`). A
+  rotation republishes the profile in every remaining group (and, on the
+  next upload, the channel member card); a refused write is retried when the
+  new grant arrives (the existing grant-kept hook). The `channel` key no
+  longer follows a channel's seed epoch. Version recovery after a restore
+  reads the account-wide slots only.
+- **Ledgers (section 10).** `services/discovery` migration
+  `0031_ownerless_invite_ledgers.sql` drops and recreates the three ledgers
+  and their consumer tables (flag day): a row is `blob_id`, the sealed
+  capability, `revocation_pk BINARY(32)`, expiry, `max_uses`, `used_count`,
+  `created_at`; no `owner_account_id`, no `issuer_pubkey`, and also no
+  `label` and no `bootstrap_referral` (both existed only for the owner list,
+  which is gone; decided while building, not by this ADR). Upload takes
+  `revocation_pubkey`; a revoke verifies against it. `POST
+  /discovery/invite/by-owner` is deleted, and with it the owner-list signer
+  on both FFI surfaces (`signOwnerListQuery`); `linkRevocationPublicKey(seed)`
+  is new on both. Account deletion no longer deletes invites by owner. Each
+  client mints a random 32-byte seed per link and keeps it beside the link
+  secret (web IndexedDB `minted-links`, iOS Keychain `OwnLinkStore`,
+  Android EncryptedSharedPreferences `OwnLinkStore`); the "Invite links"
+  list is built from those records, so it shows the links minted on this
+  device and states each one's limit instead of the uses left (decided while
+  building: nothing on the server counts uses for an owner any more). Every
+  revoke, the ADR-0074 rule 5 spend after a key rotation included, signs
+  with the link's own seed; a link this device has no record of is another
+  device's to revoke. Deleting the account revokes every live recorded link
+  before `DELETE /account`.
+- **Logs (section 11).** New crate `lakko-log-hygiene`: `request_span`
+  (every service's `TraceLayer` records the method and the route template
+  from `MatchedPath`, never the URI), a source lint (`tests/source_lint.rs`
+  walks `services/*/src` and the two shared server crates and fails on any
+  info, warn or error macro or span naming a denied field component, and on
+  a `TraceLayer` built with its default span), and, behind the `capture`
+  feature, a capture subscriber with an identifier scanner (hex of 32
+  characters or more, unpadded base64 of 16 or 32 bytes, UUIDs, 16- or
+  32-element byte arrays) that a test asserts empty against a reviewed
+  allow-list. Capture tests drive the account and link routes in
+  `services/discovery` and the journal, knock and mailbox routes in
+  `services/ds`; both allow-lists are empty. CI: `just log-lint` in `just
+  ci`, and a `log-hygiene` job in `.github/workflows/ci.yml` running the
+  lint and both capture tests against MariaDB. Every violation the lint
+  found was fixed (auth, discovery, push-gw, storage, sfu); the SFU names a
+  peer in its logs by a per-process 24-bit tag (`PeerId::log_tag`) that
+  does not survive a restart, and no longer logs call ids.
 
 ### 12. Network origin and timing: a later phase, its own ADR
 

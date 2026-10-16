@@ -85,7 +85,7 @@ function b64(bytes: Uint8Array): string {
 
 const ACCOUNT_ID = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
 const ACCOUNT_B64 = b64(ACCOUNT_ID);
-const ATTEST_B64 = b64(new Uint8Array(177).fill(7));
+const ATTEST_B64 = b64(new Uint8Array(145).fill(7));
 
 function peer(seed: number): { sig: string; x: string; edSeed: Uint8Array } {
   const id = realWasm.Identity.fromSeed(new Uint8Array(32).fill(seed));

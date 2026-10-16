@@ -43,7 +43,7 @@ const ACCOUNT = new Uint8Array(16).fill(0x01);
 const CAP = new Uint8Array(160).fill(0x41);
 const UPLOAD = {
   sealed: CAP,
-  issuerPubkey: new Uint8Array(32).fill(0x02),
+  revocationPubkey: new Uint8Array(32).fill(0x02),
   expiryMs: 0n,
   maxUses: 5,
 };

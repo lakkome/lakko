@@ -65,7 +65,7 @@ use lakko_contacts::incoming_envelope::{
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
     decode_and_verify as rust_invite_decode, open_link as rust_invite_open_link,
-    seal_link as rust_invite_seal_link, sign_owner_list as rust_sign_owner_list,
+    revocation_public_key as rust_revocation_public_key, seal_link as rust_invite_seal_link,
     sign_revocation as rust_sign_revocation, BLOB_ID_B64URL_LEN, BLOB_ID_LEN,
 };
 use lakko_contacts::link_seal::{
@@ -1751,50 +1751,21 @@ pub fn sign_call_invite_revocation(
     Ok(rust_call_sign_revocation(&signing, &blob_id_arr, signed_at_ms).to_vec())
 }
 
-/// Sign an owner-list query for the
-/// `POST /discovery/invite/by-owner` endpoint (Phase
-/// 1.18d2b-list).
-///
-/// The web client calls this just before posting the list
-/// request so the body's `signature` field carries proof that
-/// the caller is the holder of the identity Ed25519 key bound
-/// to `account_id` via the KT log. Canonical bytes layout:
-/// see [`lakko_contacts::invite::owner_list_canonical_bytes`].
-///
-/// Distinct domain separator from
-/// [`signInviteRevocation`] ensures a captured revoke signature
-/// cannot be replayed as an owner-list authentication (and vice
-/// versa).
-///
-/// Returns the 64-byte raw Ed25519 signature. Caller
-/// base64-encodes for the JSON body.
+/// The Ed25519 public key of a per-link revocation seed (ADR-0078
+/// section 10): what an invite upload (`/i/`, `/c/`, `/g/`) stores in the
+/// ledger in place of an owner or issuer. The client draws 32 random bytes
+/// for each link it mints, keeps them beside the link secret, uploads this
+/// key, and later signs a revocation with the seed.
 ///
 /// # Errors
 ///
-/// `JsError` on any input-shape failure (32-byte signing seed,
-/// 16-byte account_id required).
-#[wasm_bindgen(js_name = signOwnerListQuery)]
-pub fn sign_owner_list_query(
-    signing_seed: &[u8],
-    owner_account_id: &[u8],
-    signed_at_ms: u64,
-) -> Result<Vec<u8>, JsError> {
-    if signing_seed.len() != 32 {
-        return Err(JsError::new("signingSeed must be 32 bytes"));
-    }
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(signing_seed);
-    let signing = SigningKey::from_seed(&seed);
-
-    if owner_account_id.len() != ACCOUNT_ID_LEN {
-        return Err(JsError::new(&format!(
-            "ownerAccountId must be {ACCOUNT_ID_LEN} bytes",
-        )));
-    }
-    let mut acct_arr = [0u8; ACCOUNT_ID_LEN];
-    acct_arr.copy_from_slice(owner_account_id);
-
-    Ok(rust_sign_owner_list(&signing, &acct_arr, signed_at_ms).to_vec())
+/// `JsError` when `seed` is not 32 bytes.
+#[wasm_bindgen(js_name = linkRevocationPublicKey)]
+pub fn link_revocation_public_key(seed: &[u8]) -> Result<Vec<u8>, JsError> {
+    let seed: [u8; 32] = seed
+        .try_into()
+        .map_err(|_| JsError::new("seed must be 32 bytes"))?;
+    Ok(rust_revocation_public_key(&seed).to_vec())
 }
 
 /// Compute the per-joiner consume-dedup tag for an invite-link
@@ -3402,6 +3373,7 @@ pub struct WasmGroupInvitePreview {
     group_name: Option<String>,
     inviter_name: Option<String>,
     member_count: u16,
+    channel_id: Option<Vec<u8>>,
 }
 
 #[wasm_bindgen(js_class = GroupInvitePreview)]
@@ -3422,6 +3394,14 @@ impl WasmGroupInvitePreview {
     #[wasm_bindgen(getter, js_name = memberCount)]
     pub fn member_count(&self) -> u16 {
         self.member_count
+    }
+
+    /// ADR-0078 section 6: the 16-byte channel id of a co-publisher link
+    /// (then `groupName` is the channel's name), or `undefined` for a group
+    /// link.
+    #[wasm_bindgen(getter, js_name = channelId)]
+    pub fn channel_id(&self) -> Option<Vec<u8>> {
+        self.channel_id.clone()
     }
 }
 
@@ -3461,6 +3441,55 @@ pub fn compose_group_invite_capability_with_preview(
         inviter_name: rust_normalize_display_name(inviter_name.as_deref().unwrap_or(""))
             .map_err(name_error)?,
         member_count,
+        channel_id: None,
+    };
+    let link_key = rust_generate_link_key();
+    let wire =
+        rust_group_invite_compose_with_preview(&signing, group_id, expiry_ms, &preview, &link_key)
+            .map_err(|e| JsError::new(&format!("{e}")))?;
+    seal_mint(
+        &signing,
+        |secret| rust_group_invite_seal_link(secret, &wire),
+        link_key,
+    )
+}
+
+/// ADR-0028 OQ3 / ADR-0078 section 6 — mint a co-publisher `/g/` link over a
+/// channel's PublisherGroup `groupId`, its sealed preview carrying the
+/// 16-byte `channelId` and the channel's name (optional). Since ADR-0078 the
+/// PublisherGroup id is derived from the owner's seed, so nothing inverts it,
+/// and the plaintext capability must not name the channel. Returns an
+/// `InviteLinkMint`.
+///
+/// # Errors
+///
+/// Throws on a bad seed, group id or channel id, or a name the rule refuses.
+#[wasm_bindgen(js_name = composeCoPublisherInviteCapability)]
+pub fn compose_co_publisher_invite_capability(
+    issuer_signing_seed: &[u8],
+    group_id: &[u8],
+    expiry_ms: u64,
+    channel_id: &[u8],
+    channel_name: Option<String>,
+) -> Result<WasmInviteLinkMint, JsError> {
+    let seed: [u8; 32] = issuer_signing_seed
+        .try_into()
+        .map_err(|_| JsError::new("issuerSigningSeed must be 32 bytes"))?;
+    let signing = SigningKey::from_seed(&seed);
+    if group_id.is_empty() || group_id.len() > MAX_GROUP_ID_LEN {
+        return Err(JsError::new(&format!(
+            "groupId must be 1..={MAX_GROUP_ID_LEN} bytes"
+        )));
+    }
+    let channel: [u8; 16] = channel_id
+        .try_into()
+        .map_err(|_| JsError::new("channelId must be 16 bytes"))?;
+    let preview = RustGroupInvitePreview {
+        group_name: rust_normalize_display_name(channel_name.as_deref().unwrap_or(""))
+            .map_err(|e: DisplayNameError| JsError::new(&format!("{e}")))?,
+        inviter_name: None,
+        member_count: 0,
+        channel_id: Some(channel),
     };
     let link_key = rust_generate_link_key();
     let wire =
@@ -3584,6 +3613,7 @@ impl GroupInviteCapability {
             group_name: p.group_name,
             inviter_name: p.inviter_name,
             member_count: p.member_count,
+            channel_id: p.channel_id.map(|c| c.to_vec()),
         }))
     }
 }
@@ -3872,8 +3902,8 @@ mod tests {
     fn profile_v3_carries_certificate_and_grants() {
         use crate::scoped_discovery::{derive_reach_grant, ReachClass};
         let grants = vec![
-            derive_reach_grant(&[0x42; 32], ReachClass::Group, &[1; 8], 2).unwrap(),
-            derive_reach_grant(&[0x42; 32], ReachClass::Member, &[1; 8], 1).unwrap(),
+            derive_reach_grant(&[0x42; 32], ReachClass::Group, &[], 2).unwrap(),
+            derive_reach_grant(&[0x42; 32], ReachClass::Member, &[], 1).unwrap(),
         ];
         let envelope = compose_profile_envelope(
             Some("Alice".to_string()),
@@ -3891,7 +3921,7 @@ mod tests {
         assert_eq!(dispatched.profile(), Some(decoded));
         // The ADR-0060 bounds refuse before any bytes exist.
         let mut too_many = grants.clone();
-        too_many.push(derive_reach_grant(&[0x42; 32], ReachClass::Channel, &[1; 8], 1).unwrap());
+        too_many.push(derive_reach_grant(&[0x42; 32], ReachClass::Channel, &[], 1).unwrap());
         let p = prepare_profile(None, None, 1, None, None, Some(too_many)).unwrap();
         assert!(matches!(
             rust_compose_profile(&p),

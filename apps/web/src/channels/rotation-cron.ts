@@ -47,6 +47,12 @@
  *     enforces. Partial fanouts would leave some subscribers on
  *     the old seed + some on the new, which is worse than
  *     retrying.
+ *   - G-50: the rotation's effects (the DS epoch registration,
+ *     the reseal + commit) are recorded durably WITH the N+1
+ *     provider snapshot before any of them runs
+ *     (`publisher-commit-outbox.ts`); a reload or a failed step
+ *     resumes them from that record, never from a fresh fetch of
+ *     the server epoch.
  *   - If the fanout (stage + commit) succeeds but the local
  *     `saveState` callback throws, the rotation is still
  *     committed server-side; the caller's storage is in a
@@ -67,6 +73,13 @@ import type { Wasm } from "../wasm";
 import { loadWasm } from "../wasm";
 import { DsClient } from "../ds/client";
 import { registerBeforePublish, takeSigner } from "../ds/access";
+import { channelsActions } from "../state/channels-state";
+import {
+  newEntryId,
+  runPublisherCommit,
+  type PublisherCommitEntry,
+  type PublisherCommitPorts,
+} from "./publisher-commit-outbox";
 
 type Identity = InstanceType<Wasm["Identity"]>;
 type PublisherGroup = InstanceType<Wasm["PublisherGroup"]>;
@@ -148,115 +161,154 @@ export async function runRotationOnce(
     return { rotated: false, newState: state };
   }
 
-  // 1. Advance the local MLS epoch + derive the new seed
-  //    BEFORE talking to the server. If the server-side
-  //    POST /rotate fails later, we have already rotated
-  //    the local PublisherGroup — that's fine because the
-  //    next tick retries from the new local state, and the
-  //    server's atomic-rotation guarantee means no partial
-  //    landings are observable.
-  // ADR-0053 — the rotation is a self-update commit, so the PublisherGroup's
-  // DS access key moves with it: register the new epoch's key after, signed
-  // with the channel owner's root (ADR-0057). Best effort, unlike a published
-  // commit: the rotation commit is not published and cannot be rolled back
-  // here, so a refused registration is logged, and the owner's lazy claim on
-  // the next refused request (which registers the current epoch with the
-  // root) covers the gap.
-  const signerN = takeSigner(() => ctx.publisherGroup.dsAccessSigner(ctx.identity));
-  ctx.publisherGroup.rotate(ctx.identity);
-  {
-    const signerN1 = takeSigner(() => ctx.publisherGroup.dsAccessSigner(ctx.identity));
-    try {
-      // ADR-0057 — registered with the channel owner's root.
-      await registerBeforePublish(new DsClient(), ctx.publisherGroup.groupId(), signerN1);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("ds: PublisherGroup epoch registration after rotation failed", err);
-    } finally {
-      signerN?.free();
-      signerN1?.free();
-    }
-  }
-  const newSeed = ctx.publisherGroup.channelSeed(ctx.identity);
-  const channelIdBytes = ctx.publisherGroup.channelId();
-
-  // 2. The new server epoch the envelopes will bind to.
-  //    `fetchEpoch` returns the CURRENT server epoch; the
-  //    rotate endpoint will bump to current+1.
+  // 1. The server epoch the envelopes will bind to, read BEFORE the local
+  //    rotation: after the eager merge nothing may fail before the commit's
+  //    record is durable (G-50), and this is a network read.
   const current = await fetchEpoch(ctx.channelIdHex, ctx.apiBase);
   const newServerEpoch = current.epoch + 1;
   if (!Number.isInteger(newServerEpoch) || newServerEpoch < 0) {
-    throw new Error(
-      `unexpected server epoch ${current.epoch}; cannot derive new epoch`,
-    );
+    throw new Error(`unexpected server epoch ${current.epoch}; cannot derive new epoch`);
   }
 
-  // 3. Walk the subscriber list + seal new envelopes.
-  const subscribers = await listSubscribers(ctx.channelIdHex, ctx.identity, ctx.apiBase);
-  const keyed: Array<{ readonly hex: string; readonly bytes: Uint8Array }> = [];
+  // 2. Advance the local MLS epoch (the self-update commit eager-merges
+  //    N -> N+1 in the account identity's provider), then record the
+  //    rotation together with that provider snapshot, durably, before any
+  //    of its steps runs. A refused record runs nothing.
+  ctx.publisherGroup.rotate(ctx.identity);
+  const entry: PublisherCommitEntry = {
+    id: newEntryId(),
+    kind: "rotation",
+    channelIdHex: ctx.channelIdHex,
+    groupIdHex: hexOf(ctx.publisherGroup.groupId()),
+    targetEpoch: ctx.publisherGroup.epoch().toString(),
+    serverTargetEpoch: newServerEpoch,
+    commitB64: null,
+    welcomeB64: null,
+    joinerKeyB64: null,
+    replyGrantB64: null,
+    done: [],
+  };
+  await channelsActions.recordPublisherCommit(entry);
+
+  // 3. The steps: register the N+1 epoch key on the DS with the channel's
+  //    root (ADR-0057), reseal the N+1 seed to every subscriber and commit
+  //    the rotation on the channels service (ADR-0030 chunked fanout).
+  await runPublisherCommit(entry, publisherCommitPorts(ctx));
+
+  // 4. Stamp the new state + persist.
+  const newState = wasm.channelRotationStateAfterRotation(nowMsBig);
+  await ctx.saveState(newState);
+  ctx.onRotated?.(newServerEpoch);
+
+  return { rotated: true, newState, newEpoch: newServerEpoch };
+}
+
+/** What a PublisherGroup commit's steps run against. */
+export interface PublisherCommitContext {
+  readonly publisherGroup: PublisherGroup;
+  readonly identity: Identity;
+  readonly channelIdHex: string;
+  readonly apiBase?: string;
+  readonly ds?: DsClient;
+}
+
+/**
+ * G-50 — the ports a recorded PublisherGroup commit runs through. The
+ * approve-only steps (the journal publish, the Welcome, the appointment)
+ * come from the co-publisher module as `extras`; a rotation has none of
+ * them. Recording goes to the channel log (`channelsActions`).
+ */
+export function publisherCommitPorts(
+  ctx: PublisherCommitContext,
+  extras: Partial<Pick<PublisherCommitPorts, "publishCommit" | "deliverWelcome" | "appoint">> = {},
+): PublisherCommitPorts {
+  const ds = ctx.ds ?? new DsClient();
+  return {
+    async registerEpoch() {
+      const signer = takeSigner(() => ctx.publisherGroup.dsAccessSigner(ctx.identity));
+      try {
+        // ADR-0057 — registered with the channel owner's root. A 409 on a
+        // replay is this device's own earlier registration of the epoch.
+        await registerBeforePublish(ds, ctx.publisherGroup.groupId(), signer);
+      } catch (err) {
+        if ((err as { status?: unknown }).status !== 409) throw err;
+      } finally {
+        signer?.free();
+      }
+    },
+    publishCommit:
+      extras.publishCommit ??
+      (async () => {
+        throw new Error("publisher commit: no journal publish for this kind");
+      }),
+    deliverWelcome:
+      extras.deliverWelcome ??
+      (async () => {
+        throw new Error("publisher commit: no Welcome for this kind");
+      }),
+    async serverEpoch() {
+      return (await fetchEpoch(ctx.channelIdHex, ctx.apiBase)).epoch;
+    },
+    async reseal(targetEpoch) {
+      await resealToSubscribers(ctx.publisherGroup, ctx.identity, ctx.channelIdHex, targetEpoch, ctx.apiBase);
+    },
+    appoint: extras.appoint ?? (async () => undefined),
+    save: (e) => channelsActions.savePublisherCommit(e),
+    finish: (e) => channelsActions.finishPublisherCommit(e.id),
+  };
+}
+
+/**
+ * Reseal the PublisherGroup's CURRENT seed to every subscriber, bound to
+ * the channels-service epoch `targetEpoch`, and commit it there with the
+ * ADR-0030 chunked fanout. A subscriber key the core refuses to seal to (a
+ * pre-ADR-0060 X25519 key) is skipped; any other seal failure aborts the
+ * whole batch.
+ */
+export async function resealToSubscribers(
+  publisherGroup: PublisherGroup,
+  identity: Identity,
+  channelIdHex: string,
+  targetEpoch: number,
+  apiBase?: string,
+): Promise<ChannelEpoch> {
+  const wasm = await loadWasm();
+  const newSeed = publisherGroup.channelSeed(identity);
+  const channelIdBytes = publisherGroup.channelId();
+  const subscribers = await listSubscribers(channelIdHex, identity, apiBase);
+  const bytesByHex = new Map<string, Uint8Array>();
   for (const subscriberHex of subscribers.subscribers) {
     const subscriberBytes = hexToBytes(subscriberHex);
     if (subscriberBytes === null) {
-      // Malformed subscriber hex from the server — refuse to
-      // post a partial batch. Throwing here aborts the
-      // rotation; state is NOT updated (the next tick will
-      // retry once the server's subscriber list is sane).
-      throw new Error(
-        `subscriber pubkey hex is not valid: ${subscriberHex}`,
-      );
+      // Malformed subscriber hex from the server: refuse to post a partial
+      // batch (the step stays owed and is retried).
+      throw new Error(`subscriber pubkey hex is not valid: ${subscriberHex}`);
     }
-    keyed.push({ hex: subscriberHex, bytes: subscriberBytes });
+    bytesByHex.set(subscriberHex, subscriberBytes);
   }
   // ADR-0060: a subscriber key is Ed25519 now. A key registered before the
   // flag day (an X25519 key) may not be a valid Ed25519 point, and the core
   // refuses to seal to it; that subscriber could not open the envelope
   // anyway, so it is skipped rather than aborting the whole rotation. Its
   // device re-registers a fresh key on its next open of the channel.
-  const bytesByHex = new Map(keyed.map((k) => [k.hex, k.bytes] as const));
-  const { sealed, skipped } = sealEachSkippingInvalid(
-    keyed.map((k) => k.hex),
-    (hex) =>
-      wasm.sealSubscriberSeedEnvelope(
-        bytesByHex.get(hex) ?? new Uint8Array(0),
-        channelIdBytes,
-        newServerEpoch,
-        newSeed,
-      ),
+  const { sealed, skipped } = sealEachSkippingInvalid([...bytesByHex.keys()], (hex) =>
+    wasm.sealSubscriberSeedEnvelope(bytesByHex.get(hex) ?? new Uint8Array(0), channelIdBytes, targetEpoch, newSeed),
   );
   if (skipped.length > 0) {
     // eslint-disable-next-line no-console
-    console.warn(`[channels] rotation skipped ${skipped.length} subscriber key(s) the core refused`);
+    console.warn(`[channels] reseal skipped ${skipped.length} subscriber key(s) the core refused`);
   }
   const batch: RotateBatchEntry[] = sealed.map((s) => ({
     subscriber_pubkey_hex: s.subscriberHex,
     envelope_b64: base64Encode(s.value),
   }));
+  return stageAndCommitRotation(channelIdHex, targetEpoch, batch, identity, apiBase);
+}
 
-  // 4. Fan out with the ADR-0030 chunked staged-rotation
-  //    protocol: stage the sealed envelopes in bounded chunks,
-  //    then run one atomic commit that promotes the staged set
-  //    + bumps the epoch. An empty batch stages nothing and
-  //    commits directly — still bumps the epoch, covering the
-  //    "no subscribers yet" case where the publisher keeps
-  //    rotating on schedule before the audience grows. A
-  //    stage/commit failure throws, so `saveState` below never
-  //    runs and the local rotation state is not advanced (the
-  //    next tick retries; staging is idempotent so re-staging
-  //    the already-staged chunks is safe).
-  const epoch = await stageAndCommitRotation(
-    ctx.channelIdHex,
-    newServerEpoch,
-    batch,
-    ctx.identity,
-    ctx.apiBase,
-  );
-
-  // 5. Stamp the new state + persist.
-  const newState = wasm.channelRotationStateAfterRotation(nowMsBig);
-  await ctx.saveState(newState);
-  ctx.onRotated?.(epoch.epoch);
-
-  return { rotated: true, newState, newEpoch: epoch.epoch };
+function hexOf(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
 }
 
 /**

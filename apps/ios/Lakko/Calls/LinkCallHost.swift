@@ -604,14 +604,13 @@ extension LinkCallHost {
                     ownerAccountId: request.ownerAccountId,
                     ownerSignatureKey: request.ownerSignatureKey,
                     sfuBaseUrl: base,
-                    sessionToken: session.sessionToken,
                     audio: true,
                     video: video,
-                    // Tiles are named by the one resolver: a member's sealed
-                    // profile is filed like any received profile (which
-                    // verifies a claimed username), and a person this device
-                    // already knows is named before they announce.
-                    naming: .live(callIdHex: hexEncode(request.callId), directory: .shared),
+                    // Tiles are named by the one resolver: a member's verified
+                    // peer announcement names the person (ADR-0078 section 2),
+                    // and a member's sealed profile is filed like any received
+                    // profile.
+                    naming: .live(directory: .shared),
                     authBaseUrl: nil,
                     // Section 4.4: the own tile carries the profile name from
                     // the first second, and the same profile is announced to
@@ -662,6 +661,14 @@ extension LinkCallHost {
                 if let mintedLinkId, let blobId = composed.blobId {
                     ReachCenter.shared.attachBlob(
                         linkId: mintedLinkId, blobId: blobId, kind: LinkReach.callKind)
+                    // ADR-0078 section 10: the link's own revocation seed,
+                    // the only thing that revokes its ledger row.
+                    OwnLinkStore.shared.put(accountIdB64: base64Encode(secrets.accountId), OwnLink(
+                        kind: .call, slug: base64UrlEncodeNoPad(blobId),
+                        revocationSeed: composed.revocationSeed, label: CallInviteValues.label,
+                        expiryMs: composed.expiryMs, maxUses: Int64(CallInviteValues.maxUses),
+                        bootstrapReferral: false,
+                        mintedAtMs: Int64(Date().timeIntervalSince1970 * 1000)))
                 }
                 return composed.url
             },

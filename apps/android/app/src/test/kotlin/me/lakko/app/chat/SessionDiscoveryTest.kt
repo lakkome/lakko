@@ -56,7 +56,7 @@ class SessionDiscoveryTest {
     private val upload: suspend (DiscoveryClient) -> ByteArray = { client ->
         base64UrlDecodeNoPad(
             client.groupInviteUpload(
-                GroupInviteUploadRequest(sealed = "AA==", issuer_pubkey = "AA==", expiry_ms = 0L, max_uses = 1L),
+                GroupInviteUploadRequest(sealed = "AA==", revocation_pubkey = "AA==", expiry_ms = 0L, max_uses = 1L),
             ).blob_id,
         )
     }

@@ -77,7 +77,7 @@
 //! the [`statement`] module - the root and registrar seed derivations and
 //! the signed statements (claim, root reset, register epoch in append or
 //! replace mode, registrar management, the whole registrar set, root
-//! transfer, push binding) the DS routes take as bodies.
+//! transfer) the DS routes take as bodies; the push binding is retired (ADR-0078).
 //!
 //! [ADR-0057]: ../../../docs/adr/0057-journal-ownership.md
 //!
@@ -90,10 +90,10 @@
 pub mod statement;
 
 pub use statement::{
-    journal_registrar_seed, journal_root_seed, push_binding_key, sign_statement,
-    statement_signing_key, Rank, RegisterMode, RegistrarChange, RegistrarEntry, SignedStatement,
-    StatementBody, StatementError, StatementKind, StatementSigner, JOURNAL_ID_LEN,
-    MAX_LIST_ENTRIES, MAX_REGISTRARS, MAX_STATEMENT_LEN, ROOT_RANK_BYTE, STATEMENT_DOMAIN,
+    journal_registrar_seed, journal_root_seed, sign_statement, statement_signing_key, Rank,
+    RegisterMode, RegistrarChange, RegistrarEntry, SignedStatement, StatementBody, StatementError,
+    StatementKind, StatementSigner, JOURNAL_ID_LEN, MAX_LIST_ENTRIES, MAX_REGISTRARS,
+    MAX_STATEMENT_LEN, ROOT_RANK_BYTE, STATEMENT_DOMAIN,
 };
 
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD};

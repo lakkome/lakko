@@ -77,23 +77,22 @@ private let groupHexLen = 64
 /// all (ADR-0042, amended 2026-09-30); `g` (group hex) + `p` (DS pointer)
 /// drive the preview.
 public struct NsePushWake: Equatable {
-    /// 64 lowercase-hex chars = the 32-byte opaque `push_gid` (post-ADR-0042
-    /// Sprint 3 the notify path sends `g = hex(push_gid)`) or a legacy raw
-    /// group_id (a pre-ADR-0042 subscription), or `nil`. The decrypt core
-    /// reverse-maps a `push_gid` to the real group_id first and falls back
-    /// to the raw-group_id interpretation on a miss.
+    /// 64 lowercase-hex chars = the 32-byte opaque `push_gid`, or `nil`. The
+    /// decrypt core reverse-maps it to the real group_id; a miss is refused
+    /// (the raw-group_id fallback of the pre-ADR-0042 wake is gone).
     public let groupHex: String?
     /// DS message id of the message that triggered the wake, or `nil`.
     public let pointer: Int64?
-    /// Hex of the device pseudonym the wake was sent to (`d`), or `nil`. The
-    /// wake is handled only when it equals the pseudonym bound to the
-    /// signed-in account (``NsePushDecryptDeps/boundAccount(wakeDevicePseudonymHex:)``).
-    public let devicePseudonymHex: String?
+    /// Hex of the push-gw subscription the wake was delivered for (`s`), or
+    /// `nil`. The wake is handled only when the bound account's route row for
+    /// `g` holds that id (ADR-0078 section 3,
+    /// ``NsePushDecryptDeps/lookupRoute(accountIdB64:pushGidHex:subscriptionIdHex:)``).
+    public let subscriptionIdHex: String?
 
-    public init(groupHex: String?, pointer: Int64?, devicePseudonymHex: String? = nil) {
+    public init(groupHex: String?, pointer: Int64?, subscriptionIdHex: String? = nil) {
         self.groupHex = groupHex
         self.pointer = pointer
-        self.devicePseudonymHex = devicePseudonymHex
+        self.subscriptionIdHex = subscriptionIdHex
     }
 }
 
@@ -359,27 +358,21 @@ public protocol NsePushDecryptDeps {
     /// ADR-0042 (amended 2026-09-30) — the ONE account this wake may be
     /// handled for, or `nil` when it may not be handled at all.
     ///
-    /// Non-`nil` only when the app recorded a `(device pseudonym, account)`
-    /// binding at push registration and `wakeDevicePseudonymHex` (the wake's
-    /// `d`) equals the bound pseudonym (``PushAccountBinding``). A device has
-    /// at most one active account and never shows another account's push, so
-    /// every later read — route, known groups, seed, snapshot, cursor, name,
-    /// mute — is for this account and no other. READ-ONLY.
-    func boundAccount(wakeDevicePseudonymHex: String?) -> String?
+    /// Non-`nil` only when the app recorded an account binding at push setup
+    /// and the wake carries a well-formed `s` (``PushAccountBinding``). A
+    /// device has at most one active account and never shows another
+    /// account's push, so every later read — route, seed, snapshot, cursor,
+    /// name, mute — is for this account and no other. READ-ONLY.
+    func boundAccount(wakeSubscriptionIdHex: String?) -> String?
 
-    /// ADR-0042 Sprint 4 — reverse-map an opaque `push_gid` (lowercase hex,
-    /// the post-Sprint-3 wake `g`) to the real `group_id` it routes for
+    /// ADR-0042 Sprint 4 with ADR-0078 — reverse-map an opaque `push_gid`
+    /// (lowercase hex, the wake's `g`) to the real `group_id` it routes for
     /// `accountIdB64`, via the PLAINTEXT App-Group reverse index
-    /// (`PushRoutingStore.lookupRoute`, keyed `(account, push_gid)`). A row
-    /// another account wrote for the same `push_gid` is a miss. `nil` on a
-    /// miss — the caller falls back to the legacy raw-group_id reading of
-    /// `g`, for the same account. READ-ONLY.
-    func lookupRoute(accountIdB64: String, pushGidHex: String) -> String?
-
-    /// Does `accountIdB64` know `groupHex` as one of its groups (the legacy
-    /// raw-group_id wake)? Only the bound account's groups are searched: a
-    /// group another account on this device knows is not a match.
-    func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool
+    /// (`PushRoutingStore.lookupRoute`), and only when the account's
+    /// subscription id for that row equals the wake's `s`. A row another
+    /// account wrote, or a subscription this account does not hold, is a
+    /// miss, and a miss is refused. READ-ONLY.
+    func lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?) -> String?
 
     /// The 64-byte AccountIdentity (BIP39) seed for `accountIdB64`, or `nil`.
     func loadIdentitySeed(accountIdB64: String) -> Data?
@@ -532,38 +525,32 @@ public func decryptPushOutcome(
     let groupHex = rawGroupHex.lowercased()
     guard groupHex.count == groupHexLen, isLowerHex(groupHex) else { return .none }
 
-    // 2. The wake is handled only for the account the device pseudonym is
-    //    bound to (ADR-0042, amended 2026-09-30): no binding, no `d`, or a
-    //    `d` that differs from the bound pseudonym → the generic line, with
-    //    no store read at all. From here on the bound account is the ONLY
-    //    account this wake is decrypted as.
+    // 2. The wake is handled only for the bound account (ADR-0042, amended
+    //    2026-09-30, with ADR-0078): no binding or no well-formed `s` → the
+    //    generic line, with no store read at all. From here on the bound
+    //    account is the ONLY account this wake is decrypted as.
     guard let boundAccountIdB64 = deps.boundAccount(
-        wakeDevicePseudonymHex: wake?.devicePseudonymHex),
+        wakeSubscriptionIdHex: wake?.subscriptionIdHex),
           !boundAccountIdB64.isEmpty else {
         return .none
     }
 
-    // 3. Resolve the wake's `g` to the real group_id, for the bound account.
-    //    ADR-0042 Sprint 4: the notify path sends `g = hex(push_gid)` — an
-    //    opaque routing id, NOT the DS group_id — so FIRST reverse-map it
-    //    through the App-Group index for (bound account, push_gid); on a hit
-    //    the row's REAL group_id drives everything downstream (snapshot, group
-    //    open, DS fetch, cursor). On a miss — an unknown push_gid, another
-    //    account's row, an unprovisioned suite, or a malformed row — FALL BACK
-    //    to reading `g` as a raw group_id, accepted only when the BOUND account
-    //    knows that group. Both failing → the generic banner (fail-closed).
-    let account: NseResolvedAccount
-    let realGroupHex: String
-    if let routed = routedGroup(deps.lookupRoute(accountIdB64: boundAccountIdB64, pushGidHex: groupHex)) {
-        account = NseResolvedAccount(accountIdB64: boundAccountIdB64, groupIdBytes: routed.bytes)
-        realGroupHex = routed.hex
-    } else if deps.accountKnowsGroup(accountIdB64: boundAccountIdB64, groupHex: groupHex),
-              let legacyBytes = hexToData(groupHex) {
-        account = NseResolvedAccount(accountIdB64: boundAccountIdB64, groupIdBytes: legacyBytes)
-        realGroupHex = groupHex
-    } else {
+    // 3. Resolve the wake's `g` to the real group_id, for the bound account:
+    //    the notify path sends `g = hex(push_gid)`, an opaque routing id, so
+    //    it is reverse-mapped through the App-Group index for (bound account,
+    //    push_gid), and only when the row's subscription id is the wake's
+    //    `s`. On a hit the row's REAL group_id drives everything downstream
+    //    (snapshot, group open, DS fetch, cursor). A miss — an unknown
+    //    push_gid, another account's row, a subscription this account does not
+    //    hold, an unprovisioned suite, a malformed row — is the generic banner
+    //    (fail-closed).
+    guard let routed = routedGroup(deps.lookupRoute(
+        accountIdB64: boundAccountIdB64, pushGidHex: groupHex,
+        subscriptionIdHex: wake?.subscriptionIdHex)) else {
         return .none
     }
+    let account = NseResolvedAccount(accountIdB64: boundAccountIdB64, groupIdBytes: routed.bytes)
+    let realGroupHex = routed.hex
 
     // 4. The AccountIdentity seed → the throwaway Identity.
     guard var seed = deps.loadIdentitySeed(accountIdB64: account.accountIdB64) else {
@@ -756,17 +743,12 @@ public func nseConversationThread(_ wake: NsePushWake?, _ deps: NsePushDecryptDe
     guard let rawGroupHex = wake?.groupHex else { return nil }
     let groupHex = rawGroupHex.lowercased()
     guard groupHex.count == groupHexLen, isLowerHex(groupHex) else { return nil }
-    guard let accountIdB64 = deps.boundAccount(wakeDevicePseudonymHex: wake?.devicePseudonymHex),
-          !accountIdB64.isEmpty else { return nil }
-    let realGroupHex: String
-    if let routed = routedGroup(deps.lookupRoute(accountIdB64: accountIdB64, pushGidHex: groupHex)) {
-        realGroupHex = routed.hex
-    } else if deps.accountKnowsGroup(accountIdB64: accountIdB64, groupHex: groupHex) {
-        realGroupHex = groupHex
-    } else {
-        return nil
-    }
-    return deps.conversationHex(accountIdB64: accountIdB64, groupIdHex: realGroupHex).lowercased()
+    guard let accountIdB64 = deps.boundAccount(wakeSubscriptionIdHex: wake?.subscriptionIdHex),
+          !accountIdB64.isEmpty,
+          let routed = routedGroup(deps.lookupRoute(
+            accountIdB64: accountIdB64, pushGidHex: groupHex,
+            subscriptionIdHex: wake?.subscriptionIdHex)) else { return nil }
+    return deps.conversationHex(accountIdB64: accountIdB64, groupIdHex: routed.hex).lowercased()
 }
 
 // MARK: - Ringing

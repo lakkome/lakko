@@ -104,6 +104,16 @@ android {
             "\"${project.findProperty("lakko.device.attest.key") as String? ?: ""}\"",
         )
 
+        // ADR-0078 section 3 - optional build-time pin of push-gw's X25519
+        // wake key (base64url of 32 bytes). When set, `PushWakeKey` never
+        // fetches `/push/wake-key`. Sourced from the gradle property
+        // `lakko.push.wake.key`; empty when unset (fetched once per process).
+        buildConfigField(
+            "String",
+            "LAKKO_PUSH_WAKE_KEY",
+            "\"${project.findProperty("lakko.push.wake.key") as String? ?: ""}\"",
+        )
+
         // ADR-0060 section 5 - optional build-time pin of the discovery
         // username-certificate verifying key (base64url of the 32-byte Ed25519
         // key). When set, a claimed username is verified against it and the

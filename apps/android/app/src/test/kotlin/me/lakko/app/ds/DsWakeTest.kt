@@ -17,65 +17,52 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0054 decision 1 — the `x-lakko-wake` header on the signed group
- * publish. The DS answers `400` to a malformed value, which would fail the
- * SEND, so the one builder is pinned here against fixed vectors and the
- * publish path is checked to carry it (and only it) where asked.
+ * ADR-0054 decision 1 with ADR-0078 section 3 — the `x-lakko-wake` header on
+ * the signed group publish is a wake sealed to push-gw's key. The DS answers
+ * `400` to a malformed value, which would fail the SEND, so [DsWake] admits
+ * only the sealed shape, a sealing failure fails toward silence, and the
+ * publish path carries it (and only it) where asked. The sealing itself runs
+ * in the core (host JVM tests load no native library); its vectors are pinned
+ * in `crates/lakko-contacts`.
  */
 class DsWakeTest {
 
-    private val zeros = ByteArray(32)
+    /** A well-formed header value (312 base64url characters). */
+    private val sealedA = "A".repeat(DsWake.HEADER_VALUE_LEN)
+    private val gwKey = ByteArray(32) { 9 }
+    private val secret = ByteArray(32) { 4 }
 
     @Test
-    fun `the header is 43 base64url characters without padding then the kind`() {
-        assertEquals("A".repeat(43) + ";message", DsWake(zeros, DsWakeKind.MESSAGE).headerValue())
-        assertEquals("A".repeat(43) + ";call", DsWake(zeros, DsWakeKind.CALL).headerValue())
-        // The URL-safe alphabet: 0xFF.. ends in '_' ... '8', never '/' or '='.
-        assertEquals("_".repeat(42) + "8;message", DsWake(ByteArray(32) { -1 }, DsWakeKind.MESSAGE).headerValue())
-        val dashes = ByteArray(32).also {
-            it[0] = 0xFB.toByte()
-            it[1] = 0xEF.toByte()
-            it[2] = 0xBE.toByte()
-        }
-        assertTrue(DsWake(dashes, DsWakeKind.CALL).headerValue().startsWith("----"))
-    }
-
-    @Test
-    fun `every value matches the wire grammar`() {
-        val grammar = Regex("^[A-Za-z0-9_-]{43};(message|call)$")
-        for (seed in 0 until 64) {
-            val gid = ByteArray(32) { (it * 37 + seed * 11).toByte() }
-            for (kind in DsWakeKind.entries) {
-                val value = DsWake(gid, kind).headerValue()
-                assertTrue(value, grammar.matches(value))
-            }
+    fun `only the sealed shape is a header`() {
+        assertEquals(sealedA, DsWake(sealedA).headerValue())
+        assertTrue(DsWake.isWellFormed("-_09azAZ".repeat(39)))
+        assertThrows(IllegalArgumentException::class.java) { DsWake("A".repeat(311)) }
+        assertThrows(IllegalArgumentException::class.java) { DsWake("A".repeat(313)) }
+        assertThrows(IllegalArgumentException::class.java) { DsWake("A".repeat(311) + "=") }
+        assertThrows(IllegalArgumentException::class.java) {
+            DsWake("A".repeat(43) + ";message") // the pre-ADR-0078 clear header
         }
     }
 
     @Test
-    fun `the constructor refuses anything but 32 bytes`() {
-        assertThrows(IllegalArgumentException::class.java) { DsWake(ByteArray(31), DsWakeKind.MESSAGE) }
-        assertThrows(IllegalArgumentException::class.java) { DsWake(ByteArray(33), DsWakeKind.MESSAGE) }
-        assertThrows(IllegalArgumentException::class.java) { DsWake(ByteArray(0), DsWakeKind.CALL) }
+    fun `the sealer is handed the key, the secret and the kind`() {
+        val seen = mutableListOf<DsWakeKind>()
+        val sealer = PushWakeSealer { key, sec, kind, ts ->
+            assertTrue(key.contentEquals(gwKey))
+            assertTrue(sec.contentEquals(secret))
+            assertEquals(1234L, ts)
+            seen += kind
+            sealedA
+        }
+        assertEquals(sealedA, DsWake.seal(gwKey, secret, DsWakeKind.CALL, 1234L, sealer)?.headerValue())
+        DsWake.seal(gwKey, secret, DsWakeKind.MESSAGE, 1234L, sealer)
+        assertEquals(listOf(DsWakeKind.CALL, DsWakeKind.MESSAGE), seen)
     }
 
     @Test
-    fun `a publish with no kind, no push_gid or a bad push_gid wakes nobody`() {
-        // A control envelope: no kind, no header.
-        assertNull(DsWake.forPublish(zeros, null))
-        // ADR-0042 defer: no routing secret held yet, and never the group id.
-        assertNull(DsWake.forPublish(null, DsWakeKind.MESSAGE))
-        // Fail toward silence rather than a refused send.
-        assertNull(DsWake.forPublish(ByteArray(16), DsWakeKind.CALL))
-        assertEquals(DsWakeKind.CALL, DsWake.forPublish(zeros, DsWakeKind.CALL)?.kind)
-    }
-
-    @Test
-    fun `the value does not change when the caller reuses its array`() {
-        val gid = ByteArray(32)
-        val wake = DsWake(gid, DsWakeKind.MESSAGE)
-        gid.fill(-1)
-        assertEquals("A".repeat(43) + ";message", wake.headerValue())
+    fun `a sealing failure or a malformed result wakes nobody`() {
+        assertNull(DsWake.seal(gwKey, secret, DsWakeKind.MESSAGE, 1L) { _, _, _, _ -> throw IllegalStateException("x") })
+        assertNull(DsWake.seal(gwKey, secret, DsWakeKind.MESSAGE, 1L) { _, _, _, _ -> "short" })
     }
 
     // ------------------------------------------------------------ publish
@@ -117,9 +104,9 @@ class DsWakeTest {
     fun `a publish asked to wake carries the header`() = runTest {
         val seen = mutableListOf<Seen>()
         client(listOf(HttpStatusCode.OK to published), seen).use {
-            it.publishGroup(groupId, byteArrayOf(1), wake = DsWake(zeros, DsWakeKind.MESSAGE))
+            it.publishGroup(groupId, byteArrayOf(1), wake = DsWake(sealedA))
         }
-        assertEquals("A".repeat(43) + ";message", seen.single().wake)
+        assertEquals(sealedA, seen.single().wake)
     }
 
     @Test
@@ -155,14 +142,14 @@ class DsWakeTest {
             HttpStatusCode.OK to published,
         )
         client(replies, seen, registry).use {
-            it.publishGroup(groupId, byteArrayOf(1), wake = DsWake(zeros, DsWakeKind.CALL))
+            it.publishGroup(groupId, byteArrayOf(1), wake = DsWake(sealedA))
         }
         assertEquals(1, claims)
         assertEquals(2, seen.size)
         assertEquals(HttpMethod.Post, seen[0].method)
-        assertEquals("A".repeat(43) + ";call", seen[0].wake)
+        assertEquals(sealedA, seen[0].wake)
         assertEquals(HttpMethod.Post, seen[1].method)
-        assertEquals("A".repeat(43) + ";call", seen[1].wake)
+        assertEquals(sealedA, seen[1].wake)
     }
 
     @Test

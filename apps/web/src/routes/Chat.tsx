@@ -292,7 +292,7 @@ import {
   ensureGroupPushRouting,
   memberSignatureKeys,
   publishRemoveThenRotate,
-  pushGidForGroup,
+  sealedWakeForGroup,
   readPushRotationRole,
   receivePushRoutingSecretGated,
   redistributeSecretToGroup,
@@ -655,10 +655,10 @@ function ChatView(props: {
     // ADR-0042 — route the notify wake under the opaque `push_gid` instead
     // of the leaky DS `group_id`. Returns null when no secret is held yet
     // (→ the wake is skipped; recipients catch up on foreground poll).
-    pushGidResolver: async (groupId) => {
+    wakeSealer: async (groupId, kind) => {
       const s = auth.state();
       if (s.kind !== "session") return null;
-      return pushGidForGroup(s.account.accountId, base64Encode(groupId));
+      return sealedWakeForGroup(s.account.accountId, base64Encode(groupId), kind);
     },
   });
   // 1.18g — ContactsClient is the home of the addMemberToGroup

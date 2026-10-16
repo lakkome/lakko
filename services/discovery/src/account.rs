@@ -5,9 +5,13 @@
 //!
 //! Part of the cross-service account deletion: `services/auth` purges the auth
 //! tier (FK cascade over OPAQUE / passkeys / recovery factors), THIS purges the
-//! discovery tier (username binding, identity bundle, KeyPackage, owned invite
-//! capabilities, name search terms), and `services/storage` purges the backup
-//! blob. The DS, push, channels, transparency, and witness tiers are
+//! discovery tier (username binding, identity bundle, KeyPackage, name search
+//! terms), and `services/storage` purges the backup blob.
+//!
+//! Invite ledger rows are not deleted here: since ADR-0078 section 10 they name
+//! no owner, so there is nothing to find them by. A deleting client revokes its
+//! own live links first (it holds each link's revocation seed); a row it could
+//! not revoke lives until its expiry or its last use. The DS, push, channels, transparency, and witness tiers are
 //! account-opaque (invariant #5 — they key on group / device / channel /
 //! username-hash pseudonyms, never the account_id) and hold nothing to delete.
 
@@ -52,9 +56,8 @@ pub(crate) async fn delete_account(
 
 /// Everything an account owns here besides its username binding and its
 /// identity bundle: the MLS KeyPackages, the ADR-0060 search terms and public
-/// record, and the contact- and call-invite capabilities it issued. (The
-/// per-joiner consumer rows are not account-keyed and prune on their own TTL;
-/// they carry no link back to the account.)
+/// record. Invite ledger rows are not among them (ADR-0078 section 10: no row
+/// names its owner).
 async fn purge_owned_rows(
     pool: &sqlx::MySqlPool,
     account_id: &[u8; 16],
@@ -65,8 +68,6 @@ async fn purge_owned_rows(
         "DELETE FROM keypackage_tombstones WHERE account_id = ?",
         "DELETE FROM display_names WHERE account_id = ?",
         "DELETE FROM public_records WHERE account_id = ?",
-        "DELETE FROM invites WHERE owner_account_id = ?",
-        "DELETE FROM call_invites WHERE owner_account_id = ?",
     ] {
         sqlx::query(sql)
             .bind(account_id.as_slice())
@@ -183,7 +184,7 @@ pub(crate) fn spawn_unclaimed_pruner(
             interval.tick().await;
             match prune_unclaimed(&pool, ttl_secs).await {
                 Ok(0) => {},
-                Ok(accounts) => tracing::info!(accounts, "pruned unclaimed accounts"),
+                Ok(removed) => tracing::info!(removed, "pruned unclaimed accounts"),
                 Err(e) => tracing::warn!(error = %e, "unclaimed-account prune failed"),
             }
         }

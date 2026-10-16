@@ -72,6 +72,7 @@ import type {
 } from "../../../wasm/lakko_ffi_wasm";
 
 import {
+  deviceGroupIdOf,
   ensureDeviceGroup,
   persistDeviceGroupSnapshot,
   persistDeviceGroupSnapshotWithCursor,
@@ -422,8 +423,9 @@ export function DeviceGroupSyncProvider(props: {
   onCleanup(unregisterDsSource);
 
   // ADR-0057 — the account owns its DeviceGroup: every device holds the root.
-  // Keyed on the id derived from the account (`deviceGroupIdFor`), set before
-  // the group is ensured, so the founding claim finds the root too.
+  // Keyed on the DeviceGroup id derived from the account seed (ADR-0078
+  // section 6, `deviceGroupIdOf`), set before the group is ensured, so the
+  // founding claim finds the root too.
   let ownDeviceGroupId: Uint8Array | null = null;
   const unregisterOwner = dsAccess.registerOwnerSource((groupId) => {
     const own = ownDeviceGroupId ?? group?.groupId() ?? null;
@@ -542,16 +544,6 @@ export function DeviceGroupSyncProvider(props: {
     // is asked after each one; a stale bootstrap assigns nothing, starts
     // nothing and frees what it built.
     const current = binding.capture();
-    let ownId: Uint8Array | null = null;
-    try {
-      ownId = (await loadWasm()).deviceGroupIdFor(accountIdBytes);
-    } catch {
-      ownId = null;
-    }
-    if (!current()) return;
-    ownDeviceGroupId = ownId;
-    accountIdBytesActive = accountIdBytes;
-
     const deviceKey = await getDeviceKey(accountIdB64);
     if (!current()) return;
     if (deviceKey === null) {
@@ -560,6 +552,15 @@ export function DeviceGroupSyncProvider(props: {
       activeAccountIdB64 = null;
       return;
     }
+    let ownId: Uint8Array | null = null;
+    try {
+      ownId = await deviceGroupIdOf(accountIdB64, deviceKey, auth.identitySecrets()?.accountIdentitySeed);
+    } catch {
+      ownId = null;
+    }
+    if (!current()) return;
+    ownDeviceGroupId = ownId;
+    accountIdBytesActive = accountIdBytes;
 
     let ensured;
     try {

@@ -7,6 +7,12 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 - **Status:** Accepted
 - **Date:** 2026-06-25
+- **Amended by [ADR-0078](0078-servers-cannot-link-accounts.md) phase 6 (2026-10-16):**
+  for OQ3, a PublisherGroup id is the owner's derivation over its account
+  seed and the channel id, so `channel_id_from_group_id` is removed; a
+  co-publisher `/g/` link carries the channel id (and optionally the channel
+  name) in its sealed preview (preview kind 2), and the joiner opens the
+  group under the id the capability conveyed.
 - **Context:** Phase 3/4 — the live consumer of ADR-0027 (external-join approval, G-3)
 
 > **AMENDED 2026-09-28 — sealed links (maintainer's decision on the security

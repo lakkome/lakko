@@ -27,7 +27,6 @@ import kotlinx.coroutines.withContext
 import me.lakko.app.calls.toRow
 import me.lakko.app.calls.withSender
 import me.lakko.app.profile.toFfi
-import me.lakko.app.push.DevicePushId
 import me.lakko.app.push.GroupPushRouting
 import me.lakko.app.push.NativePushRoutingPorts
 import me.lakko.app.push.PushClient
@@ -35,7 +34,6 @@ import me.lakko.app.push.PushRouteStore
 import me.lakko.app.push.PushRoutingPorts
 import me.lakko.app.push.PushRoutingSecretStore
 import me.lakko.app.auth.IdentitySecrets
-import uniffi.lakko_ffi_uniffi.derivePushGid
 import me.lakko.app.discovery.ConsumeInviteResult
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.ds.DsClient
@@ -2325,7 +2323,7 @@ public class ChatRepository(
         return providerLock.sessionLock {
             val record = groups[groupIdHex]
             if (record == null) {
-                android.util.Log.w("ChatRepository", "deriveCallKey: no group $groupIdHex")
+                android.util.Log.w("ChatRepository", "deriveCallKey: no group handle")
                 null
             } else {
                 try {
@@ -2356,6 +2354,20 @@ public class ChatRepository(
      * cannot move it under this read; one that had started makes `settled`
      * false and reports its own drain later.
      */
+    /**
+     * The peer announcer of a group call in [groupIdHex] (ADR-0078 section 2):
+     * this device signs who it is with its leaf key, and every other peer's
+     * announcement is verified against the group's roster as it is when the
+     * announcement arrives. `null` before bootstrap or for a call id that is
+     * not 16 bytes. The reads are single-key map gets and read-only FFI calls
+     * the core serialises itself.
+     */
+    public fun callPeerAnnouncer(groupIdHex: String, callId: ByteArray): me.lakko.app.calls.CallPeerAnnouncer? {
+        val identity = canonicalIdentity.get() ?: return null
+        if (callId.size != 16) return null
+        return me.lakko.app.calls.CallPeerAnnouncer.forGroup(identity, callId) { groups[groupIdHex]?.group }
+    }
+
     public suspend fun readSettledCallKey(
         groupIdHex: String,
         callId: ByteArray,
@@ -3862,9 +3874,14 @@ public class ChatRepository(
         // throttle, not an access control: the admin approval gate stays the
         // boundary. Either form carries the fragment; `Copy link` copies the
         // whole string.
+        // ADR-0078 section 10: the ledger row carries a key minted for this
+        // link alone, never the issuer's identity key; its seed is kept in
+        // this device's record of the link and is the only thing that
+        // revokes it.
+        val (revocationSeed, revocationPubkey) = me.lakko.app.contacts.OwnLinks.freshRevocationKey()
         val upload = me.lakko.app.discovery.SealedInviteUpload(
             sealed = mint.sealed,
-            issuerPubkey = mint.issuerPubkey,
+            revocationPubkey = revocationPubkey,
             expiryMs = 0L,
             maxUses = 0xFFFFFFFFL,
         )
@@ -3874,6 +3891,19 @@ public class ChatRepository(
             upload = { client -> client.uploadGroupInvite(upload) },
             log = { message -> android.util.Log.w("ChatRepository", message) },
         )
+        val accountIdB64 = currentAccountIdB64.get()
+        if (blobId != null && accountIdB64 != null) {
+            me.lakko.app.contacts.OwnLinkStores.current.put(
+                accountIdB64,
+                me.lakko.app.contacts.OwnLinks.record(
+                    kind = me.lakko.app.contacts.OwnLink.KIND_GROUP,
+                    blobId = blobId,
+                    seed = revocationSeed,
+                    maxUses = 0xFFFFFFFFL,
+                ),
+            )
+        }
+        revocationSeed.fill(0)
         return me.lakko.app.discovery.composeSealedInviteUrl(
             origin = GROUP_INVITE_DEFAULT_ORIGIN,
             prefix = GROUP_INVITE_URL_PREFIX,
@@ -3887,13 +3917,15 @@ public class ChatRepository(
      * ADR-0028 revoke — the issuer revokes a previously-created group invite
      * link. Only the server-backed pointer form (a 6-byte ledger id) is
      * revocable; an inline link has no ledger row. Returns `true` when a ledger
-     * row was revoked, `false` for an inline / malformed link (nothing to do).
+     * row was revoked, `false` for an inline / malformed link, or one this
+     * device keeps no revocation key for (ADR-0078 section 10: it lives until
+     * it expires).
      */
     public suspend fun revokeGroupInviteLink(link: String): Boolean =
         forSession { revokeGroupInviteLinkOnMlsThread(link = link) }
 
     private suspend fun revokeGroupInviteLinkOnMlsThread(link: String): Boolean {
-        val identity = accountIdentity.get() ?: canonicalIdentity.get()
+        val accountIdB64 = currentAccountIdB64.get()
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
@@ -3907,19 +3939,30 @@ public class ChatRepository(
         return when (parsed) {
             is ParsedGroupInvite.Inline -> false
             is ParsedGroupInvite.Pointer -> {
+                val store = me.lakko.app.contacts.OwnLinkStores.current
+                val ownSlug = me.lakko.app.auth.base64UrlEncodeNoPad(parsed.blobId)
+                val seed = store.get(accountIdB64, me.lakko.app.contacts.OwnLink.KIND_GROUP, ownSlug)?.seed()
+                    ?: return false
                 // Bearer-gated route: a client carrying the session token
-                // read now (a missing session throws a ChatError as is).
-                withSessionDiscovery(
-                    sessionToken = keyPackageAccount.get()?.sessionToken,
-                    what = "group invite revoke",
-                    clientFactory = keyPackageDiscoveryFactory,
-                ) { client ->
-                    try {
-                        client.revokeGroupInvite(parsed.blobId, identity.ed25519Seed())
-                    } catch (e: Throwable) {
-                        throw ChatError("group invite revoke failed", e)
+                // read now (a missing session throws a ChatError as is). The
+                // signature by the link's own revocation key is the
+                // authorisation.
+                try {
+                    withSessionDiscovery(
+                        sessionToken = keyPackageAccount.get()?.sessionToken,
+                        what = "group invite revoke",
+                        clientFactory = keyPackageDiscoveryFactory,
+                    ) { client ->
+                        try {
+                            client.revokeGroupInvite(parsed.blobId, seed)
+                        } catch (e: Throwable) {
+                            throw ChatError("group invite revoke failed", e)
+                        }
                     }
+                } finally {
+                    seed.fill(0)
                 }
+                store.remove(accountIdB64, me.lakko.app.contacts.OwnLink.KIND_GROUP, ownSlug)
                 true
             }
         }
@@ -4241,9 +4284,9 @@ public class ChatRepository(
             // ADR-0054 — the wake rides this signed publish as a header and the
             // DS fans it out after appending the row; only an offer and an end
             // ask for one, every other frame published here stays silent.
-            val wake = DsWake.forPublish(
-                pushGid = pushGidForGroupOrNull(groupIdHex),
-                kind = if (me.lakko.app.calls.shouldWakeForCallSignaling(plaintextBytes)) DsWakeKind.CALL else null,
+            val wake = sealedWakeFor(
+                groupIdHex,
+                if (me.lakko.app.calls.shouldWakeForCallSignaling(plaintextBytes)) DsWakeKind.CALL else null,
             )
             // ADR-0045 — the publish is INSIDE the per-group lock (see
             // [runGroupSend]): a message sealed at one epoch and published on the
@@ -4485,10 +4528,7 @@ public class ChatRepository(
             // names the opaque `push_gid`, never the DS `group_id`; with no
             // routing secret held yet the header is omitted and recipients
             // pick the message up on their next foreground poll.
-            val wake = DsWake.forPublish(
-                pushGid = pushGidForGroupOrNull(groupIdHex),
-                kind = DsWakeKind.MESSAGE,
-            )
+            val wake = sealedWakeFor(groupIdHex, DsWakeKind.MESSAGE)
             val result = chatClient.publishPreparedSend(prepared, wake = wake)
             record.markSent(
                 localId = localId,
@@ -4812,54 +4852,46 @@ public class ChatRepository(
         }
     }
 
-    /** ADR-0042 — subscribe this device to push-gw under [pushGid]. */
+    /** ADR-0042 / ADR-0078 — send this device's sealed push-gw subscription
+     *  for the group filed under [pushGid] ([PushSubscriptions.send]). */
     private suspend fun subscribePushGidBestEffort(pushGid: ByteArray) {
-        val pseudonym = DevicePushId.getOrCreate(applicationContext)
-        PushClient().use { client ->
-            client.subscribeGroup(
-                devicePseudonym = pseudonym,
-                groupPseudonym = pushGid,
-            )
-        }
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        me.lakko.app.push.PushSubscriptions.sendForPushGid(applicationContext, accountIdB64, pushGid)
     }
 
     /**
      * ADR-0043 — drop this device's push-gw subscription under a SUPERSEDED
-     * [pushGid]. The FIRST call site [PushClient.unsubscribeGroup] has ever
-     * had: the wrapper shipped with ADR-0042 but was dead code on all three
-     * clients, which is what compounded G-36 residual 2 (an evicted member's
-     * subscription was never torn down by anyone).
+     * [pushGid], by its subscription id (ADR-0078).
      *
-     * The endpoint deletes exactly the `(device, group)` row named in the
-     * request, and a client knows only its OWN device pseudonym — so this
-     * can only ever retire THIS device's row, never a peer's.
+     * The endpoint deletes exactly the row named by its subscription id, and
+     * a client knows only its OWN subscription ids — so this can only ever
+     * retire THIS device's row, never a peer's.
      */
     private suspend fun unsubscribePushGidBestEffort(pushGid: ByteArray) {
-        val pseudonym = DevicePushId.getOrCreate(applicationContext)
-        PushClient().use { client ->
-            client.unsubscribeGroup(
-                devicePseudonym = pseudonym,
-                groupPseudonym = pushGid,
-            )
-        }
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        me.lakko.app.push.PushSubscriptions.retire(applicationContext, accountIdB64, pushGid)
     }
 
     /**
-     * ADR-0042 — the `push_gid` this device would route [groupIdHex] under,
-     * or `null` when it holds no `push_routing_secret` yet (the caller then
-     * DEFERS / SKIPS rather than falling back to `group_id`). Derived from
-     * the encrypted-at-rest secret via the audited keyed-BLAKE3 FFI.
+     * ADR-0054 decision 1 with ADR-0078 section 3 — the wake a publish to
+     * [groupIdHex] carries: the group's `push_gid`, the kind, a nonce, this
+     * device's clock, the group's unlock key and a signature by the group's
+     * wake key, sealed to push-gw's key ([me.lakko.app.push.PushWakeKey]), so
+     * the DS forwards a blob it cannot read. `null` (no header) when [kind]
+     * is `null`, when this device holds no routing secret for the group yet
+     * (the ADR-0042 defer; the group id is never used in its place), or when
+     * push-gw's key cannot be had.
      */
-    private fun pushGidForGroupOrNull(groupIdHex: String): ByteArray? {
+    private suspend fun sealedWakeFor(groupIdHex: String, kind: DsWakeKind?): DsWake? {
+        if (kind == null) return null
         val accountIdB64 = currentAccountIdB64.get() ?: return null
-        val secret = PushRoutingSecretStore.get(applicationContext, accountIdB64, groupIdHex)
-            ?: return null
-        return try {
-            derivePushGid(secret)
-        } catch (_: Throwable) {
-            null
-        }
+        val secret = PushRoutingSecretStore.get(applicationContext, accountIdB64, groupIdHex) ?: return null
+        val gwKey = pushWakeKeyProvider() ?: return null
+        return DsWake.seal(gwKey, secret, kind, System.currentTimeMillis())
     }
+
+    /** push-gw's wake key; replaceable so a test supplies a fixed key. */
+    internal var pushWakeKeyProvider: suspend () -> ByteArray? = { me.lakko.app.push.PushWakeKey.key() }
 
     /**
      * ADR-0042 — build the production [PushRoutingPorts] for [group]: the FFI
@@ -4903,16 +4935,6 @@ public class ChatRepository(
             // lock's bounded hold wait on a 15 s send publish.
             groupEpochFn = {
                 providerLock.sessionLock { runCatching { group.epoch() }.getOrNull() }
-            },
-            // ADR-0057 obligation 8 — bind the journal to a freshly minted or
-            // rotated push_gid, with the root or an admin's registrar key.
-            bindFn = { pushGid ->
-                val groupId = runCatching { hexToBytes(groupIdHex) }.getOrNull()
-                if (groupId != null) {
-                    sessionLeg { bindPushGidBestEffort(groupIdHex, group, groupId, pushGid) }
-                } else {
-                    me.lakko.app.ds.PushBindingOutcome.FAILED
-                }
             },
         )
 
@@ -7487,10 +7509,7 @@ public class ChatRepository(
                     publish = { sealed ->
                         chatClient.publishPreparedSend(
                             sealed,
-                            wake = DsWake.forPublish(
-                                pushGid = pushGidForGroupOrNull(successorGroupIdHex),
-                                kind = DsWakeKind.MESSAGE,
-                            ),
+                            wake = sealedWakeFor(successorGroupIdHex, DsWakeKind.MESSAGE),
                         )
                     },
                 )
@@ -7942,18 +7961,20 @@ public class ChatRepository(
         selfEvicted: Boolean,
     ) {
         // ADR-0060 §3 — a group that shrank rotates this account's own
-        // `group` and `member` keys for it (the evicted member holds the old
-        // ones), then republishes the profile carrying the new grants. This
-        // runs after the Remove commit was applied, so the republished profile
-        // is sealed at an epoch the evicted member cannot open (the C-61
-        // shape). Every member does this for its own keys, whatever its role.
+        // `group` and `member` keys (the evicted member holds the old ones),
+        // then republishes the profile carrying the new grants. Since
+        // ADR-0078 section 9 they are the account's one key per class, so the
+        // profile is republished in EVERY group. This runs after the Remove
+        // commit was applied, so the republished profile is sealed at an
+        // epoch the evicted member cannot open (the C-61 shape). Every member
+        // does this for its own keys, whatever its role.
         if (me.lakko.app.reach.reachRotationOnShrink(previousMemberKeys, currentMemberKeys, selfEvicted)) {
             reachScope.launchSession {
                 try {
                     val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
-                    reach.rotate(me.lakko.app.reach.ReachKind.MEMBER, groupIdHex)
-                    reach.rotate(me.lakko.app.reach.ReachKind.GROUP, groupIdHex)
-                    profileRepublish.publishNow(groupIdHex)
+                    // Republishes in every group through the visibility
+                    // listener (the same path a setting change takes).
+                    reach.rotateClasses(listOf(me.lakko.app.reach.ReachKind.MEMBER, me.lakko.app.reach.ReachKind.GROUP))
                 } catch (cause: kotlinx.coroutines.CancellationException) {
                     throw cause
                 } catch (cause: Throwable) {
@@ -11083,47 +11104,6 @@ public class ChatRepository(
             log = { line -> android.util.Log.i("ChatRepository", "ADR-0057: $line") },
         )
         android.util.Log.i("ChatRepository", "ADR-0057: root takeover $outcome")
-        return outcome
-    }
-
-    /**
-     * ADR-0057 obligation 8 — bind [group]'s journal to [pushGid] with this
-     * device's authority over the journal (the root, or during an unconfirmed
-     * takeover the owner's registrar seed) when it owns the group, or its admin
-     * registrar; a member never binds ([me.lakko.app.ds.PushBindingOutcome.NOT_PERMITTED],
-     * nothing sent). Never throws; `409` / `503` / failures are classified and
-     * logged. Since the second security pass (finding 5) the routing code binds
-     * BEFORE it broadcasts the secret.
-     */
-    private suspend fun bindPushGidBestEffort(
-        groupIdHex: String,
-        group: Group,
-        groupId: ByteArray,
-        pushGid: ByteArray,
-    ): me.lakko.app.ds.PushBindingOutcome {
-        val signer = providerLock.sessionLock {
-            val record = groups[groupIdHex]
-            if (ownsJournal(group)) {
-                if (record != null) authoritySignerFor(record, groupIdHex) else rootStatementSigner(groupId)
-            } else {
-                val own = ownAccountKey()
-                val isAdmin = own != null &&
-                    roleTableOrNull(group)?.admins?.any { it.contentEquals(own) } == true
-                if (isAdmin) registrarStatementSigner(groupIdHex) else null
-            }
-        } ?: return me.lakko.app.ds.PushBindingOutcome.NOT_PERMITTED
-        val error = try {
-            dsClient.putStatement { signer.pushBinding(groupId, pushGid) }
-            null
-        } catch (cause: kotlinx.coroutines.CancellationException) {
-            throw cause
-        } catch (cause: Throwable) {
-            cause
-        }
-        val outcome = me.lakko.app.ds.pushBindingOutcomeOf(error)
-        if (outcome != me.lakko.app.ds.PushBindingOutcome.BOUND) {
-            android.util.Log.w("ChatRepository", "ADR-0057: push binding not taken: $outcome")
-        }
         return outcome
     }
 

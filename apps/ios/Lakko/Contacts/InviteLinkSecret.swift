@@ -78,14 +78,20 @@ public protocol InviteLinkSecretBackend: AnyObject {
 /// accountIdB64`), `AfterFirstUnlockThisDeviceOnly`, never synced — the same
 /// per-account secret posture as ``BackupFloorStore`` and ``PhraseStore``.
 public final class KeychainInviteLinkSecretBackend: InviteLinkSecretBackend {
-    public static let serviceTag = "me.lakko.invite-link-secrets.v2"
+    public static let defaultServiceTag = "me.lakko.invite-link-secrets.v2"
 
-    public init() {}
+    private let serviceTag: String
+
+    /// - Parameter serviceTag: the Keychain service the blobs live under
+    ///   (``OwnLinkStore`` keeps its records under its own).
+    public init(serviceTag: String = KeychainInviteLinkSecretBackend.defaultServiceTag) {
+        self.serviceTag = serviceTag
+    }
 
     public func load(accountIdB64: String) -> Data? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.serviceTag,
+            kSecAttrService: serviceTag,
             kSecAttrAccount: accountIdB64,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne,
@@ -99,7 +105,7 @@ public final class KeychainInviteLinkSecretBackend: InviteLinkSecretBackend {
         delete(accountIdB64: accountIdB64)
         let add: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.serviceTag,
+            kSecAttrService: serviceTag,
             kSecAttrAccount: accountIdB64,
             kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecValueData: blob,
@@ -113,7 +119,7 @@ public final class KeychainInviteLinkSecretBackend: InviteLinkSecretBackend {
     public func delete(accountIdB64: String) {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.serviceTag,
+            kSecAttrService: serviceTag,
             kSecAttrAccount: accountIdB64,
         ]
         SecItemDelete(query as CFDictionary)

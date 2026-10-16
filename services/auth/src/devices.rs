@@ -195,9 +195,6 @@ pub(crate) async fn revoke(
     .map_err(ApiError::Db)?;
     tx.commit().await.map_err(ApiError::Db)?;
 
-    tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(account_id),
-        "device revoked",
-    );
+    tracing::info!("device revoked",);
     Ok(StatusCode::NO_CONTENT)
 }

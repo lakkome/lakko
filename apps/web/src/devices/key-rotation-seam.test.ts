@@ -25,17 +25,14 @@ import init, {
   Identity,
   RecoveryMnemonic,
   composeKeyRotationEnvelope,
-  dsRootEndorsementLen,
   epochOfMessage,
   keyRotationEnvelopeLen,
   keyRotationPendingExpired,
   keyRotationPendingMaxAgeMs,
-  signDsRootEndorsement,
   signSessionUpgradeStatement,
   signSupersessionProof,
   verifyKeyRotationEnvelope,
 } from "../../wasm/lakko_ffi_wasm";
-import { rootEndorsementFor } from "./lifecycle";
 import { KeyRotationOrderError, sealKeyRotationAfterRemoval, type KeyRotationSealPorts } from "./key-rotation";
 
 beforeAll(async () => {
@@ -72,7 +69,9 @@ function rotationMaterial() {
 function twoDevices() {
   const mine = Identity.fromSeed(new Uint8Array(32).fill(11));
   const stolen = Identity.fromSeed(new Uint8Array(32).fill(12));
-  const group = DeviceGroup.createFounder(mine, ACCOUNT);
+  const account = Identity.fromSeed(accountSeed(1));
+  const group = DeviceGroup.createFounder(mine, ACCOUNT, account);
+  account.free();
   group.addDeviceFromWire(mine, stolen.createKeyPackage()).free();
   const stolenKey = stolen.signaturePublicKey;
   const epoch = (): bigint => {
@@ -204,40 +203,3 @@ describe("the envelope on a kept device (through the real core)", () => {
   });
 });
 
-describe("the DS root endorsement (ADR-0074 section 4.6) is what a reset and a recall send", () => {
-  /** A 177-byte attestation-shaped blob carrying `generation` where the
-   *  layout has it; only the generation is read by the endorsement. */
-  function attestationWithGeneration(generation: bigint): string {
-    const bytes = new Uint8Array(177);
-    new DataView(bytes.buffer).setBigUint64(1 + 32 + 32, generation, false);
-    let binary = "";
-    for (const b of bytes) binary += String.fromCharCode(b);
-    return btoa(binary);
-  }
-
-  it("is 64 bytes, signed by the NEW account key over the journal, the attested generation and the root key", () => {
-    const seed = accountSeed(5);
-    const journal = new Uint8Array(32).fill(8);
-    const rootKey = new Uint8Array(32).fill(9);
-    const wasm = { Identity, signDsRootEndorsement };
-    const endorsement = rootEndorsementFor(wasm, seed, journal, attestationWithGeneration(7n), rootKey);
-    const raw = Uint8Array.from(atob(endorsement), (c) => c.charCodeAt(0));
-    expect(raw).toHaveLength(dsRootEndorsementLen());
-    expect(raw).toHaveLength(64);
-    // Bound to each input: another generation, journal or root key signs
-    // something else (Ed25519 is deterministic, so equal inputs are equal).
-    const same = rootEndorsementFor(wasm, seed, journal, attestationWithGeneration(7n), rootKey);
-    expect(same).toBe(endorsement);
-    expect(rootEndorsementFor(wasm, seed, journal, attestationWithGeneration(8n), rootKey)).not.toBe(endorsement);
-    expect(rootEndorsementFor(wasm, seed, new Uint8Array(32).fill(1), attestationWithGeneration(7n), rootKey)).not.toBe(endorsement);
-    expect(rootEndorsementFor(wasm, seed, journal, attestationWithGeneration(7n), new Uint8Array(32).fill(1))).not.toBe(endorsement);
-    expect(rootEndorsementFor(wasm, accountSeed(6), journal, attestationWithGeneration(7n), rootKey)).not.toBe(endorsement);
-  });
-
-  it("is never built without the new account seed", () => {
-    const wasm = { Identity, signDsRootEndorsement };
-    expect(() =>
-      rootEndorsementFor(wasm, undefined, new Uint8Array(32), attestationWithGeneration(1n), new Uint8Array(32)),
-    ).toThrow(/new account seed/);
-  });
-});

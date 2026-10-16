@@ -106,13 +106,13 @@ final class CallHost: ObservableObject {
         var placeCall: @MainActor (_ session: CallSession, _ audio: Bool, _ video: Bool) -> Void = {
             session, audio, video in session.dial(audio: audio, video: video)
         }
-        /// The TURN-credential client handed to each new session, or `nil` for
-        /// STUN-only ICE.
+        /// The TURN-credential client handed to each new session for its call
+        /// id, or `nil` for STUN-only ICE.
         ///
-        /// A port rather than a stored client because the credential is minted
-        /// against the current session token, and a test must be able to watch
-        /// a call be placed without reaching the auth service.
-        var turnClient: @MainActor () -> TurnCredentialClient? = { nil }
+        /// A port so a test can watch a call be placed without reaching the
+        /// auth service. In production the credential is minted for the call's
+        /// room through the anonymous call-join exchange (ADR-0078 section 2).
+        var turnClient: @MainActor (_ callId: Data) -> TurnCredentialClient? = { _ in nil }
     }
 
     // MARK: - Published state
@@ -552,7 +552,7 @@ final class CallHost: ObservableObject {
         // cannot reach each other directly never connect. Fail-soft by
         // contract: a `nil` client, or a credential the auth service declines
         // to mint, leaves the call on STUN rather than refusing it.
-        session.setTurnClient(ports.turnClient())
+        session.setTurnClient(ports.turnClient(callId))
         activeCall = session
         activeGroupIdHex = groupIdHex
         incomingQuiet = quiet
@@ -739,17 +739,13 @@ final class CallHost: ObservableObject {
 extension CallHost {
     /// The composition root's ports over the live repository.
     ///
-    /// `sessionTokenProvider` is read at each call rather than captured once,
-    /// because the token is rebound on login, recover and pairing, and a TURN
-    /// credential minted against a stale one is refused.
+    /// `sessionTokenProvider` gates the TURN mint on a signed-in session: the
+    /// anonymous token that pays for it is drawn with the session.
     static func live(
         repository: ChatRepository,
         sessionTokenProvider: @escaping @MainActor () -> String? = { nil }
     ) -> CallHost {
-        // One client for the process: it holds no per-call state, only the
-        // bearer token, which the port refreshes before every mint.
-        let turn = TurnCredentialClient()
-        return CallHost(ports: Ports(
+        CallHost(ports: Ports(
             publish: { [weak repository] groupIdHex, bytes in
                 guard let repository else { return false }
                 do {
@@ -795,10 +791,9 @@ extension CallHost {
             callTarget: { [weak repository] groupIdHex in
                 repository?.oneToOneCallTarget(groupIdHex: groupIdHex) ?? .dial(groupIdB64: groupIdHex)
             },
-            turnClient: {
+            turnClient: { callId in
                 guard let token = sessionTokenProvider(), !token.isEmpty else { return nil }
-                turn.setSessionToken(token)
-                return turn
+                return TurnCredentialClient.forCall(callId: callId)
             }
         ))
     }

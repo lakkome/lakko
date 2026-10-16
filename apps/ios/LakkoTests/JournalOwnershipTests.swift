@@ -33,11 +33,6 @@ private final class FakeStatementSigner: DsStatementSignerProtocol, @unchecked S
 
     func publicKey() -> Data { key }
 
-    func pushBinding(journalId: Data, pushGid: Data) throws -> DsStatementRequest {
-        calls.append("push-binding")
-        return req("push-binding", "\"x\":0")
-    }
-
     func registerEpoch(journalId: Data, epoch: UInt64, epochKey: Data, revoke: [Data]) throws
         -> DsStatementRequest {
         calls.append("access:\(epoch)")
@@ -243,7 +238,9 @@ final class JournalOwnershipTests: XCTestCase {
         try AccountIdentitySeedStore.putAccountIdentitySeed(accountIdB64: accountIdB64, seed: seed)
         defer { AccountIdentitySeedStore.deleteAccountIdentitySeed(accountIdB64: accountIdB64) }
         let device = try Identity.fromSeed(seed: Data(repeating: 0x56, count: 32))
-        let group = try DeviceGroup.createFounder(identity: device, accountId: Data(repeating: 7, count: 16))
+        let group = try DeviceGroup.createFounder(
+            identity: device, accountId: Data(repeating: 7, count: 16),
+            accountIdentity: try Identity.fromSeed(seed: seed))
         let marks = JournalFoundingMarks(
             defaults: try XCTUnwrap(UserDefaults(suiteName: "marks-\(UUID().uuidString)")))
         let hex = DsClient.pseudonymHex(try group.groupId())
@@ -626,27 +623,6 @@ final class JournalOwnershipTests: XCTestCase {
         XCTAssertNotEqual(signer.publicKey(), try dsJournalRootSigner(accountIdentity: owner, journalId: gid).publicKey())
     }
 
-    // MARK: Obligation 8 — the push binding
-
-    func testThePushBindingReportsItsOutcome() async {
-        let signer = FakeStatementSigner("root")
-        let cases: [(DsStatementError, PushBindOutcome)] = [
-            (.conflict, .conflict), (.pushBindingDisabled, .disabled), (.http(status: 500, body: ""), .failed),
-        ]
-        for (refusal, expected) in cases {
-            let ds = FakeStatementDs()
-            ds.answers = [refusal]
-            let outcome = await JournalOwnership.bindPush(
-                signer: signer, journalId: gid, pushGid: Data(repeating: 9, count: 32), ds: ds)
-            XCTAssertEqual(outcome, expected)
-            XCTAssertEqual(ds.segments, ["push-binding"])
-        }
-        let ok = FakeStatementDs()
-        let outcome = await JournalOwnership.bindPush(
-            signer: signer, journalId: gid, pushGid: Data(repeating: 9, count: 32), ds: ok)
-        XCTAssertEqual(outcome, .bound)
-    }
-
     // MARK: Transport
 
     func testAStatementIsAPutWithoutAProofAndA409IsRetriedOnce() async throws {
@@ -689,7 +665,7 @@ final class JournalOwnershipTests: XCTestCase {
         let cases: [(Int, String, DsStatementError)] = [
             (401, "proof required", .unauthorized),
             (403, "rank", .rankShortfall),
-            (503, #"{"error":"push-binding-disabled"}"#, .pushBindingDisabled),
+            (503, #"{"error":"key-reset-disabled"}"#, .keyResetDisabled),
         ]
         for (status, body, expected) in cases {
             let scope = DsAccessURLProtocol.freshScope()

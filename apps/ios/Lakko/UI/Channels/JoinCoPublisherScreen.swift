@@ -104,7 +104,9 @@ struct JoinCoPublisherScreen: View {
             status = nil
         }
         do {
-            let identity = try Identity.fromSeed(seed: accountIdentitySeed)
+            // The durable channel provider (G-50): the joined PublisherGroup
+            // lands in it and is snapshotted once the join is done.
+            let identity = try ChannelPublisherIdentity.shared.identity(currentSeed: accountIdentitySeed)
             let request = try await CoPublisher.requestToCoPublish(
                 ds: ds, identity: identity, accountIdB64: accountIdB64, link: trimmed)
             status = "channels.join.waiting"
@@ -129,6 +131,7 @@ struct JoinCoPublisherScreen: View {
                 errorMessage = .key("channels.join.no_approval")
                 return
             }
+            ChannelPublisherIdentity.shared.persist()
             let name = localName.trimmingCharacters(in: .whitespaces)
             state.addChannel(.init(
                 id: request.channelIdHex,

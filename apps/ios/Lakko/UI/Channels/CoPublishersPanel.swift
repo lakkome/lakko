@@ -7,18 +7,21 @@ import SwiftUI
 import UIKit
 
 /// ADR-0028 OQ3 — owner-side co-publisher card (``ChannelManageScreen``).
-/// Holds a long-lived PublisherGroup + Identity (the approve path needs the
-/// same handle the poll loop populated the pending set on). Opens both on
-/// appear, polls the journal every 5 s, and surfaces the invite link
-/// (Copy / Share) and each request with Approve / Reject. The approve path is
-/// `CoPublisher.approve`, whose reseal-after-add is untouched.
+/// Runs on the durable channel provider (``ChannelPublisherIdentity``): the
+/// pending set the poll loop fills is in that provider, so the approve finds
+/// it, and every action reopens the group from it rather than keeping a
+/// handle. Polls the journal every 5 s, and surfaces the invite link (Copy)
+/// and each request with Approve / Reject. The approve path is
+/// `CoPublisher.approve`, recorded (G-50) before its reseal-after-add runs.
 struct CoPublishersPanel: View {
     let channelId: String
+    /// G-50 — where the post-approve content seed is written back.
+    @ObservedObject var state: ChannelsUiState
     let client: ChannelsClient
     let accountIdentitySeed: Data
 
-    @State private var identity: Identity?
-    @State private var publisherGroup: PublisherGroup?
+    /// `true` once the PublisherGroup opened.
+    @State private var ready = false
     @State private var link: String?
     @State private var pending: [Data] = []
     @State private var busy = false
@@ -107,7 +110,7 @@ struct CoPublishersPanel: View {
                 Label(l10n.t(busy ? "chats.new_group.creating" : "chat.invite_link.create"), systemImage: "link")
             }
             .buttonStyle(.bordered)
-            .disabled(busy || publisherGroup == nil)
+            .disabled(busy || !ready)
         }
     }
 
@@ -130,14 +133,23 @@ struct CoPublishersPanel: View {
         .padding(.vertical, 8)
     }
 
+    /// The channel provider identity and the channel's PublisherGroup.
+    private func open() throws -> (identity: Identity, group: PublisherGroup) {
+        let identity = try ChannelPublisherIdentity.shared.identity(currentSeed: accountIdentitySeed)
+        guard let group = try CoPublisher.loadPublisherGroup(identity: identity, channelIdHex: channelId) else {
+            throw CoPublisherError.badChannelId(channelId)
+        }
+        return (identity, group)
+    }
+
     private func onAppearLoad() async {
         do {
-            let id = try Identity.fromSeed(seed: accountIdentitySeed)
+            let id = try ChannelPublisherIdentity.shared.identity(currentSeed: accountIdentitySeed)
             let pg = try CoPublisher.openPublisherGroup(
                 identity: id, accountIdB64: AcceptedContactsStore.boundAccountIdB64,
                 channelIdHex: channelId)
-            identity = id
-            publisherGroup = pg
+            ChannelPublisherIdentity.shared.persist()
+            ready = true
             // ADR-0053 point 2 — claim-on-open (the claim at creation included).
             await CoPublisher.claimJournal(ds: ds, identity: id, publisherGroup: pg)
         } catch {
@@ -166,13 +178,17 @@ struct CoPublishersPanel: View {
     }
 
     private func refreshPending() async {
-        guard let identity, let publisherGroup else { return }
+        guard ready, let opened = try? open() else { return }
+        let identity = opened.identity
+        let publisherGroup = opened.group
         do {
             let outcome = try await CoPublisher.pollJournal(
                 ds: ds, identity: identity, publisherGroup: publisherGroup,
                 knockAfter: knockCursor,
                 readKnocks: knockThrottle.take(channelId))
             knockCursor = outcome.knockCursor
+            // The poll applied commits and retained requests in the provider.
+            ChannelPublisherIdentity.shared.persist()
             pending = try CoPublisher.pending(publisherGroup: publisherGroup)
         } catch {
             // Best-effort — keep the last good pending list.
@@ -180,13 +196,17 @@ struct CoPublishersPanel: View {
     }
 
     private func createLink() async {
-        guard let identity, let publisherGroup else { return }
+        guard ready else { return }
         busy = true
         error = nil
         defer { busy = false }
         do {
+            let (identity, publisherGroup) = try open()
+            let channel = state.channels.first { $0.id == channelId }
+            let name = channel.map { $0.sharedMeta?.name ?? $0.localName }
             link = try CoPublisher.createCoPublisherLink(
-                identity: identity, publisherGroup: publisherGroup)
+                identity: identity, publisherGroup: publisherGroup,
+                channelName: name?.isEmpty == false ? name : nil)
         } catch {
             NSLog("Channels: create co-publisher link failed: %@", String(describing: error))
             self.error = .key("chat.error.create_link")
@@ -194,14 +214,16 @@ struct CoPublishersPanel: View {
     }
 
     private func approve(_ ref: Data) async {
-        guard let identity, let publisherGroup else { return }
+        guard ready, let accountIdB64 = AcceptedContactsStore.boundAccountIdB64 else { return }
         busy = true
         error = nil
         defer { busy = false }
         do {
             try await CoPublisher.approve(
-                ds: ds, channelsClient: client, identity: identity,
-                publisherGroup: publisherGroup, proposalRef: ref, channelIdHex: channelId)
+                context: ChannelPublisherCommits.Context(
+                    channelIdHex: channelId, currentSeed: accountIdentitySeed,
+                    accountIdB64: accountIdB64, channelsClient: client, ds: ds),
+                state: state, proposalRef: ref)
             await refreshPending()
         } catch {
             NSLog("Channels: approve co-publisher failed: %@", String(describing: error))
@@ -210,13 +232,15 @@ struct CoPublishersPanel: View {
     }
 
     private func reject(_ ref: Data) async {
-        guard let identity, let publisherGroup else { return }
+        guard ready else { return }
         busy = true
         error = nil
         defer { busy = false }
         do {
+            let (identity, publisherGroup) = try open()
             try CoPublisher.reject(
                 identity: identity, publisherGroup: publisherGroup, proposalRef: ref)
+            ChannelPublisherIdentity.shared.persist()
             await refreshPending()
         } catch {
             NSLog("Channels: reject co-publisher failed: %@", String(describing: error))

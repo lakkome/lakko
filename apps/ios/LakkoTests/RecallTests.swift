@@ -467,7 +467,7 @@ final class RecallFlowTests: XCTestCase {
         var hooks: AuthRepository.KeyResetHooks {
             AuthRepository.KeyResetHooks(
                 republishOwnKeyPackage: { [unowned self] _ in self.events.append("keypackage") },
-                refoundDeviceGroup: { [unowned self] _, _, _, _ in self.events.append("devicegroup") }
+                refoundDeviceGroup: { [unowned self] _, _, _ in self.events.append("devicegroup") }
             )
         }
     }
@@ -1107,7 +1107,7 @@ final class RecallFlowTests: XCTestCase {
         struct Down: Error {}
         let failing = AuthRepository.KeyResetHooks(
             republishOwnKeyPackage: { _ in },
-            refoundDeviceGroup: { _, _, _, _ in throw Down() })
+            refoundDeviceGroup: { _, _, _ in throw Down() })
         h.repository.keyResetHooks = failing
 
         await h.repository.recallTakeBack(oldPassword: Data("old-password".utf8), newPassword: Data("new-password".utf8))

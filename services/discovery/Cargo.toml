@@ -22,6 +22,8 @@ path = "src/main.rs"
 [dependencies]
 tokio.workspace = true
 tracing.workspace = true
+# ADR-0078 section 11: the request span that records the route template.
+lakko-log-hygiene.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -127,3 +129,5 @@ lakko-anon-token-server = { workspace = true, features = ["testing"] }
 # ADR-0060 — pin the server's name-term cap to the client crate's and compute
 # real name terms in the route tests.
 lakko-discovery-client.workspace = true
+# ADR-0078 section 11: the capture layer the log test asserts with.
+lakko-log-hygiene = { workspace = true, features = ["capture"] }

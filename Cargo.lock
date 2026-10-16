@@ -2605,6 +2605,7 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "lakko-crypto",
+ "lakko-sfu-proto",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2641,6 +2642,7 @@ name = "lakko-contacts"
 version = "0.0.0"
 dependencies = [
  "lakko-crypto",
+ "proptest",
  "thiserror 1.0.69",
  "tracing",
 ]
@@ -2834,6 +2836,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-log-hygiene"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lakko-mls"
 version = "0.0.0"
 dependencies = [
@@ -2975,8 +2987,10 @@ dependencies = [
  "lakko-call-jwt",
  "lakko-crypto",
  "lakko-device-link",
+ "lakko-log-hygiene",
  "lakko-mnemonic",
  "lakko-pow-server",
+ "lakko-sfu-proto",
  "lakko-transparency",
  "lettre",
  "opaque-ke",
@@ -3044,6 +3058,7 @@ dependencies = [
  "lakko-contacts",
  "lakko-crypto",
  "lakko-discovery-client",
+ "lakko-log-hygiene",
  "lakko-mls",
  "lakko-transparency",
  "rand 0.8.6",
@@ -3072,8 +3087,9 @@ dependencies = [
  "http-body-util",
  "lakko-anon-token",
  "lakko-anon-token-server",
- "lakko-attest",
+ "lakko-contacts",
  "lakko-ds-proof",
+ "lakko-log-hygiene",
  "reqwest",
  "serde",
  "serde_json",
@@ -3153,6 +3169,9 @@ dependencies = [
  "jsonwebtoken",
  "lakko-anon-token",
  "lakko-anon-token-server",
+ "lakko-contacts",
+ "lakko-crypto",
+ "lakko-log-hygiene",
  "p256",
  "parking_lot",
  "rand 0.8.6",
@@ -3183,6 +3202,7 @@ dependencies = [
  "futures",
  "lakko-call-jwt",
  "lakko-calls",
+ "lakko-log-hygiene",
  "lakko-sfu-proto",
  "metrics",
  "metrics-exporter-prometheus",
@@ -3212,6 +3232,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "lakko-auth-token",
+ "lakko-log-hygiene",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3235,6 +3256,7 @@ dependencies = [
  "http-body-util",
  "lakko-attest",
  "lakko-crypto",
+ "lakko-log-hygiene",
  "lakko-transparency",
  "rand 0.8.6",
  "reqwest",
@@ -3270,6 +3292,7 @@ dependencies = [
  "dotenvy",
  "http-body-util",
  "lakko-crypto",
+ "lakko-log-hygiene",
  "lakko-transparency",
  "rand 0.8.6",
  "serde",

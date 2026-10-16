@@ -30,12 +30,24 @@
 //!
 //! ## The scope shape is checked
 //!
-//! `contact` and `fof` are account-wide and carry an **empty** scope; every
-//! other class names something (a link id, a request id, a group or channel
-//! id) and carries 1 to [`MAX_REACH_SCOPE_ID_LEN`] bytes.
+//! `contact`, `group`, `member`, `channel` and `fof` are account-wide and
+//! carry an **empty** scope; `link` and `reply` name something (a link id, a
+//! request id) and carry 1 to [`MAX_REACH_SCOPE_ID_LEN`] bytes.
 //! [`ReachClass::check_scope`] enforces it for the derivation and for
-//! [`crate::visibility::ReachState`], so a caller cannot derive a `group` key
-//! for "no group" by mistake.
+//! [`crate::visibility::ReachState`].
+//!
+//! ## One key per class, not per group ([ADR-0078] section 9)
+//!
+//! Until ADR-0078 a `group`, `member` or `channel` key was derived per group
+//! or channel id, so every mailbox write under one carried a stable label
+//! naming the group its writer shares with the owner: writes under one label
+//! were writes from co-members of one group, readable from the Delivery
+//! Service's table alone. These three classes are now **account-wide**: one
+//! key per class, handed out in every group and channel the setting allows.
+//! The server learns "a co-member of some group of this person wrote", not
+//! which group. The cost is revocation: leaving one group (or narrowing the
+//! setting) cannot revoke that group's key alone, so the client bumps the
+//! class version and republishes its profile in every remaining group.
 //!
 //! ## The continuity key
 //!
@@ -115,12 +127,13 @@ pub enum ReachClass {
     Link,
     /// The one party a request of the owner's went to. Scope: a random id.
     Reply,
-    /// Members of a group the owner lets find them. Scope: the group id.
+    /// Members of every group the owner lets find them. Empty scope: one
+    /// key for all of them (ADR-0078 section 9).
     Group,
-    /// Every co-member of a group, whatever the setting (device
-    /// re-admission Welcomes). Scope: the group id.
+    /// Every co-member of every group, whatever the setting (device
+    /// re-admission Welcomes). Empty scope.
     Member,
-    /// Members of a channel the owner lets find them. Scope: the channel id.
+    /// Members of every channel the owner lets find them. Empty scope.
     Channel,
     /// Contacts of contacts. Empty scope.
     Fof,
@@ -170,10 +183,12 @@ impl ReachClass {
         }
     }
 
-    /// `true` for the account-wide classes, whose scope id is empty.
+    /// `true` for the account-wide classes, whose scope id is empty: every
+    /// class but `link` and `reply` (ADR-0078 section 9 made `group`,
+    /// `member` and `channel` account-wide).
     #[must_use]
     pub const fn is_account_wide(self) -> bool {
-        matches!(self, Self::Contact | Self::Fof)
+        !matches!(self, Self::Link | Self::Reply)
     }
 
     /// Check that `scope_id` has the shape this class requires: empty for an
@@ -214,7 +229,8 @@ pub enum ReachError {
         /// The offending length.
         len: usize,
     },
-    /// An account-wide class (`contact`, `fof`) was given a scope id.
+    /// An account-wide class (every class but `link` and `reply`) was given
+    /// a scope id.
     #[error("an account-wide reach class takes no scope id")]
     ScopeIdNotEmpty,
     /// A scoped class was given an empty scope id.
@@ -322,9 +338,9 @@ pub fn reach_verifying_key(seed: &[u8; REACH_SEED_LEN]) -> [u8; REACH_SEED_LEN] 
 /// A reach key handed to someone: its class, its version, the seed, and the
 /// owner's mailbox binding (ADR-0078).
 ///
-/// The scope is implicit in where the grant travels (the group a profile is
-/// published in, the channel a member card belongs to), so it is not on the
-/// wire. `Debug` never prints the seed.
+/// A `link` or `reply` grant's scope is implicit in where it travels (the
+/// link it rides in, the request it answers); every other class has none.
+/// So no scope is on the wire. `Debug` never prints the seed.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReachGrant {
     /// Who the key is for.
@@ -485,15 +501,15 @@ mod tests {
 
     #[test]
     fn golden_pins_the_derivation() {
-        let seed = reach_seed(&ACCOUNT, ReachClass::Group, b"group-1", 3).unwrap();
+        let seed = reach_seed(&ACCOUNT, ReachClass::Link, b"link-1", 3).unwrap();
         assert_eq!(
             hex(seed.as_bytes()),
-            "00cad2ad9a1885862187f17ef75e33818653b1b54b9a480dad919d3d3d9d851e",
+            "69e756d3faf95aae33944de2bdb27569fe890279b0817350e3980d23dd137cb6",
             "a change here changes every reach key of every account"
         );
         assert_eq!(
             hex(&reach_verifying_key(seed.as_bytes())),
-            "e7c2e2aa6ff74083318d5f6b1dfa7939c3cc074549376d9e91c5592a67a35e8f"
+            "f81b813554d8b791c378ffb6e836d2218f76ddf26e2e8d0be1209b0c2adac4d5"
         );
     }
 
@@ -552,22 +568,45 @@ mod tests {
 
     #[test]
     fn every_input_separates_the_seed() {
-        let base = reach_seed(&ACCOUNT, ReachClass::Group, b"g", 1).unwrap();
+        let base = reach_seed(&ACCOUNT, ReachClass::Link, b"g", 1).unwrap();
         let others = [
-            reach_seed(&[0x43; 32], ReachClass::Group, b"g", 1).unwrap(),
-            reach_seed(&ACCOUNT, ReachClass::Member, b"g", 1).unwrap(),
-            reach_seed(&ACCOUNT, ReachClass::Group, b"h", 1).unwrap(),
-            reach_seed(&ACCOUNT, ReachClass::Group, b"g", 2).unwrap(),
-            reach_seed(&ACCOUNT, ReachClass::Group, b"gg", 1).unwrap(),
+            reach_seed(&[0x43; 32], ReachClass::Link, b"g", 1).unwrap(),
+            reach_seed(&ACCOUNT, ReachClass::Reply, b"g", 1).unwrap(),
+            reach_seed(&ACCOUNT, ReachClass::Link, b"h", 1).unwrap(),
+            reach_seed(&ACCOUNT, ReachClass::Link, b"g", 2).unwrap(),
+            reach_seed(&ACCOUNT, ReachClass::Link, b"gg", 1).unwrap(),
         ];
         for other in &others {
             assert_ne!(&base, other);
         }
         assert_eq!(
             base,
-            reach_seed(&ACCOUNT, ReachClass::Group, b"g", 1).unwrap(),
+            reach_seed(&ACCOUNT, ReachClass::Link, b"g", 1).unwrap(),
             "deterministic: every device derives the same key"
         );
+    }
+
+    #[test]
+    fn group_member_and_channel_keys_carry_no_group_label() {
+        // ADR-0078 section 9: one key per class per account. A group id can
+        // no longer enter the derivation, so no two groups' co-members write
+        // under two different keys.
+        for class in [ReachClass::Group, ReachClass::Member, ReachClass::Channel] {
+            assert!(class.is_account_wide());
+            assert_eq!(
+                reach_seed(&ACCOUNT, class, b"group-1", 0).err(),
+                Some(ReachError::ScopeIdNotEmpty)
+            );
+            let a = reach_seed(&ACCOUNT, class, b"", 3).unwrap();
+            assert_eq!(a, reach_seed(&ACCOUNT, class, b"", 3).unwrap());
+            assert_ne!(a, reach_seed(&ACCOUNT, class, b"", 4).unwrap());
+        }
+        let group = reach_seed(&ACCOUNT, ReachClass::Group, b"", 0).unwrap();
+        let member = reach_seed(&ACCOUNT, ReachClass::Member, b"", 0).unwrap();
+        let channel = reach_seed(&ACCOUNT, ReachClass::Channel, b"", 0).unwrap();
+        assert_ne!(group, member);
+        assert_ne!(group, channel);
+        assert_ne!(member, channel);
     }
 
     #[test]
@@ -589,13 +628,7 @@ mod tests {
             reach_seed(&ACCOUNT, ReachClass::Fof, b"x", 0).err(),
             Some(ReachError::ScopeIdNotEmpty)
         );
-        for class in [
-            ReachClass::Link,
-            ReachClass::Reply,
-            ReachClass::Group,
-            ReachClass::Member,
-            ReachClass::Channel,
-        ] {
+        for class in [ReachClass::Link, ReachClass::Reply] {
             assert_eq!(
                 reach_seed(&ACCOUNT, class, b"", 0).err(),
                 Some(ReachError::ScopeIdEmpty)

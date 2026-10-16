@@ -29,8 +29,8 @@
 use std::fmt::Write as _;
 
 use lakko_mls::{
-    channel_id_from_group_id, AccountId, ChannelId, DeviceGroup, Group, GroupKind, Identity,
-    PublisherGroup, GROUP_ID_LEN,
+    publisher_group_id_for, AccountId, AccountSeed, ChannelId, DeviceGroup, Group, GroupKind,
+    Identity, PublisherGroup, GROUP_ID_LEN,
 };
 
 /// Local restatement of `services/ds/src/journal.rs`:
@@ -147,21 +147,23 @@ fn created_group_ids_are_unique_and_not_all_zero() {
     }
 }
 
-/// `DeviceGroup` derives its id as `BLAKE3("lakko-device-group/v1" ||
-/// account_id)`, which is 32 bytes by construction. It is DS-routed (the
-/// device journal), so it is subject to the same width requirement.
+/// `DeviceGroup` derives its id as `BLAKE3-derive-key(
+/// "lakko/device-group/id/v2", account_seed)` (ADR-0078 section 6), which is
+/// 32 bytes by construction. It is DS-routed (the device journal), so it is
+/// subject to the same width requirement.
 #[test]
 fn device_group_id_matches_the_ds_width() {
     let account: AccountId = [3u8; 16];
+    let seed: AccountSeed = [4u8; 32];
 
     assert_eq!(
-        DeviceGroup::group_id_for(&account).len(),
+        DeviceGroup::group_id_for(&seed).len(),
         DS_PSEUDONYM_LEN,
         "DeviceGroup ids are DS-routed and must match the DS width"
     );
 
     let identity = Identity::generate("alice").expect("identity");
-    let dg = DeviceGroup::create_founder(&identity, &account).expect("device group");
+    let dg = DeviceGroup::create_founder(&identity, &account, &seed).expect("device group");
     assert_eq!(dg.group_id().len(), DS_PSEUDONYM_LEN);
 }
 
@@ -177,12 +179,9 @@ fn device_group_id_matches_the_ds_width() {
 /// id), so it became 82 hex chars and the DS answered 400 on both the poll and
 /// the publish.
 ///
-/// The id is *deterministic* from the channel id so `PublisherGroup::load` can
-/// find the persisted group across restarts, and it must stay invertible so an
-/// ADR-0028 OQ3 co-publisher can recover the channel id from a `/g/`
-/// capability that conveys only the `group_id`. Narrowing the domain prefix to
-/// 16 bytes reaches the DS width while keeping both — see
-/// `publisher_group_id_round_trips_through_channel_id`.
+/// Since ADR-0078 section 6 the id is derived from the owner's account seed
+/// and the channel id (`publisher_group_id_for`), 32 bytes by construction:
+/// deterministic for the owner, not computable from the channel id alone.
 #[test]
 fn publisher_group_id_matches_the_ds_width() {
     let identity = Identity::generate("alice").expect("identity");
@@ -205,46 +204,23 @@ fn publisher_group_id_matches_the_ds_width() {
     );
 }
 
-/// The width fix must not cost the inverse. A co-publisher joining from a
-/// `/g/` ticket has only the `group_id`; `channel_id_from_group_id` is how it
-/// recovers the channel id, so the trailing bytes must remain the channel id
-/// verbatim. Deriving the id by hashing the channel id would also have hit 32
-/// bytes and would have broken exactly this.
+/// Distinct kinds of group never share an id: a PublisherGroup id, a chat
+/// group id and a DeviceGroup id are each 32 bytes on the same DS route.
 #[test]
-fn publisher_group_id_round_trips_through_channel_id() {
+fn publisher_group_ids_do_not_collide_with_other_group_ids() {
     let identity = Identity::generate("alice").expect("identity");
-
-    for fill in [0x00u8, 0x01, 0x5C, 0x9A, 0xFF] {
-        let channel = ChannelId::try_from_slice(&[fill; 16]).expect("channel id");
-        let pg = PublisherGroup::create(&identity, &channel).expect("publisher group");
-        let gid = pg.group_id();
-
-        assert_eq!(gid.len(), DS_PSEUDONYM_LEN, "width at fill {fill:#04x}");
-        assert_eq!(
-            channel_id_from_group_id(&gid),
-            Some(channel),
-            "a co-publisher must be able to recover the channel id from the \
-             group id alone (fill {fill:#04x})"
-        );
-    }
-
-    // A chat group id is 32 bytes too, so the length check alone no longer
-    // discriminates — the prefix must. A random id decoding as a channel would
-    // let a `/g/` chat ticket be mistaken for a co-publisher ticket.
-    let chat = Group::create(&identity, GroupKind::Group).expect("chat group");
-    assert_eq!(chat.group_id().len(), DS_PSEUDONYM_LEN);
+    let channel = ChannelId::try_from_slice(&[0x5C; 16]).expect("channel id");
+    let pg = PublisherGroup::create(&identity, &channel).expect("publisher group");
     assert_eq!(
-        channel_id_from_group_id(&chat.group_id()),
-        None,
-        "a chat group id must not decode as a PublisherGroup id"
+        pg.group_id(),
+        publisher_group_id_for(&identity.ed25519_seed_bytes(), &channel).to_vec()
     );
-
-    // Same for a DeviceGroup id, which is also 32 bytes.
-    let account: AccountId = [7u8; 16];
-    assert_eq!(
-        channel_id_from_group_id(&DeviceGroup::group_id_for(&account)),
-        None,
-        "a DeviceGroup id must not decode as a PublisherGroup id"
+    let chat = Group::create(&identity, GroupKind::Group).expect("chat group");
+    assert_ne!(chat.group_id(), pg.group_id());
+    // The same 32-byte seed as a DeviceGroup seed names another journal.
+    assert_ne!(
+        DeviceGroup::group_id_for(&identity.ed25519_seed_bytes()),
+        pg.group_id()
     );
 }
 

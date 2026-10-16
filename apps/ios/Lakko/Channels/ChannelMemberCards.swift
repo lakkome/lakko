@@ -13,8 +13,10 @@ import LakkoCore
 @MainActor
 enum ChannelMemberCards {
 
-    /// `channelId hex|epoch` pairs already uploaded this process: a card is
-    /// uploaded once per epoch (a newcomer holds only current seeds).
+    /// `channelId hex|epoch|grant` keys already uploaded this process: a card
+    /// is uploaded once per epoch (a newcomer holds only current seeds) and
+    /// again when the `channel` grant it carries changed (ADR-0078 section 9:
+    /// the class key rotates on a channel left or a setting change).
     private static var uploaded: Set<String> = []
 
     /// Upload this subscriber's card for the newest epoch it holds a seed for,
@@ -22,11 +24,12 @@ enum ChannelMemberCards {
     static func uploadIfNeeded(state: ChannelsUiState, channelId: String) async {
         guard let keys = state.subscriberKeysByChannel[channelId],
               let (epoch, seed) = state.subscribedSeeds(channelId: channelId).max(by: { $0.key < $1.key }),
-              let channelIdBytes = CoPublisher.hexToData(channelId),
-              !uploaded.contains("\(channelId)|\(epoch)"),
+              let channelIdBytes = CoPublisher.hexToData(channelId) else { return }
+        let grant = ReachCenter.shared.channelGrant(channelId: channelIdBytes)
+        let uploadKey = "\(channelId)|\(epoch)|\(grant.map { String($0.version) } ?? "-")"
+        guard !uploaded.contains(uploadKey),
               var profile = ProfileDirectory.shared.ownProfileForRequest() else { return }
-        profile.grants = ReachCenter.shared.channelGrant(channelId: channelIdBytes, epoch: epoch)
-            .map { [$0] } ?? []
+        profile.grants = grant.map { [$0] } ?? []
         if profile.grants.isEmpty {
             // Not findable by this channel's members: the name, no username.
             profile.username = nil
@@ -46,7 +49,8 @@ enum ChannelMemberCards {
                 channelIdHex: channelId,
                 subscriberPubHex: ChannelsComposer.bytesToHex(kp.`public`()),
                 card: card, sigHeader: sig)
-            uploaded.insert("\(channelId)|\(epoch)")
+            forgetUploads(channelId: channelId)
+            uploaded.insert(uploadKey)
             ReachCenter.shared.sync()
         } catch {
             NSLog("ADR-0060: member card not uploaded: \(error)")

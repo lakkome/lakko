@@ -178,6 +178,16 @@ public final class PushRoutingStore {
     /// keyed by `push_gid` alone and are no longer read.
     private static let routeKeyPrefix: String = "me.lakko.push-route.v2."
 
+    /// ADR-0078 — per-`(account, push_gid)` key prefix for this device's
+    /// push-gw subscription id (32 lowercase hex characters), in the same
+    /// NSE-readable suite as the route rows. A wake names the id as `s`, and
+    /// a background path handles it only when the bound account's row for the
+    /// wake's `push_gid` holds that id; the device removes its own push-gw row
+    /// by it. No device pseudonym exists any more.
+    private static let subKeyPrefix: String = "me.lakko.push-sub.v1."
+
+    /// Length of a subscription id in bytes.
+    public static let subscriptionIdLength: Int = 16
     /// App-private location for the encrypted secret (foreground-only).
     private let secretDefaults: UserDefaults
     /// App Group shared suite for the plaintext reverse index (NSE-readable).
@@ -394,6 +404,87 @@ public final class PushRoutingStore {
         return nil
     }
 
+    /// ADR-0078 — the reverse map for a WAKE: the `group_id` the bound
+    /// account's row for `push_gid` routes, but only when this device's
+    /// subscription id for that row equals the wake's `s`. A wake for a
+    /// subscription this account does not hold (another account that used
+    /// the device, a stale row) is a miss.
+    public func lookupRoute(
+        accountIdB64: String,
+        pushGidHex: String,
+        subscriptionIdHex: String?
+    ) -> String? {
+        guard let presented = subscriptionIdHex.flatMap(PushAccountBinding.normalizedSubscriptionIdHex),
+              let held = subscriptionId(accountIdB64: accountIdB64, pushGidHex: pushGidHex),
+              PushAccountBinding.hex(held) == presented else {
+            return nil
+        }
+        return lookupRoute(accountIdB64: accountIdB64, pushGidHex: pushGidHex)
+    }
+
+    /// ADR-0078 — this device's subscription id for `(account, push_gid)`, or
+    /// `nil` when it never subscribed under it.
+    public func subscriptionId(accountIdB64: String, pushGidHex: String) -> Data? {
+        let key = Self.subKey(accountIdB64, pushGidHex.lowercased())
+        for defaults in orderedRouteDefaults() {
+            guard let hex = defaults.string(forKey: key),
+                  let normal = PushAccountBinding.normalizedSubscriptionIdHex(hex) else { continue }
+            return Self.bytes(fromHex: normal)
+        }
+        return nil
+    }
+
+    /// ADR-0078 — this device's subscription id for `(account, push_gid)`,
+    /// minting and recording 16 random bytes when none is held.
+    public func ensureSubscriptionId(accountIdB64: String, pushGidHex: String) -> Data {
+        if let held = subscriptionId(accountIdB64: accountIdB64, pushGidHex: pushGidHex) {
+            return held
+        }
+        var rng = SystemRandomNumberGenerator()
+        let fresh = Data((0..<Self.subscriptionIdLength).map { _ in UInt8.random(in: 0...255, using: &rng) })
+        if let gate = AccountStoreGate.enter(accountIdB64) {
+            routeDefaults.set(
+                PushAccountBinding.hex(fresh),
+                forKey: Self.subKey(accountIdB64, pushGidHex.lowercased()))
+            gate.leave()
+        }
+        return fresh
+    }
+
+    /// Every `(push_gid, group_id)` route row of `accountIdB64` (re-sending
+    /// every subscription after a token change).
+    public func routes(accountIdB64: String) -> [(pushGidHex: String, groupIdHex: String)] {
+        let prefix = Self.routeKeyPrefix + accountIdB64 + " "
+        var seen: Set<String> = []
+        var out: [(pushGidHex: String, groupIdHex: String)] = []
+        for defaults in orderedRouteDefaults() {
+            for (key, value) in defaults.dictionaryRepresentation() where key.hasPrefix(prefix) {
+                let gid = String(key.dropFirst(prefix.count))
+                guard let groupIdHex = value as? String, !groupIdHex.isEmpty,
+                      seen.insert(gid).inserted else { continue }
+                out.append((pushGidHex: gid, groupIdHex: groupIdHex))
+            }
+        }
+        return out
+    }
+
+    /// Every subscription id `accountIdB64` holds on this device (removing
+    /// the account's push-gw rows at sign-out). Must be read BEFORE
+    /// ``clear(accountIdB64:)``.
+    public func subscriptionIds(accountIdB64: String) -> [Data] {
+        let prefix = Self.subKeyPrefix + accountIdB64 + " "
+        var seen: Set<String> = []
+        var out: [Data] = []
+        for defaults in orderedRouteDefaults() {
+            for (key, value) in defaults.dictionaryRepresentation() where key.hasPrefix(prefix) {
+                guard let hex = (value as? String).flatMap(PushAccountBinding.normalizedSubscriptionIdHex),
+                      seen.insert(hex).inserted else { continue }
+                out.append(Self.bytes(fromHex: hex))
+            }
+        }
+        return out
+    }
+
     /// Delete ONE reverse-index entry: `accountIdB64`'s row for `push_gid`
     /// (lowercase hex). Another account's row for the same `push_gid` stays.
     ///
@@ -418,8 +509,10 @@ public final class PushRoutingStore {
     /// from.
     public func removeRoute(accountIdB64: String, pushGidHex: String) {
         let key = Self.routeKey(accountIdB64, pushGidHex.lowercased())
+        let sub = Self.subKey(accountIdB64, pushGidHex.lowercased())
         for defaults in orderedRouteDefaults() {
             defaults.removeObject(forKey: key)
+            defaults.removeObject(forKey: sub)
         }
     }
 
@@ -436,11 +529,13 @@ public final class PushRoutingStore {
         where key.hasPrefix(secretAccountPrefix) {
             secretDefaults.removeObject(forKey: key)
         }
-        // routes — keyed `<prefix><account> <push_gid>`, same prefix match.
+        // routes and subscription ids — keyed `<prefix><account> <push_gid>`,
+        // same prefix match.
         let routeAccountPrefix = Self.routeKeyPrefix + accountIdB64 + " "
+        let subAccountPrefix = Self.subKeyPrefix + accountIdB64 + " "
         for defaults in orderedRouteDefaults() {
             for (key, _) in defaults.dictionaryRepresentation()
-            where key.hasPrefix(routeAccountPrefix) {
+            where key.hasPrefix(routeAccountPrefix) || key.hasPrefix(subAccountPrefix) {
                 defaults.removeObject(forKey: key)
             }
         }
@@ -555,6 +650,23 @@ public final class PushRoutingStore {
     /// ``secretKey(_:_:)``: a base64 account id never contains a space.
     private static func routeKey(_ accountIdB64: String, _ pushGidHex: String) -> String {
         routeKeyPrefix + accountIdB64 + " " + pushGidHex
+    }
+
+    /// Composite subscription-id key, the same shape as ``routeKey(_:_:)``.
+    private static func subKey(_ accountIdB64: String, _ pushGidHex: String) -> String {
+        subKeyPrefix + accountIdB64 + " " + pushGidHex
+    }
+
+    /// Bytes of an even-length lowercase hex string (already validated).
+    private static func bytes(fromHex hex: String) -> Data {
+        var out = Data(capacity: hex.count / 2)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            out.append(UInt8(hex[index..<next], radix: 16) ?? 0)
+            index = next
+        }
+        return out
     }
 
     /// Ordered route read/clear locations: the shared suite first, then

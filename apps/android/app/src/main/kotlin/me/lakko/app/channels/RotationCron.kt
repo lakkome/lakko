@@ -3,7 +3,6 @@
 
 package me.lakko.app.channels
 
-import android.util.Base64
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
@@ -19,7 +18,6 @@ import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.PublisherGroup
 import uniffi.lakko_ffi_uniffi.channelRotationStateAfterRotation
 import uniffi.lakko_ffi_uniffi.channelShouldRotate
-import uniffi.lakko_ffi_uniffi.sealSubscriberSeedEnvelope
 
 /**
  * G4-2-rotation-timer-android — one entry in the rotation
@@ -91,28 +89,14 @@ public class RotationCron(
     private val channelIdHex: String,
     private val channelsClient: ChannelsClient,
     private val saveState: suspend (ChannelRotationState) -> Unit,
+    /** G-50 — the account the rotation is recorded for. */
+    private val accountIdB64: String,
+    /** G-50 — where the rotation is recorded before any of its steps runs. */
+    private val store: PublisherCommitStore,
+    /** G-50 — snapshot the channel provider now, throwing when it was not
+     *  written ([ChannelPublisherIdentity.withIdentityPersistingFirst]). */
+    private val persistNow: () -> Unit,
     private val onRotated: ((UInt) -> Unit)? = null,
-    /** ADR-0057 — registers the rotated epoch's journal key with the channel
-     *  owner's journal ROOT (the publisher identity is the account identity).
-     *  Tests pass a no-op; production builds a DS client per registration. */
-    private val registerRotatedEpoch: suspend (groupId: ByteArray, before: me.lakko.app.ds.DsJournalSigner?, after: me.lakko.app.ds.DsJournalSigner?) -> Unit =
-        { groupId, before, after ->
-            val root = try {
-                me.lakko.app.ds.FfiDsStatementSigning.root(identity, groupId)
-            } catch (_: Throwable) {
-                null
-            }
-            me.lakko.app.ds.DsClient().use { ds ->
-                me.lakko.app.ds.registerEpochBeforePublish(
-                    journalId = groupId,
-                    before = before,
-                    after = after,
-                    statements = root,
-                    revoke = emptyList(),
-                    put = { make -> ds.putStatement(make) },
-                )
-            }
-        },
 ) {
 
     /** Result of one single-pass rotation attempt. */
@@ -158,116 +142,53 @@ public class RotationCron(
             return OnceResult(rotated = false, newState = state)
         }
 
-        // 1. Advance the local MLS epoch + derive the new
-        //    seed BEFORE talking to the server. If the
-        //    server-side POST /rotate fails later, we have
-        //    already rotated the local PublisherGroup —
-        //    that's fine because the next tick retries
-        //    from the new local state, and the server's
-        //    atomic-rotation guarantee means no partial
-        //    landings are observable.
-        val signerBeforeRotate = CoPublisher.signerOf(publisherGroup, identity)
-        publisherGroup.rotate(identity)
-        // ADR-0053 — the rotation advanced the PublisherGroup epoch, so its
-        // journal's key must be registered or every later journal request of
-        // this owner (the co-publisher panel's poll and approve) is refused.
-        // The rotation commit itself is never published, so this is best
-        // effort: a refusal is logged and the next claim-on-open retries.
-        try {
-            registerRotatedEpoch(
-                publisherGroup.groupId(),
-                signerBeforeRotate,
-                CoPublisher.signerOf(publisherGroup, identity),
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Throwable) {
-            android.util.Log.w("RotationCron", "ADR-0053: rotated epoch not registered", e)
-        }
-        val newSeed = publisherGroup.channelSeed(identity)
-        val channelIdBytes = publisherGroup.channelId()
-
-        // 2. The new server epoch the envelopes will bind
-        //    to. fetchEpoch returns the CURRENT server
-        //    epoch; the rotate endpoint will bump to
-        //    current+1.
+        // 1. The server epoch the envelopes will bind to,
+        //    read BEFORE the local rotation: after the eager
+        //    merge nothing may fail before the commit's record
+        //    is durable (G-50), and this is a network read.
         val currentEpoch = channelsClient.fetchEpoch(channelIdHex)
         if (currentEpoch == UInt.MAX_VALUE) {
             throw CronException.UnexpectedServerEpoch(currentEpoch)
         }
         val newServerEpoch = currentEpoch + 1u
 
-        // 3. Walk the subscriber list + seal new envelopes.
-        //    Every publisher request below is signed (ADR-0059 section 9)
-        //    with the role this account holds, learned once and cached.
-        return ChannelPublisherSigners.derive(identity, channelIdHex).use { proofs ->
-            fanOut(proofs, channelIdBytes, newServerEpoch, newSeed, nowMs)
-        }
-    }
-
-    private suspend fun fanOut(
-        proofs: ChannelPublisherProofs,
-        channelIdBytes: ByteArray,
-        newServerEpoch: UInt,
-        newSeed: ByteArray,
-        nowMs: ULong,
-    ): OnceResult {
-        val subscribers = channelsClient.listSubscribersAsPublisher(channelIdHex, proofs)
-        val batch = ArrayList<RotateBatchEntry>(subscribers.size)
-        for (subscriberHex in subscribers) {
-            val subscriberBytes = hexToBytes(subscriberHex)
-                ?: throw CronException.MalformedSubscriberHex(subscriberHex)
-            val envelope = sealSubscriberSeedEnvelope(
-                subscriberBytes,
-                channelIdBytes,
-                newServerEpoch,
-                newSeed,
-            )
-            batch.add(
-                RotateBatchEntry(
-                    subscriber_pubkey_hex = subscriberHex,
-                    envelope_b64 = Base64.encodeToString(envelope, Base64.NO_WRAP),
-                ),
+        // 2. Advance the local MLS epoch (the self-update
+        //    commit eager-merges N -> N+1 in the channel
+        //    provider) and record the rotation, then the N+1
+        //    provider snapshot, durably, before any of its
+        //    steps runs. A refused record runs nothing and
+        //    rolls the provider back.
+        val entry = CoPublisher.recordCommit(identity, accountIdB64, store, persistNow) {
+            publisherGroup.rotate(identity)
+            PublisherCommitEntry(
+                id = PublisherCommitEntry.newId(),
+                kind = PublisherCommitEntry.Kind.ROTATION,
+                channelIdHex = channelIdHex.lowercase(),
+                groupIdHex = me.lakko.app.ds.DsClient.pseudonymHex(publisherGroup.groupId()),
+                targetEpoch = publisherGroup.epoch().toLong(),
+                serverTargetEpoch = newServerEpoch.toLong(),
             )
         }
 
-        // 4. Fan the batch out via the ADR-0030 chunked
-        //    staged-rotation protocol: upload the sealed
-        //    envelopes in bounded, resumable, idempotent
-        //    chunks to the staging area (epoch NOT bumped,
-        //    staged envelopes never served), then a single
-        //    atomic commit promotes them + bumps the epoch.
-        //    Staging is idempotent (upsert keyed on
-        //    subscriber), so a chunk failure aborts this tick
-        //    and the next tick re-sends only the missing
-        //    chunks; the rotation state advances only after
-        //    commit succeeds (fail-closed, invariant #4 —
-        //    C-42 preserved as "the commit is atomic").
-        //
-        //    Empty batch: no stage chunks, commit still bumps
-        //    the epoch — covers the "no subscribers yet" case
-        //    where the publisher wants to keep rotating on
-        //    schedule before the audience grows.
-        var chunkStart = 0
-        while (chunkStart < batch.size) {
-            val chunkEnd =
-                minOf(chunkStart + ChannelsClient.MAX_STAGE_CHUNK_ENTRIES, batch.size)
-            channelsClient.stageRotation(
-                channelIdHex,
-                newServerEpoch,
-                batch.subList(chunkStart, chunkEnd),
-                proofs,
+        // 3. The steps: register the N+1 epoch key on the DS
+        //    with the channel's root (ADR-0057, best effort for
+        //    a rotation), reseal the N+1 seed to every
+        //    subscriber and commit the rotation on the channels
+        //    service with the ADR-0030 chunked fanout (C-42:
+        //    the commit is the one atomic point).
+        me.lakko.app.ds.DsClient().use { ds ->
+            runPublisherCommit(
+                entry,
+                CoPublisher.commitPorts(ds, channelsClient, identity, publisherGroup, channelIdHex, accountIdB64, store),
             )
-            chunkStart = chunkEnd
         }
-        val committedEpoch = channelsClient.commitRotation(channelIdHex, newServerEpoch, proofs)
 
-        // 5. Stamp the new state + persist.
+        // 4. Stamp the new state + persist.
         val newState = channelRotationStateAfterRotation(nowMs)
         saveState(newState)
-        onRotated?.invoke(committedEpoch)
+        onRotated?.invoke(newServerEpoch)
 
-        return OnceResult(rotated = true, newState = newState, newEpoch = committedEpoch)
+        return OnceResult(rotated = true, newState = newState, newEpoch = newServerEpoch)
     }
 
     /**
@@ -327,26 +248,5 @@ public class RotationCron(
 
     private companion object {
         fun currentMs(): ULong = System.currentTimeMillis().toULong()
-
-        /** Parse a lowercase / mixed-case hex string into
-         *  bytes. Returns `null` on any malformed input. */
-        fun hexToBytes(hex: String): ByteArray? {
-            if (hex.isEmpty() || hex.length % 2 != 0) return null
-            val out = ByteArray(hex.length / 2)
-            for (i in out.indices) {
-                val hi = hexNibble(hex[2 * i].code)
-                val lo = hexNibble(hex[2 * i + 1].code)
-                if (hi < 0 || lo < 0) return null
-                out[i] = ((hi shl 4) or lo).toByte()
-            }
-            return out
-        }
-
-        fun hexNibble(code: Int): Int = when (code) {
-            in 0x30..0x39 -> code - 0x30
-            in 0x61..0x66 -> code - 0x61 + 10
-            in 0x41..0x46 -> code - 0x41 + 10
-            else -> -1
-        }
     }
 }

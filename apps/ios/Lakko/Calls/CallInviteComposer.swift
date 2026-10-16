@@ -61,7 +61,7 @@ public enum CallInviteComposer {
         /// falls back to (no ledger row, nothing to revoke). Pass
         /// a present id to
         /// ``DiscoveryClient/revokeCallInvite(blobId:signingSeed:)``
-        /// when the owner cancels the link.
+        /// with ``revocationSeed`` when the owner cancels the link.
         public let blobId: Data?
         /// The full `<origin>/c/<slug>#<secret>` URL the owner
         /// shares — base64url-no-pad of ``blobId`` (or of the
@@ -79,6 +79,13 @@ public enum CallInviteComposer {
         /// against the same bytes (e.g. to read back
         /// `expiryMs` for the landing-page rendering).
         public let capabilityBytes: Data
+        /// The 32-byte seed of the link's own revocation key (ADR-0078
+        /// section 10), for this device's record of the link
+        /// (``OwnLinkStore``): the ledger row names no owner, so this
+        /// seed is the only thing that revokes it.
+        public let revocationSeed: Data
+        /// The capability's expiry, UNIX ms.
+        public let expiryMs: Int64
     }
 
     // MARK: - Pipeline
@@ -175,12 +182,16 @@ public enum CallInviteComposer {
         // the clear fields only. Only a TRANSPORT failure (a censored or
         // offline network) falls back to the inline form, which carries the
         // sealed blob in the URL; a refusal from the server surfaces.
+        // ADR-0078 section 10: the ledger row carries a key minted for this
+        // link alone, never the owner's identity key.
+        let revocation = try LinkRevocationKey.fresh()
         let (blobId, base) = try await pointerOrInlineBase(
             sealed: mint.sealed,
             origin: origin,
             upload: {
                 try await discoveryClient.uploadCallInvite(
                     mint: mint,
+                    revocationPubkey: revocation.publicKey,
                     expiryMs: expiryMs,
                     maxUses: CallInviteValues.maxUses
                 )
@@ -194,7 +205,9 @@ public enum CallInviteComposer {
             blobId: blobId,
             url: url,
             callId: callId,
-            capabilityBytes: capabilityBytes
+            capabilityBytes: capabilityBytes,
+            revocationSeed: revocation.seed,
+            expiryMs: Int64(expiryMs)
         )
     }
 }

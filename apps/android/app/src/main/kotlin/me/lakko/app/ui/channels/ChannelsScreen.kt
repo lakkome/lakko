@@ -160,6 +160,8 @@ public fun rememberChannelsUiState(): ChannelsUiState {
             logStore = SharedPreferencesChannelLogStore(subscriberPrefs),
             publisher = ChannelPublisherIdentity.onDevice(context),
             orphanStore = me.lakko.app.channels.OrphanedChannelsStore.onDevice(context),
+            coPublished = me.lakko.app.channels.CoPublishedJournals.onDevice(context),
+            commitStore = me.lakko.app.channels.PublisherCommitStore.onDevice(context),
         )
     }
 }
@@ -1584,7 +1586,7 @@ public fun ChannelManageScreen(
         try {
             val pub = publisher ?: throw IllegalStateException("channel publisher identity not available")
             // Open-or-create: persisted so a group minted here is not lost.
-            val opened = pub.withIdentity { id -> CoPublisher.openPublisherGroup(id, channelId) }
+            val opened = pub.withIdentity { id -> CoPublisher.openPublisherGroup(id, channelId, state.coPublished) }
             // ADR-0057 — the channel OWNER claims the publisher journal (at
             // creation the first registration, afterwards an idempotent
             // re-send). A co-publisher device never claims: its root would
@@ -1613,6 +1615,21 @@ public fun ChannelManageScreen(
     // The key fan-out keeps running while Manage is open, so a subscriber
     // who registers now is served here too.
     SubscriberFanoutEffect(channelId = channelId, state = state, client = client)
+
+    /** G-50 — a commit whose record could not be made durable rolled the
+     *  channel provider back; the handle this screen holds still carries the
+     *  rolled-back epoch in memory, so it is opened again from the provider. */
+    suspend fun reopenPublisherGroup() {
+        val pub = publisher ?: return
+        try {
+            pubGroup = pub.withIdentity(persist = false) { id ->
+                CoPublisher.loadPublisherGroup(id, channelId, state.coPublished)
+            }
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            Log.w(TAG, "publisher group not reopened", e)
+        }
+    }
 
     /** After a rotation or an approve the group's current key changed: refresh
      *  the composer's copy so the next post seals under the key the
@@ -1656,11 +1673,13 @@ public fun ChannelManageScreen(
             SubscribersCard(channelId = channelId, state = state, client = client)
             CoPublishersCard(
                 channelId = channelId,
+                state = state,
                 client = client,
                 publisher = publisher,
                 publisherGroup = pubGroup,
                 onCopy = { copyToClipboard(context, it) },
                 afterApprove = { refreshPublisherKey() },
+                afterFailure = { reopenPublisherGroup() },
             )
             KeysCard(
                 channelId = channelId,
@@ -1670,6 +1689,7 @@ public fun ChannelManageScreen(
                 publisherGroup = pubGroup,
                 zone = zone,
                 locale = locale,
+                afterFailure = { reopenPublisherGroup() },
                 afterRotate = {
                     refreshPublisherKey()
                     // ADR-0051 §4 — re-issue the record under the new key so a
@@ -1889,11 +1909,13 @@ private fun SubscribersCard(channelId: String, state: ChannelsUiState, client: C
 @Composable
 private fun CoPublishersCard(
     channelId: String,
+    state: ChannelsUiState,
     client: ChannelsClient,
     publisher: ChannelPublisherIdentity?,
     publisherGroup: PublisherGroup?,
     onCopy: (String) -> Unit,
     afterApprove: suspend () -> Unit,
+    afterFailure: suspend () -> Unit,
 ) {
     var link by remember(channelId) { mutableStateOf<String?>(null) }
     var pending by remember(channelId) { mutableStateOf<List<ByteArray>>(emptyList()) }
@@ -1914,6 +1936,17 @@ private fun CoPublishersCard(
                 val poll = pub.withIdentity(persist = false) { id -> CoPublisher.pollJournal(ds, id, pg) }
                 if (poll.applied > 0) pub.persist()
                 pending = pub.withIdentity(persist = false) { CoPublisher.pending(pg) }
+                // G-50 — a recorded approve whose Welcome waited for the
+                // joiner's reply key (re-read by the poll just now) or whose
+                // reseal failed is resumed here.
+                val account = state.boundAccount
+                val store = state.commitStore
+                if (account != null && store != null && store.entries(account).isNotEmpty()) {
+                    val finished = pub.withIdentity(persist = false) { id ->
+                        CoPublisher.replayPublisherCommits(ds, client, id, account, store, state.coPublished)
+                    }
+                    if (finished.isNotEmpty()) afterApprove()
+                }
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (_: Throwable) {
@@ -1938,8 +1971,12 @@ private fun CoPublishersCard(
                     error = null
                     scope.launch {
                         try {
+                            // ADR-0078 section 6 — the link's sealed preview
+                            // carries the channel id and its name.
+                            val name = state.channels.value.firstOrNull { it.id == channelId }
+                                ?.let { it.sharedName.ifEmpty { it.localName } }
                             link = pub.withIdentity(persist = false) { id ->
-                                CoPublisher.createCoPublisherLink(id, pg)
+                                CoPublisher.createCoPublisherLink(id, pg, name)
                             }
                         } catch (e: Throwable) {
                             me.lakko.app.rethrowIfCancelled(e)
@@ -2010,16 +2047,24 @@ private fun CoPublishersCard(
                                 try {
                                     // The audited approve: adds the joiner and
                                     // reseals the new key to every subscriber.
-                                    // Persisted after success — the Add advanced
-                                    // the epoch the subscribers were resealed to.
-                                    pending = pub.withIdentity { id ->
-                                        CoPublisher.approve(ds, client, id, pg, ref, channelId)
+                                    // G-50 — recorded with the N+1 provider
+                                    // snapshot (persistNow) before any of its
+                                    // steps leaves the device.
+                                    val account = state.boundAccount
+                                        ?: throw IllegalStateException("no account bound")
+                                    val store = state.commitStore
+                                        ?: throw IllegalStateException("no commit store")
+                                    pending = pub.withIdentityPersistingFirst { id, persistNow ->
+                                        CoPublisher.approve(
+                                            ds, client, id, pg, ref, channelId, account, store, persistNow,
+                                        )
                                         CoPublisher.pending(pg)
                                     }
                                     afterApprove()
                                 } catch (e: Throwable) {
                                     me.lakko.app.rethrowIfCancelled(e)
                                     Log.w(TAG, "approve failed", e)
+                                    afterFailure()
                                     error = channelsErrorText(e, "channels.copublishers.error.approve")
                                 } finally {
                                     busy = false
@@ -2056,6 +2101,7 @@ private fun KeysCard(
     publisherGroup: PublisherGroup?,
     zone: ZoneId,
     locale: Locale,
+    afterFailure: suspend () -> Unit,
     afterRotate: suspend () -> Unit,
 ) {
     val policy = remember { channelRotationPolicyDefault() }
@@ -2090,21 +2136,13 @@ private fun KeysCard(
         val pg = publisherGroup ?: return@LaunchedEffect
         while (true) {
             try {
-                val result = pub.withIdentity(persist = false) { id ->
-                    RotationCron(
-                        publisherGroup = pg,
-                        identity = id,
-                        channelIdHex = channelId,
-                        channelsClient = client,
-                        saveState = { next -> adoptState(next) },
-                    ).runOnce(
-                        policy = policy,
-                        state = cronState,
-                        nowMs = System.currentTimeMillis().toULong(),
-                    )
-                }
+                val result = rotateOnce(
+                    pub, pg, channelId, client, state,
+                    saveState = { next -> adoptState(next) },
+                    policy = policy,
+                    rotationState = cronState,
+                )
                 if (result.rotated) {
-                    pub.persist()
                     lastRotatedAtMs = System.currentTimeMillis()
                     afterRotate()
                 }
@@ -2112,6 +2150,7 @@ private fun KeysCard(
                 throw cause
             } catch (e: Throwable) {
                 Log.w(TAG, "scheduled rotation failed", e)
+                afterFailure()
                 error = UiText("channels.rotation.error.check")
             }
             delay(ROTATION_HEARTBEAT_MS)
@@ -2139,28 +2178,21 @@ private fun KeysCard(
                         // any real wall-clock now; runOnce rotates + reseals
                         // every subscriber atomically and returns the fresh
                         // after-rotation state adopted as the new baseline.
-                        val result = pub.withIdentity(persist = false) { id ->
-                            RotationCron(
-                                publisherGroup = pg,
-                                identity = id,
-                                channelIdHex = channelId,
-                                channelsClient = client,
-                                saveState = { next -> adoptState(next) },
-                            ).runOnce(
-                                policy = policy,
-                                state = ChannelRotationState(lastRotationMs = 0uL, postsSinceRotation = 0u),
-                                nowMs = System.currentTimeMillis().toULong(),
-                            )
-                        }
+                        val result = rotateOnce(
+                            pub, pg, channelId, client, state,
+                            saveState = { next -> adoptState(next) },
+                            policy = policy,
+                            rotationState = ChannelRotationState(lastRotationMs = 0uL, postsSinceRotation = 0u),
+                        )
                         adoptState(result.newState)
                         if (result.rotated) {
-                            pub.persist()
                             lastRotatedAtMs = System.currentTimeMillis()
                             afterRotate()
                         }
                     } catch (e: Throwable) {
                         me.lakko.app.rethrowIfCancelled(e)
                         Log.w(TAG, "rotate now failed", e)
+                        afterFailure()
                         error = UiText("channels.rotation.error.refresh")
                     } finally {
                         busy = false
@@ -2172,6 +2204,42 @@ private fun KeysCard(
             Text(if (busy) t("channels.rotation.refreshing") else t("channels.rotation.refresh_now"))
         }
         error?.let { ErrorLine(it) }
+    }
+}
+
+/**
+ * One rotation pass on the shared channel provider (G-50): the rotation is
+ * recorded with the N+1 provider snapshot before its steps run
+ * (`withIdentityPersistingFirst`), and the provider is snapshotted again
+ * after a pass that returns normally.
+ */
+private suspend fun rotateOnce(
+    pub: ChannelPublisherIdentity,
+    pg: PublisherGroup,
+    channelId: String,
+    client: ChannelsClient,
+    state: ChannelsUiState,
+    saveState: suspend (ChannelRotationState) -> Unit,
+    policy: uniffi.lakko_ffi_uniffi.ChannelRotationPolicy,
+    rotationState: ChannelRotationState,
+): RotationCron.OnceResult {
+    val account = state.boundAccount ?: throw IllegalStateException("no account bound")
+    val store = state.commitStore ?: throw IllegalStateException("no commit store")
+    return pub.withIdentityPersistingFirst { id, persistNow ->
+        RotationCron(
+            publisherGroup = pg,
+            identity = id,
+            channelIdHex = channelId,
+            channelsClient = client,
+            saveState = saveState,
+            accountIdB64 = account,
+            store = store,
+            persistNow = persistNow,
+        ).runOnce(
+            policy = policy,
+            state = rotationState,
+            nowMs = System.currentTimeMillis().toULong(),
+        )
     }
 }
 

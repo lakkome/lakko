@@ -420,8 +420,8 @@ function welcome(others: readonly string[]): void {
     data: JSON.stringify({
       kind: "welcome",
       peer_id: "self",
-      call_id: "call",
-      roster: others.map((peer_id) => ({ peer_id, account_pseudonym: "p" })),
+      room: "room",
+      roster: others.map((peer_id) => ({ peer_id })),
       server_ts: 0,
     }),
   });
@@ -429,7 +429,7 @@ function welcome(others: readonly string[]): void {
 
 function peerJoined(peerId: string): void {
   sockets[0]?.onmessage?.({
-    data: JSON.stringify({ kind: "peer-joined", peer_id: peerId, account_pseudonym: "p" }),
+    data: JSON.stringify({ kind: "peer-joined", peer_id: peerId }),
   });
 }
 

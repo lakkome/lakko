@@ -29,7 +29,7 @@ final class ChannelMemberCardRulesTests: XCTestCase {
     private func channelGrant(version: UInt32 = 3) throws -> FfiReachGrant {
         try deriveReachGrant(
             accountSeed: Data(repeating: 0x44, count: 32), class: .channel,
-            scopeId: Data(repeating: 0xCD, count: 16), version: version)
+            scopeId: Data(), version: version)
     }
 
     // MARK: - Rule 4: the directory lookup
@@ -88,7 +88,7 @@ final class ChannelMemberCardRulesTests: XCTestCase {
         let other = String(repeating: "ef", count: 16)
         let grant = try deriveReachGrant(
             accountSeed: realAuthor.ed25519Seed(), class: .channel,
-            scopeId: Data(repeating: 0xCD, count: 16), version: 3)
+            scopeId: Data(), version: 3)
         XCTAssertTrue(c.keep(grant, carrier: .channelMemberCard,
                              fromAccountKeyB64: keyB64, scopeHex: channelHex))
         XCTAssertTrue(c.keep(grant, carrier: .channelMemberCard,

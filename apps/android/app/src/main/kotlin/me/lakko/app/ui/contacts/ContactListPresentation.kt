@@ -132,9 +132,10 @@ public data class InviteLinkRow(
     val createdAtMs: Long?,
     /** UNIX millis; `0` = never expires. */
     val expiryMs: Long,
-    /** Uses left, or `null` when unknown (unlimited, or a session-only row
-     *  whose consume count the server has not reported yet). */
-    val usesLeft: Long?,
+    /** The `max_uses` sentinel the link was minted with. ADR-0078 section
+     *  10: the list is this device's own records, so how many uses are left
+     *  is not known here; the row states the limit. */
+    val maxUses: Long,
     /** `true` for a row this device generated this session — its raw
      *  `blob_id` is in memory, so revocation goes through the session path. */
     val fromSession: Boolean,
@@ -152,19 +153,10 @@ public sealed interface InviteRowShare {
 public fun inviteRowShare(row: InviteLinkRow): InviteRowShare =
     row.url?.let { InviteRowShare.Shareable(it) } ?: InviteRowShare.CreatedElsewhere
 
-/** Uses left from the wire `max_uses` sentinel and the server-counted
- *  consumes: `null` for unlimited, never negative. */
-public fun invitesUsesLeft(maxUses: Long, usedCount: Long): Long? = when (maxUses) {
-    INVITE_UNLIMITED_USES -> null
-    0L -> (1L - usedCount).coerceAtLeast(0L)
-    else -> (maxUses - usedCount).coerceAtLeast(0L)
-}
-
 /**
- * Merge the session-created rows with the server's list, keyed by slug: a slug
- * in both keeps the session row (it has the creation time) and takes the
- * server's uses-left; session rows come first, newest first, then the
- * server-only rows soonest-to-expire first.
+ * Merge the session-created rows with the recorded list, keyed by slug: a
+ * slug in both keeps the session row; session rows come first, newest first,
+ * then the recorded-only rows soonest-to-expire first.
  */
 public fun mergeInviteLinkRows(
     session: List<InviteLinkRow>,
@@ -173,7 +165,7 @@ public fun mergeInviteLinkRows(
     val serverBySlug = server.associateBy { it.slug }
     val merged = session
         .sortedByDescending { it.createdAtMs ?: 0L }
-        .map { row -> serverBySlug[row.slug]?.let { row.copy(usesLeft = it.usesLeft) } ?: row }
+        .map { row -> serverBySlug[row.slug]?.let { row.copy(createdAtMs = row.createdAtMs ?: it.createdAtMs) } ?: row }
     val sessionSlugs = session.map { it.slug }.toHashSet()
     val rest = server
         .filter { it.slug !in sessionSlugs }
@@ -194,7 +186,10 @@ public fun describeInviteExpiry(expiryMs: Long, nowMs: Long): UiText {
     return UiText("invite.links.expires_minutes", texts = mapOf("count" to minutes.toString()))
 }
 
-/** "1 use left" / "3 uses left" / `null` when unknown. */
-public fun describeUsesLeft(usesLeft: Long?): UiText? = usesLeft?.let {
-    UiText("invite.links.uses_left", counts = mapOf("count" to it.toULong()))
+/** The limit a link was minted with: "single-use" / "up to 5 uses" /
+ *  "unlimited" (the web `describeInviteLimit`, iOS `limitCopy`). */
+public fun describeInviteLimit(maxUses: Long): UiText = when {
+    maxUses == INVITE_UNLIMITED_USES -> UiText("invite.uses.unlimited")
+    maxUses <= 1L -> UiText("invite.uses.single")
+    else -> UiText("invite.uses.up_to", counts = mapOf("count" to maxUses.toULong()))
 }

@@ -329,7 +329,6 @@ public enum RootHandover {
     public static func isTransient(_ error: Error) -> Bool {
         guard let refusal = error as? DsStatementError else { return true }
         if case .http(let status, _) = refusal { return status >= 500 }
-        if case .pushBindingDisabled = refusal { return true }
         return false
     }
 

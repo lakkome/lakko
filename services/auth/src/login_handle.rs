@@ -593,7 +593,7 @@ pub(crate) async fn put(
             }));
         },
     }
-    tracing::info!(account_id = %URL_SAFE_NO_PAD.encode(auth.0), "login handle bound");
+    tracing::info!("login handle bound");
     Ok(Json(serde_json::json!({ "bound": true })))
 }
 
@@ -677,11 +677,7 @@ pub(crate) async fn delete(
         .await?;
     }
     let removed = remove(&state.db, &auth.0).await.map_err(ApiError::Db)?;
-    tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(auth.0),
-        removed,
-        "login handle removed"
-    );
+    tracing::info!(removed, "login handle removed");
     Ok(Json(serde_json::json!({ "removed": removed })))
 }
 

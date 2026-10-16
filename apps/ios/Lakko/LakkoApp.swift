@@ -1151,6 +1151,15 @@ private final class SessionModels: ObservableObject {
         // that reset them.
         channelsState.currentKeyGeneration = services.authRepository.identitySecrets?.session.keyGeneration
         channelPostSync = ChannelPostSync(accountIdB64: accountIdB64, channels: channelsState)
+        // G-50 — resume the channel PublisherGroup commits whose steps had not
+        // all landed before the app was closed.
+        if let seed = services.authRepository.identitySecrets?.accountIdentitySeed {
+            let channels = channelsState
+            Task { @MainActor in
+                await ChannelPublisherCommits.replayAll(
+                    accountIdB64: accountIdB64, currentSeed: seed, state: channels)
+            }
+        }
         // `docs/ux/feed.md` — every channel sync reports into the app-wide
         // refresh state; another account's results are forgotten here.
         let feedRefresh = services.feedRefresh
@@ -1577,13 +1586,8 @@ private struct SessionRoot: View, Equatable {
                     let accountId = profiles.accountIdB64.flatMap { Data(base64Encoded: $0) }
                     return (profiles.ownProfile?.displayName, profiles.ownUsername, accountId)
                 }
-                ReachCenter.shared.channelEpochsProvider = { [channelsState] in
-                    channelsState.channels.compactMap { channel -> (id: Data, epoch: UInt32)? in
-                        guard let id = CoPublisher.hexToData(channel.id),
-                              let epoch = channelsState.subscribedSeeds(channelId: channel.id).keys.max()
-                        else { return nil }
-                        return (id, epoch)
-                    }
+                ReachCenter.shared.channelIdsProvider = { [channelsState] in
+                    channelsState.channels.compactMap { CoPublisher.hexToData($0.id) }
                 }
                 ReachCenter.shared.allScopesProvider = { [chatRepository, channelsState] in
                     let groups = chatRepository.state.threads

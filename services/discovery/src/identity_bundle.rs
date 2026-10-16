@@ -224,7 +224,7 @@ pub(crate) struct UploadRequest {
     pub(crate) genesis_attest: Option<String>,
     /// ADR-0073 (S3): base64 (standard alphabet, like every sibling field —
     /// auth hands it out URL-safe, the client re-encodes as it does for
-    /// `genesis_attest`) of the 177-byte key-reset attestation minted by
+    /// `genesis_attest`) of the 145-byte key-reset attestation minted by
     /// `POST /account/keys/reset/finish`. Required for a key CHANGE that
     /// carries no supersession proof; discovery VERIFIES it (the one
     /// attestation it parses: signature under the pinned attest key, the
@@ -297,11 +297,7 @@ pub(crate) async fn upload(
     // can upload its identity bundle. Same check shape as
     // `registry::register`.
     if account_id != authed.0 {
-        tracing::warn!(
-            body_account_id = %B64.encode(account_id),
-            token_account_id = %B64.encode(authed.0),
-            "identity_bundle upload: body account_id does not match token's"
-        );
+        tracing::warn!("identity_bundle upload: body account_id does not match token's");
         return Err(RouteError::Text(
             StatusCode::FORBIDDEN,
             "account_id mismatch between body and session token".to_string(),
@@ -346,10 +342,7 @@ pub(crate) async fn upload(
     )
     .await?;
 
-    tracing::info!(
-        account_id = %B64.encode(account_id),
-        "identity bundle upserted",
-    );
+    tracing::info!("identity bundle upserted",);
 
     // KT-log S2 (decision E) — best-effort transparency-log append on a
     // KEY CHANGE only. The identity bundle is ALREADY published above; the
@@ -408,7 +401,6 @@ async fn mark_logged_pubkey(db: &sqlx::MySqlPool, account_id: &[u8], signature_p
         .await;
     if let Err(e) = result {
         tracing::warn!(
-            account_id = %B64.encode(account_id),
             error = %e,
             "KT-log S2.5: failed to advance logged_pubkey after a confirmed append \
              — the reconciler will heal it",
@@ -559,11 +551,8 @@ fn proof_is_valid(
 }
 
 /// The `400 supersession-proof-invalid` refusal.
-fn proof_refused(account_id: &[u8]) -> AttemptError {
-    tracing::warn!(
-        account_id = %B64.encode(account_id),
-        "identity upload refused — supersession proof does not verify",
-    );
+fn proof_refused() -> AttemptError {
+    tracing::warn!("identity upload refused — supersession proof does not verify",);
     AttemptError::Refused(crate::key_reset::json_error(
         StatusCode::BAD_REQUEST,
         crate::key_reset::CODE_PROOF_INVALID,
@@ -741,7 +730,7 @@ async fn try_apply_identity_once(
                 !proof_is_valid(proof, None, None, signature_pubkey, now_unix_secs())
             }) {
                 tx.rollback().await?;
-                return Err(proof_refused(account_id));
+                return Err(proof_refused());
             }
             let attested = evidence.key_reset_attest;
             // A duplicate key here (a concurrent first publish won) and the
@@ -777,7 +766,6 @@ async fn try_apply_identity_once(
             if crate::key_reset::floor_decision(Some(stored_generation), token_generation) {
                 tx.rollback().await?;
                 tracing::warn!(
-                    account_id = %B64.encode(account_id),
                     token_generation,
                     stored_generation,
                     "identity upload refused — session token's key generation superseded",
@@ -800,7 +788,7 @@ async fn try_apply_identity_once(
                 )
             }) {
                 tx.rollback().await?;
-                return Err(proof_refused(account_id));
+                return Err(proof_refused());
             }
 
             let outcome = change_outcome(
@@ -822,11 +810,7 @@ async fn try_apply_identity_once(
                 | ChangeOutcome::CoolingDown => {
                     tx.rollback().await?;
                     let (status, code) = outcome.refusal();
-                    tracing::warn!(
-                        account_id = %B64.encode(account_id),
-                        code,
-                        "identity key change refused",
-                    );
+                    tracing::warn!(code, "identity key change refused",);
                     return Err(AttemptError::Refused(crate::key_reset::json_error(
                         status, code,
                     )));
@@ -904,7 +888,6 @@ async fn delete_keypackage_rows(
         .await?
         .rows_affected();
     tracing::info!(
-        account_id = %B64.encode(account_id),
         deleted,
         "proven key rotation: KeyPackage rows of the old generation removed, tombstones kept",
     );
@@ -930,7 +913,6 @@ async fn delete_keypackages(
         .execute(&mut **tx)
         .await?;
     tracing::info!(
-        account_id = %B64.encode(account_id),
         deleted,
         "attested key reset: KeyPackage rows of the old generation removed",
     );
@@ -1611,7 +1593,7 @@ mod tests {
         //    directory accepts) WITH a new genesis attestation -> Append
         //    {is_reset} and the stored attestation is REPLACED. (Not gated:
         //    the first publish never armed the cool-down marker.)
-        let reset_att = [0x77u8; 177]; // bytes already verified by the handler
+        let reset_att = [0x77u8; 145]; // bytes already verified by the handler
         let reset = try_apply_identity_once(
             &pool,
             COOLDOWN,

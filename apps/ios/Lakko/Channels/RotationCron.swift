@@ -45,6 +45,13 @@ import LakkoCore
 ///     just re-uploads any missing chunks; nothing is served
 ///     to subscribers until commit, so a mid-fanout failure
 ///     leaves the live epoch untouched (fail-closed, C-42).
+///   - G-50: the rotation's effects (the DS epoch
+///     registration, the reseal + commit) are recorded
+///     durably WITH the N+1 provider snapshot before any of
+///     them runs (``PublisherCommitEntry``); a failed step or
+///     a restart resumes them from that record
+///     (``ChannelPublisherCommits``), never from a fresh fetch
+///     of the server epoch.
 ///   - If a single envelope seal fails, the WHOLE batch is
 ///     aborted — same atomic posture the server enforces.
 ///     Partial fanouts would leave some subscribers on the
@@ -63,14 +70,13 @@ public actor RotationCron {
     /// rotation pass. Bundled so the call site cannot
     /// forget a field.
     public struct Context {
-        /// Publisher's MLS group for this channel.
-        public let publisherGroup: PublisherGroup
-        /// Publisher's MLS identity + signing key.
-        public let identity: Identity
-        /// Hex-encoded 16-byte channel id (URL slot).
-        public let channelIdHex: String
-        /// HTTP client for the `/v1/channels/...` surface.
-        public let channelsClient: ChannelsClient
+        /// What the rotation's steps run against: the channel, the
+        /// account's current seed (the channel provider is built from the
+        /// lineage seed it implies; requests are signed by the current
+        /// one), the clients.
+        public let commits: ChannelPublisherCommits.Context
+        /// Where the N+1 content seed and server epoch are written back.
+        public weak var state: ChannelsUiState?
         /// Caller-persistence: invoked synchronously with
         /// the new state after a successful fanout.
         public let saveState: @Sendable (ChannelRotationState) async throws -> Void
@@ -78,18 +84,17 @@ public actor RotationCron {
         /// (carries the new server-side epoch).
         public let onRotated: (@Sendable (UInt32) -> Void)?
 
+        /// Hex-encoded 16-byte channel id (URL slot).
+        public var channelIdHex: String { commits.channelIdHex }
+
         public init(
-            publisherGroup: PublisherGroup,
-            identity: Identity,
-            channelIdHex: String,
-            channelsClient: ChannelsClient,
+            commits: ChannelPublisherCommits.Context,
+            state: ChannelsUiState?,
             saveState: @escaping @Sendable (ChannelRotationState) async throws -> Void,
             onRotated: (@Sendable (UInt32) -> Void)? = nil
         ) {
-            self.publisherGroup = publisherGroup
-            self.identity = identity
-            self.channelIdHex = channelIdHex
-            self.channelsClient = channelsClient
+            self.commits = commits
+            self.state = state
             self.saveState = saveState
             self.onRotated = onRotated
         }
@@ -144,39 +149,11 @@ public actor RotationCron {
             return OnceResult(rotated: false, newState: state, newEpoch: nil)
         }
 
-        // 1. Advance the local MLS epoch + derive the new
-        //    seed BEFORE talking to the server. If the
-        //    server-side POST /rotate fails later, we have
-        //    already rotated the local PublisherGroup —
-        //    that's fine because the next tick retries
-        //    from the new local state, and the server's
-        //    atomic-rotation guarantee means no partial
-        //    landings are observable.
-        _ = try context.publisherGroup.rotate(identity: context.identity)
-        // ADR-0057 — a rotation moves the PublisherGroup epoch, so the journal's
-        // access key moves with it: register the new key under the journal
-        // root (the channel owner's account key), or this device's own later
-        // journal reads would be refused. The rotation commit is not published
-        // to the journal, so no peer can hold an unregistered epoch; best
-        // effort.
-        if let signerAfter = try? context.publisherGroup.dsAccessSigner(identity: context.identity) {
-            do {
-                try await CoPublisher.registerEpoch(
-                    ds: DsClient(), identity: context.identity,
-                    publisherGroup: context.publisherGroup, next: signerAfter)
-            } catch {
-                NSLog("ADR-0057: PublisherGroup rotation epoch not registered: %@",
-                      String(describing: error))
-            }
-        }
-        let newSeed = try context.publisherGroup.channelSeed(identity: context.identity)
-        let channelIdBytes = try context.publisherGroup.channelId()
-
-        // 2. The new server epoch the envelopes will bind
-        //    to. fetchEpoch returns the CURRENT server
-        //    epoch; the rotate endpoint will bump to
-        //    current+1.
-        let currentEpoch = try await context.channelsClient.fetchEpoch(
+        // 1. The server epoch the envelopes will bind to,
+        //    read BEFORE the local rotation: after the eager
+        //    merge nothing may fail before the commit's record
+        //    is durable (G-50), and this is a network read.
+        let currentEpoch = try await context.commits.channelsClient.fetchEpoch(
             channelIdHex: context.channelIdHex
         )
         let newServerEpoch = currentEpoch &+ 1
@@ -186,70 +163,51 @@ public actor RotationCron {
             throw CronError.unexpectedServerEpoch(currentEpoch)
         }
 
-        // 3. Walk the subscriber list + seal new envelopes.
-        let subscribers = try await context.channelsClient.listSubscribers(
-            channelIdHex: context.channelIdHex,
-            accountIdentity: context.identity
-        )
-        var batch: [RotateBatchEntry] = []
-        batch.reserveCapacity(subscribers.count)
-        for subscriberHex in subscribers {
-            guard let subscriberBytes = Self.hexToBytes(subscriberHex) else {
-                throw CronError.malformedSubscriberHex(subscriberHex)
-            }
-            let envelope = try sealSubscriberSeedEnvelope(
-                subscriberPub: subscriberBytes,
-                channelId: channelIdBytes,
-                epochId: newServerEpoch,
-                seed: newSeed
-            )
-            batch.append(
-                RotateBatchEntry(
-                    subscriberPubkeyHex: subscriberHex,
-                    envelopeB64: envelope.base64EncodedString()
-                )
-            )
-        }
+        // 2. Advance the local MLS epoch (the self-update
+        //    commit eager-merges N -> N+1 in the channel
+        //    provider) and record the rotation, then the N+1
+        //    provider snapshot, durably, before any of its
+        //    steps runs. A refused record runs nothing.
+        let entry = try await Self.recordRotation(
+            context.commits, serverTargetEpoch: newServerEpoch)
 
-        // 4. Fan the sealed batch out via the ADR-0030
-        //    chunked staged-rotation protocol. Stage the
-        //    envelopes in slices of at most
-        //    `maxStageChunkEntries` (the server rejects a
-        //    larger chunk with 413), each an idempotent
-        //    upsert into the staging area — the live epoch is
-        //    NOT bumped and staged rows are never served, so a
-        //    chunk that throws just means the next tick
-        //    re-stages from the same local state. Only after
-        //    every chunk is staged does the single atomic
-        //    commit promote them + bump the epoch (C-42: the
-        //    commit is the one atomic point). An empty batch
-        //    stages nothing and still commits, bumping the
-        //    epoch on schedule for a channel with no
-        //    subscribers yet.
-        let chunkSize = ChannelsClient.maxStageChunkEntries
-        var offset = 0
-        while offset < batch.count {
-            let end = min(offset + chunkSize, batch.count)
-            try await context.channelsClient.stageRotation(
-                channelIdHex: context.channelIdHex,
-                targetEpoch: newServerEpoch,
-                batch: Array(batch[offset..<end]),
-                accountIdentity: context.identity
-            )
-            offset = end
-        }
-        let committedEpoch = try await context.channelsClient.commitRotation(
-            channelIdHex: context.channelIdHex,
-            targetEpoch: newServerEpoch,
-            accountIdentity: context.identity
-        )
+        // 3. The steps: register the N+1 epoch key on the DS
+        //    with the channel's root (ADR-0057, best effort for
+        //    a rotation), reseal the N+1 seed to every
+        //    subscriber and commit the rotation on the channels
+        //    service with the ADR-0030 chunked fanout (C-42:
+        //    the commit is the one atomic point).
+        try await Self.runEntry(entry, context: context)
 
-        // 5. Stamp the new state + persist.
+        // 4. Stamp the new state + persist.
         let newState = channelRotationStateAfterRotation(nowMs: now)
         try await context.saveState(newState)
-        context.onRotated?(committedEpoch)
+        context.onRotated?(newServerEpoch)
 
-        return OnceResult(rotated: true, newState: newState, newEpoch: committedEpoch)
+        return OnceResult(rotated: true, newState: newState, newEpoch: newServerEpoch)
+    }
+
+    @MainActor
+    private static func recordRotation(
+        _ commits: ChannelPublisherCommits.Context, serverTargetEpoch: UInt32
+    ) throws -> PublisherCommitEntry {
+        let (identity, group) = try commits.open()
+        _ = try group.rotate(identity: identity)
+        let entry = PublisherCommitEntry(
+            kind: .rotation,
+            channelIdHex: commits.channelIdHex.lowercased(),
+            groupIdHex: DsClient.pseudonymHex(try group.groupId()),
+            targetEpoch: try group.epoch(),
+            serverTargetEpoch: serverTargetEpoch)
+        try ChannelPublisherCommits.record(entry, accountIdB64: commits.accountIdB64)
+        return entry
+    }
+
+    @MainActor
+    private static func runEntry(_ entry: PublisherCommitEntry, context: Context) async throws {
+        try await PublisherCommitRunner.run(
+            entry, ports: ChannelPublisherCommits.ports(context.commits, state: context.state))
+        ChannelPublisherCommits.refreshContentSeed(context.commits, state: context.state)
     }
 
     /// Start a periodic rotation poller. Returns a `Task`
@@ -305,29 +263,5 @@ public actor RotationCron {
 
     private static func currentMs() -> UInt64 {
         UInt64(Date().timeIntervalSince1970 * 1000.0)
-    }
-
-    /// Parse a lowercase / mixed-case hex string into
-    /// bytes. Returns `nil` on any malformed input.
-    private static func hexToBytes(_ hex: String) -> Data? {
-        guard !hex.isEmpty, hex.count % 2 == 0 else { return nil }
-        var out = Data(capacity: hex.count / 2)
-        var iter = hex.unicodeScalars.makeIterator()
-        while let hi = iter.next(), let lo = iter.next() {
-            guard let hn = Self.hexNibble(hi.value),
-                  let ln = Self.hexNibble(lo.value)
-            else { return nil }
-            out.append((hn << 4) | ln)
-        }
-        return out
-    }
-
-    private static func hexNibble(_ code: UInt32) -> UInt8? {
-        switch code {
-        case 0x30...0x39: return UInt8(code - 0x30)
-        case 0x61...0x66: return UInt8(code - 0x61 + 10)
-        case 0x41...0x46: return UInt8(code - 0x41 + 10)
-        default: return nil
-        }
     }
 }

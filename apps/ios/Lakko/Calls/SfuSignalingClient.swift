@@ -32,8 +32,10 @@ enum SfuSignalingError: Error {
 /// frame is silently ignored. Invoked from the receive-loop `Task` (the
 /// caller hops to `@MainActor` itself if it touches UI state).
 struct SfuSignalingCallbacks {
-    var onWelcome: ((_ selfPeerId: String, _ callId: String, _ roster: [SfuPeerSnapshot]) -> Void)?
-    var onPeerJoined: ((_ peerId: String, _ accountPseudonym: String, _ peerTag: String) -> Void)?
+    var onWelcome: ((_ selfPeerId: String, _ room: String, _ roster: [SfuPeerSnapshot]) -> Void)?
+    /// A peer joined. The SFU says nothing about who it is (ADR-0078
+    /// section 2); its own sealed announcement does (``CallRelay``).
+    var onPeerJoined: ((_ peerId: String) -> Void)?
     var onPeerLeft: ((_ peerId: String) -> Void)?
     var onSignalRelay: ((_ from: String, _ payloadB64: String) -> Void)?
     var onSdpAnswer: ((_ sdp: String) -> Void)?
@@ -298,10 +300,10 @@ final class SfuSignalingClient {
 
     private func dispatch(_ frame: SfuServerFrame) {
         switch frame {
-        case let .welcome(peerId, callId, roster, _):
-            callbacks.onWelcome?(peerId, callId, roster)
-        case let .peerJoined(peerId, accountPseudonym, peerTag):
-            callbacks.onPeerJoined?(peerId, accountPseudonym, peerTag)
+        case let .welcome(peerId, room, roster, _):
+            callbacks.onWelcome?(peerId, room, roster)
+        case let .peerJoined(peerId):
+            callbacks.onPeerJoined?(peerId)
         case let .peerLeft(peerId):
             callbacks.onPeerLeft?(peerId)
         case let .signalRelay(from, payloadB64):

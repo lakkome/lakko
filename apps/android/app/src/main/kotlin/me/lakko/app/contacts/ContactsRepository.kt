@@ -170,6 +170,9 @@ public class ContactsRepository(
      *  in memory without a [Context]). */
     private val inviteSecretStore: InviteLinkSecretStore =
         appContext?.let { EncryptedInviteLinkSecretStore(it) } ?: InMemoryInviteLinkSecretStore(),
+    /** ADR-0078 section 10: the links this device minted, with their
+     *  revocation seeds; `null` = the process-wide [OwnLinkStores.current]. */
+    private val ownLinkStoreOverride: OwnLinkStore? = null,
     /** ADR-0073 R.2 - the accepted generation, the retired keys and the
      *  reset's `signed_at` per peer account (public values only). */
     private val resetLedgerStore: ResetLedgerStore =
@@ -197,6 +200,10 @@ public class ContactsRepository(
         }
     },
 ) {
+    /** ADR-0078 section 10 - where this device keeps its own links. */
+    private val ownLinkStore: OwnLinkStore
+        get() = ownLinkStoreOverride ?: OwnLinkStores.current
+
     // -----------------------------------------------------------------
     // ADR-0073 "Phase 2 revised: silent continuity" - a contact reset their
     // account keys. Nothing here has a surface (R.0).
@@ -434,7 +441,7 @@ public class ContactsRepository(
         if (predecessors.isEmpty()) return false
         val adoptedAtMs = predecessors.maxOf { it.supersededAtMs }
         val linksDone = try {
-            withContext(Dispatchers.IO) { revokeSpentLinks(secrets, predecessors) }
+            withContext(Dispatchers.IO) { revokeSpentLinks(secrets) }
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: Throwable) {
@@ -452,56 +459,48 @@ public class ContactsRepository(
         return linksDone && requestsDone
     }
 
-    /** Revoke every ledger row a previous key of this account issued. */
-    private suspend fun revokeSpentLinks(
-        secrets: IdentitySecrets,
-        predecessors: List<me.lakko.app.auth.OwnPredecessor>,
-    ): Boolean {
+    /**
+     * Revoke the ledger rows of the links that were live when this account's
+     * keys rotated. ADR-0078 section 10: each with its own revocation seed
+     * from this device's record; there is no owner list, so a link this
+     * device has no record of is another device's to revoke (its reach key
+     * goes anyway).
+     */
+    private suspend fun revokeSpentLinks(secrets: IdentitySecrets): Boolean {
         val manager = reach()
         val accountB64 = base64Encode(secrets.accountId)
-        // The contact links the directory lists for this account (every
-        // device's), and the ledger ids this device recorded for the links
-        // it minted itself (call links included).
-        val listed = when (val list = listActiveInvites()) {
-            is me.lakko.app.discovery.ListInvitesResult.List -> list.invites.map { it.blobIdSlug }
-            me.lakko.app.discovery.ListInvitesResult.NotFoundOrNotOwner -> return false
-        }
         val recorded = manager?.spentLinkBlobsHex().orEmpty().mapNotNull { hex ->
             me.lakko.app.reach.reachUnhex(hex)?.let(::base64UrlEncodeNoPad)
         }
-        val seeds = predecessors.asReversed().map { row ->
-            Identity.fromSeed(row.phraseSeed).use { it.ed25519Seed() }
-        }
-        try {
-            authenticatedDiscoveryClient().use { discovery ->
-                for (slug in spentLinkSlugs(listed, recorded)) {
-                    val blobId = try {
-                        me.lakko.app.auth.base64UrlDecodeNoPad(slug)
-                    } catch (_: IllegalArgumentException) {
-                        continue
+        authenticatedDiscoveryClient().use { discovery ->
+            for (slug in spentLinkSlugs(recorded)) {
+                val link = ownLinkStore.get(accountB64, OwnLink.KIND_CONTACT, slug)
+                    ?: ownLinkStore.get(accountB64, OwnLink.KIND_CALL, slug)
+                    ?: continue
+                val blobId = link.blobId() ?: continue
+                val seed = link.seed() ?: continue
+                val result = try {
+                    if (link.kind == OwnLink.KIND_CALL) {
+                        discovery.revokeCallInvite(blobId, seed)
+                    } else {
+                        discovery.revokeInvite(blobId, seed)
                     }
-                    // A link the CURRENT key issued answers "not the owner"
-                    // to every previous key and stays live.
-                    val revoked = try {
-                        seeds.any { seed ->
-                            discovery.revokeInvite(blobId, seed) is me.lakko.app.discovery.RevokeInviteResult.Revoked ||
-                                discovery.revokeCallInvite(blobId, seed) is
-                                me.lakko.app.discovery.RevokeInviteResult.Revoked
-                        }
-                    } catch (_: me.lakko.app.discovery.DiscoveryClientArgError) {
-                        // Not a ledger id this client can name: nothing to revoke.
-                        false
-                    }
-                    if (revoked) {
-                        inviteSecretStore.remove(accountB64, slug)
-                        mutableState.update { state ->
-                            state.copy(outstandingInvites = state.outstandingInvites.filterNot { it.blobIdSlug == slug })
-                        }
+                } catch (_: me.lakko.app.discovery.DiscoveryClientArgError) {
+                    // Not a ledger id this client can name: nothing to revoke.
+                    me.lakko.app.discovery.RevokeInviteResult.NotFoundOrNotOwner
+                } finally {
+                    seed.fill(0)
+                }
+                // Revoked, or already gone (used up, expired, revoked
+                // elsewhere): either way the record and the row leave.
+                ownLinkStore.remove(accountB64, link.kind, slug)
+                inviteSecretStore.remove(accountB64, slug)
+                if (result is me.lakko.app.discovery.RevokeInviteResult.Revoked) {
+                    mutableState.update { state ->
+                        state.copy(outstandingInvites = state.outstandingInvites.filterNot { it.blobIdSlug == slug })
                     }
                 }
             }
-        } finally {
-            seeds.forEach { it.fill(0) }
         }
         manager?.spentLinksDone()
         return true
@@ -2166,13 +2165,15 @@ public class ContactsRepository(
             // Sealed links (2026-09-28): the ledger stores only the sealed
             // capability; the secret rides in the fragment. Only a transport
             // failure falls back to the inline form; a refusal is thrown.
+            // ADR-0078 section 10: the ledger row carries a key minted for
+            // this link alone, never the account key; the seed stays on this
+            // device with what the list shows.
+            val (revocationSeed, revocationPubkey) = OwnLinks.freshRevocationKey()
             val upload = me.lakko.app.discovery.SealedInviteUpload(
                 sealed = mint.sealed,
-                issuerPubkey = mint.issuerPubkey,
+                revocationPubkey = revocationPubkey,
                 expiryMs = expiryMs.toLong(),
                 maxUses = maxUses.toLong(),
-                label = label,
-                bootstrapReferral = bootstrapReferral,
             )
             val blobId: ByteArray? = try {
                 authenticatedDiscoveryClient().use { discovery ->
@@ -2218,7 +2219,22 @@ public class ContactsRepository(
                     slug,
                     base64UrlEncodeNoPad(mint.linkSecret),
                 )
+                // This device's record is the only list of the account's
+                // links and the only key that revokes this one.
+                ownLinkStore.put(
+                    base64Encode(secrets.accountId),
+                    OwnLinks.record(
+                        kind = OwnLink.KIND_CONTACT,
+                        blobId = blobId,
+                        seed = revocationSeed,
+                        label = label,
+                        expiryMs = expiryMs.toLong(),
+                        maxUses = maxUses.toLong(),
+                        bootstrapReferral = bootstrapReferral,
+                    ),
+                )
             }
+            revocationSeed.fill(0)
             val invite = GeneratedInvite(
                 blobId = blobId,
                 blobIdSlug = slug,
@@ -2237,9 +2253,11 @@ public class ContactsRepository(
 
 
     /**
-     * Revoke an outstanding invite link via the discovery
-     * service's owner-signed `DELETE` endpoint + drop the row
-     * from [ContactsState.outstandingInvites].
+     * Revoke an outstanding invite link via the discovery service's `DELETE`
+     * endpoint, signed by the link's own revocation seed from this device's
+     * record (ADR-0078 section 10), + drop the row from
+     * [ContactsState.outstandingInvites]. A link this device keeps no record
+     * of answers [me.lakko.app.discovery.RevokeInviteResult.NotFoundOrNotOwner].
      *
      * Returns the underlying [me.lakko.app.discovery.RevokeInviteResult]
      * so the UI can branch on `Revoked` vs `NotFoundOrNotOwner`.
@@ -2256,13 +2274,17 @@ public class ContactsRepository(
                     "no identity secrets — please re-enter your password",
                 ),
             )
-        return me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use { identity ->
-            val signingSeed = identity.ed25519Seed()
+        val accountB64 = base64Encode(secrets.accountId)
+        val ownSlug = base64UrlEncodeNoPad(blobId)
+        val signingSeed = ownLinkStore.get(accountB64, OwnLink.KIND_CONTACT, ownSlug)?.seed()
+            ?: return me.lakko.app.discovery.RevokeInviteResult.NotFoundOrNotOwner
+        return run {
             try {
                 val result = authenticatedDiscoveryClient().use { discovery ->
                     discovery.revokeInvite(blobId, signingSeed)
                 }
                 if (result is me.lakko.app.discovery.RevokeInviteResult.Revoked) {
+                    ownLinkStore.remove(accountB64, OwnLink.KIND_CONTACT, ownSlug)
                     // ADR-0060 §6 — the link's key comes off the mailbox.
                     reach()?.retireLinkByBlob(blobId)
                     // UX 5.3 — a revoked link's secret leaves with it.
@@ -2285,16 +2307,12 @@ public class ContactsRepository(
     }
 
     /**
-     * Owner-signed list of every live invite this account owns
-     * across all devices (Phase 1.18d2b-list). Distinct from
-     * [ContactsState.outstandingInvites] which only tracks
-     * invites generated in the current session — the server-side
-     * list is authoritative across the user's full device fleet.
+     * The live `/i/` links this device minted and keeps a record of
+     * (ADR-0078 section 10). No ledger row names its owner, so there is no
+     * server list: a link minted on another device is listed there.
      *
-     * Throws [ContactsError] when the session has no identity
-     * secrets (caller should prompt the user to re-enter their
-     * password) or when the discovery client surfaces a transport
-     * failure.
+     * Throws [ContactsError] when the session has no identity secrets
+     * (caller should prompt the user to re-enter their password).
      */
     public suspend fun listActiveInvites(): me.lakko.app.discovery.ListInvitesResult {
         val secrets = authRepo.identitySecrets.value
@@ -2303,17 +2321,33 @@ public class ContactsRepository(
                     "no identity secrets — please re-enter your password",
                 ),
             )
-        return me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use { identity ->
-            val signingSeed = identity.ed25519Seed()
-            try {
-                authenticatedDiscoveryClient().use { discovery ->
-                    discovery.listInvitesByOwner(secrets.accountId, signingSeed)
-                }
-            } catch (e: Throwable) {
-                throw ContactsError.wrap(e)
-            } finally {
-                signingSeed.fill(0)
+        val nowMs = System.currentTimeMillis()
+        val rows = ownLinkStore.all(base64Encode(secrets.accountId))
+            .filter { it.kind == OwnLink.KIND_CONTACT && !it.isExpired(nowMs) }
+            .map { link ->
+                me.lakko.app.discovery.ActiveInvite(
+                    blobIdSlug = link.slug,
+                    expiryMs = link.expiryMs,
+                    maxUses = link.maxUses,
+                    usedCount = 0,
+                    label = link.label,
+                    bootstrapReferral = link.bootstrapReferral,
+                    createdAtMs = link.mintedAtMs,
+                )
             }
+        return me.lakko.app.discovery.ListInvitesResult.List(rows)
+    }
+
+    /**
+     * Revoke every live link this device keeps a record of, each with its own
+     * revocation seed (ADR-0078 section 10). Account deletion runs this
+     * first, while the session still works. Best effort; returns how many
+     * could not be reached.
+     */
+    public suspend fun revokeAllOwnLinks(): Int {
+        val secrets = authRepo.identitySecrets.value ?: return 0
+        return authenticatedDiscoveryClient().use { discovery ->
+            OwnLinks.revokeAll(base64Encode(secrets.accountId), discovery, ownLinkStore)
         }
     }
 
@@ -2790,8 +2824,8 @@ internal fun isMailboxRefusal(cause: Throwable): Boolean = when (cause) {
 
 /**
  * ADR-0074 section 3.5a rule 5 - the ledger ids (base64url slugs) the
- * rotating device tries to revoke: what the directory lists for the account,
- * then what this device recorded for links it minted, each once.
+ * rotating device tries to revoke: what this device recorded for links it
+ * minted, each once. ADR-0078 section 10: there is no owner list to add the
+ * other devices' links from.
  */
-internal fun spentLinkSlugs(listed: List<String>, recorded: List<String>): List<String> =
-    (listed + recorded).distinct()
+internal fun spentLinkSlugs(recorded: List<String>): List<String> = recorded.distinct()

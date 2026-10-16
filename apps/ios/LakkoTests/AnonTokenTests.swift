@@ -62,6 +62,12 @@ final class FakeIssuer: AnonTokenIssuing, @unchecked Sendable {
 
     var calls: [Call] { lock.withLock { recorded } }
 
+    /// The issuances asked for `context` (every context's first refill runs
+    /// when a session is bound, ADR-0078 section 8).
+    func calls(for context: AnonTokenContext) -> [Call] {
+        calls.filter { $0.context == context }
+    }
+
     func issue(
         context: AnonTokenContext,
         epoch: UInt64,
@@ -98,110 +104,144 @@ private func eventually(
     return condition()
 }
 
+/// An issuer that refuses the first `failures.count` issuances of ONE
+/// context with the scripted failures and answers every other call through
+/// `inner` (every context's first refill runs at once when a session is
+/// bound, so a script shared by all contexts would hit an arbitrary one).
+final class OneContextScriptIssuer: AnonTokenIssuing, @unchecked Sendable {
+    let inner = FakeIssuer()
+    private let context: AnonTokenContext
+    private let lock = NSLock()
+    private var failures: [AnonTokenUnavailable]
+
+    init(_ context: AnonTokenContext, failures: [AnonTokenUnavailable]) {
+        self.context = context
+        self.failures = failures
+    }
+
+    func issue(context: AnonTokenContext, epoch: UInt64, count: UInt32, sessionToken: String)
+        async throws -> [AnonToken]
+    {
+        let failure: AnonTokenUnavailable? = lock.withLock {
+            guard context == self.context, !failures.isEmpty else { return nil }
+            return failures.removeFirst()
+        }
+        if let failure {
+            _ = try? await inner.issue(context: context, epoch: epoch, count: 0, sessionToken: sessionToken)
+            throw failure
+        }
+        return try await inner.issue(context: context, epoch: epoch, count: count, sessionToken: sessionToken)
+    }
+}
+
+/// A pool whose first scheduled refill of each context runs at once (the
+/// random moment drawn is 0); the later ones are 30 minutes out, beyond any
+/// test (ADR-0078 section 8).
+func makePool(
+    _ issuer: AnonTokenIssuing,
+    store: AnonTokenStore? = nil,
+    waitSeconds: TimeInterval = AnonTokenPool.defaultWaitSeconds
+) -> AnonTokenPool {
+    AnonTokenPool(issuer: issuer, store: store, waitSeconds: waitSeconds, random: { 0 })
+}
+
 // MARK: - The pool
 
 final class AnonTokenPoolTests: XCTestCase {
 
     func testContextNamesAreTheCoresInWireOrder() {
         XCTAssertEqual(AnonTokenContext.allCases.map(\.rawValue), anonTokenContexts())
-        // The eleven names as literals too, so a rename on either side shows up
+        // The twelve names as literals too, so a rename on either side shows up
         // here as a named difference (source of truth:
         // `crates/lakko-anon-token/src/context.rs`, `TokenContext::ALL`).
         XCTAssertEqual(anonTokenContexts(), [
             "discovery-lookup", "discovery-register", "invite-consume", "ds-knock",
             "push-register", "channel-subscribe", "directory-search",
-            "vault-claim", "blob-upload", "blob-read", "mailbox-write",
+            "vault-claim", "blob-upload", "blob-read", "mailbox-write", "call-join",
         ])
         XCTAssertEqual(AnonTokenRoute.headerName, "x-lakko-anon-token")
     }
 
-    func testATakeWithNothingAtHandWaitsForABatchOfEight() async throws {
+    func testTheFirstScheduledRefillDrawsADayOfUseAndATakeWaitsForIt() async throws {
         let issuer = FakeIssuer()
-        let pool = AnonTokenPool(issuer: issuer)
+        let pool = makePool(issuer)
         pool.configure(accountKey: "A", sessionToken: "s1")
 
         let token = try await pool.take(.discoveryLookup)
 
         XCTAssertEqual(token.context, "discovery-lookup")
-        XCTAssertEqual(issuer.calls.first?.count, 8)
-        XCTAssertEqual(issuer.calls.first?.sessionToken, "s1")
-        XCTAssertEqual(issuer.calls.first?.epoch, pool.currentEpoch())
-        XCTAssertEqual(pool.count(.discoveryLookup), 7, "the token taken leaves the pool")
+        let call = try XCTUnwrap(issuer.calls(for: .discoveryLookup).first)
+        XCTAssertEqual(call.count, 16)
+        XCTAssertEqual(call.sessionToken, "s1")
+        XCTAssertEqual(call.epoch, pool.currentEpoch())
+        XCTAssertEqual(pool.count(.discoveryLookup), 15, "the token taken leaves the pool")
     }
 
-    func testALookupRefillStartsInTheBackgroundBelowTwo() async throws {
+    /// ADR-0078 section 8: the token pool refills on a timer, not on spend.
+    func testThePoolRefillsOnATimerNotOnSpend() async throws {
         let issuer = FakeIssuer()
-        let pool = AnonTokenPool(issuer: issuer)
+        let pool = makePool(issuer, waitSeconds: 0.3)
         pool.configure(accountKey: "A", sessionToken: "s1")
-        for _ in 0..<6 { _ = try await pool.take(.discoveryLookup) }
-        XCTAssertEqual(issuer.calls.count, 1, "2 left: no refill yet")
-
-        _ = try await pool.take(.discoveryLookup) // 1 left -> refill
-        let refilled = await eventually { pool.count(.discoveryLookup) == 9 }
-        XCTAssertTrue(refilled, "count is \(pool.count(.discoveryLookup))")
-        XCTAssertEqual(issuer.calls.count, 2)
+        _ = try await pool.take(.dsKnock)
+        while pool.takeIfAvailable(.dsKnock) != nil {}
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(issuer.calls(for: .dsKnock).count, 1, "spending the bucket empty draws nothing")
+        do {
+            _ = try await pool.take(.dsKnock)
+            XCTFail("an empty bucket must not draw at the moment of use")
+        } catch let error as AnonTokenUnavailable {
+            XCTAssertEqual(error, .timedOut)
+        }
+        XCTAssertEqual(issuer.calls(for: .dsKnock).count, 1)
+        // The schedule's next refill tops it up to its target in one issuance.
+        await pool.runScheduledRefills()
+        XCTAssertEqual(issuer.calls(for: .dsKnock).map(\.count), [8, 8])
+        XCTAssertEqual(pool.count(.dsKnock), 8)
     }
 
-    /// ADR-0054 S5: small batches for the rare actions, refilled only once
-    /// the context is empty.
-    func testEachContextHasItsBatchSize() async throws {
+    func testEachContextHasItsPoolTarget() async throws {
         let expected: [AnonTokenContext: UInt32] = [
-            .discoveryLookup: 8, .pushRegister: 4, .inviteConsume: 2, .dsKnock: 2, .discoveryRegister: 1,
-            .channelSubscribe: 2, .directorySearch: 1,
-            .vaultClaim: 4, .blobUpload: 2, .blobRead: 2,
-            .mailboxWrite: 2,
+            .discoveryLookup: 16, .pushRegister: 8, .inviteConsume: 4, .dsKnock: 8, .discoveryRegister: 2,
+            .channelSubscribe: 4, .directorySearch: 4,
+            .vaultClaim: 8, .blobUpload: 4, .blobRead: 4,
+            .mailboxWrite: 4,
+            .callJoin: 4,
         ]
         XCTAssertEqual(Set(expected.keys), Set(AnonTokenContext.allCases), "every context has a pinned policy")
-        for (context, batch) in expected {
-            let issuer = FakeIssuer()
-            let pool = AnonTokenPool(issuer: issuer)
-            pool.configure(accountKey: "A", sessionToken: "s1")
+        let issuer = FakeIssuer()
+        let pool = makePool(issuer)
+        pool.configure(accountKey: "A", sessionToken: "s1")
+        for (context, target) in expected {
             _ = try await pool.take(context)
-            XCTAssertEqual(issuer.calls.first?.count, batch, context.rawValue)
-            XCTAssertEqual(context.batchSize, Int(batch), context.rawValue)
-            XCTAssertEqual(context.lowWater, context == .discoveryLookup ? 2 : 1, context.rawValue)
+            XCTAssertEqual(issuer.calls(for: context).first?.count, target, context.rawValue)
+            XCTAssertEqual(context.poolTarget, Int(target), context.rawValue)
         }
     }
 
-    func testARareContextRefillsOnlyWhenEmpty() async throws {
-        let issuer = FakeIssuer()
-        let pool = AnonTokenPool(issuer: issuer)
-        pool.configure(accountKey: "A", sessionToken: "s1")
-        for _ in 0..<3 { _ = try await pool.take(.pushRegister) }
-        try await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(issuer.calls.count, 1, "1 left: no refill yet")
-        XCTAssertEqual(pool.count(.pushRegister), 1)
-
-        _ = try await pool.take(.pushRegister) // empty -> refill
-        let refilled = await eventually { pool.count(.pushRegister) == 4 }
-        XCTAssertTrue(refilled, "count is \(pool.count(.pushRegister))")
-        XCTAssertEqual(issuer.calls.map(\.count), [4, 4])
-    }
-
     func testTokensAreNeverReusedWithinAContext() async throws {
-        let pool = AnonTokenPool(issuer: FakeIssuer())
+        let pool = makePool(FakeIssuer())
         pool.configure(accountKey: "A", sessionToken: "s1")
         var seen = Set<String>()
-        for _ in 0..<20 {
-            let token = try await pool.take(.inviteConsume)
+        for _ in 0..<16 {
+            let token = try await pool.take(.discoveryLookup)
             XCTAssertTrue(seen.insert(token.headerValue).inserted, "reused \(token.headerValue)")
         }
     }
 
     func testLogoutClearsThePoolAndAnAccountSwitchDoesToo() async throws {
         let issuer = FakeIssuer()
-        let pool = AnonTokenPool(issuer: issuer)
+        let pool = makePool(issuer)
         pool.configure(accountKey: "A", sessionToken: "s1")
         _ = try await pool.take(.dsKnock)
-        XCTAssertEqual(pool.count(.dsKnock), 1)
+        XCTAssertEqual(pool.count(.dsKnock), 7)
 
         pool.configure(accountKey: "A", sessionToken: "s1-refreshed")
-        XCTAssertEqual(pool.count(.dsKnock), 1, "a fresh session for the same account keeps its tokens")
+        XCTAssertEqual(pool.count(.dsKnock), 7, "a fresh session for the same account keeps its tokens")
 
         pool.configure(accountKey: "B", sessionToken: "s2")
         XCTAssertEqual(pool.count(.dsKnock), 0, "account switch")
         _ = try await pool.take(.dsKnock)
-        XCTAssertEqual(issuer.calls.last?.sessionToken, "s2")
+        XCTAssertEqual(issuer.calls(for: .dsKnock).last?.sessionToken, "s2")
 
         pool.clear()
         XCTAssertEqual(pool.count(.dsKnock), 0, "logout")
@@ -216,15 +256,17 @@ final class AnonTokenPoolTests: XCTestCase {
 
     func testTakeIfAvailableNeverStartsARefill() async throws {
         let issuer = FakeIssuer()
-        let pool = AnonTokenPool(issuer: issuer)
-        pool.configure(accountKey: "A", sessionToken: "s1")
+        // No session: no schedule runs.
+        let pool = makePool(issuer)
+        pool.configure(accountKey: "A", sessionToken: nil)
         XCTAssertNil(pool.takeIfAvailable(.pushRegister))
+        try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertTrue(issuer.calls.isEmpty)
     }
 
     func testAUsedUpAllowanceSurfacesAndIsRemembered() async throws {
-        let issuer = FakeIssuer(script: [.quotaExhausted(retryAfterSecs: 3600)])
-        let pool = AnonTokenPool(issuer: issuer)
+        let issuer = OneContextScriptIssuer(.discoveryLookup, failures: [.quotaExhausted(retryAfterSecs: 3600)])
+        let pool = makePool(issuer)
         pool.configure(accountKey: "A", sessionToken: "s1")
         do {
             _ = try await pool.take(.discoveryLookup)
@@ -240,21 +282,22 @@ final class AnonTokenPoolTests: XCTestCase {
         } catch let AnonTokenUnavailable.quotaExhausted(retry) {
             XCTAssertNotNil(retry)
         }
-        XCTAssertEqual(issuer.calls.count, 1, "no second issuance while the allowance is used up")
+        await pool.runScheduledRefills()
+        XCTAssertEqual(
+            issuer.inner.calls(for: .discoveryLookup).count, 1,
+            "no second issuance while the allowance is used up")
     }
 
     func testEpochNotIssuableRebuildsOnceForTheIssuersEpoch() async throws {
-        let pool = AnonTokenPool(issuer: FakeIssuer())
-        let serverEpoch = pool.currentEpoch() + 1
-        let issuer = FakeIssuer(script: [.epochNotIssuable(currentEpoch: serverEpoch)])
-        let skewed = AnonTokenPool(issuer: issuer)
+        let probe = makePool(FakeIssuer())
+        let serverEpoch = probe.currentEpoch() + 1
+        let issuer = OneContextScriptIssuer(.dsKnock, failures: [.epochNotIssuable(currentEpoch: serverEpoch)])
+        let skewed = makePool(issuer)
         skewed.configure(accountKey: "A", sessionToken: "s1")
 
-        // `ds-knock` (a batch of 2) so the take leaves one token and no
-        // background refill adds a third issuance to the record.
         let token = try await skewed.take(.dsKnock)
 
-        XCTAssertEqual(issuer.calls.map(\.epoch), [serverEpoch - 1, serverEpoch])
+        XCTAssertEqual(issuer.inner.calls(for: .dsKnock).map(\.epoch), [serverEpoch - 1, serverEpoch])
         XCTAssertEqual(token.epoch, serverEpoch)
         XCTAssertEqual(skewed.currentEpoch(), serverEpoch, "the server's epoch corrects the local one")
     }
@@ -262,7 +305,7 @@ final class AnonTokenPoolTests: XCTestCase {
     func testDeadTokensAreDropped() async throws {
         // The issuer hands back tokens two epochs behind: never live.
         let issuer = FakeIssuer(tokenEpoch: { $0 &- 2 })
-        let pool = AnonTokenPool(issuer: issuer, waitSeconds: 0.3)
+        let pool = makePool(issuer, waitSeconds: 0.3)
         pool.configure(accountKey: "A", sessionToken: "s1")
         do {
             _ = try await pool.take(.dsKnock)
@@ -273,7 +316,7 @@ final class AnonTokenPoolTests: XCTestCase {
     }
 
     func testAWaitThatRunsOutFailsWithTheNetworkCopy() async throws {
-        let pool = AnonTokenPool(issuer: FakeIssuer(hang: true), waitSeconds: 0.2)
+        let pool = makePool(FakeIssuer(hang: true), waitSeconds: 0.2)
         pool.configure(accountKey: "A", sessionToken: "s1")
         let started = Date()
         do {
@@ -288,7 +331,7 @@ final class AnonTokenPoolTests: XCTestCase {
     }
 
     func testDisabledIssuanceFailsWithTheNetworkCopy() async throws {
-        let pool = AnonTokenPool(issuer: FakeIssuer(script: [.disabled]))
+        let pool = makePool(OneContextScriptIssuer(.pushRegister, failures: [.disabled]))
         pool.configure(accountKey: "A", sessionToken: "s1")
         do {
             _ = try await pool.take(.pushRegister)
@@ -346,18 +389,18 @@ final class AnonTokenPersistenceTests: XCTestCase {
     func testThePoolSurvivesARelaunch() async throws {
         let store = InMemoryAnonTokenStore()
         let issuer = FakeIssuer()
-        let first = AnonTokenPool(issuer: issuer, store: store)
+        let first = makePool(issuer, store: store)
         first.configure(accountKey: "A", sessionToken: "s1")
         let spent = try await first.take(.discoveryLookup)
-        XCTAssertEqual(store.snapshot["A"]?[.discoveryLookup]?.count, 7, "every change is written")
+        XCTAssertEqual(store.snapshot["A"]?[.discoveryLookup]?.count, 15, "every change is written")
+        first.clear()
 
         // A relaunch: a fresh pool over the same storage, bound to the same account.
-        let second = AnonTokenPool(issuer: issuer, store: store)
+        let second = makePool(issuer, store: store)
         second.configure(accountKey: "A", sessionToken: "s2")
-        XCTAssertEqual(second.count(.discoveryLookup), 7)
+        XCTAssertEqual(second.count(.discoveryLookup), 15)
         let next = try await second.take(.discoveryLookup)
         XCTAssertNotEqual(next.headerValue, spent.headerValue, "a spent token never comes back")
-        XCTAssertEqual(issuer.calls.count, 1, "no new issuance after the relaunch")
     }
 
     func testDeadEpochTokensAreDroppedOnLoad() {
@@ -383,7 +426,7 @@ final class AnonTokenPersistenceTests: XCTestCase {
     func testLogoutAndAnAccountSwitchKeepEveryAccountsTokens() async throws {
         let store = InMemoryAnonTokenStore()
         let issuer = FakeIssuer()
-        let pool = AnonTokenPool(issuer: issuer, store: store)
+        let pool = makePool(issuer, store: store)
         pool.configure(accountKey: "A", sessionToken: "s1")
         _ = try await pool.take(.discoveryLookup)
         let aStored = try XCTUnwrap(store.snapshot["A"]?[.discoveryLookup])
@@ -393,7 +436,7 @@ final class AnonTokenPersistenceTests: XCTestCase {
         XCTAssertEqual(pool.count(.discoveryLookup), 0, "B never sees A's tokens")
         let bToken = try await pool.take(.discoveryLookup)
         XCTAssertFalse(aStored.map(\.headerValue).contains(bToken.headerValue))
-        XCTAssertEqual(issuer.calls.last?.sessionToken, "s2")
+        XCTAssertEqual(issuer.calls(for: .discoveryLookup).last?.sessionToken, "s2")
         let bStored = try XCTUnwrap(store.snapshot["B"]?[.discoveryLookup])
 
         pool.clear()
@@ -402,13 +445,11 @@ final class AnonTokenPersistenceTests: XCTestCase {
         XCTAssertEqual(store.snapshot["B"]?[.discoveryLookup], bStored, "logout keeps B's")
 
         // The next sign-in of A loads A's own, and nothing of B's.
-        let callsBefore = issuer.calls.count
         pool.configure(accountKey: "A", sessionToken: "s3")
         XCTAssertEqual(pool.count(.discoveryLookup), aStored.count)
         let next = try await pool.take(.discoveryLookup)
         XCTAssertEqual(next.headerValue, aStored.first?.headerValue)
         XCTAssertFalse(bStored.map(\.headerValue).contains(next.headerValue))
-        XCTAssertEqual(issuer.calls.count, callsBefore, "no new issuance for A")
     }
 
     func testBindingToAnAccountLeavesAnotherAccountsTokensAndNeverYieldsThem() {
@@ -423,7 +464,7 @@ final class AnonTokenPersistenceTests: XCTestCase {
 
     func testForgetDeletesOnlyThatAccountAndNothingIsWrittenBack() async throws {
         let store = InMemoryAnonTokenStore()
-        let pool = AnonTokenPool(issuer: FakeIssuer(), store: store)
+        let pool = makePool(FakeIssuer(), store: store)
         pool.configure(accountKey: "B", sessionToken: "s0")
         _ = try await pool.take(.dsKnock)
         pool.configure(accountKey: "A", sessionToken: "s1")
@@ -445,7 +486,6 @@ final class AnonTokenPersistenceTests: XCTestCase {
 
         // A new sign-in of A starts empty and is persisted again.
         pool.configure(accountKey: "A", sessionToken: "s2")
-        XCTAssertEqual(pool.count(.pushRegister), 0)
         _ = try await pool.take(.pushRegister)
         XCTAssertNotNil(store.snapshot["A"])
     }
@@ -454,7 +494,7 @@ final class AnonTokenPersistenceTests: XCTestCase {
         let store = InMemoryAnonTokenStore()
         let epoch = AnonTokenPool(issuer: FakeIssuer()).currentEpoch()
         store.put("B", .dsKnock, [AnonToken(context: "ds-knock", epoch: epoch, headerValue: "b-token")])
-        let pool = AnonTokenPool(issuer: FakeIssuer(hang: true), store: store, waitSeconds: 0.5)
+        let pool = makePool(FakeIssuer(hang: true), store: store, waitSeconds: 0.5)
         pool.configure(accountKey: "A", sessionToken: "s1")
 
         let pending = Task { try await pool.take(.dsKnock) }
@@ -742,49 +782,43 @@ final class AnonTokenRoutePrivacyTests: XCTestCase {
         XCTAssertTrue(tokens.taken.isEmpty)
     }
 
-    /// push-gw: all four routes spend a `push-register` token, no session.
+    /// push-gw (ADR-0078): both subscription routes spend a `push-register`
+    /// token, no session, and carry no device pseudonym.
     func testPushRoutesCarryATokenAndNoSession() async throws {
         let host = AnonRouteRecorder.scope { request, body in
             switch request.url?.path ?? "" {
-            case "/push/register": return (200, #"{"ok":true}"#)
-            case "/push/group/subscribe": return (200, #"{"ok":true,"inserted":true}"#)
+            case "/push/subscribe": return (200, #"{"ok":true}"#)
             default: return (200, #"{"ok":true,"removed":true}"#)
             }
         }
         let tokens = FakeAnonTokens()
         let client = PushClient(baseURL: "http://\(host):9", session: AnonRouteRecorder.session(), tokens: tokens)
-        let device = Data(repeating: 2, count: 32)
+        let subId = Data(repeating: 2, count: 16)
         let group = Data(repeating: 3, count: 32)
 
-        try await client.register(devicePseudonym: device, provider: .apns, tokenBytes: Data([9]))
-        _ = try await client.subscribeGroup(devicePseudonym: device, groupPseudonym: group)
-        _ = try await client.unsubscribeGroup(devicePseudonym: device, groupPseudonym: group)
-        _ = try await client.unregister(devicePseudonym: device, provider: .apns)
+        try await client.subscribe(subId: subId, pushGid: group, wakePk: group, sealed: Data([9]))
+        _ = try await client.unsubscribe(subId: subId)
 
         let seen = AnonRouteRecorder.requests(host)
-        XCTAssertEqual(seen.map(\.path), [
-            "/push/register", "/push/group/subscribe", "/push/group/unsubscribe", "/push/unregister",
-        ])
+        XCTAssertEqual(seen.map(\.path), ["/push/subscribe", "/push/unsubscribe"])
         for request in seen {
             XCTAssertNil(request.authorization, request.path)
             XCTAssertNil(request.cookie, request.path)
             let json = try JSONSerialization.jsonObject(with: request.body) as? [String: Any]
             XCTAssertNil(json?["pow"], request.path)
+            XCTAssertNil(json?["device_pseudonym"], request.path)
         }
-        XCTAssertEqual(seen.map(\.anonToken), [
-            "push-register-1", "push-register-2", "push-register-3", "push-register-4",
-        ])
+        XCTAssertEqual(seen.map(\.anonToken), ["push-register-1", "push-register-2"])
     }
 
-    /// Logout's unregister spends the token taken before the pool was cleared.
-    func testThePushUnregisterSpendsThePrepaidToken() async throws {
+    /// Logout's unsubscribe spends the token taken before the pool was cleared.
+    func testThePushUnsubscribeSpendsThePrepaidToken() async throws {
         let host = AnonRouteRecorder.scope { _, _ in (200, #"{"ok":true,"removed":true}"#) }
         let client = PushClient(
             baseURL: "http://\(host):9", session: AnonRouteRecorder.session(),
             tokens: FakeAnonTokens(failure: .noSession))
-        _ = try await client.unregister(
-            devicePseudonym: Data(repeating: 2, count: 32),
-            provider: .apns,
+        _ = try await client.unsubscribe(
+            subId: Data(repeating: 2, count: 16),
             prepaidToken: AnonToken(context: "push-register", epoch: 1, headerValue: "prepaid"))
         XCTAssertEqual(AnonRouteRecorder.requests(host).map(\.anonToken), ["prepaid"])
     }
@@ -879,7 +913,7 @@ final class AuthAnonTokenIssuerTests: XCTestCase {
         }
 
         // And the pool keeps nothing of it.
-        let pool = AnonTokenPool(issuer: issuer, waitSeconds: 2)
+        let pool = makePool(issuer, waitSeconds: 2)
         pool.configure(accountKey: "A", sessionToken: "s")
         do {
             _ = try await pool.take(.pushRegister)

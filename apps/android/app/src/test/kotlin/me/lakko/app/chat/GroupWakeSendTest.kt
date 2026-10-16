@@ -13,7 +13,6 @@ import me.lakko.app.ds.DS_WAKE_HEADER
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsSignerRegistry
 import me.lakko.app.ds.DsWake
-import me.lakko.app.ds.DsWakeKind
 import me.lakko.app.push.PushClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -24,7 +23,7 @@ import org.junit.Test
 /**
  * ADR-0054 decision 1 — the send path wakes the group through the signed DS
  * publish and talks to nothing else: one request, to the group journal,
- * carrying `x-lakko-wake`, and no request to push-gw.
+ * carrying `x-lakko-wake` (sealed since ADR-0078), and no request to push-gw.
  */
 class GroupWakeSendTest {
 
@@ -47,14 +46,14 @@ class GroupWakeSendTest {
     @Test
     fun `a message send is one DS publish carrying the wake and no push-gw call`() = runTest {
         val seen = mutableListOf<Seen>()
-        val wake = DsWake.forPublish(ByteArray(32), DsWakeKind.MESSAGE)
+        val wake = DsWake("B".repeat(DsWake.HEADER_VALUE_LEN))
         val result = chatClient(seen).use {
             it.publishPreparedSend(it.preparedForTest(groupId, byteArrayOf(1, 2)), wake = wake)
         }
         assertEquals(11L, result.messageId)
         val request = seen.single()
         assertEquals("/ds/group/${DsClient.pseudonymHex(groupId)}/messages", request.path)
-        assertEquals("A".repeat(43) + ";message", request.wake)
+        assertEquals("B".repeat(DsWake.HEADER_VALUE_LEN), request.wake)
         assertFalse(seen.any { it.path.contains("/push/") })
     }
 

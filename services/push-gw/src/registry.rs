@@ -1,325 +1,159 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Push token registry — `(device_pseudonym, provider) → token`.
+//! Sealed subscriptions ([ADR-0078] section 3).
 //!
-//! Re-registering the same (device, provider) pair replaces the token —
-//! clients rotate tokens periodically (APNs token after backup restore,
-//! FCM token after app update, etc.). The PK is composite so a single
-//! device can be reachable through multiple providers (e.g. Web Push
-//! on desktop browser plus FCM on the Android companion app).
+//! A subscription row is `(sub_id, push_gid, wake_pk, sealed)`:
 //!
-//! Every route here is anonymous by design (invariant #5: a session would
-//! name the account behind a device pseudonym). Since ADR-0054 S3 each
-//! request spends one `push-register` anonymous token, checked by the
-//! router's gate (`x-lakko-anon-token`) before the handler runs.
+//! - `sub_id` - 16 random bytes the device keeps per (its own) subscription,
+//!   so it can replace or remove its row. Knowing it is the capability; no
+//!   two of a device's subscriptions share one.
+//! - `push_gid` - the ADR-0042 routing id of the group.
+//! - `wake_pk` - the public half of the group's wake key. A wake is
+//!   delivered only to rows registered under the key that signed it.
+//! - `sealed` - the device's provider tokens, AEAD-sealed under the group's
+//!   unlock key (`lakko_contacts::push_wake::seal_push_subscription`). The
+//!   unlock key reaches push-gw only inside a sealed wake and is never
+//!   stored, so this table at rest holds no token in the clear, nothing
+//!   equal across two groups, and no device pseudonym.
+//!
+//! No timestamp is stored: a device re-registers all of its subscriptions
+//! together when its provider token changes, and equal timestamps on rows of
+//! different groups would tie those rows to one device.
+//!
+//! Every route here is anonymous (a session would name the account behind
+//! a subscription) and spends one `push-register` anonymous token, checked by
+//! the router's gate (`x-lakko-anon-token`) before the handler runs.
+//!
+//! [ADR-0078]: ../../../docs/adr/0078-servers-cannot-link-accounts.md
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use base64::engine::general_purpose::STANDARD as B64;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
+use lakko_contacts::push_wake::{is_well_formed_subscription_len, PUSH_SUBSCRIPTION_ID_LEN};
 use serde::{Deserialize, Serialize};
 
-use crate::provider::ProviderKind;
 use crate::AppState;
 
-/// Device pseudonym length: 32 raw bytes, 64 lowercase hex chars on
-/// the wire — same convention as `services/ds`.
-const DEVICE_LEN: usize = 32;
-/// Push tokens vary by provider. APNs is 32 hex bytes (~64 chars),
-/// FCM is up to ~200 chars, Web Push subscription endpoints push the
-/// envelope further. 2 KiB is generous and matches the column.
-const MAX_TOKEN_BYTES: usize = 2048;
+type HandlerError = (StatusCode, String);
 
-fn decode_device(hex_str: &str) -> Result<[u8; DEVICE_LEN], (StatusCode, String)> {
-    if hex_str.len() != DEVICE_LEN * 2 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("device_pseudonym must be {} hex chars", DEVICE_LEN * 2),
-        ));
-    }
-    if !hex_str
-        .bytes()
-        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "device_pseudonym must be lowercase hex [0-9a-f]".to_string(),
-        ));
-    }
-    let mut out = [0u8; DEVICE_LEN];
-    hex::decode_to_slice(hex_str, &mut out)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("hex decode: {e}")))?;
-    Ok(out)
+fn bad(what: &str) -> HandlerError {
+    (StatusCode::BAD_REQUEST, format!("malformed {what}"))
 }
 
-fn decode_token(b64: &str) -> Result<Vec<u8>, (StatusCode, String)> {
-    let bytes = B64.decode(b64).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid token base64: {e}"),
-        )
-    })?;
-    if bytes.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "token must be non-empty".to_string(),
-        ));
-    }
-    if bytes.len() > MAX_TOKEN_BYTES {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("token > {MAX_TOKEN_BYTES} bytes"),
-        ));
-    }
-    Ok(bytes)
-}
-
-// ============================================================================
-// /push/register
-// ============================================================================
-
-#[derive(Deserialize)]
-pub(crate) struct RegisterRequest {
-    /// 32-byte device pseudonym, lowercase hex.
-    pub(crate) device_pseudonym: String,
-    /// Which platform this token is for.
-    pub(crate) provider: ProviderKind,
-    /// Base64-encoded raw token bytes (provider-specific format,
-    /// opaque to us).
-    pub(crate) token: String,
-}
-
-#[derive(Serialize)]
-pub(crate) struct RegisterResponse {
-    pub(crate) ok: bool,
-}
-
-/// `POST /push/register` — store (or replace) a push token for a
-/// `(device_pseudonym, provider)` pair. Idempotent: re-registering
-/// the same pair updates the token in place.
-pub(crate) async fn register(
-    State(state): State<AppState>,
-    Json(payload): Json<RegisterRequest>,
-) -> Result<Json<RegisterResponse>, (StatusCode, String)> {
-    let device = decode_device(&payload.device_pseudonym)?;
-    let token = decode_token(&payload.token)?;
-    let provider_db = payload.provider.as_db();
-
-    // UPSERT — `INSERT ... ON DUPLICATE KEY UPDATE`. The composite PK
-    // is `(device_id, provider)`, so re-registration with a fresh
-    // token simply overwrites the bytes.
-    sqlx::query(
-        "INSERT INTO push_tokens (device_id, provider, token) VALUES (?, ?, ?) \
-         ON DUPLICATE KEY UPDATE token = VALUES(token)",
-    )
-    .bind(&device[..])
-    .bind(provider_db)
-    .bind(&token)
-    .execute(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "insert push_tokens");
+fn db_error(what: &'static str) -> impl Fn(sqlx::Error) -> HandlerError {
+    move |e: sqlx::Error| {
+        tracing::error!(error = %e, what, "subscription store");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal db error".to_string(),
         )
-    })?;
+    }
+}
 
-    tracing::info!(
-        provider = payload.provider.as_str(),
-        device_prefix = %hex::encode(&device[..4]),
-        "push token registered",
-    );
-    Ok(Json(RegisterResponse { ok: true }))
+/// Decode a base64url-no-pad field of exactly `N` bytes.
+fn fixed<const N: usize>(b64: &str, what: &str) -> Result<[u8; N], HandlerError> {
+    let bytes = B64URL.decode(b64).map_err(|_| bad(what))?;
+    bytes.try_into().map_err(|_| bad(what))
 }
 
 // ============================================================================
-// /push/unregister
+// /push/subscribe
 // ============================================================================
 
+/// `POST /push/subscribe`. Every field is required and nothing else is
+/// accepted.
 #[derive(Deserialize)]
-pub(crate) struct UnregisterRequest {
-    pub(crate) device_pseudonym: String,
-    pub(crate) provider: ProviderKind,
+#[serde(deny_unknown_fields)]
+pub(crate) struct SubscribeRequest {
+    /// 16 bytes, base64url without padding.
+    pub(crate) sub_id: String,
+    /// The group's `push_gid`, 32 bytes, base64url without padding.
+    pub(crate) push_gid: String,
+    /// The group's wake public key, 32 bytes, base64url without padding.
+    pub(crate) wake_pk: String,
+    /// The sealed token list, base64url without padding.
+    pub(crate) sealed: String,
 }
 
 #[derive(Serialize)]
-pub(crate) struct UnregisterResponse {
+pub(crate) struct OkResponse {
     pub(crate) ok: bool,
-    /// `true` if a row was deleted; `false` if there was nothing
-    /// registered (idempotent — clients can call this safely on logout
-    /// without checking first).
-    pub(crate) removed: bool,
 }
 
-/// `POST /push/unregister` — drop a push token. Idempotent.
+/// `POST /push/subscribe` — store (or replace) the subscription row
+/// `sub_id`. Idempotent: re-registering the same id replaces its row, which
+/// is how a device publishes a new provider token.
 ///
-/// When the device holds no token after the delete, its group
-/// subscriptions go in the same transaction: a device that unregistered its
-/// last token has signed out, and a subscription left behind would keep
-/// waking it for the groups of the account that signed out (the rows were
-/// never removed before, and the pseudonym is minted anew at the next
-/// sign-in, so nothing else would ever delete them). A device keeping
-/// another provider's token (iOS unregisters APNs and VoIP one at a time)
-/// keeps its subscriptions until the last one goes.
-pub(crate) async fn unregister(
+/// push-gw cannot open `sealed` here (it has no unlock key) and does not
+/// try; it checks only that the length is one a sealed subscription can
+/// have, so it never stores a row no wake could open.
+pub(crate) async fn subscribe(
     State(state): State<AppState>,
-    Json(payload): Json<UnregisterRequest>,
-) -> Result<Json<UnregisterResponse>, (StatusCode, String)> {
-    let device = decode_device(&payload.device_pseudonym)?;
-    let provider_db = payload.provider.as_db();
-    let db_error = |what: &'static str| {
-        move |e: sqlx::Error| {
-            tracing::error!(error = %e, what, "unregister");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal db error".to_string(),
-            )
-        }
-    };
-
-    let mut tx = state.db.begin().await.map_err(db_error("begin"))?;
-    let result = sqlx::query("DELETE FROM push_tokens WHERE device_id = ? AND provider = ?")
-        .bind(&device[..])
-        .bind(provider_db)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_error("delete push_tokens"))?;
-    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_tokens WHERE device_id = ?")
-        .bind(&device[..])
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(db_error("count push_tokens"))?;
-    let dropped_groups = if remaining == 0 {
-        sqlx::query("DELETE FROM push_group_subscriptions WHERE device_id = ?")
-            .bind(&device[..])
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error("delete push_group_subscriptions"))?
-            .rows_affected()
-    } else {
-        0
-    };
-    tx.commit().await.map_err(db_error("commit"))?;
-
-    let removed = result.rows_affected() > 0;
-    if removed || dropped_groups > 0 {
-        tracing::info!(
-            provider = payload.provider.as_str(),
-            device_prefix = %hex::encode(&device[..4]),
-            dropped_groups,
-            "push token unregistered",
-        );
+    Json(req): Json<SubscribeRequest>,
+) -> Result<Json<OkResponse>, HandlerError> {
+    let sub_id: [u8; PUSH_SUBSCRIPTION_ID_LEN] = fixed(&req.sub_id, "sub_id")?;
+    let push_gid: [u8; 32] = fixed(&req.push_gid, "push_gid")?;
+    let wake_pk: [u8; 32] = fixed(&req.wake_pk, "wake_pk")?;
+    let sealed = B64URL.decode(&req.sealed).map_err(|_| bad("sealed"))?;
+    if !is_well_formed_subscription_len(sealed.len()) {
+        return Err(bad("sealed"));
     }
-    Ok(Json(UnregisterResponse { ok: true, removed }))
-}
 
-// ============================================================================
-// /push/group/subscribe (Phase 1.20e — fan-out)
-// ============================================================================
-
-#[derive(Deserialize)]
-pub(crate) struct GroupSubscribeRequest {
-    /// 32-byte device pseudonym, lowercase hex.
-    pub(crate) device_pseudonym: String,
-    /// 32-byte group pseudonym, lowercase hex. Same handle the
-    /// DS uses as its group journal key.
-    pub(crate) group_pseudonym: String,
-}
-
-#[derive(Serialize)]
-pub(crate) struct GroupSubscribeResponse {
-    pub(crate) ok: bool,
-    /// `true` if the row was inserted fresh; `false` if it was
-    /// already there (idempotent re-subscribe).
-    pub(crate) inserted: bool,
-}
-
-/// `POST /push/group/subscribe` — declare that this device wants
-/// wakes for messages published into `group_pseudonym`. Idempotent:
-/// a re-subscribe with the same `(device, group)` pair returns
-/// `inserted: false` and is a no-op.
-pub(crate) async fn group_subscribe(
-    State(state): State<AppState>,
-    Json(payload): Json<GroupSubscribeRequest>,
-) -> Result<Json<GroupSubscribeResponse>, (StatusCode, String)> {
-    let device = decode_device(&payload.device_pseudonym)?;
-    let group = decode_device(&payload.group_pseudonym)?;
-
-    // INSERT IGNORE — the composite PK `(device_id, group_id)`
-    // makes a re-subscribe a silent no-op. `rows_affected == 0`
-    // is the "already subscribed" signal we surface as
-    // `inserted: false`.
-    let result = sqlx::query(
-        "INSERT IGNORE INTO push_group_subscriptions (device_id, group_id) VALUES (?, ?)",
+    sqlx::query(
+        "INSERT INTO push_subscriptions (sub_id, push_gid, wake_pk, sealed) VALUES (?, ?, ?, ?) \
+         ON DUPLICATE KEY UPDATE push_gid = VALUES(push_gid), wake_pk = VALUES(wake_pk), \
+         sealed = VALUES(sealed)",
     )
-    .bind(&device[..])
-    .bind(&group[..])
+    .bind(&sub_id[..])
+    .bind(&push_gid[..])
+    .bind(&wake_pk[..])
+    .bind(&sealed)
     .execute(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "insert push_group_subscriptions");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal db error".to_string(),
-        )
-    })?;
+    .map_err(db_error("upsert push_subscriptions"))?;
 
-    let inserted = result.rows_affected() > 0;
-    tracing::debug!(
-        device_prefix = %hex::encode(&device[..4]),
-        group_prefix = %hex::encode(&group[..4]),
-        inserted,
-        "push group subscription",
-    );
-    Ok(Json(GroupSubscribeResponse { ok: true, inserted }))
+    tracing::debug!("push subscription stored");
+    Ok(Json(OkResponse { ok: true }))
 }
 
 // ============================================================================
-// /push/group/unsubscribe (Phase 1.20e)
+// /push/unsubscribe
 // ============================================================================
 
+/// `POST /push/unsubscribe`.
 #[derive(Deserialize)]
-pub(crate) struct GroupUnsubscribeRequest {
-    pub(crate) device_pseudonym: String,
-    pub(crate) group_pseudonym: String,
+#[serde(deny_unknown_fields)]
+pub(crate) struct UnsubscribeRequest {
+    /// 16 bytes, base64url without padding.
+    pub(crate) sub_id: String,
 }
 
 #[derive(Serialize)]
-pub(crate) struct GroupUnsubscribeResponse {
+pub(crate) struct UnsubscribeResponse {
     pub(crate) ok: bool,
-    /// `true` if a row was deleted; `false` if there was nothing
-    /// registered — idempotent like the token unregister path.
+    /// `true` if a row was deleted; `false` if there was none (idempotent:
+    /// a device may call it on sign-out without checking first).
     pub(crate) removed: bool,
 }
 
-/// `POST /push/group/unsubscribe` — drop a `(device, group)`
-/// subscription. Idempotent.
-pub(crate) async fn group_unsubscribe(
+/// `POST /push/unsubscribe` — drop the subscription row `sub_id`.
+pub(crate) async fn unsubscribe(
     State(state): State<AppState>,
-    Json(payload): Json<GroupUnsubscribeRequest>,
-) -> Result<Json<GroupUnsubscribeResponse>, (StatusCode, String)> {
-    let device = decode_device(&payload.device_pseudonym)?;
-    let group = decode_device(&payload.group_pseudonym)?;
-
-    let result =
-        sqlx::query("DELETE FROM push_group_subscriptions WHERE device_id = ? AND group_id = ?")
-            .bind(&device[..])
-            .bind(&group[..])
-            .execute(&state.db)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "delete push_group_subscriptions");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal db error".to_string(),
-                )
-            })?;
-
-    let removed = result.rows_affected() > 0;
-    Ok(Json(GroupUnsubscribeResponse { ok: true, removed }))
+    Json(req): Json<UnsubscribeRequest>,
+) -> Result<Json<UnsubscribeResponse>, HandlerError> {
+    let sub_id: [u8; PUSH_SUBSCRIPTION_ID_LEN] = fixed(&req.sub_id, "sub_id")?;
+    let result = sqlx::query("DELETE FROM push_subscriptions WHERE sub_id = ?")
+        .bind(&sub_id[..])
+        .execute(&state.db)
+        .await
+        .map_err(db_error("delete push_subscriptions"))?;
+    Ok(Json(UnsubscribeResponse {
+        ok: true,
+        removed: result.rows_affected() > 0,
+    }))
 }
 
 // ============================================================================
@@ -330,186 +164,71 @@ pub(crate) async fn group_unsubscribe(
 mod tests {
     use super::*;
 
-    /// Gated on `LAKKO_PUSH_GW_TEST_DATABASE_URL` (skipped without it): the
-    /// group subscriptions of a device go with its LAST token, not before.
-    #[tokio::test]
-    async fn the_last_unregistered_token_takes_the_group_subscriptions_with_it() {
-        use crate::provider::ProviderKind;
-        use std::collections::HashMap;
-
-        let Ok(url) = std::env::var("LAKKO_PUSH_GW_TEST_DATABASE_URL") else {
-            eprintln!("skipping: LAKKO_PUSH_GW_TEST_DATABASE_URL unset");
-            return;
-        };
-        let db = sqlx::mysql::MySqlPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("connect test db");
-        crate::MIGRATIONS.run(&db).await.expect("migrate");
-
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-            .to_be_bytes();
-        let mut device = [0xe1u8; 32];
-        device[..16].copy_from_slice(&stamp);
-        let mut gid = [0x5bu8; 32];
-        gid[..16].copy_from_slice(&stamp);
-        for kind in [ProviderKind::Fcm, ProviderKind::Apns] {
-            sqlx::query("INSERT INTO push_tokens (device_id, provider, token) VALUES (?, ?, ?)")
-                .bind(&device[..])
-                .bind(kind.as_db())
-                .bind(&b"test-token"[..])
-                .execute(&db)
-                .await
-                .unwrap();
-        }
-        sqlx::query("INSERT INTO push_group_subscriptions (device_id, group_id) VALUES (?, ?)")
-            .bind(&device[..])
-            .bind(&gid[..])
-            .execute(&db)
-            .await
-            .unwrap();
-
-        let state = AppState {
-            anon_tokens: lakko_anon_token_server::TokenVerifier::new(db.clone(), None),
-            db: db.clone(),
-            providers: std::sync::Arc::new(HashMap::new()),
-            internal_secret: None,
-        };
-        let subscriptions = || async {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM push_group_subscriptions WHERE device_id = ?",
-            )
-            .bind(&device[..])
-            .fetch_one(&db)
-            .await
-            .unwrap()
-        };
-        let request = |kind: ProviderKind| {
-            Json(UnregisterRequest {
-                device_pseudonym: hex::encode(device),
-                provider: kind,
-            })
-        };
-
-        let first = unregister(State(state.clone()), request(ProviderKind::Fcm)).await;
-        let after_first = subscriptions().await;
-        let second = unregister(State(state.clone()), request(ProviderKind::Apns)).await;
-        let after_second = subscriptions().await;
-
-        sqlx::query("DELETE FROM push_group_subscriptions WHERE device_id = ?")
-            .bind(&device[..])
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM push_tokens WHERE device_id = ?")
-            .bind(&device[..])
-            .execute(&db)
-            .await
-            .unwrap();
-
-        assert!(first.is_ok() && second.is_ok());
-        assert_eq!(
-            after_first, 1,
-            "another provider's token keeps the subscriptions"
-        );
-        assert_eq!(after_second, 0, "the last token takes them with it");
+    fn b64(bytes: &[u8]) -> String {
+        B64URL.encode(bytes)
     }
 
-    #[test]
-    fn decode_device_validates_format() {
-        assert!(decode_device(&"a".repeat(64)).is_ok());
-        assert!(decode_device(&"0".repeat(64)).is_ok());
-        assert!(decode_device(&"A".repeat(64)).is_err()); // uppercase rejected
-        assert!(decode_device(&"g".repeat(64)).is_err());
-        assert!(decode_device(&"a".repeat(63)).is_err());
-        assert!(decode_device(&"a".repeat(65)).is_err());
-    }
-
-    fn register_body(provider: &str) -> String {
+    fn body(sub: usize, gid: usize, pk: usize, sealed: usize) -> String {
         format!(
-            r#"{{"device_pseudonym":"{}","provider":"{provider}","token":"{}"}}"#,
-            "ab".repeat(32),
-            B64.encode([7u8; 32]),
+            r#"{{"sub_id":"{}","push_gid":"{}","wake_pk":"{}","sealed":"{}"}}"#,
+            b64(&vec![1; sub]),
+            b64(&vec![2; gid]),
+            b64(&vec![3; pk]),
+            b64(&vec![4; sealed]),
         )
     }
 
-    /// The five provider names, and the row each is stored under.
-    ///
-    /// These are the exact strings the three clients send — iOS
-    /// `PushClient.Provider`, Android `PushClient.kt`, web
-    /// `push/client.ts`. A device that cannot register is a device that
-    /// is never woken, so the wire names and the column values are
-    /// pinned together here rather than assumed from the enum.
-    const WIRE_NAMES: [(&str, ProviderKind, u8); 5] = [
-        ("apns", ProviderKind::Apns, 1),
-        ("fcm", ProviderKind::Fcm, 2),
-        ("web_push", ProviderKind::WebPush, 3),
-        ("unified_push", ProviderKind::UnifiedPush, 4),
-        ("apns_voip", ProviderKind::ApnsVoip, 5),
-    ];
-
     #[test]
-    fn every_provider_kind_can_be_registered() {
-        for (wire, kind, db) in WIRE_NAMES {
-            let req: RegisterRequest = serde_json::from_str(&register_body(wire))
-                .unwrap_or_else(|e| panic!("{wire} rejected by the extractor: {e}"));
-            assert_eq!(req.provider, kind);
-            assert_eq!(req.provider.as_db(), db);
-            // The handler's own two decode gates, which run before the
-            // UPSERT and are the rest of what a register has to clear.
-            assert!(decode_device(&req.device_pseudonym).is_ok());
-            assert!(decode_token(&req.token).is_ok());
+    fn a_subscribe_body_has_exactly_the_four_fields() {
+        let ok: SubscribeRequest = serde_json::from_str(&body(16, 32, 32, 285)).unwrap();
+        assert!(fixed::<16>(&ok.sub_id, "sub_id").is_ok());
+        // The pre-ADR-0078 shapes are refused.
+        for old in [
+            r#"{"device_pseudonym":"ab","provider":"fcm","token":"AA"}"#,
+            r#"{"device_pseudonym":"ab","group_pseudonym":"cd"}"#,
+        ] {
+            assert!(serde_json::from_str::<SubscribeRequest>(old).is_err());
         }
+        let extra = body(16, 32, 32, 285).replace('}', r#","device_pseudonym":"x"}"#);
+        assert!(serde_json::from_str::<SubscribeRequest>(&extra).is_err());
     }
 
     #[test]
-    fn every_provider_kind_can_be_unregistered() {
-        for (wire, kind, _) in WIRE_NAMES {
-            let body = format!(
-                r#"{{"device_pseudonym":"{}","provider":"{wire}"}}"#,
-                "ab".repeat(32),
-            );
-            let req: UnregisterRequest = serde_json::from_str(&body)
-                .unwrap_or_else(|e| panic!("{wire} rejected by the extractor: {e}"));
-            assert_eq!(req.provider, kind);
-        }
+    fn wrong_length_fields_are_refused() {
+        assert!(fixed::<16>(&b64(&[0; 15]), "sub_id").is_err());
+        assert!(fixed::<16>(&b64(&[0; 17]), "sub_id").is_err());
+        assert!(fixed::<32>(&b64(&[0; 31]), "push_gid").is_err());
+        assert!(fixed::<32>("not base64!", "push_gid").is_err());
+        // Padded and standard-alphabet spellings are refused.
+        assert!(fixed::<16>(&(b64(&[0; 16]) + "=="), "sub_id").is_err());
     }
 
     #[test]
-    fn the_two_apple_tokens_are_separate_rows_of_one_device() {
-        // The composite PK is `(device_id, provider)`, so this pair of
-        // distinct column values is exactly what keeps a fresh call
-        // token from evicting the alert token, and vice versa.
-        assert_ne!(
-            ProviderKind::Apns.as_db(),
-            ProviderKind::ApnsVoip.as_db(),
-            "one device's two Apple tokens would collide on the primary key",
-        );
+    fn only_a_sealed_subscription_length_is_stored() {
+        use lakko_contacts::push_wake::{MAX_PUSH_SUBSCRIPTION_LEN, MIN_PUSH_SUBSCRIPTION_LEN};
+        assert!(is_well_formed_subscription_len(MIN_PUSH_SUBSCRIPTION_LEN));
+        assert!(is_well_formed_subscription_len(MAX_PUSH_SUBSCRIPTION_LEN));
+        assert!(!is_well_formed_subscription_len(
+            MIN_PUSH_SUBSCRIPTION_LEN - 1
+        ));
+        assert!(!is_well_formed_subscription_len(
+            MIN_PUSH_SUBSCRIPTION_LEN + 1
+        ));
+        assert!(!is_well_formed_subscription_len(
+            MAX_PUSH_SUBSCRIPTION_LEN + 256
+        ));
     }
 
     #[test]
-    fn an_unknown_provider_name_is_refused() {
-        for bad in ["voip", "apnsvoip", "ApnsVoip", "pushkit", "apns_alert"] {
-            assert!(
-                serde_json::from_str::<RegisterRequest>(&register_body(bad)).is_err(),
-                "expected refusal for {bad}",
-            );
-        }
-    }
-
-    #[test]
-    fn decode_token_validates_size() {
-        assert!(decode_token(&B64.encode([0u8; 32])).is_ok());
-        // empty payload after b64-decode is rejected
-        assert!(decode_token("").is_err());
-        // too big
-        let huge = B64.encode(vec![0u8; MAX_TOKEN_BYTES + 1]);
-        assert!(decode_token(&huge).is_err());
-        // bad b64
-        assert!(decode_token("not-valid!!!").is_err());
+    fn an_unsubscribe_body_is_the_sub_id_alone() {
+        assert!(serde_json::from_str::<UnsubscribeRequest>(&format!(
+            r#"{{"sub_id":"{}"}}"#,
+            b64(&[1; 16])
+        ))
+        .is_ok());
+        assert!(serde_json::from_str::<UnsubscribeRequest>(
+            r#"{"device_pseudonym":"ab","provider":"fcm"}"#
+        )
+        .is_err());
     }
 }

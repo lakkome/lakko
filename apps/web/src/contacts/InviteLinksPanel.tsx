@@ -10,19 +10,23 @@
  * the link's reach key (ADR-0060 section 6) before anything else, compose and
  * seal the capability in the core, upload the sealed blob to the discovery
  * service for the short pointer URL (the secret stays in the fragment and in
- * this device's `invite-link-secrets` record; the link's reach scope id is
- * kept in `minted-links.ts` for the revoke), fall back to the self-contained
- * inline URL only on a network failure (a rejected upload is a real error; the same bytes would be
- * rejected again by whoever opens them). The list is the owner query the old
- * "Active invites" card made, run when this panel opens and after every
- * change, never behind a button.
+ * this device's record of the link, `minted-links.ts`, beside the link's
+ * reach scope id and its own revocation seed), fall back to the
+ * self-contained inline URL only on a network failure (a rejected upload is a
+ * real error; the same bytes would be rejected again by whoever opens them).
+ *
+ * ADR-0078 section 10: the ledger rows name no owner, so there is no owner
+ * query. The list is this device's own records of the links it minted, read
+ * when this panel opens and after every change; a link minted on another
+ * device is listed and revoked there. Revoking signs with the link's own
+ * revocation seed, never the account key.
  */
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Encode, base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
-import { DiscoveryClient, type ActiveInvite } from "../discovery/client";
+import { DiscoveryClient } from "../discovery/client";
 import { Icon } from "../ui/icons";
 import { loadWasm } from "../wasm";
 import { joinFacts, t } from "../l10n";
@@ -30,14 +34,21 @@ import { KeyedError } from "../l10n/keyed-error";
 import { createLiveText } from "../l10n/live-text";
 import { contactsErrorText } from "./errors";
 import { reachSession } from "../reach/reach-service";
-import { forgetMintedLink, mintedLinkFor, rememberMintedLink, type MintedLink } from "./minted-links";
+import {
+  isInlineLinkSlug,
+  listMintedLinks,
+  rememberMintedLink,
+  type MintedLinkFacts,
+  type MintedLinkRow,
+} from "./minted-links";
+import { newRevocationKey, revokeMintedLink } from "./own-links";
 import {
   appendInviteLinkSecret,
   composeSealedInviteLink,
   inviteLinkWidths,
   type InviteLinkWidths,
 } from "./invite-link";
-import { inviteLinkSecretFor, rememberInviteLinkSecret } from "./invite-link-secrets";
+import { forgetInviteLinkSecret } from "./invite-link-secrets";
 import {
   composePointerInviteUrl,
   INVITE_URL_PREFIX,
@@ -47,17 +58,11 @@ import {
   type ExpiryPreset,
   type MaxUsesPreset,
 } from "./invite";
-import {
-  describeInviteCreated,
-  describeInviteExpiry,
-  describeInviteUses,
-} from "./invite-describe";
+import { describeInviteCreated, describeInviteExpiry, describeInviteLimit } from "./invite-describe";
 
-/** A link this panel can show: an uploaded one from the list, or the inline
- *  fallback minted a moment ago (no server row, so it cannot be revoked).
- *  `url` is `null` for a listed link whose secret this device does not hold
- *  (sealed-link amendment: the ledger never sees it): it can be revoked here
- *  but not copied. */
+/** A link this panel can show: one this device minted and keeps a record
+ *  of, or the inline fallback minted a moment ago (no server row, so it
+ *  cannot be revoked). */
 interface LinkRow {
   readonly key: string;
   readonly url: string | null;
@@ -67,42 +72,38 @@ interface LinkRow {
   /** The facts under the title, rendered in the current language. */
   readonly meta: () => string;
   readonly revocable: boolean;
-  readonly blobIdSlug: string | null;
+  /** The record the revoke acts on; `null` for the inline fallback. */
+  readonly link: MintedLinkRow | null;
 }
 
-/** `null` when the listed id is not a ledger id of the current width (a row
- *  the server should not have sent); the row is then left out rather than
- *  breaking the list. */
-function rowOf(
-  invite: ActiveInvite,
-  nowMs: number,
-  widths: InviteLinkWidths,
-  secretFragment: string | null,
-): LinkRow | null {
-  let url: string | null;
+/** A row for one kept record, or `null` for a record of another shape (a
+ *  ledger id of another width, no facts kept). */
+function rowOf(link: MintedLinkRow, nowMs: number, widths: InviteLinkWidths): LinkRow | null {
+  const facts: MintedLinkFacts | null = link.facts;
+  if (facts === null || isInlineLinkSlug(link.blobIdSlug)) return null;
+  let url: string;
   try {
-    const pointer = composePointerInviteUrl(base64UrlDecodeNoPad(invite.blobIdSlug), widths);
-    url = secretFragment === null ? null : `${pointer}#${secretFragment}`;
+    const pointer = composePointerInviteUrl(base64UrlDecodeNoPad(link.blobIdSlug), widths);
+    url = `${pointer}${appendInviteLinkSecret("", link.linkSecret, widths)}`;
   } catch {
     return null;
   }
   const meta = (): string => {
     const parts = [
-      describeInviteCreated(invite.createdAt),
-      describeInviteExpiry(invite.expiryMs, nowMs),
-      describeInviteUses(invite.usedCount, invite.maxUses),
-    ];
-    if (invite.bootstrapReferral) parts.push(t("invite.links.for_new_user"));
-    if (url === null) parts.push(t("invite.links.made_elsewhere"));
+      link.mintedAtMs === null ? "" : describeInviteCreated(new Date(link.mintedAtMs).toISOString()),
+      describeInviteExpiry(facts.expiryMs, nowMs),
+      describeInviteLimit(facts.maxUses),
+    ].filter((p) => p.length > 0);
+    if (facts.bootstrapReferral) parts.push(t("invite.links.for_new_user"));
     return joinFacts(parts);
   };
   return {
-    key: invite.blobIdSlug,
+    key: link.blobIdSlug,
     url,
-    label: invite.label.length > 0 ? invite.label : null,
+    label: facts.label.length > 0 ? facts.label : null,
     meta,
-    revocable: true,
-    blobIdSlug: invite.blobIdSlug,
+    revocable: link.revocationSeed !== null,
+    link,
   };
 }
 
@@ -112,9 +113,7 @@ export function InviteLinksPanel(): JSX.Element {
   const discovery = new DiscoveryClient();
   discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
 
-  const [invites, setInvites] = createSignal<ActiveInvite[]>([]);
-  /** The local half of each listed link this device minted, by ledger slug. */
-  const [minted, setMinted] = createSignal<ReadonlyMap<string, MintedLink>>(new Map());
+  const [links, setLinks] = createSignal<MintedLinkRow[]>([]);
   const [widths, setWidths] = createSignal<InviteLinkWidths | null>(null);
   const [loaded, setLoaded] = createSignal(false);
   const [inlineLink, setInlineLink] = createSignal<LinkRow | null>(null);
@@ -130,24 +129,14 @@ export function InviteLinksPanel(): JSX.Element {
   const [bootstrapReferral, setBootstrapReferral] = createSignal(false);
   const [createBusy, setCreateBusy] = createSignal(false);
 
-  /** The account the local secret store is keyed on. */
-  const accountKey = (): string | null => {
-    const secrets = auth.identitySecrets();
-    return secrets === null ? null : base64UrlEncodeNoPad(secrets.accountId);
-  };
-  const secretOf = (blobIdSlug: string): string | null => {
-    const key = accountKey();
-    return key === null ? null : inviteLinkSecretFor(key, blobIdSlug);
-  };
-
   const rows = (): LinkRow[] => {
     const now = Date.now();
     const w = widths();
     const listed =
       w === null
         ? []
-        : invites()
-            .map((i) => rowOf(i, now, w, secretOf(i.blobIdSlug)))
+        : links()
+            .map((l) => rowOf(l, now, w))
             .filter((r): r is LinkRow => r !== null);
     const inline = inlineLink();
     return inline === null ? listed : [inline, ...listed];
@@ -160,22 +149,18 @@ export function InviteLinksPanel(): JSX.Element {
   async function load(): Promise<void> {
     try {
       const secrets = auth.identitySecrets();
-      const id = chats.accountIdentity();
-      if (secrets === null || id === null) {
+      if (secrets === null) {
         throw new KeyedError("invite.links.error.sign_in_list");
       }
       setWidths(inviteLinkWidths(await loadWasm()));
-      const result = await discovery.listInvitesByOwner(secrets.accountId, id.ed25519Seed);
-      // "not found or not owner" means no row matches this account: no links.
-      const listed = result.kind === "list" ? result.invites : [];
-      const accountIdB64 = base64Encode(secrets.accountId);
-      const local = new Map<string, MintedLink>();
-      for (const invite of listed) {
-        const m = await mintedLinkFor(accountIdB64, "contact", invite.blobIdSlug);
-        if (m !== null) local.set(invite.blobIdSlug, m);
-      }
-      setMinted(local);
-      setInvites(listed);
+      // ADR-0078 section 10: this device's records, newest first. An expired
+      // link is left out (the ledger drops it on its own).
+      const now = Date.now();
+      const own = (await listMintedLinks(base64Encode(secrets.accountId)))
+        .filter((l) => l.kind === "contact")
+        .filter((l) => l.facts === null || l.facts.expiryMs === 0 || l.facts.expiryMs > now)
+        .sort((x, y) => (y.mintedAtMs ?? 0) - (x.mintedAtMs ?? 0));
+      setLinks(own);
       setLoaded(true);
     } catch (err) {
       setError(contactsErrorText(err, "invite.links.error.load"));
@@ -235,32 +220,36 @@ export function InviteLinksPanel(): JSX.Element {
       }
       const sealed = mint.sealed;
       const linkSecret = mint.linkSecret;
-      const issuerPubkey = mint.issuerPubkey;
       mint.free();
+      // ADR-0078 section 10: the ledger row carries a key minted for this
+      // link alone, never the account key.
+      const revocation = await newRevocationKey();
       try {
         const blobId = await discovery.uploadInvite({
           sealed,
-          issuerPubkey,
+          revocationPubkey: revocation.publicKey,
           expiryMs,
           maxUses: maxUsesValue,
-          label: label(),
-          bootstrapReferral: bootstrapReferral(),
         });
-        // The list is rebuilt from the ledger, which never holds the secret:
-        // remember it here so this device can show the working link.
-        const fragment = appendInviteLinkSecret("", linkSecret, widths).slice(1);
-        rememberInviteLinkSecret(
-          base64UrlEncodeNoPad(secrets.accountId),
-          base64UrlEncodeNoPad(blobId),
-          fragment,
-        );
-        // ADR-0060 section 6: the link id is what removes this link's reach
-        // key on revoke.
+        // The record is the only list of this account's links and the only
+        // key that revokes this one: the secret (to show the working link),
+        // the link id (ADR-0060 section 6: removes its reach key), the
+        // revocation seed, and what the list shows.
         await rememberMintedLink(
           base64Encode(secrets.accountId),
           "contact",
           base64UrlEncodeNoPad(blobId),
-          { linkSecret, linkId },
+          {
+            linkSecret,
+            linkId,
+            revocationSeed: revocation.seed,
+            facts: {
+              label: label(),
+              expiryMs: Number(expiryMs),
+              maxUses: maxUsesValue,
+              bootstrapReferral: bootstrapReferral(),
+            },
+          },
         );
         setInlineLink(null);
         await load();
@@ -287,7 +276,7 @@ export function InviteLinksPanel(): JSX.Element {
           label: label().length > 0 ? label() : null,
           meta: () => t("invite.links.inline_note"),
           revocable: false,
-          blobIdSlug: null,
+          link: null,
         });
       }
       setCreating(false);
@@ -313,33 +302,25 @@ export function InviteLinksPanel(): JSX.Element {
   }
 
   async function onRevoke(row: LinkRow): Promise<void> {
-    if (row.blobIdSlug === null) return;
+    const link = row.link;
+    if (link === null) return;
     setError(null);
     setNotice(null);
     setBusyKey(row.key);
     try {
-      const id = chats.accountIdentity();
       const secrets = auth.identitySecrets();
-      if (id === null || secrets === null) throw new KeyedError("invite.links.error.sign_in_revoke");
-      const slug = row.blobIdSlug;
-      const result = await discovery.revokeInvite(base64UrlDecodeNoPad(slug), id.ed25519Seed);
-      // ADR-0060 section 6: the link's reach key goes with it, so a request
-      // written under the link is dropped even by a joiner who fetched it.
-      const local = minted().get(slug);
-      if (local !== undefined) {
-        await reachSession()?.revokeLink(local.linkId);
-        await forgetMintedLink(base64Encode(secrets.accountId), "contact", slug);
+      if (secrets === null) throw new KeyedError("invite.links.error.sign_in_revoke");
+      // ADR-0078 section 10: signed by the link's own revocation seed; the
+      // link's reach key (ADR-0060 section 6) and the record go with it, so a
+      // request written under the link is dropped even by a joiner who
+      // fetched it.
+      const outcome = await revokeMintedLink(discovery, base64Encode(secrets.accountId), link);
+      if (outcome === "unreachable") {
+        throw new KeyedError("chat.error.revoke_link");
       }
-      // Both outcomes mean the row is gone server-side.
-      setInvites(invites().filter((i) => i.blobIdSlug !== row.blobIdSlug));
-      const label = row.label;
-      setNotice(() =>
-        result.kind === "revoked"
-          ? t("invite.links.revoked")
-          : label === null
-            ? t("invite.links.already_removed_unnamed")
-            : t("invite.links.already_removed", { label }),
-      );
+      forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), link.blobIdSlug);
+      setLinks(links().filter((l) => l.blobIdSlug !== link.blobIdSlug));
+      setNotice(() => t("invite.links.revoked"));
     } catch (err) {
       setError(contactsErrorText(err, "chat.error.revoke_link"));
     } finally {
@@ -435,14 +416,7 @@ export function InviteLinksPanel(): JSX.Element {
                     <span class="lk-meta">{row.meta()}</span>
                   </div>
                   <div class="lk-link-row" role="group" aria-label={row.label ?? t("chat.invite_link.label")}>
-                    <Show
-                      when={row.url}
-                      fallback={
-                        <span class="lk-link-text lk-muted">
-                          {t("invite.links.made_elsewhere_hint")}
-                        </span>
-                      }
-                    >
+                    <Show when={row.url}>
                       {(url) => (
                         <>
                           <span class="lk-link-text" title={url()}>

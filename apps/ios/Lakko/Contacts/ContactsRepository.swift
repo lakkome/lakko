@@ -1263,14 +1263,21 @@ public final class ContactsRepository: ObservableObject {
         // the clear fields; the link carries the secret in its fragment. A
         // contact invite has no inline form, so an upload failure is an error.
         let discovery = authenticatedDiscoveryClient()
+        // ADR-0078 section 10: the ledger row carries a key minted for this
+        // link alone, never the account key; the seed stays on this device.
+        let revocation: (seed: Data, publicKey: Data)
+        do {
+            revocation = try LinkRevocationKey.fresh()
+        } catch {
+            throw ContactsError.wrap(error)
+        }
         let blobId: Data
         do {
             blobId = try await discovery.uploadInvite(
                 mint: mint,
+                revocationPubkey: revocation.publicKey,
                 expiryMs: UInt64(expiryMs),
-                maxUses: maxUses,
-                label: label,
-                bootstrapReferral: bootstrapReferral
+                maxUses: maxUses
             )
         } catch {
             throw ContactsError.wrap(error)
@@ -1286,10 +1293,15 @@ public final class ContactsRepository: ObservableObject {
         let blobIdSlug = base64UrlEncodeNoPad(blobId)
         let url = InviteLinkSecret.link(
             base: "\(Self.inviteUrlPrefix)\(blobIdSlug)", secret: mint.linkSecret)
-        // The secret never leaves this device, so a link listed by the server
-        // later can be copied again only from here.
+        // The secret never leaves this device; with the revocation seed and
+        // what the list shows, this device's record is the only list of the
+        // account's links and the only key that revokes this one.
         InviteLinkSecretStore.shared.put(
             accountIdB64: base64Encode(secrets.accountId), slug: blobIdSlug, secret: mint.linkSecret)
+        OwnLinkStore.shared.put(accountIdB64: base64Encode(secrets.accountId), OwnLink(
+            kind: .contact, slug: blobIdSlug, revocationSeed: revocation.seed, label: label,
+            expiryMs: expiryMs, maxUses: Int64(maxUses), bootstrapReferral: bootstrapReferral,
+            mintedAtMs: nowMs))
         let invite = GeneratedInvite(
             blobId: blobId,
             blobIdSlug: blobIdSlug,
@@ -1305,9 +1317,10 @@ public final class ContactsRepository: ObservableObject {
         return invite
     }
 
-    /// Revoke an outstanding invite link via the discovery
-    /// service's owner-signed `DELETE` endpoint + drop the row
-    /// from ``ContactsState/outstandingInvites``.
+    /// Revoke an outstanding invite link via the discovery service's
+    /// `DELETE` endpoint, signed by the link's own revocation seed from this
+    /// device's record (ADR-0078 section 10), + drop the row from
+    /// ``ContactsState/outstandingInvites``.
     public func revokeInviteLink(blobId: Data) async throws -> RevokeInviteResult {
         guard let secrets = authRepository.identitySecrets else {
             throw ContactsError.wrap(
@@ -1316,18 +1329,23 @@ public final class ContactsRepository: ObservableObject {
                 )
             )
         }
-        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+        let accountIdB64 = base64Encode(secrets.accountId)
+        guard let own = OwnLinkStore.shared.link(
+            accountIdB64: accountIdB64, kind: .contact, slug: base64UrlEncodeNoPad(blobId)),
+              let seed = own.seed else {
+            throw ContactsError.wrap(ContactsError.simple(
+                "this device keeps no revocation key for that link"))
+        }
         let discovery = authenticatedDiscoveryClient()
         let bound = binding.capture()
         let result: RevokeInviteResult
         do {
-            result = try await discovery.revokeInvite(
-                blobId: blobId,
-                signingSeed: identity.ed25519Seed()
-            )
+            result = try await discovery.revokeInvite(blobId: blobId, signingSeed: seed)
         } catch {
             throw ContactsError.wrap(error)
         }
+        OwnLinkStore.shared.remove(
+            accountIdB64: accountIdB64, kind: .contact, slug: base64UrlEncodeNoPad(blobId))
         guard bound.isCurrent else {
             // Revoked on the server as the account that asked. This device's
             // secret for it is filed under that account and goes; the reach
@@ -1391,42 +1409,31 @@ public final class ContactsRepository: ObservableObject {
         let reach = ReachCenter.shared
         var owed = 0
 
-        // The keys that may have issued a link: this account's old ones,
-        // newest first.
-        let issuers = predecessorSeeds.reversed().compactMap {
-            try? Identity.fromSeed(seed: $0).ed25519Seed()
-        }
-        // Links.
-        var listed: [Data] = []
-        if !issuers.isEmpty {
-            do {
-                // Signed by the CURRENT key: the directory verifies the list
-                // query against the published identity.
-                if case .list(let rows) = try await listActiveInvites() {
-                    listed = rows.compactMap { base64UrlDecodeNoPad($0.blobIdSlug) }
-                }
-            } catch {
-                owed += 1
-            }
-        }
+        // ADR-0078 section 10: each link is revoked with its own revocation
+        // seed from this device's record; there is no owner list, so a link
+        // this device has no record of is another device's to revoke.
+        _ = predecessorSeeds
         let discovery = authenticatedDiscoveryClient()
-        for link in SpentGrants.linksToRevoke(spent: reach.spentLinks, listedInviteBlobIds: listed) {
+        for link in SpentGrants.linksToRevoke(spent: reach.spentLinks) {
+            let kind: OwnLink.Kind = link.call ? .call : .contact
+            let slug = base64UrlEncodeNoPad(link.blobId)
             var answers: [SpentGrants.RevokeAnswer] = []
-            for issuer in issuers {
+            if let seed = OwnLinkStore.shared.link(accountIdB64: accountIdB64, kind: kind, slug: slug)?.seed {
                 do {
                     let result = link.call
-                        ? try await discovery.revokeCallInvite(blobId: link.blobId, signingSeed: issuer)
-                        : try await discovery.revokeInvite(blobId: link.blobId, signingSeed: issuer)
+                        ? try await discovery.revokeCallInvite(blobId: link.blobId, signingSeed: seed)
+                        : try await discovery.revokeInvite(blobId: link.blobId, signingSeed: seed)
                     answers.append(result == .revoked ? .revoked : .notFoundOrNotOwner)
-                    if result == .revoked { break }
                 } catch {
                     answers.append(.failed)
                 }
             }
             guard boundAccountIdB64 == accountIdB64 else { throw SessionNotReady() }
-            let verdict = SpentGrants.linkVerdict(answers)
+            // No record: nothing this device can revoke; the reach key goes.
+            let verdict = answers.isEmpty ? SpentGrants.LinkVerdict.notOurs : SpentGrants.linkVerdict(answers)
             if verdict == .owed { owed += 1 }
             guard SpentGrants.dropsLocally(verdict, mintedHere: link.linkIdB64 != nil) else { continue }
+            OwnLinkStore.shared.remove(accountIdB64: accountIdB64, kind: kind, slug: slug)
             if let linkIdB64 = link.linkIdB64 { reach.forgetSpentLink(linkIdB64: linkIdB64) }
             if !link.call {
                 InviteLinkSecretStore.shared.remove(
@@ -1512,16 +1519,12 @@ public final class ContactsRepository: ObservableObject {
         authRepository.identitySecrets.map { base64Encode($0.accountId) }
     }
 
-    /// Owner-signed list of every live invite this account owns
-    /// across all devices (Phase 1.18d2b-list). Distinct from
-    /// ``ContactsState/outstandingInvites`` which only tracks
-    /// invites generated in the current session — the server-side
-    /// list is authoritative across the user's full device fleet.
+    /// The live `/i/` links this device minted and keeps a record of
+    /// (ADR-0078 section 10). No ledger row names its owner, so there is no
+    /// server list: a link minted on another device is listed there.
     ///
-    /// Throws ``ContactsError/wrapped`` when the session has no
-    /// identity secrets (caller should prompt the user to
-    /// re-enter their password) or when the discovery client
-    /// surfaces a transport failure.
+    /// Throws ``ContactsError/wrapped`` when the session has no identity
+    /// secrets (caller should prompt the user to re-enter their password).
     public func listActiveInvites() async throws -> ListInvitesResult {
         guard let secrets = authRepository.identitySecrets else {
             throw ContactsError.wrap(
@@ -1530,16 +1533,33 @@ public final class ContactsRepository: ObservableObject {
                 )
             )
         }
-        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
-        let discovery = authenticatedDiscoveryClient()
-        do {
-            return try await discovery.listInvitesByOwner(
-                accountId: secrets.accountId,
-                signingSeed: identity.ed25519Seed()
-            )
-        } catch {
-            throw ContactsError.wrap(error)
-        }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let iso = ISO8601DateFormatter()
+        let rows = OwnLinkStore.shared.all(accountIdB64: base64Encode(secrets.accountId))
+            .filter { $0.kind == .contact && !$0.isExpired(nowMs: nowMs) }
+            .map { link in
+                ActiveInvite(
+                    blobIdSlug: link.slug,
+                    expiryMs: UInt64(max(0, link.expiryMs)),
+                    maxUses: UInt32(clamping: link.maxUses),
+                    usedCount: 0,
+                    label: link.label,
+                    bootstrapReferral: link.bootstrapReferral,
+                    createdAt: iso.string(from: Date(timeIntervalSince1970: TimeInterval(link.mintedAtMs) / 1000)))
+            }
+        return .list(rows)
+    }
+
+    /// Revoke every live link this device keeps a record of, each with its
+    /// own revocation seed (ADR-0078 section 10). Account deletion runs this
+    /// first, while the session still works: the directory cannot delete an
+    /// account's links any more. Best effort; returns how many could not be
+    /// reached.
+    @discardableResult
+    public func revokeAllOwnLinks() async -> Int {
+        guard let secrets = authRepository.identitySecrets else { return 0 }
+        return await OwnLinks.revokeAll(
+            accountIdB64: base64Encode(secrets.accountId), discovery: authenticatedDiscoveryClient())
     }
 
     /// Default invite expiry — 7 days. Mirrors the Android +

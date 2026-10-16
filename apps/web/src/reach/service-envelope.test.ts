@@ -312,13 +312,15 @@ describe("adoptReachState", () => {
       [
         { cls: "contact", scopeHex: "", version: 4 },
         { cls: "fof", scopeHex: "", version: 2 },
-        { cls: "group", scopeHex: "", version: 9 }, // a scope that does not fit: skipped
+        { cls: "group", scopeHex: "", version: 9 }, // account-wide since ADR-0078
+        { cls: "member", scopeHex: "bb", version: 3 }, // a scope that does not fit: skipped
       ],
       77,
     );
     expect(reachStateEntries(next)).toEqual([
       { cls: "contact", scopeHex: "", version: 4 },
       { cls: "link", scopeHex: "aa", version: 1 },
+      { cls: "group", scopeHex: "", version: 9 },
       { cls: "fof", scopeHex: "", version: 2 },
     ]);
     expect(next.stateUpdatedAtMs).toBe(77);

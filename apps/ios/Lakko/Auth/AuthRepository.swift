@@ -446,12 +446,11 @@ public final class AuthRepository: ObservableObject {
         /// Re-publish this device's KeyPackage with a binding signed by the
         /// NEW account key. Throws when it did not land.
         var republishOwnKeyPackage: @MainActor (IdentitySecrets) async throws -> Void
-        /// Re-found the DeviceGroup and re-root its journal with the
-        /// attestation. Throws when the reset did not land.
-        /// `keyGeneration` is the attestation's: the root endorsement
-        /// (ADR-0074 section 4.6) binds it.
+        /// Re-found the DeviceGroup under the NEW account seed, which names
+        /// a new journal (ADR-0078 section 6), and claim it. Throws when the
+        /// claim did not land.
         var refoundDeviceGroup: @MainActor (
-            _ accountIdBytes: Data, _ accountIdB64: String, _ attestation: Data, _ keyGeneration: UInt64
+            _ accountIdBytes: Data, _ accountIdB64: String, _ accountSeed: Data
         ) async throws -> Void
 
         /// The defaults: the device binding is re-minted under the new
@@ -468,12 +467,11 @@ public final class AuthRepository: ObservableObject {
                         underlying: AuthClientError.argument("device binding could not be re-minted"))
                 }
             },
-            refoundDeviceGroup: { accountIdBytes, accountIdB64, attestation, keyGeneration in
+            refoundDeviceGroup: { accountIdBytes, accountIdB64, accountSeed in
                 try await DeviceGroupDsAccess.refoundAfterKeyReset(
                     accountIdBytes: accountIdBytes,
                     accountIdB64: accountIdB64,
-                    attestation: attestation,
-                    keyGeneration: keyGeneration,
+                    accountSeed: accountSeed,
                     ds: DsClient())
             }
         )
@@ -3078,8 +3076,10 @@ public final class AuthRepository: ObservableObject {
         if let endingPair { logoutAtServer(endingPair) }
         // 1.20c — fire-and-forget unsubscribe so the next page
         // reload doesn't silently keep accepting pushes against
-        // a logged-out session.
-        Task { await PushSubscriber.shared.unsubscribe(prepaidToken: unregisterToken) }
+        // a logged-out session. ADR-0078: the account's push-gw rows are
+        // named by the subscription ids in its route rows, which a logout
+        // keeps, so they are read inside.
+        Task { await PushSubscriber.shared.unsubscribe(accountIdB64: leaving, prepaidToken: unregisterToken) }
         // Last, after the runtimes let go above: wait for this account's
         // store writes in flight and refuse the later ones until it lands
         // here again. Nothing is deleted.
@@ -3145,12 +3145,13 @@ public final class AuthRepository: ObservableObject {
         state = .anon(cachedUsername: nil)
         if let endingPair { logoutAtServer(endingPair) }
         // 1.20c — full wipe of push state too. The contract is
-        // "leave NOTHING per-account behind on this device", so
-        // we both unregister server-side and clear the Keychain
-        // pseudonym. Best-effort fire-and-forget — the local
-        // clear inside `unsubscribe` runs regardless of the
-        // server leg outcome.
-        Task { await PushSubscriber.shared.unsubscribe(prepaidToken: unregisterToken) }
+        // "leave NOTHING per-account behind on this device", so the
+        // account's push-gw rows are removed (ADR-0078: by the subscription
+        // ids the wipe handed over before it cleared the route rows) and the
+        // device's tokens forgotten. Best-effort fire-and-forget — the local
+        // clear inside `unsubscribe` runs regardless of the server leg
+        // outcome.
+        Task { await PushSubscriber.shared.unsubscribe(accountIdB64: nil, prepaidToken: unregisterToken) }
     }
 
     // MARK: - Push integration helpers
@@ -5227,6 +5228,12 @@ public final class AuthRepository: ObservableObject {
             newSignaturePubkey: newPubkey
         )
         markers.markPublishOwed(record, accountIdB64: accountIdB64)
+        // ADR-0074 section 3.5: a reset makes every predecessor, proven or
+        // not, a superseded key (web `deleteKeyRotationState` on the same
+        // step). ADR-0078 section 6: the DeviceGroup id is derived from the
+        // oldest predecessor while one is held, so a kept one would name the
+        // OLD DeviceGroup instead of the one the new seed founds.
+        ownPredecessors.clear(accountIdB64: accountIdB64)
         gate.leave()
 
         switch landing {
@@ -5723,7 +5730,7 @@ public final class AuthRepository: ObservableObject {
                     try await keyResetHooks.republishOwnKeyPackage(secrets)
                 case .deviceGroup:
                     try await keyResetHooks.refoundDeviceGroup(
-                        accountIdBytes, accountIdB64, record.attestation, record.keyGeneration)
+                        accountIdBytes, accountIdB64, accountIdentitySeed)
                 }
             } catch {
                 if KeyResetVerifyFailure.isStale(error) {

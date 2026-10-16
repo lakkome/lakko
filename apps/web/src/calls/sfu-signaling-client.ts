@@ -54,14 +54,11 @@ import {
 
 // ---- Typed server frames ------------------------------------------
 
-/** Roster entry in a {@link SfuWelcome}. */
+/** Roster entry in a {@link SfuWelcome}: the peer id only. Who the peer is
+ *  comes from its own sealed, signed announcement over `signal-relay`
+ *  (ADR-0078 section 2, `call-relay.ts`); the SFU knows no account. */
 export interface SfuPeerSnapshot {
   readonly peer_id: string;
-  readonly account_pseudonym: string;
-  /** Per-call peer tag (ADR-0021). Re-derive `sfuPeerTag(call_id,
-   *  account_id)` over a contact's account id and match to resolve this
-   *  entry to a name. Optional — absent from a pre-ADR-0021 SFU. */
-  readonly peer_tag?: string;
 }
 
 /** Machine-readable SFU error code (kebab-case wire form). */
@@ -80,17 +77,17 @@ export type SfuErrorCode =
 
 export interface SfuWelcome {
   readonly kind: "welcome";
+  /** This connection's peer id: the random `peer_id` of its admission
+   *  token, the value the device announces to the other members. */
   readonly peer_id: string;
-  readonly call_id: string;
+  /** The room (the token's `room`). */
+  readonly room: string;
   readonly roster: readonly SfuPeerSnapshot[];
   readonly server_ts: number;
 }
 export interface SfuPeerJoined {
   readonly kind: "peer-joined";
   readonly peer_id: string;
-  readonly account_pseudonym: string;
-  /** Per-call peer tag (ADR-0021) — see {@link SfuPeerSnapshot.peer_tag}. */
-  readonly peer_tag?: string;
 }
 export interface SfuPeerLeft {
   readonly kind: "peer-left";

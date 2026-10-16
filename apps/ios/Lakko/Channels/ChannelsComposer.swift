@@ -126,9 +126,16 @@ public enum ChannelsComposer {
         identity: Identity,
         accountIdB64: String?,
         channelIdHex: String,
-        existingSigningSeed: Data? = nil
+        existingSigningSeed: Data? = nil,
+        joinedGroupId: Data? = nil
     ) throws -> ChannelPublisherKeys {
         let channelId = try channelIdFromHex(channelIdHex)
+        // ADR-0078 section 6 — a co-published channel's group id is the
+        // OWNER's derivation, which this account cannot compute: it is opened
+        // under the id the co-publisher link conveyed (`joinedGroupId`, or the
+        // one ``CoPublishedJournals`` recorded for the channel), never created.
+        let coPublishedId = joinedGroupId ?? CoPublishedJournals.shared
+            .journalIdHex(channelIdHex: channelIdHex).flatMap(CoPublisher.hexToData)
 
         // G4-2-mls-persistence step 3 — load-or-create the
         // PublisherGroup keyed by `channelId`. The first
@@ -149,7 +156,13 @@ public enum ChannelsComposer {
             // ADR-0057 — a PublisherGroup founded here is marked, so its first
             // journal claim may reset one the same root claimed before.
             let group: PublisherGroup
-            if let existing = try LakkoCore.publisherGroupLoad(identity: identity, channelId: channelId) {
+            if let coPublishedId {
+                guard let joined = try LakkoCore.publisherGroupLoadJoined(
+                    identity: identity, groupId: coPublishedId, channelId: channelId) else {
+                    throw ChannelsComposerError.ffi("the co-published group is not in this provider")
+                }
+                group = joined
+            } else if let existing = try LakkoCore.publisherGroupLoad(identity: identity, channelId: channelId) {
                 group = existing
             } else {
                 group = try LakkoCore.publisherGroupOpenOrCreate(

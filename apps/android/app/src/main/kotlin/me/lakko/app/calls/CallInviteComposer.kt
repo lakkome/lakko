@@ -62,6 +62,12 @@ public class CallInviteComposer(
         /** The sealed link bytes (what the ledger holds, or what the inline
          *  slug carries); the plaintext capability never leaves the device. */
         val capabilityBytes: ByteArray,
+        /** ADR-0078 section 10: the seed of the link's own revocation key,
+         *  which the caller keeps in its [me.lakko.app.contacts.OwnLinkStore]
+         *  record; the ledger holds only its public half. */
+        val revocationSeed: ByteArray = ByteArray(0),
+        /** The capability's expiry (UNIX ms). */
+        val expiryMs: Long = 0,
     ) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -142,11 +148,14 @@ public class CallInviteComposer(
         )
 
         // ---- 3. uploadCallInvite via HTTP ----------------------
+        // ADR-0078 section 10: the row carries a key minted for this link
+        // alone, never the owner's identity key.
+        val (revocationSeed, revocationPubkey) = me.lakko.app.contacts.OwnLinks.freshRevocationKey()
         val blobId: ByteArray? = try {
             discoveryClient.uploadCallInvite(
                 SealedInviteUpload(
                     sealed = mint.sealed,
-                    issuerPubkey = mint.issuerPubkey,
+                    revocationPubkey = revocationPubkey,
                     expiryMs = expiryMs,
                     maxUses = maxUses.toLong(),
                 ),
@@ -169,6 +178,8 @@ public class CallInviteComposer(
                 lengths = lengths,
             ),
             capabilityBytes = mint.sealed,
+            revocationSeed = revocationSeed,
+            expiryMs = expiryMs,
         )
     }
 }

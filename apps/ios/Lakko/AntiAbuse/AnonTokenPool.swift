@@ -7,14 +7,22 @@ import LakkoCore
 /// The in-memory pool of anonymous tokens, per (account, context)
 /// (ADR-0054 S3).
 ///
-/// * Refilled in the background with the session when a context drops below
-///   its ``AnonTokenContext/lowWater``, in batches of its
-///   ``AnonTokenContext/batchSize``, never holding more than ``maxHeld``.
-///   Issuance runs ahead of need, so drawing and spending are not correlated
-///   in time.
-/// * An action with no token at hand waits for the refill as part of its
-///   normal loading state, at most ``waitSeconds``, then fails with the
-///   network copy (``AnonTokenUnavailable/timedOut``).
+/// * Refilled on a randomised schedule that never looks at spending
+///   (ADR-0078 section 8): when a session is bound, each context is topped
+///   up once at a random moment within ``initialRefillSpread`` seconds, then
+///   at independent random intervals between ``refillIntervalMin`` and
+///   ``refillIntervalMax``, each time to its ``AnonTokenContext/poolTarget``
+///   (about a day of use plus a reserve) in one issuance, never holding more
+///   than ``maxHeld``. A take never starts an issuance: before ADR-0078 a
+///   take below a low-water mark did, so the bearer issuance landed seconds
+///   from the anonymous spend it refilled for.
+/// * An action with no token at hand waits only for a refill the schedule
+///   already runs (this session's first one, or one in flight), at most
+///   ``waitSeconds``, then fails with the network copy until the next
+///   scheduled refill.
+/// * The issuance travels on the session-bearing `URLSession` and every spend
+///   on ``AnonymousHTTP/session`` (its own ephemeral session), so the two
+///   never share a connection.
 /// * A token is live while `anonTokenIsLive(token.epoch, currentEpoch)`; the
 ///   current epoch is `anonTokenEpochAt(now, window)` corrected by the
 ///   issuer's `current_epoch` whenever it disagrees.
@@ -47,6 +55,13 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
 
     /// Never hold more than this per context.
     public static let maxHeld = 32
+    /// A context's first refill after a session is bound falls at a random
+    /// moment within this many seconds.
+    public static let initialRefillSpread: TimeInterval = 20
+    /// After that, a context is topped up at independent random intervals
+    /// between these (seconds). Chosen, not measured.
+    public static let refillIntervalMin: TimeInterval = 30 * 60
+    public static let refillIntervalMax: TimeInterval = 90 * 60
     /// How long an action waits for a refill before failing.
     public static let defaultWaitSeconds: TimeInterval = 8
 
@@ -55,6 +70,8 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
     private let now: @Sendable () -> Date
     private let windowSecs: UInt64
     private let waitSeconds: TimeInterval
+    private let random: @Sendable () -> Double
+    private let sleep: @Sendable (TimeInterval) async -> Void
 
     private let lock = NSLock()
     private var accountKey: String?
@@ -65,6 +82,11 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
     private var generation = 0
     private var stock: [AnonTokenContext: [AnonToken]] = [:]
     private var refills: [AnonTokenContext: Task<Void, Never>] = [:]
+    /// The refill schedule of each context, for the bound session.
+    private var schedules: [AnonTokenContext: Task<Void, Never>] = [:]
+    /// The contexts whose first scheduled refill of this binding has not run
+    /// yet: a take on an empty context waits for it.
+    private var initialPending: Set<AnonTokenContext> = []
     private var lastFailure: [AnonTokenContext: AnonTokenUnavailable] = [:]
     private var quotaUntil: [AnonTokenContext: Date] = [:]
     /// The issuer's epoch minus this device's, learned from `epoch-not-issuable`.
@@ -77,13 +99,19 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
         store: AnonTokenStore? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         windowSecs: UInt64 = anonTokenDefaultWindowSecs(),
-        waitSeconds: TimeInterval = AnonTokenPool.defaultWaitSeconds
+        waitSeconds: TimeInterval = AnonTokenPool.defaultWaitSeconds,
+        random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
+        sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+        }
     ) {
         self.issuer = issuer
         self.store = store
         self.now = now
         self.windowSecs = windowSecs
         self.waitSeconds = waitSeconds
+        self.random = random
+        self.sleep = sleep
     }
 
     /// Replace the issuer refills are drawn from. A seam for the test bundle:
@@ -113,6 +141,9 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
             generation += 1
             for task in refills.values { task.cancel() }
             refills = [:]
+            for task in schedules.values { task.cancel() }
+            schedules = [:]
+            initialPending = []
             stock = [:]
             lastFailure = [:]
             quotaUntil = [:]
@@ -129,6 +160,58 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
             }
         }
         self.sessionToken = accountKey == nil ? nil : token
+        if self.sessionToken != nil, schedules.isEmpty, !forgotten {
+            startScheduleLocked()
+        }
+    }
+
+    // MARK: - The refill schedule (ADR-0078 section 8)
+
+    /// Arm every context's schedule for the bound session: a first refill at
+    /// a random moment within ``initialRefillSpread``, then one at a random
+    /// interval between ``refillIntervalMin`` and ``refillIntervalMax``,
+    /// for as long as the binding lasts. Called with the lock held.
+    private func startScheduleLocked() {
+        let generation = self.generation
+        initialPending = Set(AnonTokenContext.allCases)
+        for context in AnonTokenContext.allCases {
+            let first = random() * Self.initialRefillSpread
+            schedules[context] = Task { [weak self] in
+                var delay = first
+                while !Task.isCancelled {
+                    guard let self else { return }
+                    await self.sleep(delay)
+                    if Task.isCancelled { return }
+                    await self.scheduledRefill(context, generation: generation)
+                    let span = Self.refillIntervalMax - Self.refillIntervalMin
+                    delay = Self.refillIntervalMin + self.random() * span
+                }
+            }
+        }
+    }
+
+    /// One scheduled top-up of `context` to its target, then the end of its
+    /// first-refill wait.
+    private func scheduledRefill(_ context: AnonTokenContext, generation: Int) async {
+        let task: Task<Void, Never>? = lock.withLock {
+            guard generation == self.generation else { return nil }
+            pruneLocked(context)
+            if (stock[context]?.count ?? 0) >= context.poolTarget { return nil }
+            return try? startRefillLocked(context)
+        }
+        if let task { await task.value }
+        lock.withLock {
+            if generation == self.generation { initialPending.remove(context) }
+        }
+    }
+
+    /// Run a scheduled top-up of every context now (what the schedule does
+    /// one context at a time; tests and diagnostics).
+    public func runScheduledRefills() async {
+        let generation = lock.withLock { self.generation }
+        for context in AnonTokenContext.allCases {
+            await scheduledRefill(context, generation: generation)
+        }
     }
 
     /// Unbind (logout): drop the in-memory tokens. The stored ones stay for
@@ -151,6 +234,9 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
             forgotten = true
             for task in refills.values { task.cancel() }
             refills = [:]
+            for task in schedules.values { task.cancel() }
+            schedules = [:]
+            initialPending = []
             generation += 1
         }
         store?.delete(accountKey: accountKey)
@@ -176,10 +262,30 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
 
     public func take(_ context: AnonTokenContext) async throws -> AnonToken {
         let binding = lock.withLock { generation }
-        if let token = popAndTopUp(context, binding: binding) { return token }
-        let task = try startRefill(context)
-        await Self.wait(for: task, atMost: waitSeconds)
-        if let token = popAndTopUp(context, binding: binding) { return token }
+        if let token = pop(context, binding: binding) { return token }
+        // ADR-0078 section 8: a take never starts an issuance. It may wait for
+        // one the schedule already runs.
+        let pending: Task<Void, Never>? = try lock.withLock {
+            guard sessionToken != nil else { throw AnonTokenUnavailable.noSession }
+            if let until = quotaUntil[context], until.timeIntervalSince(now()) > 0 {
+                throw AnonTokenUnavailable.quotaExhausted(
+                    retryAfterSecs: Int(until.timeIntervalSince(now()).rounded(.up)))
+            }
+            if let running = refills[context] { return running }
+            if initialPending.contains(context) { return schedules[context] }
+            return nil
+        }
+        if let pending {
+            await Self.waitUntil(atMost: waitSeconds) { [weak self] in
+                guard let self else { return true }
+                return self.lock.withLock {
+                    pending.isCancelled
+                        || !(self.initialPending.contains(context) || self.refills[context] != nil)
+                        || (self.stock[context]?.isEmpty == false)
+                }
+            }
+        }
+        if let token = pop(context, binding: binding) { return token }
         let failure: AnonTokenUnavailable? = lock.withLock {
             // The account changed while this request waited: its tokens are
             // another account's now, and so is any failure.
@@ -190,29 +296,20 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
 
     /// A token for the binding `binding` names, or `nil` once the pool has
     /// been rebound (another account's tokens are never handed out here).
-    private func popAndTopUp(_ context: AnonTokenContext, binding: Int) -> AnonToken? {
-        lock.lock()
-        guard generation == binding else {
-            lock.unlock()
-            return nil
+    /// Never starts a refill (ADR-0078 section 8).
+    private func pop(_ context: AnonTokenContext, binding: Int) -> AnonToken? {
+        lock.withLock {
+            guard generation == binding else { return nil }
+            return popLocked(context)
         }
-        let token = popLocked(context)
-        let low = (stock[context]?.count ?? 0) < context.lowWater
-        lock.unlock()
-        if token != nil, low {
-            _ = try? startRefill(context)
-        }
-        return token
     }
 
     // MARK: - Refill
 
     /// The refill in flight for `context`, starting one when there is none.
     /// Throws when no refill can start: no session, or the allowance is known
-    /// to be used up.
-    private func startRefill(_ context: AnonTokenContext) throws -> Task<Void, Never> {
-        lock.lock()
-        defer { lock.unlock() }
+    /// to be used up. Called with the lock held, by the schedule only.
+    private func startRefillLocked(_ context: AnonTokenContext) throws -> Task<Void, Never> {
         if let running = refills[context] { return running }
         guard let sessionToken else { throw AnonTokenUnavailable.noSession }
         if let until = quotaUntil[context] {
@@ -224,7 +321,8 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
         }
         pruneLocked(context)
         let held = stock[context]?.count ?? 0
-        let wanted = min(context.batchSize, Self.maxHeld - held)
+        // A top-up to the target, in one issuance.
+        let wanted = min(context.poolTarget - held, Self.maxHeld - held)
         if wanted <= 0 {
             // Full: nothing to fetch. A waiting caller finds a token right away.
             return Task {}
@@ -350,35 +448,15 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
         store.save(accountKey: accountKey, context: context, tokens: stock[context] ?? [])
     }
 
-    /// Await `task`, but no longer than `seconds`. The refill itself keeps
-    /// running when the wait gives up. (Not a task group: a group waits for
-    /// every child on exit, and a child awaiting an unstructured task's value
-    /// cannot be cancelled out of that wait.)
-    private static func wait(for task: Task<Void, Never>, atMost seconds: TimeInterval) async {
-        let once = ResumeOnce()
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            Task {
-                await task.value
-                if once.claim() { continuation.resume() }
-            }
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
-                if once.claim() { continuation.resume() }
-            }
-        }
-    }
-}
-
-/// Lets exactly one of two racers resume a continuation.
-private final class ResumeOnce: @unchecked Sendable {
-    private let lock = NSLock()
-    private var claimed = false
-
-    func claim() -> Bool {
-        lock.withLock {
-            if claimed { return false }
-            claimed = true
-            return true
+    /// Wait until `done()` answers true, checking every 20 ms, but no longer
+    /// than `seconds`. The refill itself keeps running when the wait gives up.
+    private static func waitUntil(
+        atMost seconds: TimeInterval,
+        _ done: @escaping @Sendable () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(max(0, seconds))
+        while !done(), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
         }
     }
 }

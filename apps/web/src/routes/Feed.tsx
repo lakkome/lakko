@@ -112,7 +112,7 @@ import { ForwardPicker } from "../chat/ForwardPicker";
 import type { ForwardPickerRow } from "../chat/forward-picker";
 import { MESSAGE_LOG_VERSION, updateMessageLog, type PersistedMessage } from "../chat/message-log-store";
 import { dsClockSkewNotice } from "../ds/access";
-import { pushGidForGroup } from "../push/group-routing";
+import { sealedWakeForGroup } from "../push/group-routing";
 import { feedForwardPayload } from "../feed/feed-forward";
 import { feedIconName, PRESET_ICONS } from "../feed/feed-icons";
 import {
@@ -870,10 +870,10 @@ export default function Feed(): JSX.Element {
     identityProvider: () => chats.identity(),
     onPersist: durableSnapshotHook(chats, accountId),
     // ADR-0042 — the wake goes under the opaque routing id, as from the chat.
-    pushGidResolver: async (groupId) => {
+    wakeSealer: async (groupId, kind) => {
       const account = accountId();
       if (account === null) return null;
-      return pushGidForGroup(account, base64Encode(groupId));
+      return sealedWakeForGroup(account, base64Encode(groupId), kind);
     },
   });
   const [forwarding, setForwarding] = createSignal<FeedCandidateRef | null>(null);

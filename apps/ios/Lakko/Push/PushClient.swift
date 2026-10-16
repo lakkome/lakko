@@ -11,19 +11,20 @@ import LakkoCore
 ///   * `apps/web/src/push/client.ts` (1.20b)
 ///   * `apps/android/.../push/PushClient.kt` (1.20d)
 ///
-/// The user-device side registers tokens and group subscriptions; it never
-/// asks for a wake. ADR-0054 decision 1 moved the group wake into the signed
-/// DS publish (`x-lakko-wake`, see ``DsWake``): the DS forwards it to push-gw
-/// over the internal network after appending the row, so no client calls
-/// `/push/notify-group` and `/push/notify` is gone. Endpoints used here:
+/// The user-device side stores sealed group subscriptions; it never asks for
+/// a wake. ADR-0054 decision 1 moved the group wake into the signed DS publish
+/// (`x-lakko-wake`, see ``DsWake``): the DS forwards it to push-gw over the
+/// internal network after appending the row. Since ADR-0078 section 3 push-gw
+/// holds no device pseudonym and no token in the clear. Endpoints used here:
 ///
-///   * `POST /push/register` — bind a
-///     `(device_pseudonym, provider)` pair to a platform-specific
-///     token blob. Idempotent: re-register overwrites the prior
-///     token (clients rotate after APNs rebuild / FCM token
-///     refresh / Web Push subscription change).
-///   * `POST /push/unregister` — drop a token. Called on
-///     logout + forgetDevice.
+///   * `POST /push/subscribe` — store (or replace) one sealed subscription
+///     `{sub_id, push_gid, wake_pk, sealed}`; `sealed` is this device's
+///     tokens sealed under the group's unlock key
+///     (`LakkoCore.sealPushSubscription`), `sub_id` 16 random bytes this
+///     device keeps per subscription. Re-sending an id replaces its row,
+///     which is how a new token reaches push-gw.
+///   * `POST /push/unsubscribe` — drop one row by its `sub_id`.
+///   * `GET /push/wake-key` — the X25519 key every wake is sealed to.
 ///
 /// ## Auth posture (ADR-0054 S3)
 ///
@@ -44,39 +45,11 @@ public final class PushClient {
 
     public static var defaultBaseURL: String { ApiEndpoints.baseURL(for: .pushGw) }
 
-    /// Raw device pseudonym length — 32 bytes, 64 lowercase hex
-    /// chars on the wire (mirror of `services/push-gw`'s
-    /// `DEVICE_LEN`).
-    public static let devicePseudonymLength: Int = 32
+    /// Length of a subscription id (mirror of `PUSH_SUBSCRIPTION_ID_LEN`).
+    public static let subscriptionIdLength: Int = 16
 
-    /// Provider names as the server serialises them
-    /// (snake_case via `#[serde(rename_all = "snake_case")]`
-    /// on `ProviderKind` in `services/push-gw/src/provider.rs`).
-    public enum Provider: String, Codable {
-        case apns
-        case fcm
-        case webPush = "web_push"
-        case unifiedPush = "unified_push"
-        /// PushKit VoIP tokens (`docs/ux/calls.md` section 2.1).
-        ///
-        /// A SECOND, separate token for the same device: a VoIP push must be
-        /// sent to the PushKit token with `apns-push-type: voip` and a VoIP
-        /// services certificate, and APNs refuses it for the alert token. So it
-        /// is its own provider row rather than an overwrite of ``apns``.
-        ///
-        /// **The server does not accept this value yet.** `ProviderKind` in
-        /// `services/push-gw/src/provider.rs` has four variants and no
-        /// `apns_voip`, so `POST /push/register` rejects the body outright.
-        /// The client is deliberately complete anyway — the registration is
-        /// best-effort and its failure is logged, never fatal — so that the
-        /// server work is a server change with no client change. What it needs:
-        /// a fifth `ProviderKind` (db value 5, never renumbering the four),
-        /// an `ApnsVoipProvider` (or a flag on the existing one) that sends
-        /// `apns-push-type: voip` to `<bundle id>.voip` as the topic with a
-        /// VoIP certificate, and a call wake fanning out to the VoIP row
-        /// *instead of* the alert row when one exists for the device.
-        case apnsVoip = "apns_voip"
-    }
+    /// Length of a `push_gid`, a wake public key and push-gw's wake key.
+    public static let keyLength: Int = 32
 
     public let baseURL: String
     /// The anonymous session every push-gw route travels on.
@@ -97,131 +70,75 @@ public final class PushClient {
         self.decoder = JSONDecoder()
     }
 
-    // MARK: - Register
+    // MARK: - Subscriptions (ADR-0078)
 
-    /// Bind `(devicePseudonym, provider) → tokenBytes`.
-    /// Idempotent: re-register with a fresh `tokenBytes`
-    /// overwrites the prior bytes.
-    ///
-    /// - Parameters:
-    ///   - devicePseudonym: 32-byte stable per-device handle.
-    ///     Derive once per device + persist locally; see
-    ///     ``DevicePushId``.
-    ///   - provider: Which delivery path this token is for —
-    ///     ``Provider/apns`` for iOS / iPadOS / macOS.
-    ///   - tokenBytes: Provider-opaque token blob. For APNs
-    ///     this is the raw 32-byte device token the OS handed
-    ///     us in
-    ///     `application(_:didRegisterForRemoteNotificationsWithDeviceToken:)`.
-    public func register(
-        devicePseudonym: Data,
-        provider: Provider,
-        tokenBytes: Data
+    /// Store (or replace) one sealed subscription.
+    public func subscribe(
+        subId: Data,
+        pushGid: Data,
+        wakePk: Data,
+        sealed: Data
     ) async throws {
-        guard devicePseudonym.count == Self.devicePseudonymLength else {
-            throw PushClientError.argument(
-                "devicePseudonym must be \(Self.devicePseudonymLength) bytes"
-            )
+        guard subId.count == Self.subscriptionIdLength else {
+            throw PushClientError.argument("subId must be \(Self.subscriptionIdLength) bytes")
         }
-        guard !tokenBytes.isEmpty else {
-            throw PushClientError.argument("tokenBytes must be non-empty")
+        guard pushGid.count == Self.keyLength, wakePk.count == Self.keyLength else {
+            throw PushClientError.argument("pushGid and wakePk must be \(Self.keyLength) bytes")
         }
-        let req = PushRegisterRequest(
-            device_pseudonym: Self.pseudonymHex(devicePseudonym),
-            provider: provider,
-            token: tokenBytes.base64EncodedString()
+        guard !sealed.isEmpty else {
+            throw PushClientError.argument("sealed must be non-empty")
+        }
+        let req = SubscribeRequest(
+            sub_id: Self.base64UrlNoPad(subId),
+            push_gid: Self.base64UrlNoPad(pushGid),
+            wake_pk: Self.base64UrlNoPad(wakePk),
+            sealed: Self.base64UrlNoPad(sealed)
         )
-        let resp: PushRegisterResponse = try await post(
-            endpoint: "/push/register",
-            body: req
-        )
+        let resp: OkResponse = try await post(endpoint: "/push/subscribe", body: req)
         guard resp.ok else {
             throw PushClientError.http(
-                status: 200,
-                endpoint: "/push/register",
-                body: "server reported ok=false"
-            )
+                status: 200, endpoint: "/push/subscribe", body: "server reported ok=false")
         }
     }
 
-    // MARK: - Group fan-out (Phase 1.20e)
-
-    /// Subscribe this device to push wakes for `groupPseudonym`.
-    /// Idempotent: a re-subscribe with the same `(device, group)`
-    /// pair returns `inserted = false`.
-    public func subscribeGroup(
-        devicePseudonym: Data,
-        groupPseudonym: Data
-    ) async throws -> Bool {
-        guard devicePseudonym.count == Self.devicePseudonymLength else {
-            throw PushClientError.argument(
-                "devicePseudonym must be \(Self.devicePseudonymLength) bytes"
-            )
-        }
-        guard groupPseudonym.count == Self.devicePseudonymLength else {
-            throw PushClientError.argument(
-                "groupPseudonym must be \(Self.devicePseudonymLength) bytes"
-            )
-        }
-        let req = GroupSubscribeRequest(
-            device_pseudonym: Self.pseudonymHex(devicePseudonym),
-            group_pseudonym: Self.pseudonymHex(groupPseudonym)
-        )
-        let resp: GroupSubscribeResponse = try await post(
-            endpoint: "/push/group/subscribe",
-            body: req
-        )
-        return resp.inserted
-    }
-
-    /// Drop a `(device, group)` subscription. Idempotent.
-    public func unsubscribeGroup(
-        devicePseudonym: Data,
-        groupPseudonym: Data
-    ) async throws -> Bool {
-        guard devicePseudonym.count == Self.devicePseudonymLength,
-              groupPseudonym.count == Self.devicePseudonymLength
-        else {
-            throw PushClientError.argument("pseudonyms must be 32 bytes")
-        }
-        let req = GroupUnsubscribeRequest(
-            device_pseudonym: Self.pseudonymHex(devicePseudonym),
-            group_pseudonym: Self.pseudonymHex(groupPseudonym)
-        )
-        let resp: GroupUnsubscribeResponse = try await post(
-            endpoint: "/push/group/unsubscribe",
-            body: req
-        )
-        return resp.removed
-    }
-
-    // MARK: - Unregister
-
-    /// Drop a previously-registered token. Idempotent: returns
-    /// `removed: false` if the row was already gone.
+    /// Drop one subscription by its id. Idempotent: `false` when it was
+    /// already gone.
     ///
     /// `prepaidToken`: a `push-register` token taken before the session ended
     /// (logout clears the pool, so the caller takes one first).
-    public func unregister(
-        devicePseudonym: Data,
-        provider: Provider,
-        prepaidToken: AnonToken? = nil
-    ) async throws -> Bool {
-        guard devicePseudonym.count == Self.devicePseudonymLength else {
-            throw PushClientError.argument(
-                "devicePseudonym must be \(Self.devicePseudonymLength) bytes"
-            )
+    @discardableResult
+    public func unsubscribe(subId: Data, prepaidToken: AnonToken? = nil) async throws -> Bool {
+        guard subId.count == Self.subscriptionIdLength else {
+            throw PushClientError.argument("subId must be \(Self.subscriptionIdLength) bytes")
         }
-        let req = UnregisterRequest(
-            device_pseudonym: Self.pseudonymHex(devicePseudonym),
-            provider: provider
-        )
-        let resp: UnregisterResponse = try await post(
-            endpoint: "/push/unregister",
-            body: req,
+        let resp: UnsubscribeResponse = try await post(
+            endpoint: "/push/unsubscribe",
+            body: UnsubscribeRequest(sub_id: Self.base64UrlNoPad(subId)),
             tokens: prepaidToken.map { PrepaidAnonToken($0, then: tokens) } ?? tokens
         )
         return resp.removed
+    }
+
+    /// push-gw's X25519 wake key. No token: it is public.
+    public func wakeKey() async throws -> Data {
+        let url = try buildURL(endpoint: "/push/wake-key")
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await AntiCensorshipTransport.perform(
+                URLRequest(url: url), session: session, config: .current)
+        } catch {
+            throw PushClientError.network(endpoint: "/push/wake-key", underlying: error)
+        }
+        guard let http = raw.1 as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw PushClientError.http(
+                status: (raw.1 as? HTTPURLResponse)?.statusCode ?? 0,
+                endpoint: "/push/wake-key", body: "no wake key")
+        }
+        guard let body = try? decoder.decode(WakeKeyResponse.self, from: raw.0),
+              let key = base64UrlDecodeNoPad(body.key), key.count == Self.keyLength else {
+            throw PushClientError.http(status: http.statusCode, endpoint: "/push/wake-key", body: "malformed key")
+        }
+        return key
     }
 
     // MARK: - Internal HTTP
@@ -310,21 +227,14 @@ public final class PushClient {
         return s
     }
 
-    /// Lowercase-hex encode the 32-byte device pseudonym for the
-    /// wire form `services/push-gw` expects.
-    public static func pseudonymHex(_ bytes: Data) -> String {
-        var out = String()
-        out.reserveCapacity(bytes.count * 2)
-        for b in bytes {
-            let hi = Int(b >> 4) & 0x0F
-            let lo = Int(b) & 0x0F
-            out.append(hexAlphabet[hi])
-            out.append(hexAlphabet[lo])
-        }
-        return out
+    /// RFC 4648 section 5 base64url, padding stripped (the push-gw wire form).
+    static func base64UrlNoPad(_ bytes: Data) -> String {
+        var s = bytes.base64EncodedString()
+        s = s.replacingOccurrences(of: "+", with: "-")
+        s = s.replacingOccurrences(of: "/", with: "_")
+        while s.hasSuffix("=") { s.removeLast() }
+        return s
     }
-
-    private static let hexAlphabet: [Character] = Array("0123456789abcdef")
 }
 
 // MARK: - Wire shapes
@@ -333,45 +243,28 @@ public final class PushClient {
 // Snake-case stored properties so the default `JSONEncoder`
 // serialises the field names exactly as the server expects
 // (no `convertToSnakeCase` round-trip ambiguity).
-private struct PushRegisterRequest: Encodable {
-    let device_pseudonym: String
-    let provider: PushClient.Provider
-    let token: String
+private struct SubscribeRequest: Encodable {
+    let sub_id: String
+    let push_gid: String
+    let wake_pk: String
+    let sealed: String
 }
 
-private struct PushRegisterResponse: Decodable {
+private struct OkResponse: Decodable {
     let ok: Bool
 }
 
-private struct UnregisterRequest: Encodable {
-    let device_pseudonym: String
-    let provider: PushClient.Provider
+private struct UnsubscribeRequest: Encodable {
+    let sub_id: String
 }
 
-private struct UnregisterResponse: Decodable {
-    let ok: Bool
-    let removed: Bool
-}
-
-// 1.20e — group fan-out wire shapes.
-private struct GroupSubscribeRequest: Encodable {
-    let device_pseudonym: String
-    let group_pseudonym: String
-}
-
-private struct GroupSubscribeResponse: Decodable {
-    let ok: Bool
-    let inserted: Bool
-}
-
-private struct GroupUnsubscribeRequest: Encodable {
-    let device_pseudonym: String
-    let group_pseudonym: String
-}
-
-private struct GroupUnsubscribeResponse: Decodable {
+private struct UnsubscribeResponse: Decodable {
     let ok: Bool
     let removed: Bool
+}
+
+private struct WakeKeyResponse: Decodable {
+    let key: String
 }
 
 // swiftlint:enable identifier_name

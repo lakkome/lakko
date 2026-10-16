@@ -341,7 +341,7 @@ pub(crate) async fn enroll_start(
     .map_err(ApiError::Db)?;
 
     let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
-    tracing::info!(account_id = %account_id_b64, "totp: enrollment started");
+    tracing::info!("totp: enrollment started");
     Ok(Json(EnrollStartRes {
         otpauth_uri: otpauth_uri(&account_id_b64, &secret_b32),
         secret_b32,
@@ -398,7 +398,7 @@ pub(crate) async fn enroll_finish(
     .await
     .map_err(ApiError::Db)?;
 
-    tracing::info!(account_id = %URL_SAFE_NO_PAD.encode(account_id), "totp: enrollment confirmed");
+    tracing::info!("totp: enrollment confirmed");
     Ok(Json(serde_json::json!({ "enabled": true })))
 }
 
@@ -544,7 +544,7 @@ pub(crate) async fn recover(
     }
 
     let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
-    tracing::info!(account_id = %account_id_b64, "totp: code accepted, issuing session token");
+    tracing::info!("totp: code accepted, issuing session token");
     let key_generation = key_generation.ok_or(ApiError::InvalidCredential)?;
     let session = crate::session::issue_pair_at(&state, &account_id, key_generation, &device_id)?;
     Ok(Json(RecoverRes {
@@ -784,7 +784,7 @@ mod totp_e2e_tests {
             turn: None,
             totp_enc_key: with_totp_key.then(|| Arc::new(TOTP_KEY)),
             vault_enc_key: None,
-            throttle: crate::throttle::ThrottleConfig::disabled(),
+            room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),

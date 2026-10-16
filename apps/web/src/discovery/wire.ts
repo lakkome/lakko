@@ -110,7 +110,7 @@ export interface IdentityUploadRequest {
    *  verbatim to the transparency append (invariant #2); a peer verifies
    *  it on a first observation against the pinned auth attest key. */
   genesis_attest?: string;
-  /** ADR-0073: standard base64 of the 177-byte key-reset attestation
+  /** ADR-0073: standard base64 of the 145-byte key-reset attestation
    *  `POST /account/keys/reset/finish` minted. Required for a key CHANGE
    *  that carries no supersession proof: discovery verifies it under its
    *  pinned attest key, requires a generation strictly above the stored one,
@@ -193,17 +193,14 @@ export interface KeyPackageFetchResponse {
 export interface InviteUploadRequest {
   /** Standard-alphabet base64 of `InviteLinkMint.sealed`. */
   sealed: string;
-  /** Standard-alphabet base64 of `InviteLinkMint.issuerPubkey` (32 bytes),
-   *  the key an owner-signed revoke verifies against. */
-  issuer_pubkey: string;
+  /** Standard-alphabet base64 of the link's own revocation public key
+   *  (32 bytes, ADR-0078 section 10): minted for this link alone, so the
+   *  ledger row names no owner and no issuer. */
+  revocation_pubkey: string;
   /** The capability's `expiry_ms` (`0` = never expires). */
   expiry_ms: number;
   /** The capability's `max_uses` sentinel. */
   max_uses: number;
-  /** The capability's label, for the owner's own list. `/i/` only. */
-  label?: string;
-  /** The capability's referral flag, for the owner's own list. `/i/` only. */
-  bootstrap_referral?: boolean;
 }
 
 /** Response body of `POST /discovery/invite`. */
@@ -267,8 +264,8 @@ export interface InviteConsumeResponse {
 export interface GroupInviteUploadRequest {
   /** Standard-alphabet base64 of `InviteLinkMint.sealed`. */
   sealed: string;
-  /** Standard-alphabet base64 of `InviteLinkMint.issuerPubkey` (32 bytes). */
-  issuer_pubkey: string;
+  /** Standard-alphabet base64 of the link's revocation public key. */
+  revocation_pubkey: string;
   /** The capability's `expiry_ms` (`0` = never expires). */
   expiry_ms: number;
   /** `0` = single-use, `0xFFFFFFFF` = unlimited, any other N = at most N. */
@@ -276,11 +273,10 @@ export interface GroupInviteUploadRequest {
 }
 
 /** Body of `DELETE /discovery/invite/{blob_id_b64url}` (Phase
- *  1.18d2b). The `signature` field carries proof that the
- *  request came from the same Ed25519 key that signed the
- *  capability — server recovers `owner_signature_pubkey` from
- *  the stored `capability_bytes` and verifies against the
- *  canonical bytes built from `blob_id` + `signed_at_ms`.
+ *  1.18d2b). The `signature` is by the link's own revocation key
+ *  (ADR-0078 section 10), over the canonical bytes built from
+ *  `blob_id` + `signed_at_ms`; the server verifies it against the
+ *  revocation public key stored beside the sealed blob.
  *
  *  `signed_at_ms` MUST be within `±REVOKE_REPLAY_WINDOW_MS`
  *  (10 min, mirroring `lakko_contacts::invite`) of the server
@@ -293,66 +289,6 @@ export interface InviteRevokeRequest {
   /** Standard-alphabet base64 of the 64-byte Ed25519 signature
    *  from `wasm.signInviteRevocation(...)`. */
   signature: string;
-}
-
-/** Body of `POST /discovery/invite/by-owner` (Phase
- *  1.18d2b-list). The owner signs the canonical bytes
- *  (`OWNER_LIST_DOMAIN_V1` ‖ `owner_account_id` ‖
- *  `signed_at_ms` BE) with their identity Ed25519 key; the
- *  server resolves the verifying key from
- *  `identity_bundles.signature_pubkey` and verifies. The
- *  session-token middleware on the route is a DoS gate, not
- *  the ownership proof.
- *
- *  `signed_at_ms` MUST be within `±REVOKE_REPLAY_WINDOW_MS`
- *  (10 min, re-used from the revoke flow) of the server clock
- *  or the request is rejected with 400 Bad Request. */
-export interface InviteOwnerListRequest {
-  /** Standard-alphabet base64 of the owner's 16-byte UUIDv7
-   *  `account_id` (matches `IdentitySecrets.accountId`). */
-  owner_account_id: string;
-  /** UNIX millis at which the body was signed. */
-  signed_at_ms: number;
-  /** Standard-alphabet base64 of the 64-byte Ed25519 signature
-   *  from `wasm.signOwnerListQuery(...)`. */
-  signature: string;
-}
-
-/** One entry in the `/discovery/invite/by-owner` response —
- *  mirrors `OwnerListEntry` on the server side. The shape
- *  matches the wire-name (snake_case) the server emits; the
- *  TS client surfaces a normalised camelCase view to the UI
- *  via the `ListInvitesResult` type below. */
-export interface InviteOwnerListEntry {
-  /** URL-safe base64 (no padding) of the 32-byte blob_id —
-   *  the same `/i/<slug>` segment that appears in the share
-   *  URL the owner originally minted. */
-  blob_id_slug: string;
-  /** UNIX millis the capability expires at. `0` (the
-   *  `NEVER_EXPIRES` sentinel) means it never expires. */
-  expiry_ms: number;
-  /** Wire-format `max_uses` sentinel: `0` = SINGLE_USE,
-   *  `0xFFFFFFFF` = unlimited, any other N = N consumes
-   *  allowed. */
-  max_uses: number;
-  /** Server-counted consumes so far. */
-  used_count: number;
-  /** Owner-supplied free-text label, empty string when not
-   *  set. */
-  label: string;
-  /** Mirrors `InviteCapability.bootstrap_referral` — `true`
-   *  flags the link as a signup-deep-link that auto-Accepts
-   *  on the joiner side (Phase 1.9b4). */
-  bootstrap_referral: boolean;
-  /** RFC 3339 timestamp recording when the server first
-   *  accepted the upload. */
-  created_at: string;
-}
-
-/** Wire-level response shape from
- *  `POST /discovery/invite/by-owner`. */
-export interface InviteOwnerListResponse {
-  invites: InviteOwnerListEntry[];
 }
 
 // ----------------------------------------------------------------------------

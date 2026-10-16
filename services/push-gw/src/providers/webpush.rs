@@ -29,7 +29,7 @@
 //!   string so even a successful ECDH between two parties yields a
 //!   different content-encryption key per subscription.
 //!
-//! The stored `push_tokens.token` is JSON of the three fields above
+//! The token a sealed subscription carries is JSON of the three fields above
 //! (UTF-8 bytes); we parse it once per send.
 //!
 //! ## VAPID JWT (RFC 8292)
@@ -451,7 +451,8 @@ struct VapidClaims {
 #[derive(Serialize)]
 struct WakeBody {
     v: u8,
-    d: String,
+    /// Hex subscription id (ADR-0078).
+    s: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     g: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -469,8 +470,8 @@ struct WakeBody {
 impl From<&WakePayload> for WakeBody {
     fn from(p: &WakePayload) -> Self {
         Self {
-            v: 1,
-            d: hex::encode(p.device_pseudonym),
+            v: 2,
+            s: hex::encode(p.subscription_id),
             g: p.group_pseudonym.map(hex::encode),
             p: p.envelope_pointer,
             k: p.kind.wire_tag(),
@@ -506,7 +507,7 @@ mod tests {
 
     fn wake(kind: WakeKind) -> WakePayload {
         WakePayload {
-            device_pseudonym: [0x07; 32],
+            subscription_id: [0x07; 16],
             group_pseudonym: Some([0x08; 32]),
             envelope_pointer: Some(5),
             kind,

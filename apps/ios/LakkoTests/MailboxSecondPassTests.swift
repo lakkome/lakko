@@ -384,8 +384,10 @@ final class MailboxSecondPassTests: XCTestCase {
         XCTAssertEqual(spent.replies, [reply])
     }
 
-    func testTheLinksToRevokeAreTheSpentOnesAtTheirLedgerThenTheListedInvites() {
-        let invite = Data([1, 1, 1, 1, 1, 1]), call = Data([2, 2, 2, 2, 2, 2]), elsewhere = Data([3, 3, 3, 3, 3, 3])
+    /// ADR-0078 section 10: no owner list; only the spent scopes with a
+    /// ledger id, each revoked with its own key by the device that minted it.
+    func testTheLinksToRevokeAreTheSpentOnesAtTheirLedger() {
+        let invite = Data([1, 1, 1, 1, 1, 1]), call = Data([2, 2, 2, 2, 2, 2])
         let spent = [
             LinkReach(linkIdB64: "aQ==", version: 0, expiresAtMs: 9, blobIdB64: invite.base64EncodedString()),
             LinkReach(
@@ -394,13 +396,12 @@ final class MailboxSecondPassTests: XCTestCase {
             LinkReach(linkIdB64: "aW5saW5l", version: 0, expiresAtMs: 9),
         ]
         XCTAssertEqual(
-            SpentGrants.linksToRevoke(spent: spent, listedInviteBlobIds: [invite, elsewhere]),
+            SpentGrants.linksToRevoke(spent: spent),
             [
                 SpentGrants.LinkToRevoke(blobId: invite, call: false, linkIdB64: "aQ=="),
                 SpentGrants.LinkToRevoke(blobId: call, call: true, linkIdB64: "Yw=="),
-                SpentGrants.LinkToRevoke(blobId: elsewhere, call: false, linkIdB64: nil),
             ],
-            "an inline link has no ledger row; a row another device minted is revoked too")
+            "an inline link has no ledger row")
     }
 
     func testALinkLeavesTheListsOnlyWhenItIsGoneOrWasMintedHere() {

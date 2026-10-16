@@ -90,7 +90,7 @@ use lakko_contacts::invite::LINK_ID_LEN;
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
     decode_and_verify as rust_invite_decode, open_link as rust_invite_open_link,
-    seal_link as rust_invite_seal_link, sign_owner_list as rust_sign_owner_list,
+    revocation_public_key as rust_revocation_public_key, seal_link as rust_invite_seal_link,
     sign_revocation as rust_sign_revocation, BLOB_ID_B64URL_LEN, BLOB_ID_LEN,
 };
 use lakko_contacts::link_seal::{
@@ -1498,56 +1498,24 @@ pub fn sign_call_invite_revocation(
     Ok(rust_call_sign_revocation(&signing, &blob_id_arr, signed_at_ms).to_vec())
 }
 
-/// Sign an owner-list query for the
-/// `POST /discovery/invite/by-owner` endpoint (Phase
-/// 1.18d2b-list).
-///
-/// Each client calls this just before posting the list request
-/// so the body's `signature` field carries proof that the
-/// caller is the holder of the identity Ed25519 key bound to
-/// `account_id` via the KT log. The canonical bytes the
-/// signature covers — domain separator + `account_id` +
-/// big-endian `signed_at_ms` — live in
-/// [`lakko_contacts::invite::owner_list_canonical_bytes`]; both
-/// the server (`services/discovery::invite::list_by_owner`) and
-/// this helper drive sign / verify against the same layout.
-///
-/// Distinct domain separator from
-/// [`sign_invite_revocation`] ensures a captured revoke
-/// signature cannot be replayed as an owner-list authentication
-/// (and vice versa).
-///
-/// Returns the 64-byte raw Ed25519 signature. Caller
-/// base64-encodes for the JSON body.
+/// The Ed25519 public key of a per-link revocation seed (ADR-0078
+/// section 10): what an invite upload (`/i/`, `/c/`, `/g/`) stores in the
+/// ledger in place of an owner or issuer. The client draws 32 random bytes
+/// for each link it mints, keeps them beside the link secret, uploads this
+/// key, and later signs a revocation with the seed
+/// ([`sign_invite_revocation`], [`sign_call_invite_revocation`],
+/// [`sign_group_invite_revocation`]).
 ///
 /// # Errors
 ///
-/// * [`FfiError::Contacts`] on wrong-length signing seed (32
-///   bytes required) or account_id ([`ACCOUNT_ID_LEN`] required).
+/// [`FfiError::Contacts`] when `seed` is not 32 bytes.
 #[uniffi::export]
-pub fn sign_owner_list_query(
-    signing_seed: Vec<u8>,
-    owner_account_id: Vec<u8>,
-    signed_at_ms: u64,
-) -> Result<Vec<u8>, FfiError> {
-    if signing_seed.len() != 32 {
-        return Err(FfiError::Contacts(
-            "signingSeed must be 32 bytes".to_string(),
-        ));
-    }
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&signing_seed);
-    let signing = SigningKey::from_seed(&seed);
-
-    if owner_account_id.len() != ACCOUNT_ID_LEN {
-        return Err(FfiError::Contacts(format!(
-            "ownerAccountId must be {ACCOUNT_ID_LEN} bytes",
-        )));
-    }
-    let mut acct_arr = [0u8; ACCOUNT_ID_LEN];
-    acct_arr.copy_from_slice(&owner_account_id);
-
-    Ok(rust_sign_owner_list(&signing, &acct_arr, signed_at_ms).to_vec())
+pub fn link_revocation_public_key(seed: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    let seed: [u8; 32] = seed
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Contacts("seed must be 32 bytes".to_string()))?;
+    Ok(rust_revocation_public_key(&seed).to_vec())
 }
 
 /// Compute the per-joiner consume-dedup tag for an invite-link
@@ -3197,6 +3165,10 @@ pub struct GroupInvitePreview {
     pub group_name: Option<String>,
     pub inviter_name: Option<String>,
     pub member_count: u16,
+    /// ADR-0078 section 6: the 16-byte channel id a co-publisher link carries
+    /// (then `group_name` is the channel's name, `inviter_name` is `None` and
+    /// `member_count` 0). `None` for a group link.
+    pub channel_id: Option<Vec<u8>>,
 }
 
 /// Mint a `/g/` capability that carries a sealed preview (ADR-0028 v2) and
@@ -3236,6 +3208,59 @@ pub fn compose_group_invite_capability_with_preview(
         group_name: rust_normalize_display_name(group_name.as_deref().unwrap_or(""))?,
         inviter_name: rust_normalize_display_name(inviter_name.as_deref().unwrap_or(""))?,
         member_count,
+        channel_id: None,
+    };
+    let link_key = rust_generate_link_key();
+    let wire = rust_group_invite_compose_with_preview(
+        &signing, &group_id, expiry_ms, &preview, &link_key,
+    )?;
+    seal_mint(
+        &signing,
+        |secret| rust_group_invite_seal_link(secret, &wire),
+        link_key,
+    )
+}
+
+/// ADR-0028 OQ3 / ADR-0078 section 6 — mint a co-publisher `/g/` link over a
+/// channel's PublisherGroup `group_id`. The capability's sealed preview
+/// carries the 16-byte `channel_id` (and the channel's name, optional): since
+/// ADR-0078 the PublisherGroup id is derived from the owner's seed, so
+/// nothing inverts it, and the plaintext capability (which the join
+/// attribution carries to the knock journal in the clear) must not name the
+/// channel. Never expires when `expiry_ms` is 0. Returns the
+/// [`InviteLinkMint`].
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] for a bad seed, group id or channel id, or a name
+///   the display-name rule refuses.
+#[uniffi::export]
+pub fn compose_co_publisher_invite_capability(
+    issuer_signing_seed: Vec<u8>,
+    group_id: Vec<u8>,
+    expiry_ms: u64,
+    channel_id: Vec<u8>,
+    channel_name: Option<String>,
+) -> Result<InviteLinkMint, FfiError> {
+    let seed: [u8; 32] = issuer_signing_seed
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Contacts("issuerSigningSeed must be 32 bytes".to_string()))?;
+    let signing = SigningKey::from_seed(&seed);
+    if group_id.is_empty() || group_id.len() > MAX_GROUP_ID_LEN {
+        return Err(FfiError::Contacts(format!(
+            "groupId must be 1..={MAX_GROUP_ID_LEN} bytes",
+        )));
+    }
+    let channel: [u8; 16] = channel_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Contacts("channelId must be 16 bytes".to_string()))?;
+    let preview = RustGroupInvitePreview {
+        group_name: rust_normalize_display_name(channel_name.as_deref().unwrap_or(""))?,
+        inviter_name: None,
+        member_count: 0,
+        channel_id: Some(channel),
     };
     let link_key = rust_generate_link_key();
     let wire = rust_group_invite_compose_with_preview(
@@ -3348,6 +3373,7 @@ impl GroupInviteCapability {
             group_name: p.group_name,
             inviter_name: p.inviter_name,
             member_count: p.member_count,
+            channel_id: p.channel_id.map(|c| c.to_vec()),
         }))
     }
 }
@@ -3881,31 +3907,20 @@ mod tests {
     }
 
     #[test]
-    fn sign_owner_list_query_round_trip() {
-        let alice_signing = SigningKey::from_seed(&[0x88u8; 32]);
-        let acct = [0xA1u8; ACCOUNT_ID_LEN];
-        let sig = sign_owner_list_query(
-            alice_signing.to_seed().to_vec(),
-            acct.to_vec(),
-            1_700_000_000_000,
-        )
-        .expect("sign");
-        assert_eq!(sig.len(), 64, "Ed25519 signature must be 64 bytes");
-    }
-
-    #[test]
-    fn sign_owner_list_query_rejects_wrong_account_id_length() {
-        let alice_signing = SigningKey::from_seed(&[0x88u8; 32]);
-        let err = sign_owner_list_query(
-            alice_signing.to_seed().to_vec(),
-            vec![0u8; 8], // wrong: ACCOUNT_ID_LEN is 16
-            0,
-        )
-        .expect_err("expected wrong-length rejection");
-        match err {
-            FfiError::Contacts(msg) => assert!(msg.contains("16 bytes")),
-            other => panic!("expected Contacts, got {other:?}"),
-        }
+    fn link_revocation_public_key_is_the_ed25519_key_of_the_seed() {
+        let seed = [0x88u8; 32];
+        let pk = link_revocation_public_key(seed.to_vec()).expect("32-byte seed");
+        assert_eq!(
+            pk,
+            SigningKey::from_seed(&seed)
+                .verifying_key()
+                .to_bytes()
+                .to_vec()
+        );
+        assert!(matches!(
+            link_revocation_public_key(vec![0u8; 31]),
+            Err(FfiError::Contacts(_))
+        ));
     }
 
     #[test]
@@ -4762,8 +4777,8 @@ mod tests {
         let mut p = canonical_profile();
         p.username_certificate = Some(vec![9; 153]);
         p.grants = vec![
-            derive_reach_grant(seed.clone(), FfiReachClass::Group, vec![1; 8], 2).unwrap(),
-            derive_reach_grant(seed.clone(), FfiReachClass::Member, vec![1; 8], 1).unwrap(),
+            derive_reach_grant(seed.clone(), FfiReachClass::Group, vec![], 2).unwrap(),
+            derive_reach_grant(seed.clone(), FfiReachClass::Member, vec![], 1).unwrap(),
         ];
         let wire = compose_profile_envelope(p.clone()).expect("compose v3");
         assert_eq!(decode_profile_envelope(wire.clone()).unwrap(), p);
@@ -4783,7 +4798,7 @@ mod tests {
             Err(FfiError::Contacts(_))
         ));
         let mut bad = canonical_profile();
-        let mut grant = derive_reach_grant(seed, FfiReachClass::Group, vec![1; 8], 1).unwrap();
+        let mut grant = derive_reach_grant(seed, FfiReachClass::Group, vec![], 1).unwrap();
         grant.seed.pop();
         bad.grants = vec![grant];
         assert!(matches!(
@@ -4928,6 +4943,37 @@ mod tests {
         let cap = GroupInviteCapability::open_link(plain.sealed, plain.link_secret).expect("open");
         assert!(!cap.has_preview());
         assert_eq!(cap.open_preview(mint.link_secret).expect("open"), None);
+    }
+
+    #[test]
+    fn a_co_publisher_link_carries_the_channel_id_in_its_preview() {
+        let mint = compose_co_publisher_invite_capability(
+            vec![7u8; 32],
+            vec![0x5A; 32],
+            0,
+            vec![0xC4; 16],
+            Some("Daily notes".to_string()),
+        )
+        .expect("mint");
+        let cap = GroupInviteCapability::open_link(mint.sealed.clone(), mint.link_secret.clone())
+            .expect("open");
+        let preview = cap
+            .open_preview(mint.link_secret.clone())
+            .expect("open")
+            .expect("some");
+        assert_eq!(preview.channel_id, Some(vec![0xC4; 16]));
+        assert_eq!(preview.group_name.as_deref(), Some("Daily notes"));
+        assert_eq!(preview.inviter_name, None);
+        assert_eq!(preview.member_count, 0);
+        assert!(!cap.wire().windows(16).any(|w| w == [0xC4; 16]));
+        assert!(compose_co_publisher_invite_capability(
+            vec![7u8; 32],
+            vec![0x5A; 32],
+            0,
+            vec![0xC4; 15],
+            None
+        )
+        .is_err());
     }
 
     #[test]

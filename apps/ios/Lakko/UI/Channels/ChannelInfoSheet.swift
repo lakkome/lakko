@@ -187,6 +187,9 @@ struct ChannelInfoSheet: View {
         ChannelMemberCards.forgetUploads(channelId: channelId)
         state.clearSubscriberKeys(channelId)
         state.removeChannel(channelId)
+        // ADR-0078 section 9 — the channel's members hold this account's one
+        // `channel` key: the registration sees the channel gone and rotates it.
+        ReachCenter.shared.sync()
         onUnsubscribed()
     }
 }

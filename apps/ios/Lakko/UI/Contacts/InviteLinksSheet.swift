@@ -112,9 +112,7 @@ struct InviteLinksSheet: View {
             lines.append(l10n.t("invite.links.created", texts: ["date": date]))
         }
         var status = InviteLinkRows.expiryCopy(expiryMs: row.expiryMs, now: now)
-        if let uses = row.usesLeft {
-            status = l10n.t("common.fact_pair", texts: ["first": status, "second": uses])
-        }
+        status = l10n.t("common.fact_pair", texts: ["first": status, "second": row.limit])
         lines.append(status)
         return lines
     }

@@ -127,14 +127,22 @@
  *   │       pushGidHex: <64 hex>,      // the opaque push_gid
  *   │       accountId:  <b64-uuidv7>,
  *   │       groupIdB64: <b64 group_id> // the REAL DS journal key (public)
+ *   │       subIdHex?:  <32 hex>       // ADR-0078: this device's push-gw
+ *   │                                  // subscription id for this push_gid
  *   │     }
  *   └── store "wake_binding"  keyPath: "slot"  (always "current")
  *         row {
- *           slot:               "current",
- *           devicePseudonymHex: <64 lowercase hex>,
- *           accountId:          <b64-uuidv7>
+ *           slot:      "current",
+ *           accountId: <b64-uuidv7>
  *         }
  * ```
+ *
+ * ADR-0078 section 3: push-gw holds no device pseudonym. Each group
+ * subscription has its own random id, kept here in the route row so the
+ * service worker can check that a wake (which carries the id as `s`) is for
+ * a subscription the bound account holds, and so this device can remove its
+ * own rows. Adding the field is not a schema change (no index), so
+ * `DB_VERSION` stays.
  *
  * v2 replaced the v1 `routes` store (keyed by `push_gid` alone); the upgrade
  * drops it, so its rows simply stop being read (no production data, no
@@ -160,7 +168,7 @@ const SECRETS_STORE = "secrets";
 const ROUTES_STORE = "account_routes";
 /** The v1 reverse index keyed by `push_gid` alone; dropped by the v2 upgrade. */
 const LEGACY_ROUTES_STORE = "routes";
-/** The one `(device pseudonym, account)` binding row (SW-readable). */
+/** The one binding row naming the signed-in account (SW-readable). */
 const WAKE_BINDING_STORE = "wake_binding";
 /** The binding store's only key. */
 const WAKE_BINDING_SLOT = "current";
@@ -238,7 +246,13 @@ export interface RouteRow {
   accountId: string;
   /** base64 of the REAL MLS `group_id` (the DS journal key). */
   groupIdB64: string;
+  /** ADR-0078 — lowercase hex of this device's 16-byte push-gw subscription
+   *  id for this `push_gid`; absent until the first subscribe. */
+  subIdHex?: string;
 }
+
+/** Length of a subscription id in bytes (mirror of the Rust constant). */
+const SUB_ID_LEN = 16;
 
 /**
  * Open (creating on first use) the `lakko-push-routing` database with its
@@ -368,7 +382,16 @@ export async function putGroupRouting(
     if (!accountStoresWritable(args.accountId)) return;
     const tx = db.transaction([SECRETS_STORE, ROUTES_STORE], "readwrite");
     tx.objectStore(SECRETS_STORE).put(secretRow);
-    tx.objectStore(ROUTES_STORE).put(routeRow);
+    // Keep the subscription id a re-persist of the same push_gid finds
+    // (ADR-0078): it names this device's row at push-gw.
+    const routes = tx.objectStore(ROUTES_STORE);
+    const existing = routes.get(routeRow.key);
+    existing.onsuccess = (): void => {
+      const prior = existing.result as RouteRow | undefined;
+      routes.put(
+        prior?.subIdHex !== undefined ? { ...routeRow, subIdHex: prior.subIdHex } : routeRow,
+      );
+    };
     await awaitTx(tx);
   } finally {
     db.close();
@@ -615,6 +638,90 @@ export async function deleteRoute(
 }
 
 /**
+ * ADR-0078 — this device's subscription id for `(account, push_gid)`, minting
+ * and recording a random one when none is held. Creates the route row when it
+ * is missing (a secret persisted before the row existed). Returns the 16 id
+ * bytes.
+ */
+export async function ensureRouteSubId(
+  accountId: string,
+  pushGidHex: string,
+  groupIdB64: string,
+): Promise<Uint8Array> {
+  const db = await openPushRoutingDb();
+  try {
+    if (!accountStoresWritable(accountId)) {
+      throw new Error("account stores sealed");
+    }
+    const tx = db.transaction(ROUTES_STORE, "readwrite");
+    const routes = tx.objectStore(ROUTES_STORE);
+    const key = routeRowKey(accountId, pushGidHex);
+    const req = routes.get(key);
+    let subIdHex = "";
+    req.onsuccess = (): void => {
+      const prior = req.result as RouteRow | undefined;
+      if (prior?.subIdHex !== undefined && /^[0-9a-f]{32}$/.test(prior.subIdHex)) {
+        subIdHex = prior.subIdHex;
+        return;
+      }
+      subIdHex = toHex(crypto.getRandomValues(new Uint8Array(SUB_ID_LEN)));
+      const row: RouteRow = {
+        key,
+        pushGidHex: pushGidHex.toLowerCase(),
+        accountId,
+        groupIdB64: prior?.groupIdB64 ?? groupIdB64,
+        subIdHex,
+      };
+      routes.put(row);
+    };
+    await awaitTx(tx);
+    return fromHex(subIdHex);
+  } finally {
+    db.close();
+  }
+}
+
+/** ADR-0078 — this device's subscription id for `(account, push_gid)`, or
+ *  `null` when it never subscribed under it. */
+export async function getRouteSubId(
+  accountId: string,
+  pushGidHex: string,
+): Promise<Uint8Array | null> {
+  const row = await lookupPushRoute(accountId, pushGidHex);
+  if (row?.subIdHex === undefined || !/^[0-9a-f]{32}$/.test(row.subIdHex)) return null;
+  return fromHex(row.subIdHex);
+}
+
+/** Every reverse-index row of `accountId` (re-subscribing after a token
+ *  change; removing the account's subscriptions on sign-out). */
+export async function listRoutesForAccount(accountId: string): Promise<RouteRow[]> {
+  const db = await openPushRoutingDb();
+  try {
+    const tx = db.transaction(ROUTES_STORE, "readonly");
+    const req = tx.objectStore(ROUTES_STORE).getAll();
+    return await new Promise<RouteRow[]>((resolve, reject) => {
+      req.onsuccess = (): void =>
+        resolve(((req.result ?? []) as RouteRow[]).filter((r) => r.accountId === accountId));
+      req.onerror = (): void => reject(req.error ?? new Error("idb getAll failed"));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function toHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+function fromHex(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(2 * i, 2 * i + 2), 16);
+  return out;
+}
+
+/**
  * Forget device: wipe `accountId`'s push-routing secrets and the reverse-index
  * entries that name it, in one transaction. Another account's rows on this
  * browser are left alone (2026-09-30 — Forget device used to call
@@ -679,13 +786,13 @@ export async function getGroupRoutingSecretForAccount(
 }
 
 /**
- * The `(device pseudonym, account)` pair this browser registered for push —
- * ADR-0042, "A wake is shown only for the signed-in account".
+ * The account this browser registered for push — ADR-0042, "A wake is shown
+ * only for the signed-in account". Since ADR-0078 there is no device
+ * pseudonym: a wake names its subscription id, which the service worker
+ * matches against the bound account's route rows.
  */
 export interface WakeBinding {
-  /** 64 lowercase hex chars — the `d` every wake for this sign-in carries. */
-  devicePseudonymHex: string;
-  /** base64 account_id of the account that registered it. */
+  /** base64 account_id of the account that registered. */
   accountId: string;
 }
 
@@ -695,14 +802,13 @@ interface WakeBindingRow extends WakeBinding {
 }
 
 /**
- * Record that `devicePseudonymHex` is registered for `accountId`, replacing
- * any earlier binding (a device has at most one active account). The service
- * worker reads this row on every wake.
+ * Record that `accountId` is the account registered for push on this browser,
+ * replacing any earlier binding (a device has at most one active account).
+ * The service worker reads this row on every wake.
  */
 export async function putWakeBinding(binding: WakeBinding): Promise<void> {
   const row: WakeBindingRow = {
     slot: WAKE_BINDING_SLOT,
-    devicePseudonymHex: binding.devicePseudonymHex.toLowerCase(),
     accountId: binding.accountId,
   };
   const db = await openPushRoutingDb();
@@ -730,14 +836,10 @@ export async function getWakeBinding(): Promise<WakeBinding | null> {
           reject(req.error ?? new Error("idb get failed"));
       },
     );
-    if (
-      row === undefined ||
-      typeof row.devicePseudonymHex !== "string" ||
-      typeof row.accountId !== "string"
-    ) {
+    if (row === undefined || typeof row.accountId !== "string") {
       return null;
     }
-    return { devicePseudonymHex: row.devicePseudonymHex, accountId: row.accountId };
+    return { accountId: row.accountId };
   } finally {
     db.close();
   }

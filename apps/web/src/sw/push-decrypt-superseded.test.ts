@@ -53,8 +53,8 @@ function deps(rows: Row[], overrides: Record<string, unknown> = {}) {
   return {
     forbidden,
     deps: {
-      readWakeBinding: async () => ({ devicePseudonymHex: "dd".repeat(32), accountId: ACCOUNT_ID }),
-      resolveAccount: async () => ({ accountId: ACCOUNT_ID, groupIdBytes: GROUP_BYTES }),
+      readWakeBinding: async () => ({ accountId: ACCOUNT_ID }),
+      lookupRoute: async () => ({ accountId: ACCOUNT_ID, groupIdB64: Buffer.from(GROUP_BYTES).toString("base64"), subIdHex: "dd".repeat(16) }),
       getDeviceKey: async () => ({}),
       getIdentitySeed: async () => new Uint8Array(64),
       loadSnapshot: async () => ({ snapshotBytes: new Uint8Array([1]), knownGroupIds: [] }),
@@ -94,7 +94,7 @@ function deps(rows: Row[], overrides: Record<string, unknown> = {}) {
   };
 }
 
-const wake = { deviceHex: "dd".repeat(32), groupHex: GROUP_HEX, pointer: 42 };
+const wake = { subHex: "dd".repeat(16), groupHex: GROUP_HEX, pointer: 42 };
 const chat = (text: string): Record<string, unknown> => ({ kind: "chat", text, attachmentCount: 0 });
 const retiredKeys = { lookupSupersededKeys: async () => [RETIRED_B64] };
 

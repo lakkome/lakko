@@ -41,7 +41,7 @@
  * token instead (ADR-0054 S3), carrying no credentials; a mailbox write with
  * no reach proof spends one `mailbox-write` token the same way (ADR-0078).
  *
- * ADR-0057 statements (claim, reset, register, registrars, push binding) are
+ * ADR-0057 statements (claim, reset, register, registrars, root transfer) are
  * `PUT /ds/group/<hex>/<segment>` with the signer's JSON body and NO proof
  * header ({@link DsClient.putStatement}).
  *

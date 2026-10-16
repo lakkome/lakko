@@ -6,7 +6,7 @@
 //! A `DeviceGroup` is a regular MLS group whose **leaves are the
 //! user's own devices**, not contacts. The same MLS state machine
 //! [`crate::group::Group`] uses powers it; we wrap it with a
-//! conventional group_id (deterministic from `account_id`) and a
+//! conventional group_id (deterministic from the account seed) and a
 //! small surface that only exposes the operations a multi-device
 //! flow needs:
 //!
@@ -28,23 +28,35 @@
 //!
 //! ## Conventional group_id
 //!
-//! `group_id = BLAKE3("lakko-device-group/v1" || account_id)`.
-//! Deterministic, 32 bytes, unique per account, predictable from
-//! anything that already knows `account_id`. The server still
-//! treats it as opaque — the DS journal indexes by `group_id` as
-//! bytes; only the client knows it's a DeviceGroup.
+//! `group_id = BLAKE3-derive-key("lakko/device-group/id/v2", account_seed)`
+//! ([ADR-0078] section 6). `account_seed` is the 32-byte Ed25519 seed of
+//! the account identity, the same input the mailbox key and the journal
+//! roots take, and only the account's own devices hold it. Until ADR-0078
+//! the id was `BLAKE3("lakko-device-group/v1" || account_id)`: auth and
+//! discovery hold every account id, so every DeviceGroup journal on the
+//! Delivery Service was attributable to its account. The id is now a
+//! secret of the account; a server that knows the account id cannot
+//! compute it.
 //!
-//! Why deterministic? Two reasons:
+//! Which seed: the client passes the seed its conversation leaves are bound
+//! to (the oldest own predecessor after an ADR-0074 rotation, else the
+//! current one), so a rotation, which keeps the DeviceGroup, does not move
+//! its id. An ADR-0073 key reset mints a new seed and therefore a new id;
+//! a reset re-founds the DeviceGroup anyway.
 //!
-//! 1. A paired device joining via a Welcome can verify that the
-//!    `group_id` matches the expected hash for its own
-//!    `account_id`. A misrouted Welcome from a different user's
-//!    DeviceGroup is rejected at join time, before any state
-//!    advance.
-//! 2. The post-recovery flow on a fresh device knows the
-//!    `group_id` to ask the server for catch-up MLS journal
-//!    entries before any other device has had a chance to send
-//!    the new device a Welcome.
+//! Deterministic still, for the post-recovery case: a device that holds the
+//! seed knows the journal to read before any other device has sent it a
+//! Welcome.
+//!
+//! **What the id no longer does.** A joining device used to compare the
+//! Welcome's group id against the id of its account id. It cannot compare
+//! against the seed: on every pairing route the seed reaches the new device
+//! only AFTER it joined, inside the recovery row sealed under the joined
+//! group's exporter. That seal is the binding: only a member of the group the
+//! Welcome joined can write a row the new device opens, so the group and the
+//! account the row names come from the same source.
+//!
+//! [ADR-0078]: ../../../docs/adr/0078-servers-cannot-link-accounts.md
 //!
 //! ## What lives **outside** this module
 //!
@@ -149,13 +161,17 @@ pub fn remove_device_action_hash(removed_signature_pubkey: &[u8]) -> [u8; 32] {
     lakko_crypto::hash::sha256(&input)
 }
 
-/// Domain-separation tag for the deterministic group_id hash.
-/// Pinned ASCII; any change is a breaking protocol change to
-/// every existing account's DeviceGroup.
-const GROUP_ID_DOMAIN: &[u8] = b"lakko-device-group/v1";
+/// Domain-separation context for the deterministic group_id derivation
+/// (ADR-0078 section 6). Pinned; any change is a breaking protocol change to
+/// every account's DeviceGroup.
+const GROUP_ID_DOMAIN: &str = "lakko/device-group/id/v2";
 
 /// Raw 16-byte account_id (UUIDv7).
 pub type AccountId = [u8; 16];
+
+/// The 32-byte Ed25519 seed of the account identity the DeviceGroup id is
+/// derived from (`Identity::ed25519_seed_bytes` of the account identity).
+pub type AccountSeed = [u8; 32];
 
 /// MLS group whose leaves are the user's own devices.
 ///
@@ -163,8 +179,7 @@ pub type AccountId = [u8; 16];
 ///
 ///   * the founding device's local view of the MLS group state
 ///     (via the wrapped [`Group`])
-///   * the `account_id` the group_id was derived from — kept so
-///     `group_id()` can be cheaply queried without re-hashing
+///   * the `account_id` removal attestations are bound to (ADR-0015)
 pub struct DeviceGroup {
     inner: Group,
     account_id: AccountId,
@@ -173,18 +188,12 @@ pub struct DeviceGroup {
 impl DeviceGroup {
     /// Compute the deterministic group id for an account.
     ///
-    /// `group_id = BLAKE3("lakko-device-group/v1" || account_id)`.
-    /// Output is always 32 bytes; clients can compare directly
-    /// against a wire-format group_id without parsing or
-    /// normalising.
+    /// `group_id = BLAKE3-derive-key("lakko/device-group/id/v2",
+    /// account_seed)`. Output is always 32 bytes. Not computable from the
+    /// account id: only the account's own devices hold the seed.
     #[must_use]
-    pub fn group_id_for(account_id: &AccountId) -> Vec<u8> {
-        // Concatenate domain tag + account_id, then BLAKE3.
-        // 21 + 16 = 37 bytes, single stack allocation.
-        let mut buf = Vec::with_capacity(GROUP_ID_DOMAIN.len() + account_id.len());
-        buf.extend_from_slice(GROUP_ID_DOMAIN);
-        buf.extend_from_slice(account_id);
-        lakko_crypto::hash::blake3(&buf).to_vec()
+    pub fn group_id_for(account_seed: &AccountSeed) -> Vec<u8> {
+        lakko_crypto::hash::blake3_derive_key_from_material(GROUP_ID_DOMAIN, account_seed).to_vec()
     }
 
     /// Bootstrap a DeviceGroup with `identity` as the founding
@@ -192,15 +201,20 @@ impl DeviceGroup {
     /// DeviceGroup state on this device.
     ///
     /// The group's MLS `group_id` is set to
-    /// [`DeviceGroup::group_id_for(account_id)`], not a random
-    /// UUID. See the module docstring for the rationale.
+    /// [`DeviceGroup::group_id_for(account_seed)`], not a random
+    /// UUID. See the module docstring for the rationale. `account_id` is
+    /// kept for the removal attestations (ADR-0015).
     ///
     /// # Errors
     ///
     /// Returns [`Error::Group`] for any OpenMLS-side failure
     /// (signature, storage, etc.).
-    pub fn create_founder(identity: &Identity, account_id: &AccountId) -> Result<Self> {
-        let group_id_bytes = Self::group_id_for(account_id);
+    pub fn create_founder(
+        identity: &Identity,
+        account_id: &AccountId,
+        account_seed: &AccountSeed,
+    ) -> Result<Self> {
+        let group_id_bytes = Self::group_id_for(account_seed);
         // G-13 (ADR-0015): declare the removal-policy extension type in
         // `required_capabilities` at creation, so a later
         // `GroupContextExtensions` proposal may add the policy flag (OpenMLS
@@ -236,10 +250,10 @@ impl DeviceGroup {
     /// Join a DeviceGroup from a Welcome that an existing device
     /// produced for our [`KeyPackage`].
     ///
-    /// Verifies that the embedded `group_id` matches
-    /// [`DeviceGroup::group_id_for(account_id)`] — a misrouted
-    /// Welcome from a different user's DeviceGroup is rejected
-    /// before any state advance.
+    /// Binds nothing about the group id: the joining device does not hold
+    /// the account seed yet (see "What the id no longer does" in the module
+    /// docs). The group it joined is bound to the account by the recovery
+    /// row the caller opens under this group's exporter.
     ///
     /// # Errors
     ///
@@ -248,30 +262,22 @@ impl DeviceGroup {
     ///   Welcome.
     /// - [`Error::Group`] for OpenMLS failures
     ///   (signature, ciphersuite, storage).
-    /// - [`Error::Group`] with a `"group_id mismatch"` body
-    ///   when the deterministic check fails.
     pub fn join_from_welcome(
         welcome_bytes: &[u8],
         identity: &Identity,
         account_id: &AccountId,
     ) -> Result<Self> {
         let inner = Group::join_from_welcome(welcome_bytes, identity)?;
-        let expected = Self::group_id_for(account_id);
-        if inner.group_id().as_slice() != expected.as_slice() {
-            return Err(Error::Group(
-                "DeviceGroup join: group_id mismatch (Welcome is for a different account)".into(),
-            ));
-        }
         Ok(Self {
             inner,
             account_id: *account_id,
         })
     }
 
-    /// Load the DeviceGroup for `account_id` from `identity`'s
-    /// MLS provider storage. Returns `None` when the provider
-    /// has no row for the deterministic
-    /// [`DeviceGroup::group_id_for(account_id)`] (typical
+    /// Load the DeviceGroup of the account whose seed is `account_seed`
+    /// from `identity`'s MLS provider storage. Returns `None` when the
+    /// provider has no row for the deterministic
+    /// [`DeviceGroup::group_id_for(account_seed)`] (typical
     /// case: a freshly-bootstrapped session that hasn't yet
     /// rehydrated, or this device hasn't joined the
     /// DeviceGroup yet).
@@ -284,10 +290,29 @@ impl DeviceGroup {
     ///
     /// Returns [`Error::Group`] when storage carries a row
     /// under the expected `group_id` but OpenMLS rejects it
-    /// (corrupt snapshot, ciphersuite mismatch, …).
-    pub fn load(identity: &Identity, account_id: &AccountId) -> Result<Option<Self>> {
-        let group_id = Self::group_id_for(account_id);
-        let loaded = Group::load(identity, &group_id)?;
+    /// (corrupt snapshot, ciphersuite mismatch, ...).
+    pub fn load(
+        identity: &Identity,
+        account_id: &AccountId,
+        account_seed: &AccountSeed,
+    ) -> Result<Option<Self>> {
+        let group_id = Self::group_id_for(account_seed);
+        Self::load_by_group_id(identity, account_id, &group_id)
+    }
+
+    /// Load the DeviceGroup stored under `group_id`: a group this device
+    /// joined (its id read off the joined group), before it held the
+    /// account seed.
+    ///
+    /// # Errors
+    ///
+    /// As [`DeviceGroup::load`].
+    pub fn load_by_group_id(
+        identity: &Identity,
+        account_id: &AccountId,
+        group_id: &[u8],
+    ) -> Result<Option<Self>> {
+        let loaded = Group::load(identity, group_id)?;
         Ok(loaded.map(|inner| Self {
             inner,
             account_id: *account_id,
@@ -295,34 +320,19 @@ impl DeviceGroup {
     }
 
     /// Reconstruct a [`DeviceGroup`] handle from an underlying
-    /// [`Group`] already loaded from disk. The caller asserts
-    /// (via `account_id`) what the group_id should look like;
-    /// the mismatch is rejected as a sanity check.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Group`] with a `"group_id mismatch"`
-    /// body when the inner group_id doesn't match
-    /// [`DeviceGroup::group_id_for(account_id)`].
-    pub fn from_group(group: Group, account_id: &AccountId) -> Result<Self> {
-        let expected = Self::group_id_for(account_id);
-        if group.group_id().as_slice() != expected.as_slice() {
-            return Err(Error::Group(
-                "DeviceGroup from_group: group_id mismatch".into(),
-            ));
-        }
-        Ok(Self {
+    /// [`Group`] already loaded from disk, for the account `account_id`.
+    #[must_use]
+    pub fn from_group(group: Group, account_id: &AccountId) -> Self {
+        Self {
             inner: group,
             account_id: *account_id,
-        })
+        }
     }
 
-    /// The deterministic group_id this DeviceGroup is bound to.
-    /// Cheap accessor (no re-hash) — the bytes live next to the
-    /// struct since construction.
+    /// The MLS group id of this DeviceGroup (its DS journal id).
     #[must_use]
     pub fn group_id(&self) -> Vec<u8> {
-        Self::group_id_for(&self.account_id)
+        self.inner.group_id()
     }
 
     /// Raw 16-byte UUIDv7 account this DeviceGroup belongs to.
@@ -1065,35 +1075,119 @@ mod tests {
         id
     }
 
+    fn fixture_seed() -> AccountSeed {
+        [0x5E; 32]
+    }
+
+    /// The retired account-id derivation, recomputed here only to show the
+    /// new id is not it.
+    fn retired_v1_group_id(account_id: &AccountId) -> Vec<u8> {
+        let mut buf = b"lakko-device-group/v1".to_vec();
+        buf.extend_from_slice(account_id);
+        lakko_crypto::hash::blake3(&buf).to_vec()
+    }
+
     #[test]
     fn group_id_is_deterministic() {
-        let account = fixture_account_id();
-        let a = DeviceGroup::group_id_for(&account);
-        let b = DeviceGroup::group_id_for(&account);
+        let a = DeviceGroup::group_id_for(&fixture_seed());
+        let b = DeviceGroup::group_id_for(&fixture_seed());
         assert_eq!(a, b);
-        assert_eq!(a.len(), 32, "BLAKE3 output is 32 bytes");
+        assert_eq!(a.len(), 32);
     }
 
+    /// The derivation pinned byte for byte: `BLAKE3-derive-key(
+    /// "lakko/device-group/id/v2", [0x5E; 32])`.
     #[test]
-    fn group_id_differs_across_accounts() {
-        let mut a = fixture_account_id();
-        let mut b = fixture_account_id();
-        b[0] = 0x02;
-        assert_ne!(DeviceGroup::group_id_for(&a), DeviceGroup::group_id_for(&b),);
-        // And the domain tag actually contributes — flipping
-        // a byte in the account_id flips the hash, but flipping
-        // back makes them equal again.
-        a[0] = 0x02;
-        assert_eq!(DeviceGroup::group_id_for(&a), DeviceGroup::group_id_for(&b),);
+    fn group_id_golden() {
+        assert_eq!(
+            DeviceGroup::group_id_for(&fixture_seed()),
+            lakko_crypto::hash::blake3_derive_key_from_material(
+                "lakko/device-group/id/v2",
+                &[0x5E; 32]
+            )
+            .to_vec()
+        );
+        assert_eq!(
+            to_hex(&DeviceGroup::group_id_for(&fixture_seed())),
+            GOLDEN_GROUP_ID_HEX
+        );
     }
 
+    fn to_hex(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        bytes.iter().fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+    }
+
+    const GOLDEN_GROUP_ID_HEX: &str =
+        "0782f144b3ce86d3c7956fb6c0ec0529b2c9781f76a5223540e3e3fcbcfc8a2e";
+
     #[test]
-    fn create_founder_uses_deterministic_group_id() {
+    fn create_founder_uses_the_seed_derived_group_id() {
         let account = fixture_account_id();
         let identity = Identity::generate("device-1").expect("generate identity");
-        let group = DeviceGroup::create_founder(&identity, &account).expect("create founder");
-        assert_eq!(group.group_id(), DeviceGroup::group_id_for(&account));
+        let group = DeviceGroup::create_founder(&identity, &account, &fixture_seed())
+            .expect("create founder");
+        assert_eq!(group.group_id(), DeviceGroup::group_id_for(&fixture_seed()));
         assert_eq!(group.account_id(), &account);
+        assert_ne!(group.group_id(), retired_v1_group_id(&account));
+    }
+
+    #[test]
+    fn load_finds_the_group_under_its_seed_and_nothing_under_another() {
+        let account = fixture_account_id();
+        let identity = Identity::generate("device-1").expect("generate identity");
+        let founded = DeviceGroup::create_founder(&identity, &account, &fixture_seed())
+            .expect("create founder");
+        let loaded = DeviceGroup::load(&identity, &account, &fixture_seed())
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded.group_id(), founded.group_id());
+        let by_id = DeviceGroup::load_by_group_id(&identity, &account, &founded.group_id())
+            .expect("load by id")
+            .expect("present");
+        assert_eq!(by_id.group_id(), founded.group_id());
+        assert!(DeviceGroup::load(&identity, &account, &[0x11; 32])
+            .expect("load")
+            .is_none());
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        /// ADR-0078 phase 6: the id is a function of the seed alone. One
+        /// account id under two different seeds yields two different ids, so
+        /// no function of the account id computes it; and the id never equals
+        /// the retired account-id derivation.
+        #[test]
+        fn group_id_is_not_computable_from_the_account_id(
+            account in proptest::prelude::any::<[u8; 16]>(),
+            seed_a in proptest::prelude::any::<[u8; 32]>(),
+            seed_b in proptest::prelude::any::<[u8; 32]>(),
+        ) {
+            let id_a = DeviceGroup::group_id_for(&seed_a);
+            let id_b = DeviceGroup::group_id_for(&seed_b);
+            proptest::prop_assert_eq!(id_a.len(), 32);
+            if seed_a == seed_b {
+                proptest::prop_assert_eq!(&id_a, &id_b);
+            } else {
+                proptest::prop_assert_ne!(&id_a, &id_b);
+            }
+            proptest::prop_assert_ne!(&id_a, &retired_v1_group_id(&account));
+            // The seed is not the id either.
+            proptest::prop_assert_ne!(&id_a[..], &seed_a[..]);
+        }
+
+        /// The id is deterministic: the same seed always yields the same id.
+        #[test]
+        fn group_id_is_a_pure_function_of_the_seed(seed in proptest::prelude::any::<[u8; 32]>()) {
+            proptest::prop_assert_eq!(
+                DeviceGroup::group_id_for(&seed),
+                DeviceGroup::group_id_for(&seed)
+            );
+        }
     }
 
     #[test]
@@ -1102,7 +1196,8 @@ mod tests {
 
         // Device A bootstraps the group.
         let id_a = Identity::generate("device-A").expect("generate A");
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account).expect("create founder");
+        let mut group_a =
+            DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).expect("create founder");
 
         // Device B publishes a KeyPackage.
         let id_b = Identity::generate("device-B").expect("generate B");
@@ -1152,7 +1247,8 @@ mod tests {
 
         // Device A bootstraps the group.
         let id_a = Identity::generate("device-A").expect("generate A");
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account).expect("create founder");
+        let mut group_a =
+            DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).expect("create founder");
 
         // Device B publishes a KeyPackage; A adds it (A's view advances via
         // merge_pending_commit inside add_device).
@@ -1215,33 +1311,30 @@ mod tests {
         );
     }
 
+    /// The joiner binds nothing about the group id at join time (it has no
+    /// seed yet); it lands in the group the Welcome names and can load it by
+    /// that id afterwards.
     #[test]
-    fn join_rejects_welcome_for_a_different_account() {
-        let account_a = fixture_account_id();
-        let mut account_b = fixture_account_id();
-        account_b[0] ^= 0xFF;
+    fn a_joined_device_loads_the_group_by_its_id() {
+        let account = fixture_account_id();
 
         let id_a = Identity::generate("A").unwrap();
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account_a).unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
 
         let id_b = Identity::generate("B").unwrap();
         let kp_b = id_b.create_key_package().unwrap();
         let addition = group_a.add_device(&id_a, kp_b).unwrap();
 
         let welcome_bytes = crate::group::encode_message(&addition.welcome).unwrap();
-
-        // B tries to join under the *wrong* account_id — must be
-        // rejected before any state advance.
-        match DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account_b) {
-            Ok(_) => panic!("join_from_welcome should have rejected the mismatched account"),
-            Err(Error::Group(msg)) => {
-                assert!(
-                    msg.contains("group_id mismatch"),
-                    "unexpected error body: {msg}"
-                );
-            },
-            Err(other) => panic!("expected Group error, got {other:?}"),
-        }
+        let joined = DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).unwrap();
+        assert_eq!(
+            joined.group_id(),
+            DeviceGroup::group_id_for(&fixture_seed())
+        );
+        let loaded = DeviceGroup::load_by_group_id(&id_b, &account, &joined.group_id())
+            .unwrap()
+            .expect("present");
+        assert_eq!(loaded.group_id(), group_a.group_id());
     }
 
     /// Phase 2a3e1 — end-to-end: device A composes a
@@ -1254,7 +1347,7 @@ mod tests {
 
         // A bootstraps; B joins via Welcome.
         let id_a = Identity::generate("device-A").unwrap();
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
         let id_b = Identity::generate("device-B").unwrap();
         let kp_b = id_b.create_key_package().unwrap();
         let addition = group_a.add_device(&id_a, kp_b).unwrap();
@@ -1319,7 +1412,7 @@ mod tests {
     fn remove_device_at_rejects_own_leaf() {
         let account = fixture_account_id();
         let id_a = Identity::generate("device-A").unwrap();
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
         let own = group_a.own_leaf_index();
         match group_a.remove_device_at(&id_a, own) {
             Ok(_) => panic!("remove_device_at must reject own leaf"),
@@ -1349,7 +1442,6 @@ mod tests {
         // surfaced as `Extension::Unknown`, a private-use custom extension.
         const POLICY_EXT: u16 = 0xFF01;
 
-        let account = fixture_account_id();
         let id_a = Identity::generate("A").unwrap();
         let id_b = Identity::generate("B").unwrap();
 
@@ -1375,7 +1467,7 @@ mod tests {
             .with_group_context_extensions(gc_exts)
             .build();
 
-        let group_id = DeviceGroup::group_id_for(&account);
+        let group_id = DeviceGroup::group_id_for(&fixture_seed());
         let mut group_a = MlsGroup::new_with_group_id(
             &id_a.provider,
             &id_a.signature_keys,
@@ -1447,7 +1539,7 @@ mod tests {
         // account has no passkey to produce.
         let account = fixture_account_id();
         let id_a = Identity::generate("A").unwrap();
-        let group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
         assert!(!group_a.require_attested_removals());
     }
 
@@ -1456,7 +1548,7 @@ mod tests {
         let account = fixture_account_id();
 
         let id_a = Identity::generate("device-A").unwrap();
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
 
         // B joins via Welcome.
         let id_b = Identity::generate("device-B").unwrap();
@@ -1507,7 +1599,7 @@ mod tests {
     fn attested_removal_fixture() -> (Identity, DeviceGroup, Vec<u8>, Vec<u8>, AccountId) {
         let account = fixture_account_id();
         let id_a = Identity::generate("A").unwrap();
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
 
         let id_b = Identity::generate("B").unwrap();
         let kp_b = id_b.create_key_package().unwrap();
@@ -1650,7 +1742,7 @@ mod tests {
         // Same shape as the fixture but the policy is never flipped on.
         let account = fixture_account_id();
         let id_a = Identity::generate("A").unwrap();
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
         let id_b = Identity::generate("B").unwrap();
         let kp_b = id_b.create_key_package().unwrap();
         let add_b = group_a.add_device(&id_a, kp_b).unwrap();
@@ -1698,7 +1790,7 @@ mod tests {
         // must apply without any attestation.
         let account = fixture_account_id();
         let id_a = Identity::generate("A").unwrap();
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
         let id_b = Identity::generate("B").unwrap();
         let kp_b = id_b.create_key_package().unwrap();
         let add_b = group_a.add_device(&id_a, kp_b).unwrap();
@@ -1739,7 +1831,7 @@ mod tests {
     fn remove_device_at_rejects_unknown_leaf() {
         let account = fixture_account_id();
         let id_a = Identity::generate("device-A").unwrap();
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
         match group_a.remove_device_at(&id_a, 999_999) {
             Ok(_) => panic!("remove_device_at must reject an unknown leaf"),
             Err(Error::Group(msg)) => {
@@ -1759,7 +1851,7 @@ mod tests {
     fn remove_device_at_revokes_paired_device() {
         let account = fixture_account_id();
         let id_a = Identity::generate("device-A").unwrap();
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
         let id_b = Identity::generate("device-B").unwrap();
         let kp_b = id_b.create_key_package().unwrap();
         let addition = group_a.add_device(&id_a, kp_b).unwrap();
@@ -1897,7 +1989,7 @@ mod tests {
     fn service_envelope_round_trips_a_to_b_through_mls() {
         let account = fixture_account_id();
         let id_a = Identity::generate("device-A").unwrap();
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
         let id_b = Identity::generate("device-B").unwrap();
         let kp_b = id_b.create_key_package().unwrap();
         let addition = group_a.add_device(&id_a, kp_b).unwrap();
@@ -1954,7 +2046,7 @@ mod tests {
     fn service_envelope_bounds_are_enforced_on_compose() {
         let account = fixture_account_id();
         let id_a = Identity::generate("device-A").unwrap();
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
         for envelope in [Vec::new(), vec![0u8; MAX_SERVICE_ENVELOPE_LEN + 1]] {
             let err = group_a
                 .create_devicegroup_message(&id_a, DeviceGroupBody::ServiceEnvelope { envelope }, 1)

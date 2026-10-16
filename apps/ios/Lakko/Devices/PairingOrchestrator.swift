@@ -84,13 +84,15 @@ public enum PairingOrchestrator {
     /// Which account a joining device is joining (ADR-0056).
     public enum JoinTarget {
         /// A signed-in device (or one parked on the identity prompt after a
-        /// password sign-in): the account id is already known, and the
-        /// Welcome is checked against it at join.
+        /// password sign-in): the account id is already known. The Welcome
+        /// is bound to the account by the recovery row sealed under the
+        /// joined group's exporter (ADR-0078 section 6: the DeviceGroup id
+        /// is derived from the account seed, which the device does not hold
+        /// yet, so there is no id to check at join).
         case account(accountIdBytes: Data, accountIdB64: String)
         /// A fresh device with no session that named its account by the
         /// username typed: nothing before the session carries the account
-        /// id. The device learns it from the grant redeem after the join,
-        /// and only then checks the joined group against it.
+        /// id. The device learns it from the grant redeem after the join.
         case byName
     }
 
@@ -224,9 +226,8 @@ public enum PairingOrchestrator {
             accountIdBytes: Data,
             accountIdB64: String
         ) async throws -> JoinRecoveryOutcome? {
-            // The deterministic group_id check inside
-            // DeviceGroup.joinFromWelcome rejects a misrouted
-            // Welcome before any state advance.
+            // ADR-0078 section 6: the join binds no group id; the recovery
+            // row opened under this group's exporter binds the account.
             let joined = try DeviceGroup.joinFromWelcome(
                 welcome: welcomeBytes,
                 identity: identity,
@@ -271,10 +272,12 @@ public enum PairingOrchestrator {
         /// username. The account id is unknown until the grant redeem, so
         /// the Welcome is joined as a plain group, the recovery row is
         /// opened under its exporter (the DeviceGroup exporter IS the
-        /// underlying group's), the grant is redeemed, and only then is the
-        /// joined group checked to be that account's DeviceGroup. A redeem
-        /// that fails or a group of another account ends the join: without
-        /// the account the device has nothing to land.
+        /// underlying group's), the grant is redeemed, and the joined group
+        /// is adopted as that account's DeviceGroup under its own id. A
+        /// redeem that fails ends the join: without the account the device
+        /// has nothing to land. A row whose phrase is not the redeemed
+        /// account's is refused by the restore's check against the published
+        /// identity, before anything is persisted.
         ///
         /// ADR-0056 security pass: NOTHING is written here. The device
         /// seed, the snapshot, the history rows and the state bundle are
@@ -310,7 +313,8 @@ public enum PairingOrchestrator {
             do {
                 joined = try PairingOrchestrator.adoptJoinedDeviceGroup(
                     identity: identity,
-                    accountIdBytes: accountIdBytes
+                    accountIdBytes: accountIdBytes,
+                    groupId: try plain.groupId()
                 )
             } catch {
                 outcome.wipeEntropy()
@@ -655,20 +659,24 @@ public enum PairingOrchestrator {
     }
 
     /// ADR-0056 — join a DeviceGroup Welcome before the account is known:
-    /// a plain group join. The group_id check waits for
-    /// ``adoptJoinedDeviceGroup(identity:accountIdBytes:)``.
+    /// a plain group join, adopted afterwards by
+    /// ``adoptJoinedDeviceGroup(identity:accountIdBytes:groupId:)``.
     static func joinWelcomeByName(welcomeBytes: Data, identity: Identity) throws -> Group {
         try Group.joinFromWelcome(welcome: welcomeBytes, identity: identity)
     }
 
-    /// ADR-0056 — the deferred group_id check of a join by name: load the
-    /// DeviceGroup of `accountIdBytes` from the identity's storage. It is
-    /// there only if the Welcome joined was that account's DeviceGroup
-    /// (its group_id is derived from the account id), so a group of any
-    /// other account is refused here, as `DeviceGroup.joinFromWelcome`
-    /// refuses it for a device that knew its account up front.
-    static func adoptJoinedDeviceGroup(identity: Identity, accountIdBytes: Data) throws -> DeviceGroup {
-        guard let group = try loadDeviceGroup(identity: identity, accountId: accountIdBytes) else {
+    /// ADR-0056 — adopt the group a join by name joined as the DeviceGroup
+    /// of `accountIdBytes`, under its own id (`groupId`). ADR-0078 section 6:
+    /// the DeviceGroup id is derived from the account seed, not the account
+    /// id, so the account the redeem named cannot be checked against it
+    /// here; the recovery row sealed under this group's exporter is the
+    /// binding. ``JoinByNameError/wrongAccount`` when the group is not in the
+    /// identity's storage at all.
+    static func adoptJoinedDeviceGroup(
+        identity: Identity, accountIdBytes: Data, groupId: Data
+    ) throws -> DeviceGroup {
+        guard let group = try loadDeviceGroupById(
+            identity: identity, accountId: accountIdBytes, groupId: groupId) else {
             throw JoinByNameError.wrongAccount
         }
         return group

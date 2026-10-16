@@ -3,14 +3,19 @@
 
 /**
  * What this device keeps about the invite links it minted, beyond the ledger
- * row: the link secret and the link's reach scope id.
+ * row: the link secret, the link's reach scope id, the link's revocation
+ * seed, and what the owner's list shows about it.
  *
  * Since the 2026-09-28 security pass the ledger stores only the sealed blob,
- * and the link secret rides in the URL fragment the server never sees. The
- * owner's "Invite links" list is built from the ledger's owner query, so
- * without a local copy of the secret a listed link could not be copied or
- * shared again. The link id (ADR-0060 section 6) is what `revokeLink` needs to
- * remove exactly that link's reach key when the link is revoked.
+ * and the link secret rides in the URL fragment the server never sees. Since
+ * ADR-0078 section 10 the ledger row names no owner and no issuer either: it
+ * holds the public half of a revocation key drawn for that one link, and the
+ * seed is kept here. So this record is the ONLY place a link can be listed
+ * from (the owner list route is gone) and revoked from: a link minted on
+ * another device, or whose record was lost, can no longer be revoked from
+ * here and lives until it expires or is used up. The link id (ADR-0060
+ * section 6) is what `revokeLink` needs to remove exactly that link's reach
+ * key when the link is revoked.
  *
  * A link secret lets whoever holds it open the link, which is what the owner
  * hands out anyway; the row is still sealed under the device root key (the
@@ -37,14 +42,33 @@ const STORE = "rows";
 const IV_LEN = 12;
 
 /** Which ledger a minted link lives in. */
-export type MintedLinkKind = "contact" | "call";
+export type MintedLinkKind = "contact" | "call" | "group";
+
+/** What the owner's list shows about a link (ADR-0078 section 10: the
+ *  ledger no longer returns it). */
+export interface MintedLinkFacts {
+  /** The owner's label; `""` for none. */
+  readonly label: string;
+  /** The capability's expiry, UNIX ms; `0` = never. */
+  readonly expiryMs: number;
+  /** The `max_uses` sentinel (`0` single-use, `0xFFFFFFFF` unlimited). */
+  readonly maxUses: number;
+  /** The referral flag (`/i/` only). */
+  readonly bootstrapReferral: boolean;
+}
 
 /** The local half of a minted link. */
 export interface MintedLink {
   /** The 12-byte link secret (the URL fragment). */
   readonly linkSecret: Uint8Array;
-  /** The link's 16-byte reach scope id. */
+  /** The link's 16-byte reach scope id; empty for a `/g/` link, which has
+   *  no reach key. */
   readonly linkId: Uint8Array;
+  /** The 32-byte seed of the link's own revocation key (ADR-0078 section
+   *  10); `null` on a row kept before it existed, which cannot be revoked. */
+  readonly revocationSeed: Uint8Array | null;
+  /** What the owner's list shows; `null` on a row kept before it was. */
+  readonly facts: MintedLinkFacts | null;
 }
 
 /** A minted link as the spend round of ADR-0074 section 3.5a rule 5 reads
@@ -84,7 +108,9 @@ export function parseMintedRowKey(
   if (bar <= 0) return null;
   const kind = rest.slice(0, bar);
   const blobIdSlug = rest.slice(bar + 1);
-  if ((kind !== "contact" && kind !== "call") || blobIdSlug.length === 0) return null;
+  if ((kind !== "contact" && kind !== "call" && kind !== "group") || blobIdSlug.length === 0) {
+    return null;
+  }
   return { kind, blobIdSlug };
 }
 
@@ -93,12 +119,34 @@ export function decodeMintedLink(
   json: string,
 ): (MintedLink & { readonly mintedAtMs: number | null }) | null {
   try {
-    const parsed = JSON.parse(json) as { s?: unknown; l?: unknown; t?: unknown };
+    const parsed = JSON.parse(json) as {
+      s?: unknown;
+      l?: unknown;
+      t?: unknown;
+      r?: unknown;
+      f?: { label?: unknown; e?: unknown; m?: unknown; b?: unknown };
+    };
     if (typeof parsed.s !== "string" || typeof parsed.l !== "string") return null;
     const t = parsed.t;
+    const seed = typeof parsed.r === "string" ? base64Decode(parsed.r) : null;
+    const f = parsed.f;
+    const facts: MintedLinkFacts | null =
+      f !== undefined &&
+      f !== null &&
+      typeof f.e === "number" &&
+      typeof f.m === "number"
+        ? {
+            label: typeof f.label === "string" ? f.label : "",
+            expiryMs: f.e,
+            maxUses: f.m,
+            bootstrapReferral: f.b === true,
+          }
+        : null;
     return {
       linkSecret: base64Decode(parsed.s),
       linkId: base64Decode(parsed.l),
+      revocationSeed: seed !== null && seed.length === 32 ? seed : null,
+      facts,
       mintedAtMs: typeof t === "number" && Number.isFinite(t) && t > 0 ? t : null,
     };
   } catch {
@@ -111,6 +159,17 @@ export function encodeMintedLink(link: MintedLink, mintedAtMs: number): string {
     s: base64Encode(link.linkSecret),
     l: base64Encode(link.linkId),
     t: Math.floor(mintedAtMs),
+    ...(link.revocationSeed === null ? {} : { r: base64Encode(link.revocationSeed) }),
+    ...(link.facts === null
+      ? {}
+      : {
+          f: {
+            label: link.facts.label,
+            e: link.facts.expiryMs,
+            m: link.facts.maxUses,
+            b: link.facts.bootstrapReferral,
+          },
+        }),
   });
 }
 
@@ -221,15 +280,22 @@ export async function mintedLinkFor(
       ),
     );
     const decoded = decodeMintedLink(new TextDecoder().decode(plaintext));
-    return decoded === null ? null : { linkSecret: decoded.linkSecret, linkId: decoded.linkId };
+    return decoded === null
+      ? null
+      : {
+          linkSecret: decoded.linkSecret,
+          linkId: decoded.linkId,
+          revocationSeed: decoded.revocationSeed,
+          facts: decoded.facts,
+        };
   } catch {
     return null;
   }
 }
 
 /**
- * Every link this device minted for the account and still keeps, of both
- * kinds. A row that does not open is left out. Never throws: an unreadable
+ * Every link this device minted for the account and still keeps, of every
+ * kind. A row that does not open is left out. Never throws: an unreadable
  * store reads as no links.
  */
 export async function listMintedLinks(accountIdB64: string): Promise<MintedLinkRow[]> {

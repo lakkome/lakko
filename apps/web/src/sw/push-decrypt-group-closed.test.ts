@@ -66,8 +66,8 @@ function deps(messages: unknown[]) {
   return {
     forbidden,
     deps: {
-      readWakeBinding: async () => ({ devicePseudonymHex: "dd".repeat(32), accountId: "acct" }),
-      resolveAccount: async () => ({ accountId: "acct", groupIdBytes: GROUP_BYTES }),
+      readWakeBinding: async () => ({ accountId: "acct" }),
+      lookupRoute: async () => ({ accountId: "acct", groupIdB64: Buffer.from(GROUP_BYTES).toString("base64"), subIdHex: "dd".repeat(16) }),
       getDeviceKey: async () => ({}),
       getIdentitySeed: async () => new Uint8Array(64),
       loadSnapshot: async () => ({ snapshotBytes: new Uint8Array([1]), knownGroupIds: [] }),
@@ -78,7 +78,7 @@ function deps(messages: unknown[]) {
   };
 }
 
-const wake = { deviceHex: "dd".repeat(32), groupHex: GROUP_HEX, pointer: 42 };
+const wake = { subHex: "dd".repeat(16), groupHex: GROUP_HEX, pointer: 42 };
 const SUCCESSOR = new Uint8Array(32).fill(0x77);
 const groupClosed = (successor: Uint8Array | undefined = SUCCESSOR) =>
   realWasm.composeGroupClosedEnvelope(5n, successor);

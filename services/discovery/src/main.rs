@@ -488,7 +488,8 @@ fn protected_routes(state: &AppState) -> Router<AppState> {
             get(visibility::get_certificate),
         )
         // A3 (GDPR erasure) — purge this account's discovery footprint
-        // (username binding, identity bundle, KeyPackage, owned invites).
+        // (username binding, identity bundle, KeyPackage). Invite rows name no
+        // owner (ADR-0078 section 10) and are not touched.
         // Session-token-gated; the account_id comes from the verified token.
         .route(
             "/discovery/account",
@@ -505,53 +506,40 @@ fn protected_routes(state: &AppState) -> Router<AppState> {
         )
         .route("/discovery/invite", post(invite::upload))
         // Phase 3c3-server — call-invite blob upload. Session-
-        // token-gated like the contact-invite upload above; the
-        // handler additionally enforces capability-owner /
-        // token-account match (anti-impersonation).
+        // token-gated like the contact-invite upload above, as a
+        // rate-limit gate only; the account is not stored.
         .route("/discovery/call-invite", post(call_invite::upload))
-        // Phase 3c3-revoke — owner-signed call-invite delete.
-        // Body carries Ed25519 signature over the canonical
-        // bytes per `lakko_contacts::call_invite::
-        // call_revoke_canonical_bytes`. Session-token-gated
-        // for DoS rate-limiting; the signature is the actual
-        // authorisation gate.
+        // Phase 3c3-revoke — call-invite delete signed by the link's
+        // revocation key (ADR-0078 section 10) over
+        // `lakko_contacts::call_invite::call_revoke_canonical_bytes`.
+        // Session-token-gated for DoS rate-limiting; the signature is
+        // the actual authorisation gate.
         .route(
             "/discovery/call-invite/{blob_id}",
             axum::routing::delete(call_invite::revoke),
         )
         // ADR-0028 (G-3) — group join-ticket blob upload. Session-
-        // token-gated as a DoS / logged-in-user rate-limit; there
-        // is no owner-account binding on the capability to enforce
-        // (the issuer is identified by its Ed25519 pubkey only).
+        // token-gated as a DoS / logged-in-user rate-limit; the row
+        // stores neither the account nor the issuer key.
         .route("/discovery/group-invite", post(group_invite::upload))
-        // ADR-0028 revoke — issuer-signed group-invite delete. Body carries the
-        // Ed25519 signature over the group-invite revoke canonical bytes;
+        // ADR-0028 revoke — group-invite delete signed by the link's
+        // revocation key over the group-invite revoke canonical bytes;
         // session-token-gated for DoS rate-limiting, the signature is the
-        // authorisation gate (verified against the stored capability's
-        // issuer_signature_pubkey).
+        // authorisation gate (verified against the stored revocation_pk).
         .route(
             "/discovery/group-invite/{blob_id}",
             axum::routing::delete(group_invite::revoke),
         )
-        // `DELETE /discovery/invite/{blob_id}` is owner-signed via
-        // its body, but we ALSO require a session token: the
-        // signature proves "owner of the capability", the token
-        // proves "logged-in Lakko user", and the union is strictly
-        // stronger than the signature alone (rate-limits a stolen
-        // signing seed to one account).
+        // `DELETE /discovery/invite/{blob_id}` is signed by the link's
+        // revocation key via its body, and ALSO requires a session token
+        // as a rate-limit gate (the account is not recorded).
         .route(
             "/discovery/invite/{blob_id}",
             axum::routing::delete(invite::revoke),
         )
-        // Phase 1.18d2b-list — owner-signed POST that returns
-        // every live invite for the calling account. Body
-        // carries the Ed25519 signature; the session-token
-        // middleware here is a DoS gate, same role as on
-        // `revoke` above.
-        .route(
-            "/discovery/invite/by-owner",
-            post(invite::list_by_owner),
-        )
+        // ADR-0078 section 10 removed `POST /discovery/invite/by-owner`:
+        // no ledger row names its owner, and a client lists its own links
+        // from the record it keeps for each link it minted.
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state.rate_limits),
             rate_limit::write_middleware,
@@ -674,7 +662,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
     open.merge(rate_limited)
         .merge(protected)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }
 
@@ -870,6 +858,9 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod anon_token_route_tests;
+
+#[cfg(test)]
+mod log_capture_tests;
 
 #[cfg(test)]
 mod tests {

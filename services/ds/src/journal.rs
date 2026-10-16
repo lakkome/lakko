@@ -482,23 +482,14 @@ pub(crate) async fn post_group(
     let resp = publish(&state.db, &state.notifiers, Queue::Group, &owner, &body).await?;
     // ADR-0054: the wake follows the append, and only a proven writer of a
     // claimed journal gets one. Fire-and-forget: it cannot delay or fail
-    // this response.
+    // this response. ADR-0078: the wake is sealed to push-gw; the DS forwards
+    // it unread and binds it to nothing (push-gw checks the wake-key
+    // signature only members can make).
     if let Some(wake) = wake {
-        if !matches!(gated, crate::access::Gated::Proven { .. }) {
-            tracing::debug!(
-                kind = wake.kind.as_str(),
-                outcome = "unclaimed",
-                "wake dropped"
-            );
-        } else if crate::ownership::wake_is_bound(&state, &owner, &wake.push_gid).await {
+        if matches!(gated, crate::access::Gated::Proven { .. }) {
             state.waker.fire(&owner, wake, resp.id);
         } else {
-            // ADR-0057: a journal wakes only the push_gid bound to it.
-            tracing::debug!(
-                kind = wake.kind.as_str(),
-                outcome = "unbound",
-                "wake dropped"
-            );
+            tracing::debug!(outcome = "unclaimed", "wake dropped");
         }
     }
     Ok((StatusCode::CREATED, resp).into_response())

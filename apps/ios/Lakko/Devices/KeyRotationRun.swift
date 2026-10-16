@@ -598,8 +598,9 @@ public final class KeyRotationRunner: ObservableObject {
             _ proof: Data, _ attestation: Data?, _ withProof: Bool
         ) async throws -> Void
         public var republishKeyPackage: @MainActor () async throws -> Void
-        /// `PUT /ds/group/{hex}/root` for the DeviceGroup journal.
-        public var transferDeviceGroupRoot: @MainActor (_ attestation: Data?, _ keyGeneration: UInt64?) async throws -> Void
+        /// `PUT /ds/group/{hex}/root` for the DeviceGroup journal (a plain
+        /// root transfer since ADR-0078 phase 6).
+        public var transferDeviceGroupRoot: @MainActor () async throws -> Void
         public var transferOwnedJournals: @MainActor () async throws -> Void
         public var handOverChannels: @MainActor (_ keyGeneration: UInt64?) async throws -> Void
         public var rekeyReach: @MainActor () async throws -> Void
@@ -1042,7 +1043,7 @@ public final class KeyRotationRunner: ObservableObject {
                     try await ports.republishKeyPackage()
                     landed = true
                 case .deviceGroupRoot:
-                    try await ports.transferDeviceGroupRoot(record.attestation, record.keyGeneration)
+                    try await ports.transferDeviceGroupRoot()
                     landed = true
                 case .journals:
                     try await ports.transferOwnedJournals()
@@ -1198,18 +1199,16 @@ extension KeyRotationRunner.Ports {
                 guard let chat else { throw SessionNotReady() }
                 try await chat.republishKeyPackageAfterKeyRotation()
             },
-            transferDeviceGroupRoot: { [weak auth] attestation, keyGeneration in
+            transferDeviceGroupRoot: { [weak auth] in
                 guard let auth, let secrets = auth.identitySecrets,
                       let predecessor = auth.ownPredecessorSeeds(
                         accountIdB64: base64Encode(secrets.accountId)).last else {
                     throw SessionNotReady()
                 }
                 try await DeviceGroupDsAccess.transferRootAfterKeyRotation(
-                    accountIdBytes: secrets.accountId,
+                    accountIdB64: base64Encode(secrets.accountId),
                     predecessorSeed: predecessor,
                     newAccountSeed: secrets.accountIdentitySeed,
-                    attestation: attestation,
-                    keyGeneration: keyGeneration,
                     ds: DsClient())
             },
             transferOwnedJournals: { [weak auth, weak chat] in

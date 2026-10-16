@@ -17,7 +17,7 @@ const hooks = vi.hoisted(() => ({
   /** The callbacks the orchestrator handed its SFU session. */
   callbacks: null as {
     onStateChange?: (state: string) => void;
-    onWelcome?: (self: string, roster: ReadonlyArray<{ peer_id: string; account_pseudonym: string }>) => void;
+    onWelcome?: (self: string, roster: ReadonlyArray<{ peer_id: string }>) => void;
     onPeerJoined?: (peerId: string, pseudonym: string, tag: string | undefined) => void;
     onRemoteMediaState?: (peerId: string, cameraOn: boolean) => void;
   } | null,
@@ -60,17 +60,15 @@ vi.mock("./sfu-call-session", () => ({
 
 vi.mock("../wasm", () => ({
   loadWasm: async () => ({
-    sfuPeerTag: (): string => "ownertag",
     wrapCallKeyPackage: (): Uint8Array => new Uint8Array([1, 2, 3]),
   }),
 }));
 
 vi.mock("./call-jwt-client", () => ({
   CallJwtClient: class {
-    setSessionToken(): void {}
-    async mint(): Promise<{ jwt: string }> {
+    async mintForCall(): Promise<{ jwt: string; turn: null }> {
       if (hooks.mintGate !== null) await hooks.mintGate;
-      return { jwt: "test-jwt" };
+      return { jwt: "test-jwt", turn: null };
     }
   },
 }));
@@ -108,7 +106,6 @@ function attempt(): Attempt {
     ownerAccountId: new Uint8Array(16).fill(2),
     ownerSignatureKey: new Uint8Array(32).fill(3),
     sfuBaseUrl: "wss://sfu.test",
-    sessionToken: "sess",
     media: { audio: true, video: false },
     onError: (err: unknown) => a.errors.push(err),
     onEnded: () => {
@@ -188,7 +185,7 @@ describe("an abandoned link-call attempt and the shared call store", () => {
 
     hooks.callbacks?.onStateChange?.("connecting");
     hooks.callbacks?.onStateChange?.("connected");
-    hooks.callbacks?.onWelcome?.("self", [{ peer_id: "old", account_pseudonym: "p" }]);
+    hooks.callbacks?.onWelcome?.("self", [{ peer_id: "old" }]);
     hooks.callbacks?.onPeerJoined?.("older", "p", undefined);
     hooks.callbacks?.onRemoteMediaState?.("newer", false);
 
@@ -204,7 +201,7 @@ describe("an abandoned link-call attempt and the shared call store", () => {
 
     hooks.callbacks?.onStateChange?.("connecting");
     expect(callState.phase().kind).toBe("connecting");
-    hooks.callbacks?.onWelcome?.("self", [{ peer_id: "x", account_pseudonym: "p" }]);
+    hooks.callbacks?.onWelcome?.("self", [{ peer_id: "x" }]);
     expect(callState.participants().map((p) => p.id)).toEqual(["local", "peer-x"]);
     hooks.callbacks?.onStateChange?.("closed");
     expect(callState.phase().kind).toBe("ended");

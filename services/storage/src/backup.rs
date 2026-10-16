@@ -110,7 +110,6 @@ pub(crate) async fn put_backup(
     persist_tempfile(temp, target.clone()).await?;
 
     tracing::info!(
-        account_id_hex = %hex_encode(&authed.0),
         bytes = bytes_written,
         first_upload = !already_existed,
         "backup blob written",
@@ -187,10 +186,7 @@ pub(crate) async fn delete_backup(
 
     match tokio::fs::remove_file(&path).await {
         Ok(()) => {
-            tracing::info!(
-                account_id_hex = %hex_encode(&authed.0),
-                "backup blob deleted",
-            );
+            tracing::info!("backup blob deleted",);
             Ok(StatusCode::NO_CONTENT)
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

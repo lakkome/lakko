@@ -249,7 +249,7 @@ mod tests {
     fn exporter_secret_is_32_bytes() {
         let account = fixture_account_id();
         let identity = Identity::generate("founder").unwrap();
-        let group = DeviceGroup::create_founder(&identity, &account).unwrap();
+        let group = DeviceGroup::create_founder(&identity, &account, &[0x3D; 32]).unwrap();
         let secret = exporter_secret(&group, &identity).unwrap();
         assert_eq!(secret.len(), 32);
     }
@@ -261,7 +261,7 @@ mod tests {
     fn exporter_agrees_across_paired_devices() {
         let account = fixture_account_id();
         let id_a = Identity::generate("device-A").unwrap();
-        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &[0x3D; 32]).unwrap();
 
         let id_b = Identity::generate("device-B").unwrap();
         let kp_b = id_b.create_key_package().unwrap();

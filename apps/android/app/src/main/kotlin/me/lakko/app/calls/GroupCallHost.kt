@@ -115,6 +115,8 @@ public class GroupCallSessionRequest(
     public val seed: ByteArray,
     public val localLeaf: Int,
     public val video: Boolean,
+    /** The TURN credential minted beside [jwt], or `null` (STUN alone). */
+    public val turn: TurnCredential? = null,
 )
 
 /** The platform effects the host drives. */
@@ -152,13 +154,19 @@ public interface GroupCallPort {
 
     public suspend fun readSettledGroup(groupIdHex: String, callId: ByteArray): SettledGroupRead
 
-    /** The call-admission JWT. May throw. */
-    public suspend fun mintCallJwt(sessionToken: String, callIdHex: String): String
+    /** The call token (and the TURN credential beside it) for the room of
+     *  [callId], paid for by one anonymous `call-join` token (ADR-0078
+     *  section 2): no session reaches the issuer. May throw. */
+    public suspend fun mintCallJwt(callId: ByteArray): MintCallJwtResult
 
-    /** `GET` the SFU's call-state route at [url] with [authorization] as the
-     *  `Authorization` header and return the body on a 200, else `null`
-     *  (`SfuCallState.kt`). Never throws. */
-    public suspend fun fetchSfuCallState(url: String, authorization: String): String?
+    /** `sfuRoomForCall(callId)` (64 lower-case hex), or `null` when it cannot
+     *  be computed. */
+    public fun sfuRoom(callId: ByteArray): String?
+
+    /** `GET` the SFU's room-state route at [url] (no token, no credentials)
+     *  and return the body on a 200, else `null` (`SfuCallState.kt`). Never
+     *  throws. */
+    public suspend fun fetchSfuCallState(url: String): String?
 
     /** Publish a group-call body to the group and fold it into the local record. */
     public suspend fun publishSignal(groupIdHex: String, body: FfiCallSignalingBody): Boolean
@@ -574,8 +582,11 @@ public class GroupCallHost(
                 warn("group call: SFU URL not configured (lakko.sfu.url), refusing", null)
                 return GroupCallStartOutcome.Failed(UiText("chat.call.unavailable"))
             }
-            val token = p.sessionToken()
-                ?: return GroupCallStartOutcome.Failed(UiText("call.error.signed_out_start"))
+            // The anonymous `call-join` token that pays for the call token is
+            // drawn with the session, so a call needs one.
+            if (p.sessionToken() == null) {
+                return GroupCallStartOutcome.Failed(UiText("call.error.signed_out_start"))
+            }
             if (!initiator) {
                 // Derive the key at the epoch the other participants are at, and
                 // see a `CallEnd` already on the journal before joining.
@@ -599,7 +610,7 @@ public class GroupCallHost(
                 warn("group call: call-key derivation failed, refusing", null)
                 return GroupCallStartOutcome.Failed(UiText("call.error.encryption_setup"))
             }
-            val jwt = p.mintCallJwt(token, callIdHex)
+            val minted = p.mintCallJwt(callId)
             if (gen != generation) return GroupCallStartOutcome.Failed(UiText(fallbackKey))
             if (initiator) {
                 // After the admission mint (a refused mint announces nothing) and
@@ -636,10 +647,11 @@ public class GroupCallHost(
                     groupIdHex = groupIdHex,
                     callIdHex = callIdHex,
                     sfuBaseUrl = base,
-                    jwt = jwt,
+                    jwt = minted.jwt,
                     seed = seed,
                     localLeaf = leaf,
                     video = video,
+                    turn = minted.turn,
                 ),
                 ui,
             )
@@ -802,11 +814,13 @@ public class GroupCallHost(
         val p = port ?: return
         if (active?.callIdHex == callIdHex) return
         val base = p.sfuBaseUrl() ?: return
-        val token = p.sessionToken() ?: return
+        // ADR-0078 section 2: the probe names the room (a one-way function of
+        // the call id) and carries no token, so no admission token is minted
+        // to ask and the issuer never sees who probes.
+        val probedCallId = unhex(callIdHex) ?: return
+        val room = p.sfuRoom(probedCallId) ?: return
         val state = try {
-            val jwt = p.mintCallJwt(token, callIdHex)
-            p.fetchSfuCallState(sfuCallStateUrl(base, callIdHex), sfuCallStateAuthorization(jwt))
-                ?.let(::parseSfuCallState)
+            p.fetchSfuCallState(sfuCallStateUrl(base, room))?.let(::parseSfuCallState)
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: Throwable) {

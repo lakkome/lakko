@@ -79,7 +79,7 @@ describe("removed device over the real DeviceGroup", () => {
   it("a removal stops the removed device and leaves the remover active", () => {
     const idA = wasm.Identity.fromSeed(new Uint8Array(32).fill(7));
     const idB = wasm.Identity.fromSeed(new Uint8Array(32).fill(8));
-    const a = wasm.DeviceGroup.createFounder(idA, ACCOUNT);
+    const a = wasm.DeviceGroup.createFounder(idA, ACCOUNT, idA);
     const added = a.addDeviceFromWire(idA, idB.createKeyPackage());
     const b = wasm.DeviceGroup.joinFromWelcome(added.welcome, idB, ACCOUNT);
     try {

@@ -395,7 +395,8 @@ final class InviteLinkShapeTests: XCTestCase {
             .withSessionToken("t")
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
         do {
-            let id = try await client.uploadGroupInvite(mint: mint, expiryMs: 0, maxUses: .max)
+            let id = try await client.uploadGroupInvite(
+                mint: mint, revocationPubkey: Data(repeating: 2, count: 32), expiryMs: 0, maxUses: .max)
             XCTFail("a 32-byte id must be refused, got \(id.count) bytes")
         } catch {}
     }
@@ -404,24 +405,21 @@ final class InviteLinkShapeTests: XCTestCase {
         let client = GroupInviteDiscoveryURLProtocol.client(
             GroupInviteDiscoveryURLProtocol.freshScope(.ok)).withSessionToken("t")
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
-        let id = try await client.uploadGroupInvite(mint: mint, expiryMs: 0, maxUses: .max)
+        let id = try await client.uploadGroupInvite(
+                mint: mint, revocationPubkey: Data(repeating: 2, count: 32), expiryMs: 0, maxUses: .max)
         XCTAssertEqual(id.count, 6)
         XCTAssertEqual(base64UrlEncodeNoPad(id), GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug)
     }
 
     // MARK: - Sealed uploads and opens for /i/ and /c/
 
-    /// The ledger gets the SEALED blob and clear fields only; `/i/` adds its
-    /// label and referral flag, `/c/` and `/g/` do not.
+    /// The ledger gets the SEALED blob and clear fields only, the same for
+    /// all three ledgers; ADR-0078 section 10: the link's own revocation key,
+    /// never an owner, an issuer key, a label or a referral flag.
     func testTheUploadBodiesCarryTheSealedBlobAndTheClearFields() throws {
-        let contact = try JSONSerialization.jsonObject(with: JSONEncoder().encode(InviteUploadRequest(
-            sealed: "U0VBTEVE", issuerPubkey: "S0VZ", expiryMs: 7, maxUses: 0,
-            label: "Team", bootstrapReferral: true))) as? [String: Any]
-        XCTAssertEqual(Set(contact?.keys.map { $0 } ?? []),
-                       ["sealed", "issuer_pubkey", "expiry_ms", "max_uses", "label", "bootstrap_referral"])
         let group = try JSONSerialization.jsonObject(with: JSONEncoder().encode(InviteUploadRequest(
-            sealed: "U0VBTEVE", issuerPubkey: "S0VZ", expiryMs: 0, maxUses: .max))) as? [String: Any]
-        XCTAssertEqual(Set(group?.keys.map { $0 } ?? []), ["sealed", "issuer_pubkey", "expiry_ms", "max_uses"])
+            sealed: "U0VBTEVE", revocationPubkey: "S0VZ", expiryMs: 0, maxUses: .max))) as? [String: Any]
+        XCTAssertEqual(Set(group?.keys.map { $0 } ?? []), ["sealed", "revocation_pubkey", "expiry_ms", "max_uses"])
         XCTAssertNil(group?["capability"], "the plaintext capability never reaches the ledger")
     }
 

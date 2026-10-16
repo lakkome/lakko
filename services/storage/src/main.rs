@@ -211,7 +211,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
         // with its own (much smaller) ceiling.
         .layer(DefaultBodyLimit::max(MAX_BLOB_BYTES))
         .merge(backup_routes)
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }
 

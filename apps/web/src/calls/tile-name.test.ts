@@ -9,7 +9,7 @@ import {
   EARLY_RELAY_LIMIT,
   EarlyRelays,
   personNameOrNull,
-  profileClaimMatchesPeer,
+  boundProfileClaim,
 } from "./tile-name";
 
 const KEY = new Uint8Array(32).fill(0xa1);
@@ -73,26 +73,31 @@ describe("personNameOrNull", () => {
   });
 });
 
-describe("profileClaimMatchesPeer", () => {
-  const tagOf = (accountIdHex: string): string => `tag-of-${accountIdHex}`;
-
-  it("accepts the account the SFU admitted the peer as", () => {
-    expect(profileClaimMatchesPeer("aa", "tag-of-aa", tagOf)).toBe(true);
+describe("boundProfileClaim", () => {
+  const owner = new Uint8Array(16).fill(0x22);
+  const cert = new Uint8Array(153).fill(9);
+  const profile = (accountId: Uint8Array | null) => ({
+    displayName: "Anna",
+    accountId,
+    usernameCertificate: cert,
   });
 
-  it("refuses another account's id, a missing claim and a missing tag", () => {
-    expect(profileClaimMatchesPeer("bb", "tag-of-aa", tagOf)).toBe(false);
-    expect(profileClaimMatchesPeer(null, "tag-of-aa", tagOf)).toBe(false);
-    expect(profileClaimMatchesPeer("aa", undefined, tagOf)).toBe(false);
-    expect(profileClaimMatchesPeer("aa", "", tagOf)).toBe(false);
+  it("keeps the claim of the owner's profile naming the capability's owner account", () => {
+    const p = profile(owner);
+    expect(boundProfileClaim(p, true, owner)).toBe(p);
   });
 
-  it("refuses when the tag cannot be derived", () => {
-    expect(
-      profileClaimMatchesPeer("zz", "tag-of-zz", () => {
-        throw new Error("not an account id");
-      }),
-    ).toBe(false);
+  it("strips the claim of anyone else, and of the owner naming another account", () => {
+    for (const [p, fromOwner] of [
+      [profile(owner), false],
+      [profile(new Uint8Array(16).fill(0x33)), true],
+      [profile(null), true],
+    ] as const) {
+      const out = boundProfileClaim(p, fromOwner, owner);
+      expect(out.accountId).toBeNull();
+      expect(out.usernameCertificate).toBeNull();
+      expect(out.displayName).toBe("Anna");
+    }
   });
 });
 

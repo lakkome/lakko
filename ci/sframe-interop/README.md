@@ -91,7 +91,7 @@ docker compose -f ci/sframe-interop/docker-compose.yml up --build --detach --wai
 # 2. Mint a fixture-signed JWT.
 JWT=$(cargo run -q --release -p lakko-call-jwt --example mint_test_jwt -- \
   --call-id deadbeef0000000000000000000000aa \
-  --account cafef00d0000000000000000000000bb --role participant --ttl-secs 600)
+  --peer-id cafef00d0000000000000000000000bb --role participant --ttl-secs 600)
 
 # 3. Drive the two browser peers (after the harness is armed).
 LAKKO_SFRAME_INTEROP_SFU_URL=ws://127.0.0.1:7880 LAKKO_SFRAME_INTEROP_JWT="$JWT" \

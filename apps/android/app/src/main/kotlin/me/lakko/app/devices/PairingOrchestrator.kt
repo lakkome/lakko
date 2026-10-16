@@ -14,8 +14,7 @@ import uniffi.lakko_ffi_uniffi.DecodedPairingQr
 import uniffi.lakko_ffi_uniffi.DeviceGroup
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
-import uniffi.lakko_ffi_uniffi.deviceGroupIdFor
-import uniffi.lakko_ffi_uniffi.loadDeviceGroup
+import uniffi.lakko_ffi_uniffi.loadDeviceGroupById
 import uniffi.lakko_ffi_uniffi.openWithKey
 import uniffi.lakko_ffi_uniffi.sealWithKey
 
@@ -183,9 +182,10 @@ public object PairingOrchestrator {
             check(!disposed) { "JoinSession.accept called after dispose" }
             val account = known
                 ?: return acceptByName(welcomeBytes, welcomeCursor, recovery)?.withWipes(wipes)
-            // The deterministic group_id check inside
-            // DeviceGroup.joinFromWelcome rejects a misrouted
-            // Welcome before any state advance.
+            // ADR-0078 section 6: the join binds no group id (the
+            // DeviceGroup id is derived from the account seed); the
+            // recovery row opened under this group's exporter binds the
+            // account.
             val joined = DeviceGroup.joinFromWelcome(
                 welcome = welcomeBytes,
                 identity = identity,
@@ -275,15 +275,12 @@ public object PairingOrchestrator {
                                 client.deviceAuthorizeRedeem(grantTokenB64, deviceId = identity.signaturePublicKey())
                             }
 
-                        override fun groupIdFor(accountId: ByteArray): ByteArray =
-                            deviceGroupIdFor(accountId)
-
                         override suspend fun bindAs(accountId: ByteArray): PendingJoin {
                             // In-memory only: the DeviceGroup is in the
                             // identity's own storage after the join, and the
                             // two bundles are fetched, not applied.
-                            val joined = loadDeviceGroup(identity, accountId)
-                                ?: throw IllegalStateException("joined DeviceGroup not found in storage")
+                            val joined = loadDeviceGroupById(identity, accountId, plain.groupId())
+                                ?: throw JoinWrongAccount()
                             group = joined
                             val accountIdB64 = base64Encode(accountId)
                             val bundles = fetchCatchUpBundles(joined, welcomeCursor)
@@ -516,12 +513,10 @@ public object PairingOrchestrator {
                 grantToken = parsed.grantToken
                 // Redeem the single-use grant for a session token (the
                 // request carries the grant only, ADR-0056). A redeem
-                // failure (endpoint down, grant expired), or a redeem that
-                // names an account whose DeviceGroup is not the one just
-                // joined, degrades to a keys-only outcome — the identity
-                // still restores; only ACCESS needs another factor.
-                val redeemed = completeJoinByName(
-                    joinedGroupId = joined.groupId(),
+                // failure (endpoint down, grant expired) degrades to a
+                // keys-only outcome — the identity still restores; only
+                // ACCESS needs another factor.
+                val redeemed = (completeJoinByName(
                     grantToken = parsed.grantToken,
                     redeem = { grantB64 ->
                         // ADR-0074 - name this device at the landing.
@@ -529,8 +524,10 @@ public object PairingOrchestrator {
                             client.deviceAuthorizeRedeem(grantB64, deviceId = identity.signaturePublicKey())
                         }
                     },
-                    groupIdFor = { accountId -> deviceGroupIdFor(accountId) },
-                ) as? JoinByNameResult.Joined
+                ) as? JoinByNameResult.Joined)
+                    // A redeem that names another account than the one this
+                    // device joined for is not a session of it: keys only.
+                    ?.takeIf { it.accountId.contentEquals(account.accountIdBytes) }
                 if (redeemed == null) {
                     android.util.Log.w(
                         "PairingOrchestrator",

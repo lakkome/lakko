@@ -254,40 +254,32 @@ public final class PushGroupRouting {
 
     private let store: PushRoutingStore
 
-    /// Subscribe seam — `(push_gid) -> ()`. Defaults to the real push-gw
-    /// call (device pseudonym from the Keychain + ``PushClient``);
-    /// injectable so tests can spy on the target without touching the
-    /// network (mirror of the web `PushClient` `vi.mock`).
-    private let subscribeUnderPushGid: (Data) async throws -> Void
+    /// Subscribe seam — `(push_gid) -> ()`. `nil` (production) runs the
+    /// sealed subscription of ADR-0078 section 3
+    /// (``sendSealedSubscription(accountIdB64:groupIdHex:secret:pushGid:)``);
+    /// injectable so tests can spy on the target without touching the network
+    /// (mirror of the web `PushClient` `vi.mock`).
+    private let subscribeUnderPushGid: PushGidSeam?
 
     /// Unsubscribe seam — `(push_gid) -> ()`. ADR-0043: the counterpart the
-    /// rotation needs to retire a SUPERSEDED id. Defaults to the real
-    /// `POST /push/group/unsubscribe` call, which had **zero call sites**
-    /// before this ADR (the wrapper existed on all three clients and was
-    /// never invoked); injectable so tests can spy on the target.
-    private let unsubscribeUnderPushGid: (Data) async throws -> Void
+    /// rotation needs to retire a SUPERSEDED id. `nil` (production) removes
+    /// this device's push-gw row for that id by its subscription id
+    /// (`POST /push/unsubscribe`); injectable so tests can spy on the target.
+    private let unsubscribeUnderPushGid: PushGidSeam?
 
-    /// ADR-0057 obligation 8, second security pass finding 5 — bind the
-    /// group's journal to `derivePushGid(secret)` BEFORE the secret is
-    /// broadcast, called with `(account, group, secret)`. The repository binds
-    /// with the root (owner) or the admin registrar key and answers
-    /// ``PushBindOutcome/notPermitted`` for a member. Runs under the routing
-    /// lock, bounded by ``networkCallTimeout``. `nil` binds nothing.
-    public var bindSecret: ((String, String, Data) async -> PushBindOutcome)?
+    /// A test seam closure. `@unchecked Sendable` only so the `nonisolated`
+    /// initializer may store it: it is called on the main actor alone.
+    struct PushGidSeam: @unchecked Sendable {
+        let call: (Data) async throws -> Void
+    }
 
     /// Whether `accountIdB64` is the account signed in on this device right
     /// now. Asked immediately before a subscribe or an unsubscribe reaches
-    /// push-gw: both are made under the DEVICE pseudonym, which is minted per
-    /// sign-in, and routing work queued for one account can still be running
-    /// after it signed out. Without the check that work would subscribe the
-    /// next account's pseudonym (or mint one for nobody) to the departed
-    /// account's group. The default answers `true` (tests, no repository).
+    /// push-gw: routing work queued for one account can still be running after
+    /// it signed out, and a subscription sealed for the departed account would
+    /// carry this device's tokens for a group nobody here is signed in to. The
+    /// default answers `true` (tests, no repository).
     public var accountIsBound: @MainActor (String) -> Bool = { _ in true }
-
-    /// Groups whose last bind did not land (`503` disabled, offline): the next
-    /// provisioning pass binds again (wakes are dropped until bound).
-    /// Session-scoped.
-    private var bindRetry: Set<String> = []
 
     /// Per-group in-flight provisioning keys, so a concurrent legacy-sweep
     /// + onAppear for the same group mint the random secret exactly once.
@@ -491,25 +483,13 @@ public final class PushGroupRouting {
     public nonisolated init(
         networkCallTimeout: TimeInterval = PushGroupRouting.defaultNetworkCallTimeout,
         store: PushRoutingStore = PushRoutingStore(),
-        subscribeUnderPushGid: @escaping (Data) async throws -> Void = { pushGid in
-            let devicePseudonym = try DevicePushId.getOrCreate()
-            _ = try await PushClient().subscribeGroup(
-                devicePseudonym: devicePseudonym,
-                groupPseudonym: pushGid
-            )
-        },
-        unsubscribeUnderPushGid: @escaping (Data) async throws -> Void = { pushGid in
-            let devicePseudonym = try DevicePushId.getOrCreate()
-            _ = try await PushClient().unsubscribeGroup(
-                devicePseudonym: devicePseudonym,
-                groupPseudonym: pushGid
-            )
-        }
+        subscribeUnderPushGid: ((Data) async throws -> Void)? = nil,
+        unsubscribeUnderPushGid: ((Data) async throws -> Void)? = nil
     ) {
         self.networkCallTimeout = networkCallTimeout
         self.store = store
-        self.subscribeUnderPushGid = subscribeUnderPushGid
-        self.unsubscribeUnderPushGid = unsubscribeUnderPushGid
+        self.subscribeUnderPushGid = subscribeUnderPushGid.map(PushGidSeam.init(call:))
+        self.unsubscribeUnderPushGid = unsubscribeUnderPushGid.map(PushGidSeam.init(call:))
     }
 
     // MARK: - Primitives (mirror of group-routing.ts helpers)
@@ -657,6 +637,13 @@ public final class PushGroupRouting {
         return pushGid
     }
 
+    /// The group's routing secret, or `nil` when this device does not hold
+    /// it. The publish path seals a wake with it (ADR-0078 section 3); the
+    /// secret never leaves the device.
+    public func secret(accountIdB64: String, groupIdHex: String) -> Data? {
+        store.getSecret(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+    }
+
     /// Look up the `push_gid` bytes for a group, or `nil` when this device
     /// does not (yet) hold the secret. Used by the notify path (publisher)
     /// and the subscribe path.
@@ -697,11 +684,69 @@ public final class PushGroupRouting {
             // ever applying a peer's rotation. A deadline lands in the same
             // swallow below as an unreachable push-gw, and the next
             // `ensureProvisioned` re-subscribes at its tail.
-            try await withNetworkTimeout("subscribe") { [subscribeUnderPushGid] in
-                try await subscribeUnderPushGid(pushGid)
+            if let subscribeUnderPushGid {
+                try await withNetworkTimeout("subscribe") {
+                    try await subscribeUnderPushGid.call(pushGid)
+                }
+            } else {
+                guard let request = sealedSubscription(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex) else { return }
+                try await withNetworkTimeout("subscribe") {
+                    try await PushClient().subscribe(
+                        subId: request.subId, pushGid: request.pushGid,
+                        wakePk: request.wakePk, sealed: request.sealed)
+                }
             }
         } catch {
             NSLog("push_gid subscribe failed: \(error)")
+        }
+    }
+
+    /// One sealed subscription request (ADR-0078 section 3).
+    struct SealedSubscriptionRequest {
+        let subId: Data
+        let pushGid: Data
+        let wakePk: Data
+        let sealed: Data
+    }
+
+    /// The subscription row for `(account, group)`: this device's tokens
+    /// (``PushDeviceTokens``) sealed under the group's unlock key, filed under
+    /// this device's subscription id for the current `push_gid` (minted on
+    /// first use). `nil` when no secret is held, push is off (no token), or a
+    /// derivation fails. The unlock key is derived inside the core and never
+    /// leaves it; push-gw learns it only inside a sealed wake.
+    func sealedSubscription(accountIdB64: String, groupIdHex: String) -> SealedSubscriptionRequest? {
+        guard let secret = store.getSecret(accountIdB64: accountIdB64, groupIdHex: groupIdHex),
+              let pushGid = Self.derivePushGid(secret: secret) else { return nil }
+        let entries = PushDeviceTokens.shared.entries()
+        guard !entries.isEmpty else { return nil }
+        let subId = store.ensureSubscriptionId(
+            accountIdB64: accountIdB64, pushGidHex: Self.hex(pushGid))
+        do {
+            let wakePk = try LakkoCore.derivePushWakePublicKey(secret: secret)
+            let sealed = try LakkoCore.sealPushSubscription(
+                secret: secret, subId: subId, entries: entries)
+            return SealedSubscriptionRequest(
+                subId: subId, pushGid: pushGid, wakePk: wakePk, sealed: sealed)
+        } catch {
+            NSLog("push subscription sealing failed")
+            return nil
+        }
+    }
+
+    /// Send every subscription of `accountIdB64` again (a token changed, or a
+    /// sign-in): each one carries the tokens sealed, so a new token reaches
+    /// push-gw only this way. Each group runs under its routing lock.
+    public func resubscribeAll(accountIdB64: String) async {
+        var seen: Set<String> = []
+        for route in store.routes(accountIdB64: accountIdB64)
+        where seen.insert(route.groupIdHex).inserted {
+            await withRoutingLock(accountIdB64: accountIdB64, groupIdHex: route.groupIdHex) {
+                [weak self] in
+                await self?.subscribeUnderPushGidBestEffort(
+                    accountIdB64: accountIdB64, groupIdHex: route.groupIdHex)
+            }
         }
     }
 
@@ -750,10 +795,10 @@ public final class PushGroupRouting {
     /// Called on BOTH sides of a rotation with the OLD secret — by the
     /// rotator after it re-arms under the new id, and by every remaining
     /// member when the gated receive path applies a CHANGED secret. Both
-    /// must, and for the same reason: `POST /push/group/unsubscribe` deletes
-    /// exactly the `(device, group)` row named in the request, and a client
-    /// knows only its OWN device pseudonym, so nobody can tear down anyone
-    /// else's row. If only the rotator unsubscribed, every OTHER member would
+    /// must, and for the same reason: `POST /push/unsubscribe` deletes exactly
+    /// the row named by its subscription id, and a client knows only its OWN
+    /// subscription ids (ADR-0078), so nobody can tear down anyone else's
+    /// row. If only the rotator unsubscribed, every OTHER member would
     /// leave a live row under the old id — one dead subscription per member
     /// per rotation, which is the "versioned cluster archive" ADR-0043
     /// § Context calls strictly worse than not rotating at all.
@@ -773,8 +818,8 @@ public final class PushGroupRouting {
             return
         }
         guard accountIsBound(accountIdB64) else {
-            // The account signed out: its whole device registration is
-            // dropped by the sign-out itself. Only the local route row goes.
+            // The account signed out: its subscriptions are removed by the
+            // sign-out itself. Only the local route row goes.
             store.removeRoute(accountIdB64: accountIdB64, pushGidHex: Self.hex(oldGid))
             return
         }
@@ -784,8 +829,15 @@ public final class PushGroupRouting {
             // here would wedge it. A deadline is swallowed exactly as an
             // unreachable push-gw is, at the cost this method already
             // documents: a stale row that nothing notifies again.
-            try await withNetworkTimeout("unsubscribe") { [unsubscribeUnderPushGid] in
-                try await unsubscribeUnderPushGid(oldGid)
+            if let unsubscribeUnderPushGid {
+                try await withNetworkTimeout("unsubscribe") {
+                    try await unsubscribeUnderPushGid.call(oldGid)
+                }
+            } else if let subId = store.subscriptionId(
+                accountIdB64: accountIdB64, pushGidHex: Self.hex(oldGid)) {
+                try await withNetworkTimeout("unsubscribe") {
+                    _ = try await PushClient().unsubscribe(subId: subId)
+                }
             }
         } catch {
             // The new id is already armed; a failed unsubscribe leaves a row
@@ -1428,55 +1480,6 @@ public final class PushGroupRouting {
         }
     }
 
-    // MARK: - Bind before broadcast (ADR-0057 second security pass, finding 5)
-
-    /// Bind with the network bounded (this runs under the routing-row lock).
-    /// Never throws; a timeout counts as ``PushBindOutcome/failed``. A `503`
-    /// or a failure marks the group for a re-bind on the next provisioning
-    /// pass.
-    private func bindBounded(accountIdB64: String, groupIdHex: String, secret: Data) async -> PushBindOutcome {
-        guard let bindSecret else { return .notPermitted }
-        let lockKey = Self.lockKey(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
-        var outcome: PushBindOutcome = .failed
-        do {
-            try await withNetworkTimeout("bind") {
-                outcome = await bindSecret(accountIdB64, groupIdHex, secret)
-            }
-        } catch {
-            outcome = .failed
-        }
-        switch outcome {
-        case .disabled, .failed: bindRetry.insert(lockKey)
-        case .bound, .conflict, .notPermitted: bindRetry.remove(lockKey)
-        }
-        return outcome
-    }
-
-    /// Mint a fresh secret and bind the journal to its routing id BEFORE the
-    /// caller persists and broadcasts it (finding 5): `204` bound; `503` or a
-    /// failure: broadcast anyway and re-bind later; `409` (the id is bound to
-    /// another journal): mint once more and bind again, and if that also
-    /// fails, broadcast it unbound. A member binds nothing (only an owner or
-    /// an admin mints or rotates). `mint` is injectable for tests.
-    func mintAndBind(
-        accountIdB64: String,
-        groupIdHex: String,
-        mint: () -> Data? = { PushGroupRouting.mintSecret() }
-    ) async -> Data? {
-        guard var secret = mint() else { return nil }
-        var outcome = await bindBounded(accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret)
-        if outcome == .conflict {
-            NSLog("push-routing: the minted routing id is bound elsewhere; minting another once")
-            guard let second = mint() else { return nil }
-            secret = second
-            outcome = await bindBounded(accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret)
-            if outcome == .conflict {
-                NSLog("push-routing: the second routing id is bound elsewhere too; broadcasting unbound")
-            }
-        }
-        return secret
-    }
-
     // MARK: - Owner-mint funnel
 
     /// Ensure a group's push routing is provisioned for this device.
@@ -1536,10 +1539,9 @@ public final class PushGroupRouting {
     /// none, and waits for the receive path).
     ///
     /// A per-group in-flight guard coalesces a concurrent legacy-sweep +
-    /// onAppear. Since the second security pass the mint awaits the push
-    /// binding before it persists, so it is the serializing routing lock that
-    /// keeps a second concurrent call from re-minting; the guard additionally
-    /// suppresses a redundant re-broadcast.
+    /// onAppear; the serializing routing lock keeps a second concurrent call
+    /// from re-minting, and the guard additionally suppresses a redundant
+    /// re-broadcast.
     ///
     /// - Parameter broadcast: posts the distribution-envelope bytes to the
     ///   group journal as an E2EE MLS application message
@@ -1594,9 +1596,6 @@ public final class PushGroupRouting {
         // open-question decision to keep un-owned legacy groups on deferred
         // push until a natural re-creation.
         let isOwner = (try? group.ownRole(identity: identity)) == .owner
-        // Finding 5 — the mint and the re-broadcast bind in this pass; only a
-        // row that was already distributed on entry retries a failed bind.
-        var boundThisPass = false
 
         if !store.hasSecret(accountIdB64: accountIdB64, groupIdHex: groupIdHex) {
             // MINT — OWNER ONLY. The secret is 32 RANDOM bytes, so a second
@@ -1615,17 +1614,14 @@ public final class PushGroupRouting {
                         accountIdB64: accountIdB64, groupIdHex: groupIdHex)
                     return
                 }
-                // Persist (flips `hasSecret` true) right after the bind, marked
-                // NOT distributed, then tell the group over the
-                // E2EE journal. Persist-before-broadcast stays: minting twice
-                // would diverge the group's routing id, which is far worse
-                // than re-broadcasting one envelope.
-                // Bind BEFORE broadcasting (finding 5 of the second security
-                // pass). The coalescing guard and the routing lock keep a
-                // second mint out while this awaits.
-                guard let secret = await mintAndBind(
-                    accountIdB64: accountIdB64, groupIdHex: groupIdHex) else { return }
-                boundThisPass = true
+                // Persist (flips `hasSecret` true), marked NOT distributed,
+                // then tell the group over the E2EE journal.
+                // Persist-before-broadcast stays: minting twice would diverge
+                // the group's routing id, which is far worse than
+                // re-broadcasting one envelope. (ADR-0078 retired the journal
+                // binding that used to precede the broadcast: push-gw now
+                // checks the wake's signature instead.)
+                guard let secret = Self.mintSecret() else { return }
                 if persistSecret(
                     accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: secret,
                     distributed: false, mintEpoch: mintEpoch) != nil {
@@ -1668,23 +1664,10 @@ public final class PushGroupRouting {
             // secret a newer position than the rotation that superseded it and
             // reproduce the finding with the ordering gate fully armed. The
             // pair comes from the ONE `getRecord` above.
-            //
-            // Finding 5 — bound before it goes on the wire (a 204 when it is
-            // bound already; a member binds nothing).
-            _ = await bindBounded(accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: pending.secret)
-            boundThisPass = true
             await broadcastAndSettle(
                 secret: pending.secret, mintEpoch: pending.mintEpoch,
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex,
                 what: "re-broadcast", broadcast: broadcast)
-        }
-        // A bind that did not land (503 disabled, offline) is retried here, on
-        // the next provisioning pass (finding 5: wakes are dropped until bound).
-        if !boundThisPass,
-           bindRetry.contains(Self.lockKey(accountIdB64: accountIdB64, groupIdHex: groupIdHex)),
-           let held = store.getRecord(accountIdB64: accountIdB64, groupIdHex: groupIdHex),
-           held.distributed {
-            _ = await bindBounded(accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: held.secret)
         }
         // A device holding a secret it cannot READ (`getRecord` nil while
         // `hasSecret` is true — wrap key rotated / corrupt row) falls through
@@ -1708,10 +1691,10 @@ public final class PushGroupRouting {
     // evicted from. The leak is not storage hygiene: an ex-member learns
     // "this group was active at time T" on every send, indefinitely.
     //
-    // It cannot be closed by unsubscribing, because
-    // `POST /push/group/unsubscribe` deletes exactly the `(device, group)`
-    // row named in the request and a client knows only its OWN device
-    // pseudonym — no remaining member can reach the ex-member's row, and the
+    // It cannot be closed by unsubscribing, because `POST /push/unsubscribe`
+    // deletes exactly the row named by its subscription id and a client knows
+    // only its OWN subscription ids (ADR-0078) — no remaining member can
+    // reach the ex-member's row, and the
     // ex-member's client has no "you were removed" handling to do it itself.
     // Re-keying is the only mechanism the GROUP has: after a rotation nobody
     // ever notifies the old id again, so that row goes **inert without the
@@ -1993,9 +1976,7 @@ public final class PushGroupRouting {
         // (4) — mint + persist PENDING. Persist before broadcasting for
         // the same reason the mint path does: two divergent random secrets
         // are worse than two identical envelopes.
-        // Bind BEFORE broadcasting (finding 5 of the second security pass).
-        guard let next = await mintAndBind(
-            accountIdB64: accountIdB64, groupIdHex: groupIdHex) else { return .skipNoSecret }
+        guard let next = Self.mintSecret() else { return .skipNoSecret }
         guard persistSecret(
             accountIdB64: accountIdB64, groupIdHex: groupIdHex, secret: next,
             distributed: false, mintEpoch: stamp) != nil else {
@@ -2148,7 +2129,7 @@ public final class PushGroupRouting {
 
     // MARK: - Helpers
 
-    /// Lowercase-hex a byte buffer (the push-gw pseudonym wire form).
+    /// Lowercase-hex a byte buffer (the route-row key form).
     public nonisolated static func hex(_ bytes: Data) -> String {
         bytes.map { String(format: "%02x", $0) }.joined()
     }

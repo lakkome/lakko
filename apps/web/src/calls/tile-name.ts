@@ -23,11 +23,9 @@
  * keeps the announcements that arrive before it can read them
  * ({@link EarlyRelays}).
  *
- * Never a piece of an account id or of a key. The SFU hands every client an
- * `account_pseudonym` (the first characters of the account id); a tile
- * labelled with it reads like something the viewer ought to recognise and
- * names nobody, and it is what a person without a profile name was shown as
- * until 2026-10-02.
+ * Never a piece of an account id or of a key. (The SFU used to hand every
+ * client an `account_pseudonym`, the first characters of the account id; it
+ * holds no account at all since ADR-0078 section 2.)
  *
  * Pure: no wasm, no storage, no Solid.
  */
@@ -59,29 +57,40 @@ export function personNameOrNull(resolved: ResolvedName): string | null {
   return resolved.source === "fingerprint" ? null : resolved.name;
 }
 
+/** The profile fields {@link boundProfileClaim} reads and rewrites. */
+export interface ClaimedProfile {
+  readonly accountId?: Uint8Array | null | undefined;
+  readonly usernameCertificate?: Uint8Array | null | undefined;
+}
+
 /**
- * Whether the account a sealed profile claims is the account the SFU admitted
- * the relaying peer as.
+ * A link-call profile with its account claim kept only when that claim is
+ * bound (ADR-0078 section 2).
  *
  * A profile in a link call comes from a stranger, and a username certificate
- * binds a username to an ACCOUNT ID, not to the key that sent the profile. The
- * ADR-0021 peer tag is derived from the account id in the peer's
- * call-admission token, so a profile is filed in the profile store, and its
- * username may ever read as verified, only when the claimed account id gives
- * that peer's tag. A participant therefore cannot present another account's
- * id together with that account's certificate.
+ * binds a username to an ACCOUNT ID, not to the key that sent the profile.
+ * Until ADR-0078 the SFU's peer tag tied the claim to the admitted account;
+ * the SFU knows no account any more. The one account id a link call knows
+ * independently is the owner's, inside the signed capability. So the claim
+ * (account id and certificate) is kept only for a profile the link's owner
+ * sealed and that names the capability's owner account; anyone else's
+ * profile is filed without it, so its username reads as claimed, never as
+ * verified, and a participant cannot present another account's id together
+ * with that account's certificate.
  */
-export function profileClaimMatchesPeer(
-  claimedAccountIdHex: string | null,
-  peerTag: string | undefined,
-  tagOf: (accountIdHex: string) => string,
-): boolean {
-  if (claimedAccountIdHex === null || peerTag === undefined || peerTag.length === 0) return false;
-  try {
-    return tagOf(claimedAccountIdHex) === peerTag;
-  } catch {
-    return false;
-  }
+export function boundProfileClaim<P extends ClaimedProfile>(
+  profile: P,
+  fromOwner: boolean,
+  ownerAccountId: Uint8Array,
+): P {
+  const claimed = profile.accountId ?? null;
+  const bound =
+    fromOwner &&
+    claimed !== null &&
+    claimed.length === ownerAccountId.length &&
+    claimed.every((b, i) => b === ownerAccountId[i]);
+  if (bound) return profile;
+  return { ...profile, accountId: null, usernameCertificate: null };
 }
 
 /** How many relays a link call keeps while it cannot read them yet. */

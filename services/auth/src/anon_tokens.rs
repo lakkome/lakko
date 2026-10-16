@@ -28,8 +28,15 @@
 //! - `LAKKO_ANON_TOKEN_QUOTA_<CONTEXT>` - tokens per account per epoch, one
 //!   variable per context (`DISCOVERY_LOOKUP`, `DISCOVERY_REGISTER`,
 //!   `INVITE_CONSUME`, `DS_KNOCK`, `PUSH_REGISTER`, `CHANNEL_SUBSCRIBE`,
-//!   `DIRECTORY_SEARCH`, `VAULT_CLAIM`, `BLOB_UPLOAD`, `BLOB_READ`). `0`
-//!   stops issuance for that context. Malformed: startup fails.
+//!   `DIRECTORY_SEARCH`, `VAULT_CLAIM`, `BLOB_UPLOAD`, `BLOB_READ`,
+//!   `MAILBOX_WRITE`, `CALL_JOIN`). `0` stops issuance for that context.
+//!   Malformed: startup fails.
+//! - `LAKKO_ANON_TOKEN_QUOTA_CALL_JOIN_YOUNG` - the `call-join` quota of an
+//!   account younger than `LAKKO_AUTH_YOUNG_ACCOUNT_AGE_SECS` (ADR-0078
+//!   section 2, the rebuilt ADR-0033 fresh-account signal; defaults 8 and
+//!   86400). One issuer key family serves every account (decision 2): the
+//!   young quota is the only difference, so a token never shows at spend
+//!   whether its account was young.
 //!
 //! # Failure posture
 //!
@@ -90,19 +97,46 @@ use crate::AppState;
 ///   Writes under a reach key or a delegation spend none. 50 a day is chosen,
 ///   not measured: well above the requests a person sends, low enough that
 ///   one account is a poor source for flooding open mailboxes.
+/// - `call-join` (ADR-0078 section 2): one token per call admission (a join,
+///   a reconnect). 100 a day is chosen, not measured: far above the calls a
+///   person joins, and the per-room cap bounds what one account can do to one
+///   room. A young account draws [`DEFAULT_YOUNG_CALL_JOIN_QUOTA`] instead.
+/// - `push-register` (ADR-0078 section 3): since push-gw holds no device
+///   pseudonym, every group subscription is its own sealed row and each
+///   subscribe or unsubscribe spends a token, and a token change re-sends
+///   every subscription of the device. 400 a day is chosen, not measured: a
+///   device in about a hundred groups can re-send all of them a few times a
+///   day; the earlier 100 assumed one registration per device.
 const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
     (TokenContext::DiscoveryLookup, 100),
     (TokenContext::DiscoveryRegister, 10),
     (TokenContext::InviteConsume, 30),
     (TokenContext::DsKnock, 200),
-    (TokenContext::PushRegister, 100),
+    (TokenContext::PushRegister, 400),
     (TokenContext::ChannelSubscribe, 20),
     (TokenContext::DirectorySearch, 30),
     (TokenContext::VaultClaim, 100),
     (TokenContext::BlobUpload, 96),
     (TokenContext::BlobRead, 96),
     (TokenContext::MailboxWrite, 50),
+    (TokenContext::CallJoin, 100),
 ];
+
+/// The `call-join` quota per epoch of a young account (ADR-0078 section 2,
+/// decision 2). Chosen, not measured: a guest who opened a call link joins
+/// that call and reconnects a few times; a burst of fresh accounts each
+/// buys only this many admissions.
+const DEFAULT_YOUNG_CALL_JOIN_QUOTA: u32 = 8;
+
+/// An account younger than this draws the young `call-join` quota. One day:
+/// an ADR-0032 guest that never claims a name is deleted after a day.
+const DEFAULT_YOUNG_ACCOUNT_AGE_SECS: u64 = 86_400;
+
+/// Env var of the young `call-join` quota.
+const YOUNG_CALL_JOIN_QUOTA_VAR: &str = "LAKKO_ANON_TOKEN_QUOTA_CALL_JOIN_YOUNG";
+
+/// Env var of the young-account age.
+const YOUNG_ACCOUNT_AGE_VAR: &str = "LAKKO_AUTH_YOUNG_ACCOUNT_AGE_SECS";
 
 /// How many contexts exist; the quota table has one row per context.
 const CONTEXT_COUNT: usize = TokenContext::ALL.len();
@@ -120,6 +154,10 @@ fn quota_var(context: TokenContext) -> String {
 pub(crate) struct AnonTokenIssuer {
     pub(crate) server: AnonTokenServerConfig,
     quotas: [(TokenContext, u32); CONTEXT_COUNT],
+    /// The `call-join` quota of a young account.
+    young_call_join_quota: u32,
+    /// The age under which an account is young, in seconds.
+    young_age_secs: u64,
 }
 
 impl AnonTokenIssuer {
@@ -129,7 +167,26 @@ impl AnonTokenIssuer {
         server: AnonTokenServerConfig,
         quotas: [(TokenContext, u32); CONTEXT_COUNT],
     ) -> Self {
-        Self { server, quotas }
+        Self {
+            server,
+            quotas,
+            young_call_join_quota: DEFAULT_YOUNG_CALL_JOIN_QUOTA,
+            young_age_secs: DEFAULT_YOUNG_ACCOUNT_AGE_SECS,
+        }
+    }
+
+    /// Build with the default quotas (other modules' tests).
+    #[cfg(test)]
+    pub(crate) const fn for_test(server: AnonTokenServerConfig) -> Self {
+        Self::new(server, DEFAULT_QUOTAS)
+    }
+
+    /// Set the young-account `call-join` quota and age (tests).
+    #[cfg(test)]
+    pub(crate) const fn with_young(mut self, quota: u32, age_secs: u64) -> Self {
+        self.young_call_join_quota = quota;
+        self.young_age_secs = age_secs;
+        self
     }
 
     /// The quota for `context`.
@@ -152,8 +209,65 @@ pub(crate) fn load_anon_tokens() -> anyhow::Result<Option<AnonTokenIssuer>> {
     let Some(server) = AnonTokenServerConfig::from_env()? else {
         return Ok(None);
     };
-    let quotas = quotas_from(|var| std::env::var(var).ok())?;
-    Ok(Some(AnonTokenIssuer { server, quotas }))
+    let lookup = |var: &str| std::env::var(var).ok();
+    let quotas = quotas_from(lookup)?;
+    let young_call_join_quota = parsed_or(
+        &lookup,
+        YOUNG_CALL_JOIN_QUOTA_VAR,
+        DEFAULT_YOUNG_CALL_JOIN_QUOTA,
+    )?;
+    let young_age_secs = parsed_or(
+        &lookup,
+        YOUNG_ACCOUNT_AGE_VAR,
+        DEFAULT_YOUNG_ACCOUNT_AGE_SECS,
+    )?;
+    Ok(Some(AnonTokenIssuer {
+        server,
+        quotas,
+        young_call_join_quota,
+        young_age_secs,
+    }))
+}
+
+/// A non-negative integer from `var`, or `default` when unset or blank.
+///
+/// # Errors
+///
+/// A value that does not parse as a non-negative integer.
+fn parsed_or<T: std::str::FromStr>(
+    lookup: &impl Fn(&str) -> Option<String>,
+    var: &str,
+    default: T,
+) -> anyhow::Result<T>
+where
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
+    match lookup(var) {
+        Some(raw) if !raw.trim().is_empty() => raw
+            .trim()
+            .parse()
+            .with_context(|| format!("{var} must be a non-negative integer")),
+        _ => Ok(default),
+    }
+}
+
+/// Whether the account was created less than `age_secs` ago (DB clock).
+/// A missing row reads as not young; a store error is returned (the caller
+/// fails closed).
+async fn account_is_young(
+    pool: &sqlx::MySqlPool,
+    account_id: &[u8; 16],
+    age_secs: u64,
+) -> Result<bool, sqlx::Error> {
+    let age = i64::try_from(age_secs).unwrap_or(i64::MAX);
+    let flag: Option<i64> = sqlx::query_scalar(
+        "SELECT (created_at > NOW() - INTERVAL ? SECOND) FROM accounts WHERE id = ?",
+    )
+    .bind(age)
+    .bind(&account_id[..])
+    .fetch_optional(pool)
+    .await?;
+    Ok(flag.is_some_and(|v| v != 0))
 }
 
 /// The quota table: the defaults, each replaced by its
@@ -184,9 +298,12 @@ fn quotas_from(
 /// Log the startup state, loudly when dormant.
 pub(crate) fn log_startup(issuer: Option<&AnonTokenIssuer>) {
     if let Some(i) = issuer {
+        let young_quota = i.young_call_join_quota;
         tracing::info!(
             window_secs = i.server.window_secs,
             quotas = ?i.quotas.iter().map(|(c, q)| (c.name(), *q)).collect::<Vec<_>>(),
+            young_quota,
+            young_age_secs = i.young_age_secs,
             "anonymous-token issuance enabled"
         );
     } else {
@@ -367,16 +484,22 @@ pub(crate) async fn issue_tokens(
     })?;
 
     let count = u32::try_from(blinded.len()).map_err(|_| TokenApiError::BadBatchSize)?;
-    let remaining = match reserve_issuance(
-        &state.db,
-        &auth.0,
-        context,
-        epoch,
-        count,
-        issuer.quota(context),
-    )
-    .await
-    {
+    // ADR-0078 section 2: a young account draws a small `call-join` quota.
+    // The key family is the same for every account (decision 2), so nothing
+    // about the token tells the spender the account was young.
+    let quota = if context == TokenContext::CallJoin {
+        match account_is_young(&state.db, &auth.0, issuer.young_age_secs).await {
+            Ok(true) => issuer.young_call_join_quota.min(issuer.quota(context)),
+            Ok(false) => issuer.quota(context),
+            Err(e) => {
+                tracing::error!(error = %e, "anon-token account-age read failed; refusing");
+                return Err(TokenApiError::Internal);
+            },
+        }
+    } else {
+        issuer.quota(context)
+    };
+    let remaining = match reserve_issuance(&state.db, &auth.0, context, epoch, count, quota).await {
         Ok(IssuanceDecision::Granted { remaining }) => remaining,
         Ok(IssuanceDecision::Exhausted { remaining }) => {
             let now = lakko_anon_token_server::now_unix_secs();

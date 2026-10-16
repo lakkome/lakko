@@ -54,8 +54,9 @@ export interface StoredProfile {
   readonly updatedAtMs: bigint;
   /** The CLAIMED 16-byte auth account id as 32 lower-case hex characters
    *  (the `AcceptedContact.accountIdHex` shape), or `null` when the envelope
-   *  carried none (ADR-0048 v2). What the call roster derives the ADR-0021
-   *  peer tag from; never an identity on its own — the signature key is. */
+   *  carried none (ADR-0048 v2). Never an identity on its own — the
+   *  signature key is. (A call roster no longer reads it: since ADR-0078
+   *  section 2 a peer is named by its own signed announcement.) */
   readonly accountIdHex: string | null;
   /** ADR-0060 — the username certificate the profile carried (standard
    *  base64), what `verifyUsernameBinding` checks the claimed username

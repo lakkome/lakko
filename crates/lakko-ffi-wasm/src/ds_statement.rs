@@ -431,21 +431,6 @@ impl DsStatementSigner {
         let new_root = key32(new_root, "new root key")?;
         self.request(journal_id, StatementBody::RootTransfer { new_root })
     }
-
-    /// `PUT .../push-binding`: bind the journal to one `push_gid`.
-    ///
-    /// # Errors
-    ///
-    /// On a wrong-length input.
-    #[wasm_bindgen(js_name = pushBinding)]
-    pub fn push_binding(
-        &self,
-        journal_id: &[u8],
-        push_gid: &[u8],
-    ) -> Result<DsStatementRequest, JsError> {
-        let push_gid = key32(push_gid, "push_gid")?;
-        self.request(journal_id, StatementBody::PushBinding { push_gid })
-    }
 }
 
 /// A decoded registrar-seed envelope; the seed is still sealed.

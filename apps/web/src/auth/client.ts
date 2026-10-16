@@ -108,7 +108,7 @@ import type {
 export const DEFAULT_BASE_URL = "/api/auth";
 
 /** The fixed length of the ADR-0073 key-reset attestation. */
-export const KEY_RESET_ATTESTATION_LEN = 177;
+export const KEY_RESET_ATTESTATION_LEN = 145;
 
 /** Result of `AuthClient.signup`. `exportKey` is the OPAQUE export
  *  key the device root key gets derived from in 1.16c3c2 — the
@@ -207,7 +207,7 @@ export interface RecoverResult {
 
 /** Result of `AuthClient.resetAccountKeys` (ADR-0073 section 2). */
 export interface KeyResetResult {
-  /** The raw 177-byte key-reset attestation (decoded from the server's
+  /** The raw 145-byte key-reset attestation (decoded from the server's
    *  URL-safe base64). Carried to discovery and to the DS. */
   attestation: Uint8Array;
   /** The same attestation as the server encoded it (URL-safe, no pad), kept

@@ -5,14 +5,12 @@
 //! (ADR-0074 part 3, Stage A; sprint T5).
 //!
 //! Mirror of `crates/lakko-ffi-uniffi/src/key_rotation.rs` for the web
-//! client. Three things a client needs and must not re-derive:
+//! client. Two things a client needs and must not re-derive:
 //!
 //! - the **key-rotation envelope** ([`lakko_contacts::key_rotation`]): the
 //!   rotating device composes it and posts it in the account's DeviceGroup;
 //!   a kept device decodes and CHECKS it with `verifyKeyRotationEnvelope`
 //!   before it stores it as pending;
-//! - the **root endorsement** ([`lakko_attest::sign_root_endorsement`]) the
-//!   Delivery Service requires beside a key-reset attestation;
 //! - the envelope's length and pending-age rule, exported rather than
 //!   hand-copied.
 //!
@@ -33,16 +31,14 @@
 //! Every function throws an `Error` whose message is `"<code>: <reason>"`
 //! with the stable codes `wrongDomain`, `truncated`, `unknownVersion`,
 //! `badLength` (the envelope's wire shape), `bad-entropy-length`,
-//! `bad-proof-length`, `bad-key-length`, `bad-seed-length`,
-//! `bad-journal-id-length`, `proof-refused`, `entropy-mismatch`, `same-key`.
+//! `bad-proof-length`, `bad-key-length`, `bad-seed-length`, `proof-refused`,
+//! `entropy-mismatch`, `same-key`.
 
-use lakko_attest::ROOT_ENDORSEMENT_LEN;
 use lakko_contacts::key_rotation::{
     compose_key_rotation as rust_compose, decode_key_rotation as rust_decode,
     KeyRotation as RustKeyRotation, KeyRotationError, KEY_ROTATION_ENTROPY_LEN,
     KEY_ROTATION_ENVELOPE_LEN, KEY_ROTATION_PENDING_MAX_AGE_MS, KEY_ROTATION_PROOF_LEN,
 };
-use lakko_crypto::signing::SigningKey;
 use lakko_mnemonic::Mnemonic;
 use wasm_bindgen::prelude::*;
 
@@ -217,30 +213,6 @@ fn verify_inner(
     })
 }
 
-fn endorsement_inner(
-    new_account_ed25519_seed: &[u8],
-    journal_id: &[u8],
-    key_generation: u64,
-    root_key: &[u8],
-) -> Result<Vec<u8>, String> {
-    let seed: [u8; 32] = new_account_ed25519_seed
-        .try_into()
-        .map_err(|_| refused("bad-seed-length", "the account seed must be 32 bytes"))?;
-    let journal: [u8; 32] = journal_id
-        .try_into()
-        .map_err(|_| refused("bad-journal-id-length", "the journal id must be 32 bytes"))?;
-    let root: [u8; 32] = root_key
-        .try_into()
-        .map_err(|_| refused("bad-key-length", "the root key must be 32 bytes"))?;
-    Ok(lakko_attest::sign_root_endorsement(
-        &SigningKey::from_seed(&seed),
-        &journal,
-        key_generation,
-        &root,
-    )
-    .to_vec())
-}
-
 /// Compose a key-rotation envelope: the plaintext of ONE MLS application
 /// message in the account's DeviceGroup (inside the `ServiceEnvelope`
 /// carrier). `newEntropy` is the new phrase's 16-byte entropy;
@@ -327,51 +299,10 @@ pub fn key_rotation_pending_expired(prepared_at_ms: u64, now_ms: u64) -> bool {
     now_ms.saturating_sub(prepared_at_ms) > KEY_ROTATION_PENDING_MAX_AGE_MS
 }
 
-/// Sign the **root endorsement** the Delivery Service requires beside a
-/// key-reset attestation (ADR-0074 section 4.6): the account's NEW identity
-/// key says which key becomes the root of the account's DeviceGroup journal.
-/// Sent as `root_endorsement_b64` (standard base64) with
-/// `key_reset_attest_b64` on `PUT /ds/group/{hex}/reset` (after a reset or a
-/// recall) and on `PUT /ds/group/{hex}/root` (after a rotation).
-///
-/// - `newAccountEd25519Seed`: the NEW account identity's 32-byte Ed25519
-///   seed (`identity.ed25519Seed`), the key the attestation names.
-/// - `journalId`: the DeviceGroup journal id (`deviceGroupJournalId`).
-/// - `keyGeneration`: the generation the attestation carries (`bigint`).
-/// - `rootKey`: the key that becomes the root: the signer of a `reset`
-///   statement (the NEW root's `publicKey`), the `new_root` of a `root`
-///   transfer.
-///
-/// # Errors
-///
-/// Throws `bad-seed-length`, `bad-journal-id-length`, `bad-key-length`.
-#[wasm_bindgen(js_name = signDsRootEndorsement)]
-pub fn sign_ds_root_endorsement(
-    new_account_ed25519_seed: &[u8],
-    journal_id: &[u8],
-    key_generation: u64,
-    root_key: &[u8],
-) -> Result<Vec<u8>, JsError> {
-    endorsement_inner(
-        new_account_ed25519_seed,
-        journal_id,
-        key_generation,
-        root_key,
-    )
-    .map_err(|m| JsError::new(&m))
-}
-
-/// The length of a root endorsement (64 bytes).
-#[wasm_bindgen(js_name = dsRootEndorsementLen)]
-#[must_use]
-pub fn ds_root_endorsement_len() -> u32 {
-    u32::try_from(ROOT_ENDORSEMENT_LEN).unwrap_or(u32::MAX)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lakko_attest::{verify_root_endorsement, KeyResetAttestation};
+    use lakko_crypto::signing::SigningKey;
 
     const NOW: i64 = 1_800_000_000;
 
@@ -491,39 +422,5 @@ mod tests {
         assert!(!key_rotation_pending_expired(1_000, 1_000 + max));
         assert!(key_rotation_pending_expired(1_000, 1_001 + max));
         assert!(!key_rotation_pending_expired(5_000, 1_000));
-    }
-
-    #[test]
-    fn a_root_endorsement_verifies_against_the_attestation_it_was_made_for() {
-        let account_id = [0xA1u8; 16];
-        let identity = SigningKey::from_seed(&[0x44; 32]);
-        let attest_key = SigningKey::from_seed(&[0x45; 32]);
-        let wire = KeyResetAttestation::for_account(
-            &account_id,
-            3,
-            identity.verifying_key().to_bytes(),
-            1_000,
-        )
-        .sign(&attest_key);
-        let attestation = KeyResetAttestation::open(&wire, &attest_key.verifying_key()).unwrap();
-        let root = [0x52u8; 32];
-        let journal = lakko_attest::device_group_journal_id(&account_id);
-        let sig = endorsement_inner(&[0x44; 32], &journal, 3, &root).unwrap();
-        assert_eq!(sig.len(), ds_root_endorsement_len() as usize);
-        verify_root_endorsement(&attestation, &root, &sig).unwrap();
-        let other = endorsement_inner(&[0x44; 32], &journal, 4, &root).unwrap();
-        assert!(verify_root_endorsement(&attestation, &root, &other).is_err());
-        assert_eq!(
-            code(&endorsement_inner(&[0; 31], &journal, 3, &root).unwrap_err()),
-            "bad-seed-length"
-        );
-        assert_eq!(
-            code(&endorsement_inner(&[0x44; 32], &[0; 31], 3, &root).unwrap_err()),
-            "bad-journal-id-length"
-        );
-        assert_eq!(
-            code(&endorsement_inner(&[0x44; 32], &journal, 3, &[0; 33]).unwrap_err()),
-            "bad-key-length"
-        );
     }
 }

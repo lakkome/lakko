@@ -7,12 +7,10 @@ import Foundation
 /// ACCOUNT.
 ///
 /// Closes (for the accepted list) the long-standing "No persistence yet"
-/// gap noted on ``ContactsRepository`` and unblocks ADR-0021 group-call
-/// roster name resolution: the SFU sends a per-call `peer_tag` derived
-/// from each peer's account_id, and the client re-derives the same over
-/// its contacts' account_ids to resolve a name — which requires the
-/// accepted contacts (each carrying `request.fromAccountId`) to survive a
-/// relaunch.
+/// gap noted on ``ContactsRepository``: the accepted contacts (each carrying
+/// `request.fromAccountId`) survive a relaunch. (A group-call tile is no
+/// longer named through the account id: since ADR-0078 section 2 the SFU
+/// knows no account and each peer announces itself, sealed and signed.)
 ///
 /// ## Why per account (2026-09-30)
 ///

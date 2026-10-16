@@ -742,7 +742,8 @@ pub(crate) mod tests {
         assert!(parsed.get("latest_epoch").is_none());
     }
 
-    /// ADR-0054: the wake header is parsed before the append, so a malformed
+    /// ADR-0054: the wake header (since ADR-0078 a sealed blob) is parsed
+    /// before the append, so a malformed
     /// one stores nothing; a valid one on a claimed publish is accepted (the
     /// test waker is dormant, so nothing leaves the process); a mailbox never
     /// takes one; an unclaimed group validates it and drops the wake.
@@ -758,18 +759,17 @@ pub(crate) mod tests {
             StatusCode::NO_CONTENT
         );
         let uri = messages_uri("group", &gid);
-        let good = format!(
+        // ADR-0078: a wake sealed to push-gw; the DS checks its shape only.
+        let mut blob = vec![5u8; lakko_contacts::push_wake::PUSH_WAKE_LEN];
+        blob[0] = lakko_contacts::push_wake::PUSH_WAKE_VERSION_V1;
+        let good = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&blob);
+        let wake = crate::wake::WAKE_HEADER;
+        let old_spelling = format!(
             "{};message",
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([5u8; 32])
         );
-        let wake = crate::wake::WAKE_HEADER;
 
-        for bad in [
-            "",
-            "x;message",
-            &format!("{good}x"),
-            &good.replace("message", "ring"),
-        ] {
+        for bad in ["", "x;message", &format!("{good}x"), &old_spelling] {
             let (status, _) = send_with(
                 &app,
                 Req {
@@ -1277,8 +1277,6 @@ pub(crate) mod tests {
             notifiers: journal::Notifiers::default(),
             waker: std::sync::Arc::new(crate::wake::Waker::dormant()),
             anon_tokens: lakko_anon_token_server::TokenVerifier::new(db, None),
-            binding_pepper: None,
-            attest_key: None,
         };
         let app = crate::build_app(state);
         let uri = format!("/ds/group/{}/knock", hex::encode([3u8; PSEUDONYM_LEN]));

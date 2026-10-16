@@ -8,19 +8,20 @@
  * A device has at most one active account, and the service worker must
  * never show another account's push. It decides that from ONE row, the wake
  * binding (`lakko-push-routing`/`wake_binding`, see
- * `group-routing-store.ts`): the device push pseudonym this browser
- * registered and the account it registered it for. Every wake carries `d`,
- * the pseudonym that subscribed; the worker handles a wake only when `d`
- * equals the bound pseudonym, and only as the bound account
+ * `group-routing-store.ts`): the account this browser registered for push.
+ * Since ADR-0078 there is no device pseudonym; every wake carries `s`, the
+ * subscription id it was delivered for, and the worker handles it only when
+ * the bound account's route row for the wake's `push_gid` holds that id
  * (`wakeBoundAccount` in `public/sw-push-decrypt.js`).
  *
  * This module owns the three moments the row changes:
  *
- *   - **registration** ({@link recordWakeBinding}) — written after
- *     `push-gw` accepted the pseudonym for the signed-in account;
- *   - **a different account signing in** ({@link pseudonymMustRotate}) —
- *     the old account's pseudonym is not reused, so its subscriptions
- *     (still live if it never logged out) fail the gate;
+ *   - **registration** ({@link recordWakeBinding}) — written after the
+ *     token was taken for the signed-in account;
+ *   - **a different account signing in** ({@link previousBoundAccount}) —
+ *     the account named by the old row has its push-gw subscriptions
+ *     removed, and a wake for one of them would miss the new account's
+ *     route rows anyway;
  *   - **Log out / Forget device** ({@link releaseWakeBinding}) — the row is
  *     cleared FIRST, then this app's delivered notifications are closed.
  */
@@ -30,7 +31,6 @@ import {
   putWakeBinding,
   type WakeBinding,
 } from "./group-routing-store";
-import { peekDevicePushId } from "./device-id";
 
 /** What {@link releaseWakeBinding} touches, injectable for the tests. */
 export interface ReleaseDeps {
@@ -43,7 +43,6 @@ export interface ReleaseDeps {
 /** What {@link recordWakeBinding} touches, injectable for the tests. */
 export interface RecordDeps {
   putBinding: (binding: WakeBinding) => Promise<void>;
-  currentPseudonym: () => Uint8Array | null;
 }
 
 const defaultReleaseDeps: ReleaseDeps = {
@@ -58,29 +57,22 @@ const defaultReleaseDeps: ReleaseDeps = {
 
 const defaultRecordDeps: RecordDeps = {
   putBinding: putWakeBinding,
-  currentPseudonym: peekDevicePushId,
 };
 
 /**
- * Must this sign-in mint a fresh device pseudonym? Yes when a binding names
- * ANOTHER account: that account's pseudonym (and the group subscriptions
- * registered under it, if it never logged out) must not wake this sign-in.
- * No binding (first sign-in, or after Log out, which also drops the
- * pseudonym) and a binding for the same account keep the current one.
+ * The account an existing binding names when it is NOT `accountIdB64` — the
+ * account whose push-gw subscriptions this sign-in removes — or `null` (no
+ * binding, or the same account).
  */
-export function pseudonymMustRotate(
+export function previousBoundAccount(
   existing: WakeBinding | null,
   accountIdB64: string,
-): boolean {
-  return existing !== null && existing.accountId !== accountIdB64;
+): string | null {
+  return existing !== null && existing.accountId !== accountIdB64 ? existing.accountId : null;
 }
 
 /**
- * Record `(pseudonym, account)` after `push-gw` accepted the registration.
- *
- * Skipped when the pseudonym on disk is no longer the one just registered —
- * a Log out that ran while the registration was in flight has already
- * dropped it, and writing the binding back would bind a signed-out account.
+ * Record `accountIdB64` as the account registered for push on this browser.
  * Never throws: a failed write leaves the worker showing nothing, which is
  * the safe side.
  *
@@ -88,16 +80,10 @@ export function pseudonymMustRotate(
  */
 export async function recordWakeBinding(
   accountIdB64: string,
-  devicePseudonym: Uint8Array,
   deps: RecordDeps = defaultRecordDeps,
 ): Promise<boolean> {
-  const current = deps.currentPseudonym();
-  if (current === null || !bytesEqual(current, devicePseudonym)) return false;
   try {
-    await deps.putBinding({
-      devicePseudonymHex: toHex(devicePseudonym),
-      accountId: accountIdB64,
-    });
+    await deps.putBinding({ accountId: accountIdB64 });
     return true;
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -145,16 +131,4 @@ export async function closeDeliveredNotifications(
     console.warn("delivered notifications not cleared", err);
     return 0;
   }
-}
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
-
-function toHex(bytes: Uint8Array): string {
-  let out = "";
-  for (const b of bytes) out += b.toString(16).padStart(2, "0");
-  return out;
 }

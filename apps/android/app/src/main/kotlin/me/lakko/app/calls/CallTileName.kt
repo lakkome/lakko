@@ -5,6 +5,7 @@ package me.lakko.app.calls
 
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.profile.ResolvedName
+import uniffi.lakko_ffi_uniffi.FfiProfile
 
 /**
  * The name on a remote call tile — `docs/ux/calls.md`, "Every tile carries the
@@ -29,11 +30,10 @@ import me.lakko.app.profile.ResolvedName
  * moments: everyone has a name or a username to announce, and the link call
  * keeps the announcements that arrive before it can read them ([EarlyRelays]).
  *
- * Never a piece of an account id or of a key. The SFU hands every client an
- * `account_pseudonym` (the first characters of the account id); a tile
- * labelled with it reads like something the viewer ought to recognise and
- * names nobody, and it is what a person without a profile name was shown as
- * until 2026-10-02.
+ * Never a piece of an account id or of a key. Until 2026-10-02 a person
+ * without a profile name was shown as the SFU's `account_pseudonym` (the first
+ * characters of the account id); since ADR-0078 section 2 the SFU knows no
+ * account at all and says nothing about who a peer is.
  *
  * Pure and Android-free, so the rule is unit-tested on the host JVM.
  */
@@ -66,30 +66,28 @@ public fun callNameOfPerson(directory: ProfileDirectory, signatureKeyB64: String
     )
 
 /**
- * Whether the account a sealed profile claims is the account the SFU admitted
- * the relaying peer as.
+ * A link-call profile with its account claim kept only when that claim is
+ * bound (ADR-0078 section 2). Mirror of the web `boundProfileClaim` and the
+ * iOS `CallTileName.boundProfileClaim`.
  *
  * A profile in a link call comes from a stranger, and a username certificate
- * binds a username to an ACCOUNT ID, not to the key that sent the profile. The
- * ADR-0021 peer tag is derived from the account id in the peer's
- * call-admission token, so a profile is filed in the profile store, and its
- * username may ever read as verified, only when the claimed account id gives
- * that peer's tag. A participant therefore cannot present another account's id
- * together with that account's certificate.
- *
- * @param tagOf the ADR-0021 derivation for this call, `sfuPeerTag(callId, ·)`.
+ * binds a username to an ACCOUNT ID, not to the key that sent the profile.
+ * Until ADR-0078 the SFU's peer tag tied the claim to the admitted account;
+ * the SFU knows no account any more. The one account id a link call knows
+ * independently is the owner's, inside the signed capability, so the claim
+ * (account id and certificate) is kept only for a profile the owner sealed
+ * that names that account. Anyone else's is filed without it, so its username
+ * reads as claimed, never as verified, and a participant cannot present
+ * another account's id together with that account's certificate.
  */
-public fun profileClaimMatchesPeer(
-    claimedAccountIdHex: String?,
-    peerTag: String?,
-    tagOf: (accountIdHex: String) -> String,
-): Boolean {
-    if (claimedAccountIdHex == null || peerTag.isNullOrEmpty()) return false
-    return try {
-        tagOf(claimedAccountIdHex) == peerTag
-    } catch (_: Throwable) {
-        false
-    }
+public fun boundProfileClaim(
+    profile: FfiProfile,
+    fromOwner: Boolean,
+    ownerAccountId: ByteArray,
+): FfiProfile {
+    val claimed = profile.accountId
+    if (fromOwner && claimed != null && claimed.contentEquals(ownerAccountId)) return profile
+    return profile.copy(accountId = null, usernameCertificate = null)
 }
 
 /** How many relays a link call keeps while it cannot read them yet. */

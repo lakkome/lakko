@@ -42,6 +42,15 @@ export function describeInviteUses(usedCount: number, maxUses: number): string {
   return t("invite.links.uses_left", { count: left });
 }
 
+/** The limit a link was minted with: "single-use" / "up to 10 uses" /
+ *  "unlimited". Since ADR-0078 section 10 the owner learns no use count
+ *  from the ledger, so the list states the limit, not what is left. */
+export function describeInviteLimit(maxUses: number): string {
+  if (maxUses === INVITE_USES_UNLIMITED) return t("invite.uses.unlimited");
+  if (maxUses === 0 || maxUses === 1) return t("invite.uses.single");
+  return t("invite.uses.up_to", { count: maxUses });
+}
+
 /** "Created 16 Sep" style date (formatted for `locale`, by default the
  *  interface language), or an empty string for an unparseable timestamp. */
 export function describeInviteCreated(createdAt: string, locale?: string): string {

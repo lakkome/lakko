@@ -20,10 +20,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 base64 = "0.22"
-# BLAKE3 for the per-call peer tag (ADR-0021) — a domain-separated,
-# length-framed hash of (call_id, account_id) the SFU emits and the
-# clients re-derive over their contacts. Same `blake3` major the wider
-# workspace already pulls via `lakko-crypto`; declared here so the one
-# canonical derivation lives next to the `PeerSnapshot` type that carries
-# the tag (the SFU + all three clients compute byte-identical bytes).
+# BLAKE3 for the room id (ADR-0078 section 2): one definition of
+# `room = BLAKE3_derive_key("lakko/sfu/room/v1", call_id)` that auth's
+# tests, the SFU's tests and all three clients (through the FFI) share.
+# Same `blake3` major the wider workspace already pulls via `lakko-crypto`.
 blake3 = "1"

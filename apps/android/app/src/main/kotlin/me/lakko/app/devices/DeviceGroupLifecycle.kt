@@ -5,8 +5,11 @@ package me.lakko.app.devices
 
 import android.content.Context
 import android.util.Log
+import me.lakko.app.auth.AccountIdentitySeedStore
+import me.lakko.app.auth.OwnPredecessorStore
 import uniffi.lakko_ffi_uniffi.DeviceGroup
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.deviceGroupIdFor
 import uniffi.lakko_ffi_uniffi.loadDeviceGroup
 
 /**
@@ -30,6 +33,12 @@ import uniffi.lakko_ffi_uniffi.loadDeviceGroup
  * restore goes through this DeviceIdentity provider's storage
  * only, persisted in [DeviceGroupSnapshotStore].
  *
+ * ADR-0078 section 6 — the DeviceGroup id is derived from the account's
+ * LINEAGE seed ([lineageSeed]: the earliest own predecessor after an
+ * ADR-0074 rotation, else the current seed), never from the account id, so
+ * a server holding the account id cannot compute the journal id, and a
+ * rotation that keeps the devices keeps the journal.
+ *
  * The returned [Identity] + [DeviceGroup] are FFI handles
  * backed by JNA pointers. Callers MUST close them when done —
  * idiomatic use is a `try { ... } finally { ensured.group.close();
@@ -46,6 +55,38 @@ public object DeviceGroupLifecycle {
      */
     private val storeSessions: MutableMap<Identity, me.lakko.app.account.AccountStoreGate.Session> =
         java.util.Collections.synchronizedMap(java.util.WeakHashMap())
+
+    /** Thrown by [ensureDeviceGroup] when the device holds no account seed. */
+    public class NoAccountSeed : IllegalStateException("no account seed on this device")
+
+    /**
+     * ADR-0078 section 6 — the account seed the DeviceGroup id is derived
+     * from: the EARLIEST own predecessor when the account rotated, else
+     * [currentSeed], else the cached account seed. `null` when the device
+     * holds none. Always a fresh copy.
+     */
+    public fun lineageSeed(context: Context, accountIdB64: String, currentSeed: ByteArray? = null): ByteArray? =
+        try {
+            OwnPredecessorStore.onDevice(context).conversationSeed(accountIdB64)
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "own predecessors unreadable; the current seed names the DeviceGroup", cause)
+            null
+        } ?: currentSeed?.copyOf()
+            ?: AccountIdentitySeedStore.getAccountIdentitySeed(context, accountIdB64)
+
+    /** The account's DeviceGroup journal id ([lineageSeed]); `null` when this
+     *  device cannot derive it yet. */
+    public fun groupId(context: Context, accountIdB64: String, currentSeed: ByteArray? = null): ByteArray? {
+        val seed = lineageSeed(context, accountIdB64, currentSeed) ?: return null
+        return try {
+            Identity.fromSeed(seed).use { deviceGroupIdFor(it) }
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "DeviceGroup id not derived", cause)
+            null
+        } finally {
+            seed.fill(0)
+        }
+    }
 
     /** Result of [ensureDeviceGroup]. */
     public data class Ensured(
@@ -81,12 +122,37 @@ public object DeviceGroupLifecycle {
      *         (logged), so the typical user-visible failure
      *         mode is an FFI exception from `createFounder` /
      *         `loadDeviceGroup`.
+     * @throws NoAccountSeed when the device holds no account seed to derive
+     *         the DeviceGroup id from (ADR-0078 section 6). `accountSeed` is
+     *         the current seed when the caller holds it (a key reset passes
+     *         the NEW seed).
      */
     public fun ensureDeviceGroup(
         context: Context,
         accountIdBytes: ByteArray,
         accountIdB64: String,
         deviceIdentitySeed: ByteArray,
+        accountSeed: ByteArray? = null,
+    ): Ensured {
+        val lineage = lineageSeed(context, accountIdB64, accountSeed) ?: throw NoAccountSeed()
+        val lineageAccount = try {
+            Identity.fromSeed(lineage)
+        } finally {
+            lineage.fill(0)
+        }
+        try {
+            return ensureDeviceGroupWith(context, accountIdBytes, accountIdB64, deviceIdentitySeed, lineageAccount)
+        } finally {
+            lineageAccount.close()
+        }
+    }
+
+    private fun ensureDeviceGroupWith(
+        context: Context,
+        accountIdBytes: ByteArray,
+        accountIdB64: String,
+        deviceIdentitySeed: ByteArray,
+        lineageAccount: Identity,
     ): Ensured {
         // Build the per-device Identity from the cached seed.
         // This is the DeviceIdentity (ADR-0007), NOT the
@@ -107,7 +173,7 @@ public object DeviceGroupLifecycle {
         if (snapshot != null) {
             try {
                 identity.restoreStorage(snapshot)
-                val group = loadDeviceGroup(identity, accountIdBytes)
+                val group = loadDeviceGroup(identity, accountIdBytes, lineageAccount)
                 if (group != null) {
                     return Ensured(
                         identity = identity,
@@ -132,7 +198,7 @@ public object DeviceGroupLifecycle {
         }
 
         // Bootstrap. Local device becomes the founding leaf.
-        val group = DeviceGroup.createFounder(identity, accountIdBytes)
+        val group = DeviceGroup.createFounder(identity, accountIdBytes, lineageAccount)
         // ADR-0057 second security pass, finding 3 — the founding is not
         // claimed yet: record that BEFORE it is persisted, so no path adds a
         // device (and sends a Welcome) until a claim lands. The marker is
@@ -154,7 +220,8 @@ public object DeviceGroupLifecycle {
      * the account's OLD seed, whose root the attested reset is replacing.
      * Drop its MLS snapshot (its own store, apart from the conversation
      * groups) and the stale founding marker, so the next [ensureDeviceGroup]
-     * founds a fresh DeviceGroup under the same deterministic id. The folded
+     * founds a fresh DeviceGroup under the id the NEW seed derives (ADR-0078
+     * section 6; the reset cleared the own predecessors). The folded
      * sync state and the device identity seed stay: they belong to the
      * account and to this device, not to the group's root.
      */

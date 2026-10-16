@@ -39,20 +39,54 @@ class ReachRulesTest {
         assertEquals(listOf(DesiredReachKey(ReachSlot(ReachKind.CONTACT, ""), 0, null)), keys)
     }
 
+    /** ADR-0078 section 9 — one `member` and one `group` key for the
+     *  account, never one per group, and no group id names a key. */
     @Test
-    fun `every joined group carries a member key, and only visible ones a group key`() {
+    fun `the groups carry one member key and one group key for the account`() {
         val keys = desiredReachKeys(inputs(joined = setOf("aa", "bb"), visible = setOf("bb")), now)
-        val slots = keys.map { it.slot }.toSet()
-        assertTrue(ReachSlot(ReachKind.MEMBER, "aa") in slots)
-        assertTrue(ReachSlot(ReachKind.MEMBER, "bb") in slots)
-        assertTrue(ReachSlot(ReachKind.GROUP, "bb") in slots)
-        assertFalse(ReachSlot(ReachKind.GROUP, "aa") in slots)
+        assertEquals(
+            listOf(
+                ReachSlot(ReachKind.CONTACT, ""),
+                ReachSlot(ReachKind.MEMBER, ""),
+                ReachSlot(ReachKind.GROUP, ""),
+            ),
+            keys.map { it.slot },
+        )
+        val none = desiredReachKeys(inputs(joined = setOf("aa"), visible = emptySet()), now)
+        assertFalse("no visible group, no group key", none.any { it.slot.kind == ReachKind.GROUP })
+        assertTrue(none.any { it.slot == ReachSlot(ReachKind.MEMBER, "") })
     }
 
     @Test
     fun `a visible group this account left carries no group key`() {
-        val keys = desiredReachKeys(inputs(joined = setOf("aa"), visible = setOf("aa", "gone")), now)
-        assertFalse(keys.any { it.slot == ReachSlot(ReachKind.GROUP, "gone") })
+        val keys = desiredReachKeys(inputs(joined = setOf("aa"), visible = setOf("gone")), now)
+        assertFalse(keys.any { it.slot.kind == ReachKind.GROUP })
+    }
+
+    @Test
+    fun `the channels carry one channel key while any is visible`() {
+        val keys = desiredReachKeys(inputs(channels = setOf("c1", "c2")), now)
+        assertEquals(listOf(ReachSlot(ReachKind.CHANNEL, "")), keys.filter { it.slot.kind == ReachKind.CHANNEL }.map { it.slot })
+    }
+
+    @Test
+    fun `every class but link and reply is account-wide`() {
+        assertEquals(
+            setOf(ReachKind.CONTACT, ReachKind.GROUP, ReachKind.MEMBER, ReachKind.CHANNEL, ReachKind.FOF),
+            ReachKind.entries.filter { it.scopeless }.toSet(),
+        )
+    }
+
+    /** ADR-0078 section 9 — leaving a group (or a channel) rotates the class;
+     *  the first list, a join and an empty (not yet loaded) list do not. */
+    @Test
+    fun `a departure is a set difference over the membership`() {
+        assertTrue(reachDeparted(listOf("aa", "bb"), listOf("aa")))
+        assertTrue(reachDeparted(listOf("AA"), listOf("cc")))
+        assertFalse(reachDeparted(listOf("aa"), listOf("aa", "bb")))
+        assertFalse(reachDeparted(emptyList(), listOf("aa")))
+        assertFalse(reachDeparted(listOf("aa"), emptyList()))
+        assertFalse(reachDeparted(listOf("Aa"), listOf("aA")))
     }
 
     @Test
@@ -309,7 +343,7 @@ class ReachVersionRecoveryTest {
 
     @Test
     fun `the highest registered version wins and a slot with none starts at zero`() {
-        val group = ReachSlot(ReachKind.MEMBER, "aa")
+        val group = ReachSlot(ReachKind.MEMBER, "")
         val fof = ReachSlot(ReachKind.FOF, "")
         val registered = setOf(pk(group, 2), pk(group, 5), "a link key nobody can name")
         val recovered = recoverVersions(listOf(contact, fof, group), registered, ::pk)
@@ -328,19 +362,21 @@ class ReachVersionRecoveryTest {
     }
 
     @Test
-    fun `the nameable slots are contact, fof, group and member per group, channel per channel`() {
+    fun `the nameable slots are the account-wide classes`() {
         val slots = recoverableSlots(joinedGroups = listOf("BB", "aa"), channels = listOf("cc"))
         assertEquals(
             listOf(
                 ReachSlot(ReachKind.CONTACT, ""),
                 ReachSlot(ReachKind.FOF, ""),
-                ReachSlot(ReachKind.MEMBER, "aa"),
-                ReachSlot(ReachKind.GROUP, "aa"),
-                ReachSlot(ReachKind.MEMBER, "bb"),
-                ReachSlot(ReachKind.GROUP, "bb"),
-                ReachSlot(ReachKind.CHANNEL, "cc"),
+                ReachSlot(ReachKind.MEMBER, ""),
+                ReachSlot(ReachKind.GROUP, ""),
+                ReachSlot(ReachKind.CHANNEL, ""),
             ),
             slots,
+        )
+        assertEquals(
+            listOf(ReachSlot(ReachKind.CONTACT, ""), ReachSlot(ReachKind.FOF, "")),
+            recoverableSlots(joinedGroups = emptyList(), channels = emptyList()),
         )
         assertFalse(slots.any { it.kind == ReachKind.LINK || it.kind == ReachKind.REPLY })
     }

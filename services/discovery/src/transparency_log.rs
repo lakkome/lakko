@@ -173,7 +173,6 @@ impl TransparencyClient {
                 // Non-2xx — log the status; the upload already succeeded so
                 // we proceed. Reconciliation (S2.5) will back-fill.
                 tracing::warn!(
-                    account_id = %B64.encode(account_id),
                     status = %resp.status(),
                     "transparency append non-2xx — proceeding (S2.5 reconciliation will back-fill)",
                 );
@@ -182,7 +181,6 @@ impl TransparencyClient {
             Err(e) => {
                 // Network / timeout / connect error. Same posture.
                 tracing::warn!(
-                    account_id = %B64.encode(account_id),
                     error = %e,
                     "transparency append failed — proceeding (S2.5 reconciliation will back-fill)",
                 );
@@ -328,7 +326,6 @@ async fn reconcile_once(pool: &sqlx::MySqlPool, client: &TransparencyClient) {
                 // the next sweep reconciles this account again and the
                 // idempotent append makes the re-append a no-op.
                 tracing::warn!(
-                    account_id = %B64.encode(account_id),
                     error = %e,
                     "KT-log S2.5 reconciler appended but failed to advance logged_pubkey \
                      — will retry (idempotent, no duplicate)",

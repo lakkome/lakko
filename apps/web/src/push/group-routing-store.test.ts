@@ -432,23 +432,18 @@ describe("group-routing-store — two accounts in one group (ADR-0042, 2026-09-3
 });
 
 describe("group-routing-store — the wake binding", () => {
-  const DEV_HEX = "ab".repeat(32);
-
   it("absent until written; put replaces; clear removes", async () => {
     expect(await getWakeBinding()).toBeNull();
-    await putWakeBinding({ devicePseudonymHex: DEV_HEX.toUpperCase(), accountId: ACCT });
-    expect(await getWakeBinding()).toEqual({ devicePseudonymHex: DEV_HEX, accountId: ACCT });
-    await putWakeBinding({ devicePseudonymHex: "cd".repeat(32), accountId: "b3RoZXI=" });
-    expect(await getWakeBinding()).toEqual({
-      devicePseudonymHex: "cd".repeat(32),
-      accountId: "b3RoZXI=",
-    });
+    await putWakeBinding({ accountId: ACCT });
+    expect(await getWakeBinding()).toEqual({ accountId: ACCT });
+    await putWakeBinding({ accountId: "b3RoZXI=" });
+    expect(await getWakeBinding()).toEqual({ accountId: "b3RoZXI=" });
     await clearWakeBinding();
     expect(await getWakeBinding()).toBeNull();
   });
 
   it("clearAllGroupRouting and clearGroupRoutingForAccount leave the binding alone", async () => {
-    await putWakeBinding({ devicePseudonymHex: DEV_HEX, accountId: ACCT });
+    await putWakeBinding({ accountId: ACCT });
     await clearGroupRoutingForAccount(ACCT);
     await clearAllGroupRouting();
     expect(await getWakeBinding()).not.toBeNull();

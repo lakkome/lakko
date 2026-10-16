@@ -330,30 +330,28 @@ data class KeyPackageFetchResponse(
 // ----------------------------------------------------------------------------
 
 /** Body of `POST /discovery/invite` (sealed-link amendment of 2026-09-28):
- *  the SEALED capability plus the fields the ledger needs in clear. */
+ *  the SEALED capability plus the fields the ledger needs in clear. Since
+ *  ADR-0078 section 10 nothing names the owner or the issuer. */
 @Serializable
 data class InviteUploadRequest(
     /** Standard base64 of the sealed link (`InviteLinkMint.sealed`). Opaque
      *  to the server. */
     val sealed: String,
-    /** Standard base64 of the 32-byte key that signed the capability — the
-     *  key a later owner-signed revoke must verify against. */
-    val issuer_pubkey: String,
+    /** Standard base64 of the link's own 32-byte revocation public key
+     *  ([me.lakko.app.contacts.OwnLinks.freshRevocationKey]) — the key a
+     *  later revoke must verify against. */
+    val revocation_pubkey: String,
     /** The capability's `expiry_ms` (`0` = never), for the fetch filter. */
     val expiry_ms: Long,
     /** The capability's `max_uses` sentinel, for the consume ceiling. */
     val max_uses: Long,
-    /** The capability's label, for the owner's own list. */
-    val label: String = "",
-    /** The capability's `bootstrap_referral` flag, for the owner's list. */
-    val bootstrap_referral: Boolean = false,
 )
 
 /** Body of `POST /discovery/call-invite` (sealed-link amendment). */
 @Serializable
 data class CallInviteUploadRequest(
     val sealed: String,
-    val issuer_pubkey: String,
+    val revocation_pubkey: String,
     val expiry_ms: Long,
     val max_uses: Long,
 )
@@ -423,8 +421,8 @@ data class InviteConsumeResponse(
 data class GroupInviteUploadRequest(
     /** Standard base64 of the sealed link (`InviteLinkMint.sealed`). */
     val sealed: String,
-    /** Standard base64 of the 32-byte key that signed the capability. */
-    val issuer_pubkey: String,
+    /** Standard base64 of the link's own 32-byte revocation public key. */
+    val revocation_pubkey: String,
     /** The capability's `expiry_ms` (`0` = never). */
     val expiry_ms: Long,
     /** Soft consume ceiling. Serialised as a JSON number the server reads as a
@@ -434,8 +432,8 @@ data class GroupInviteUploadRequest(
 
 /** Body of `DELETE /discovery/invite/{blob_id_b64url}` (Phase
  *  1.18d2b). The `signature` field carries proof that the
- *  request came from the same Ed25519 key that signed the
- *  capability. */
+ *  request came from the link's own revocation key (ADR-0078
+ *  section 10). */
 @Serializable
 data class InviteRevokeRequest(
     /** UNIX millis at which the body was signed. Must be within
@@ -447,43 +445,3 @@ data class InviteRevokeRequest(
     val signature: String,
 )
 
-/** Body of `POST /discovery/invite/by-owner` (Phase
- *  1.18d2b-list). The owner signs the canonical bytes
- *  (`OWNER_LIST_DOMAIN_V1` ‖ `owner_account_id` ‖
- *  `signed_at_ms` BE) with their identity Ed25519 key; the
- *  server resolves the verifying key from
- *  `identity_bundles.signature_pubkey` for the given
- *  `account_id` and verifies. The session-token middleware on
- *  the route is a DoS gate, not the ownership proof. */
-@Serializable
-data class InviteOwnerListRequest(
-    /** Standard-alphabet base64 of the owner's 16-byte UUIDv7
-     *  `account_id`. */
-    val owner_account_id: String,
-    /** UNIX millis at which the body was signed. Same ±10 min
-     *  replay window as the revoke endpoint. */
-    val signed_at_ms: Long,
-    /** Standard-alphabet base64 of the 64-byte Ed25519 signature
-     *  from [uniffi.lakko_ffi_uniffi.signOwnerListQuery]. */
-    val signature: String,
-)
-
-/** One entry in the `/discovery/invite/by-owner` response —
- *  wire-shape mirror of the server's `OwnerListEntry`. */
-@Serializable
-data class InviteOwnerListEntry(
-    val blob_id_slug: String,
-    val expiry_ms: Long,
-    val max_uses: Long,
-    val used_count: Long,
-    val label: String,
-    val bootstrap_referral: Boolean,
-    val created_at: String,
-)
-
-/** Wire-level response shape from
- *  `POST /discovery/invite/by-owner`. */
-@Serializable
-data class InviteOwnerListResponse(
-    val invites: List<InviteOwnerListEntry>,
-)

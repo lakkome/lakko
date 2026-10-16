@@ -42,7 +42,8 @@ pub(crate) const SECRET_HEADER: &str = "x-lakko-internal-secret";
 /// Minimum decoded length of the shared secret.
 pub(crate) const MIN_SECRET_LEN: usize = 16;
 
-/// Body limit on the internal listener: the DS sends three small fields.
+/// Body limit on the internal listener: the DS sends a sealed wake (312
+/// base64url characters) and a message id.
 const MAX_INTERNAL_BODY_BYTES: usize = 4 * 1024;
 
 /// Load and validate `LAKKO_PUSH_GW_INTERNAL_SECRET`.
@@ -91,7 +92,7 @@ pub(crate) fn build_internal_app(state: AppState) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(
             MAX_INTERNAL_BODY_BYTES,
         ))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }
 
@@ -202,6 +203,7 @@ mod tests {
     #[tokio::test]
     async fn the_internal_listener_serves_nothing_else() {
         for path in [
+            "/push/subscribe",
             "/push/register",
             "/push/notify",
             "/pow/challenge",
@@ -221,103 +223,6 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
         }
-    }
-
-    /// Full path against a real database, gated on
-    /// `LAKKO_PUSH_GW_TEST_DATABASE_URL` (skipped silently without it): a
-    /// subscribed device is woken through the internal listener with the
-    /// DS's body shape, and the rows the test wrote are removed afterwards.
-    #[tokio::test]
-    async fn a_forwarded_wake_reaches_a_subscribed_device() {
-        use crate::provider::{LogOnlyProvider, Provider, ProviderKind};
-        use http_body_util::BodyExt as _;
-        use std::collections::HashMap;
-
-        let Ok(url) = std::env::var("LAKKO_PUSH_GW_TEST_DATABASE_URL") else {
-            eprintln!("skipping: LAKKO_PUSH_GW_TEST_DATABASE_URL unset");
-            return;
-        };
-        let db = sqlx::mysql::MySqlPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("connect test db");
-        crate::MIGRATIONS.run(&db).await.expect("migrate");
-
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-            .to_be_bytes();
-        let mut device = [0xd0u8; 32];
-        device[..16].copy_from_slice(&stamp);
-        let mut gid = [0x9au8; 32];
-        gid[..16].copy_from_slice(&stamp);
-
-        sqlx::query("INSERT INTO push_tokens (device_id, provider, token) VALUES (?, ?, ?)")
-            .bind(&device[..])
-            .bind(ProviderKind::Fcm.as_db())
-            .bind(&b"test-token"[..])
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO push_group_subscriptions (device_id, group_id) VALUES (?, ?)")
-            .bind(&device[..])
-            .bind(&gid[..])
-            .execute(&db)
-            .await
-            .unwrap();
-
-        let mut providers: HashMap<ProviderKind, Box<dyn Provider>> = HashMap::new();
-        providers.insert(
-            ProviderKind::Fcm,
-            Box::new(LogOnlyProvider {
-                kind: ProviderKind::Fcm,
-            }),
-        );
-        let state = AppState {
-            anon_tokens: lakko_anon_token_server::TokenVerifier::new(db.clone(), None),
-            db: db.clone(),
-            providers: Arc::new(providers),
-            internal_secret: Some(Arc::new(B64.decode(SECRET_B64).unwrap())),
-        };
-        let body = serde_json::json!({
-            "push_gid": hex::encode(gid),
-            "envelope_pointer": 42,
-            "kind": "message",
-        })
-        .to_string();
-        let response = build_internal_app(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/push/notify-group")
-                    .header("content-type", "application/json")
-                    .header(SECRET_HEADER, SECRET_B64)
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = response.status();
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-
-        sqlx::query("DELETE FROM push_group_subscriptions WHERE device_id = ?")
-            .bind(&device[..])
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM push_tokens WHERE device_id = ?")
-            .bind(&device[..])
-            .execute(&db)
-            .await
-            .unwrap();
-
-        assert_eq!(status, StatusCode::OK);
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["devices_woken"], 1);
-        assert_eq!(v["deliveries"][0]["provider"], "fcm");
-        assert_eq!(v["deliveries"][0]["status"], "ok");
     }
 
     #[test]

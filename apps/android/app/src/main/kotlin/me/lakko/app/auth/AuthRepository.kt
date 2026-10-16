@@ -648,6 +648,9 @@ public class AuthRepository(
         // tokens. S5: each account's pool persists under noBackupFilesDir
         // between launches and across a logout (account data, 2026-10-01);
         // the forget-device wipe removes that account's only.
+        // ADR-0078 section 10 - the links this device mints are listed and
+        // revoked from its own records (the ledgers name no owner).
+        me.lakko.app.contacts.OwnLinkStores.install(applicationContext)
         me.lakko.app.anon.AnonTokens.installStore(
             me.lakko.app.anon.FileAnonTokenStore.under(applicationContext.noBackupFilesDir),
         )
@@ -657,6 +660,13 @@ public class AuthRepository(
                     accountKey = base64Encode(it.accountId),
                     bearer = it.sessionToken,
                 )
+            }
+        }
+        // ADR-0078 section 8 - the pool refills on its own schedule from the
+        // moment a session is bound, never because something was spent.
+        pushScope.launch {
+            identitySecrets.collect { secrets ->
+                if (secrets != null) me.lakko.app.anon.AnonTokens.sessionBound()
             }
         }
     }
@@ -1490,8 +1500,6 @@ public class AuthRepository(
                     accountIdBytes = accountIdBytes,
                     accountIdB64 = accountIdB64,
                     accountIdentitySeed = accountIdentitySeed,
-                    attestationB64 = owed.attestationB64,
-                    keyGeneration = owed.keyGeneration,
                 )
                 KeyResetStep.Done -> KeyResetStepOutcome.Landed
             }
@@ -4743,6 +4751,14 @@ public class AuthRepository(
         // and its chain on the DS belongs to the old root; the device binding
         // stored for the conversation identity was signed by the old key.
         me.lakko.app.devices.DeviceGroupLifecycle.discardForKeyReset(applicationContext, accountIdB64)
+        // ADR-0074 section 3.5: a reset makes every predecessor, proven or
+        // not, a superseded key. ADR-0078 section 6: the DeviceGroup the
+        // re-founding below names is then the NEW seed's.
+        try {
+            ownPredecessorStore.clear(accountIdB64)
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "own predecessors not cleared after a reset", cause)
+        }
         try {
             DeviceIdentityStore.deleteDeviceBinding(applicationContext, accountIdB64)
         } catch (cause: Throwable) {
@@ -5147,26 +5163,22 @@ public class AuthRepository(
     }
 
     /**
-     * ADR-0073 section 2.3 step 4: found the DeviceGroup anew and re-root its
-     * journal with the attested `Reset`
-     * ([me.lakko.app.devices.DeviceGroupJournalAccess.reRootAfterKeyReset]).
+     * ADR-0073 section 2.3 step 4: found the DeviceGroup anew under the id
+     * the NEW seed derives and claim its journal
+     * ([me.lakko.app.devices.DeviceGroupJournalAccess.refoundAfterKeyReset]).
      */
     private suspend fun reRootDeviceGroup(
         accountIdBytes: ByteArray,
         accountIdB64: String,
         accountIdentitySeed: ByteArray,
-        attestationB64: String,
-        keyGeneration: Long,
     ): KeyResetStepOutcome =
         try {
             me.lakko.app.ds.DsClient().use { ds ->
-                me.lakko.app.devices.DeviceGroupJournalAccess.reRootAfterKeyReset(
+                me.lakko.app.devices.DeviceGroupJournalAccess.refoundAfterKeyReset(
                     context = applicationContext,
                     accountIdBytes = accountIdBytes,
                     accountIdB64 = accountIdB64,
                     accountIdentitySeed = accountIdentitySeed,
-                    attestationB64 = attestationB64,
-                    keyGeneration = keyGeneration,
                     ds = ds,
                 )
             }
@@ -6251,11 +6263,11 @@ public class AuthRepository(
         // After the state: the guest flag must not drop while a session is
         // still observed (the app shell would be drawn for a guest).
         mutableGuest.value = null
-        // 1.20d — fire-and-forget push unsubscribe. The
-        // EncryptedSharedPreferences pseudonym + the server-
-        // side token row both go; subsequent FCM wakes for
-        // this device are no-ops until the next subscribe.
-        unsubscribePushBestEffort("logout", departingSession)
+        // 1.20d — fire-and-forget push unsubscribe. ADR-0078: the account's
+        // push-gw rows are named by the subscription ids in its route rows,
+        // which a logout keeps, so they are read inside; the stored token
+        // goes.
+        unsubscribePushBestEffort("logout", departingSession, departingAccount ?: cached?.accountIdB64)
     }
 
     /**
@@ -6318,12 +6330,12 @@ public class AuthRepository(
         // After the state, as in [logout]. The wipe above removed the guest
         // marker and the guest phrase row.
         mutableGuest.value = null
-        // 1.20d — full push wipe. Fire-and-forget — the local
-        // `DevicePushId.clear()` inside the subscriber runs
-        // regardless of the server leg outcome, honouring
-        // forgetDevice's "leave NOTHING per-account behind"
+        // 1.20d — full push wipe. Fire-and-forget — the account's push-gw
+        // rows go by the subscription ids the wipe handed over (ADR-0078),
+        // and the stored token is cleared regardless of the server leg,
+        // honouring forgetDevice's "leave NOTHING per-account behind"
         // contract.
-        unsubscribePushBestEffort("forgetDevice", departingSession)
+        unsubscribePushBestEffort("forgetDevice", departingSession, null)
     }
 
     // -----------------------------------------------------------------
@@ -6800,13 +6812,14 @@ public class AuthRepository(
 
     /**
      * ADR section 3.5 "DS": move the DeviceGroup journal's root from the one
-     * the OLD seed derives to the one the NEW seed derives, with the
-     * attestation and the new account key's endorsement when an attestation
-     * is in hand. Run by the rotating device and, without the attestation,
-     * by a kept device when it adopts (whoever is first moves it; the other
-     * finds it moved). `true` once the new root IS the journal's root.
+     * the OLD seed derives to the one the NEW seed derives, a plain transfer
+     * (ADR-0078 phase 6). Run by the rotating device and by a kept device
+     * when it adopts (whoever is first moves it; the other finds it moved).
+     * `true` once the new root IS the journal's root. The journal id is
+     * derived from the lineage seed (the earliest predecessor), so the
+     * rotation does not move it.
      */
-    public suspend fun rotationMoveDeviceGroupRoot(attestationB64: String?, keyGeneration: Long?): Boolean {
+    public suspend fun rotationMoveDeviceGroupRoot(): Boolean {
         val secrets = rotationSecrets()
         val accountIdB64 = base64Encode(secrets.accountId)
         val newSeed = secrets.accountIdentitySeed.copyOf()
@@ -6817,21 +6830,16 @@ public class AuthRepository(
         }
         try {
             if (oldSeed == null) return true
-            val journalId = uniffi.lakko_ffi_uniffi.deviceGroupJournalId(secrets.accountId)
+            val journalId = me.lakko.app.devices.DeviceGroupLifecycle.groupId(applicationContext, accountIdB64, newSeed)
+                ?: return false
             val access = me.lakko.app.devices.DeviceGroupJournalAccess
             val oldRoot = access.rootOfSeed(oldSeed, journalId) ?: return false
             val newRoot = access.rootOfSeed(newSeed, journalId) ?: return false
-            val evidence = if (attestationB64 != null && keyGeneration != null) {
-                access.rootEvidence(newSeed, attestationB64, keyGeneration, journalId, newRoot.publicKey)
-            } else {
-                null
-            }
             val moved = me.lakko.app.ds.DsClient().use { ds ->
                 me.lakko.app.ds.transferRootOrConfirm(
                     journalId = journalId,
                     oldRoot = oldRoot,
                     newRoot = newRoot,
-                    evidence = evidence,
                     put = { make -> ds.putStatement(make) },
                 )
             }
@@ -7302,7 +7310,7 @@ public class AuthRepository(
             // device gets there first moves it.
             pushScope.launchBound(accountBinding) {
                 try {
-                    rotationMoveDeviceGroupRoot(attestationB64 = null, keyGeneration = null)
+                    rotationMoveDeviceGroupRoot()
                 } catch (cause: Throwable) {
                     if (cause is kotlinx.coroutines.CancellationException) throw cause
                     Log.w("lakko-auth", "device list root not confirmed after adopting: ${cause.javaClass.simpleName}")
@@ -7381,7 +7389,7 @@ public class AuthRepository(
         pendingFreshPhrase.getAndSet(null)?.seed?.fill(0)
         landedState = AuthState.Anon()
         mutableGuest.value = null
-        unsubscribePushBestEffort("key-reset", departingSession)
+        unsubscribePushBestEffort("key-reset", departingSession, null)
         if (recallRecord != null) {
             // "Was it you?" replaces the signed-out screen.
             mutableRecall.value = RecallUi(
@@ -8109,9 +8117,9 @@ public class AuthRepository(
      *  subscriber + here, never thrown past the auth flow —
      *  push failure must not block sign-in. */
     private fun subscribePushBestEffort(context: String) {
-        // ADR-0042, amended 2026-09-30 — the pseudonym is registered FOR the
-        // account signed in right now, and the wake binding names it. Read
-        // here, synchronously, so the account cannot change under the launch.
+        // ADR-0042, amended 2026-09-30 — push is set up FOR the account signed
+        // in right now, and the wake binding names it. Read here,
+        // synchronously, so the account cannot change under the launch.
         val accountIdB64 = signedInAccountIdB64() ?: run {
             Log.w("lakko-auth", "push subscribe ($context) skipped: no signed-in account")
             return
@@ -8143,10 +8151,11 @@ public class AuthRepository(
     private fun unsubscribePushBestEffort(
         context: String,
         session: me.lakko.app.anon.AnonSession?,
+        accountIdB64: String?,
     ) {
         pushScope.launch {
             try {
-                PushSubscriber(applicationContext).unsubscribe(session)
+                PushSubscriber(applicationContext).unsubscribe(accountIdB64, session)
             } catch (cause: Throwable) {
                 Log.w("lakko-auth", "push unsubscribe ($context) failed", cause)
             }

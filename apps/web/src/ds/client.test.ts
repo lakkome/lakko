@@ -477,20 +477,20 @@ describe("the knock", () => {
 });
 
 describe("ADR-0054 — the wake rides the signed group publish", () => {
-  const PUSH_GID = new Uint8Array(32).fill(0xff);
-  const PUSH_GID_B64URL = "_".repeat(42) + "8";
+  /** A stand-in for a sealed wake (ADR-0078): 312 base64url characters. */
+  const SEALED = "_".repeat(311) + "8";
 
-  it("adds `x-lakko-wake: <push_gid>;<kind>` beside the proof", async () => {
+  it("adds `x-lakko-wake: <sealed wake>` beside the proof", async () => {
     const reg = registryWith(() => fakeSigner(4n));
     const { fetchImpl, sent } = fakeFetch([{ status: 201, json: { id: 9, created_at: "t" } }]);
     const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
 
     await ds.publishGroup(GID, new Uint8Array([1, 2]), {
-      wake: { pushGid: PUSH_GID, kind: "message" },
+      wake: { headerValue: SEALED },
     });
 
     expect(sent).toHaveLength(1);
-    expect(sent[0]?.wake).toBe(`${PUSH_GID_B64URL};message`);
+    expect(sent[0]?.wake).toBe(SEALED);
     // The proof is unchanged by the wake: it covers method, path, query, body.
     expect(sent[0]?.proof).toBe(`proof:g@4:POST:/ds/group/${GID_HEX}/messages::2`);
   });
@@ -506,12 +506,9 @@ describe("ADR-0054 — the wake rides the signed group publish", () => {
     ]);
     const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
 
-    await ds.publishGroup(GID, new Uint8Array([1]), { wake: { pushGid: PUSH_GID, kind: "call" } });
+    await ds.publishGroup(GID, new Uint8Array([1]), { wake: { headerValue: SEALED } });
 
-    expect(sent.map((r) => r.wake)).toEqual([
-      `${PUSH_GID_B64URL};call`,
-      `${PUSH_GID_B64URL};call`,
-    ]);
+    expect(sent.map((r) => r.wake)).toEqual([SEALED, SEALED]);
   });
 
   it("sends no header without a wake, or with `wake: null`", async () => {
@@ -528,14 +525,14 @@ describe("ADR-0054 — the wake rides the signed group publish", () => {
     expect(sent.map((r) => r.wake)).toEqual([undefined, undefined]);
   });
 
-  it("refuses a wrong-length push_gid before any request is made", async () => {
+  it("refuses a wrong-length sealed wake before any request is made", async () => {
     const reg = registryWith(() => fakeSigner(4n));
     const { fetchImpl, sent } = fakeFetch([]);
     const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
 
     await expect(
       ds.publishGroup(GID, new Uint8Array([1]), {
-        wake: { pushGid: new Uint8Array(31), kind: "message" },
+        wake: { headerValue: SEALED.slice(1) },
       }),
     ).rejects.toBeInstanceOf(DsClientArgError);
     expect(sent).toHaveLength(0);

@@ -4,10 +4,14 @@
 package me.lakko.app.anon
 
 import java.util.EnumMap
+import kotlin.random.Random
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -22,18 +26,36 @@ import kotlin.coroutines.cancellation.CancellationException
  * session, in batches and ahead of need, and the routes that spend them go out
  * with no session attached (see [AnonymousHttp]).
  *
+ * ADR-0078 section 8: the pool is refilled on a randomised schedule that does
+ * not look at spending. When a session is bound each context is topped up to
+ * its target (about a day of use plus a reserve, [anonPoolTargetFor]) once at a
+ * random moment within [INITIAL_REFILL_SPREAD_MS], and after that at
+ * independent random intervals between [REFILL_INTERVAL_MIN_MS] and
+ * [REFILL_INTERVAL_MAX_MS]. A take never starts an issuance: before ADR-0078 a
+ * take below a low-water mark started one, so the bearer issuance landed
+ * seconds from the anonymous spend it refilled for and the issuer and the
+ * spending service could pair them by time. An action that finds its context
+ * empty waits only for a refill the schedule already has running, else fails
+ * until the next scheduled refill.
+ *
+ * Issuance and spending do not share a connection: the issuer runs on its own
+ * Ktor client ([KtorAnonTokenIssuer], its own OkHttp connection pool), and
+ * every spend goes out on the anonymous clients ([AnonymousHttp]), which never
+ * carry the session.
+ *
  * Everything that touches the native core sits behind [AnonTokenCore] and
  * everything that touches the network behind [AnonTokenIssuerApi], so the pool
- * rules (per-context batch sizes and refill thresholds up to thirty-two, drop
- * a dead token, persist per account across a relaunch and a logout, wait
- * bounded then fail) run in a host JVM test with no native library.
+ * rules (per-context targets up to thirty-two, the schedule, drop a dead token,
+ * persist per account across a relaunch and a logout, wait bounded then fail)
+ * run in a host JVM test with no native library.
  */
 
 /** The rationed actions, in wire order (`anonTokenContexts()`, whose source
  *  of truth is `TokenContext::ALL` in `crates/lakko-anon-token/src/context.rs`);
  *  `channel-subscribe` and `directory-search` are ADR-0059, `vault-claim` is
  *  ADR-0064, `blob-upload` and `blob-read` are ADR-0065 (nothing spends those
- *  three yet), `mailbox-write` is ADR-0078. */
+ *  three yet), `mailbox-write` is ADR-0078 phase 1, `call-join` is ADR-0078
+ *  section 2 (one per call token). */
 public enum class AnonTokenContext(public val wire: String) {
     DISCOVERY_LOOKUP("discovery-lookup"),
     DISCOVERY_REGISTER("discovery-register"),
@@ -46,40 +68,40 @@ public enum class AnonTokenContext(public val wire: String) {
     BLOB_UPLOAD("blob-upload"),
     BLOB_READ("blob-read"),
     MAILBOX_WRITE("mailbox-write"),
+    CALL_JOIN("call-join"),
 }
 
 /**
- * How much one context draws per issuance and when it refills (ADR-0054 S5).
- * A lookup is common, so it keeps a few in hand; the rarer actions draw small
- * batches and refill only when empty, so a device never sits on tokens it will
- * not spend before they die.
+ * How many tokens a context is topped up to at each scheduled refill
+ * (ADR-0078 section 8): about a day of use plus a reserve, so no spend waits
+ * for an issuance. The same numbers as web (`POOL_TARGET`) and iOS
+ * (`AnonTokenContext.poolTarget`); chosen, not measured.
  */
-public data class AnonBatchPolicy(
-    /** Tokens per issuance request. */
-    val batch: Int,
-    /** A context holding fewer than this refills in the background. */
-    val refillBelow: Int,
-)
-
-/** The per-context policy: `discovery-lookup` 8 (refill below 2),
- *  `push-register` 4, `invite-consume` 2, `ds-knock` 2, `channel-subscribe` 2,
- *  `discovery-register` 1, `directory-search` 1, `vault-claim` 4,
- *  `blob-upload` 2, `blob-read` 2, `mailbox-write` 2 (each refill when empty). The numbers for
- *  the last three are chosen, not measured: nothing spends those contexts
- *  yet, so there is no usage to size them from. */
-public fun anonBatchPolicyFor(context: AnonTokenContext): AnonBatchPolicy = when (context) {
-    AnonTokenContext.DISCOVERY_LOOKUP -> AnonBatchPolicy(batch = 8, refillBelow = 2)
-    AnonTokenContext.PUSH_REGISTER -> AnonBatchPolicy(batch = 4, refillBelow = 1)
-    AnonTokenContext.INVITE_CONSUME -> AnonBatchPolicy(batch = 2, refillBelow = 1)
-    AnonTokenContext.DS_KNOCK -> AnonBatchPolicy(batch = 2, refillBelow = 1)
-    AnonTokenContext.DISCOVERY_REGISTER -> AnonBatchPolicy(batch = 1, refillBelow = 1)
-    AnonTokenContext.CHANNEL_SUBSCRIBE -> AnonBatchPolicy(batch = 2, refillBelow = 1)
-    AnonTokenContext.DIRECTORY_SEARCH -> AnonBatchPolicy(batch = 1, refillBelow = 1)
-    AnonTokenContext.VAULT_CLAIM -> AnonBatchPolicy(batch = 4, refillBelow = 1)
-    AnonTokenContext.BLOB_UPLOAD -> AnonBatchPolicy(batch = 2, refillBelow = 1)
-    AnonTokenContext.BLOB_READ -> AnonBatchPolicy(batch = 2, refillBelow = 1)
-    AnonTokenContext.MAILBOX_WRITE -> AnonBatchPolicy(batch = 2, refillBelow = 1)
+public fun anonPoolTargetFor(context: AnonTokenContext): Int = when (context) {
+    AnonTokenContext.DISCOVERY_LOOKUP -> 16
+    AnonTokenContext.PUSH_REGISTER -> 8
+    AnonTokenContext.INVITE_CONSUME -> 4
+    AnonTokenContext.DS_KNOCK -> 8
+    AnonTokenContext.DISCOVERY_REGISTER -> 2
+    AnonTokenContext.CHANNEL_SUBSCRIBE -> 4
+    AnonTokenContext.DIRECTORY_SEARCH -> 4
+    AnonTokenContext.VAULT_CLAIM -> 8
+    AnonTokenContext.BLOB_UPLOAD -> 4
+    AnonTokenContext.BLOB_READ -> 4
+    AnonTokenContext.MAILBOX_WRITE -> 4
+    // ADR-0078 section 2: a join, a reconnect, the TURN credential of a
+    // one-to-one call. Chosen, not measured.
+    AnonTokenContext.CALL_JOIN -> 4
 }
+
+/** The first scheduled refill of a newly bound session runs at a random
+ *  moment within this many milliseconds (ADR-0078 section 8; chosen). */
+public const val INITIAL_REFILL_SPREAD_MS: Long = 20_000L
+
+/** After the first, each context refills at an independent random interval
+ *  between these two (ADR-0078 section 8; chosen). */
+public const val REFILL_INTERVAL_MIN_MS: Long = 30L * 60_000L
+public const val REFILL_INTERVAL_MAX_MS: Long = 90L * 60_000L
 
 /** One finalized token, ready to spend in the `x-lakko-anon-token` header. */
 public data class PooledAnonToken(
@@ -243,12 +265,12 @@ public interface AnonTokenSource {
 
 /**
  * Per (account, context), in memory and mirrored to [store] so the pool
- * survives a relaunch (tokens are live in their epoch and the next). A context
- * that drops below its [policy]'s `refillBelow` refills in the background with
- * its `batch` (never past [max] held); an action with no token at hand waits
- * for that refill up to [waitMs], then fails. A refill that met a used-up quota
- * remembers it until the window rolls over, so the issuer is not asked again
- * meanwhile.
+ * survives a relaunch (tokens are live in their epoch and the next). Each
+ * context is topped up to its [target] (never past [max] held) on the
+ * schedule above, run in [scheduleScope] with [sleep] between refills; an
+ * action with no token at hand waits up to [waitMs] for a refill the schedule
+ * already runs, then fails. A refill that met a used-up quota remembers it
+ * until the window rolls over, so the issuer is not asked again meanwhile.
  *
  * Tokens are account data (maintainer decision, 2026-10-01). The memory holds
  * one account at a time; the store holds every account's pool separately.
@@ -267,12 +289,18 @@ public class AnonTokenPool(
     private val scope: CoroutineScope,
     private val nowSecs: () -> Long = { System.currentTimeMillis() / 1000L },
     private val waitMs: Long = DEFAULT_WAIT_MS,
-    private val policy: (AnonTokenContext) -> AnonBatchPolicy = ::anonBatchPolicyFor,
+    private val target: (AnonTokenContext) -> Int = ::anonPoolTargetFor,
     private val max: Int = MAX_HELD,
     private val store: AnonTokenStore = NoAnonTokenStore,
     /** Accounts forgotten before this pool was built ([AnonTokens] records
      *  a wipe that ran while no pool existed). */
     forgottenAccounts: Set<String> = emptySet(),
+    /** Where the refill schedule runs (tests pass a background scope). */
+    private val scheduleScope: CoroutineScope = scope,
+    /** The wait between scheduled refills (tests drive the schedule). */
+    private val sleep: suspend (Long) -> Unit = { delay(it) },
+    /** Uniform in `[0, 1)`: where in its window each refill falls. */
+    private val random: () -> Double = { Random.nextDouble() },
 ) : AnonTokenSource {
 
     override val headerName: String get() = core.headerName
@@ -298,6 +326,17 @@ public class AnonTokenPool(
     private val refills = EnumMap<AnonTokenContext, Refill>(AnonTokenContext::class.java)
     private val exhaustedUntil = EnumMap<AnonTokenContext, Long>(AnonTokenContext::class.java)
 
+    /** Each context's schedule for the bound account. */
+    private val schedules = EnumMap<AnonTokenContext, Job>(AnonTokenContext::class.java)
+
+    /** Completed once a context's first scheduled refill of this session
+     *  ended: what a take on an empty context waits for before it. */
+    private val initials = EnumMap<AnonTokenContext, CompletableDeferred<Unit>>(AnonTokenContext::class.java)
+
+    /** How the last scheduled refill of each context ended, when it brought
+     *  nothing: what a take that finds the context empty reports. */
+    private val lastFailure = EnumMap<AnonTokenContext, RefillResult>(AnonTokenContext::class.java)
+
     /** The issuer's epoch minus the local one, learned from
      *  `epoch-not-issuable`; zero until the two disagree. */
     private var epochCorrection: Long = 0
@@ -317,6 +356,19 @@ public class AnonTokenPool(
     /** Tokens held for [context] right now (live or not); for tests and logs. */
     public fun held(context: AnonTokenContext): Int = synchronized(lock) { queues[context]?.size ?: 0 }
 
+    /**
+     * Bind the signed-in session, if any, and start its refill schedule
+     * (ADR-0078 section 8). `AuthRepository` calls this whenever the session
+     * changes; a take binds too, for a pool nothing bound yet. Idempotent.
+     */
+    public fun bindSession() {
+        val s = session() ?: return
+        synchronized(lock) {
+            if (s.accountKey in forgotten) return
+            adoptLocked(s)
+        }
+    }
+
     override suspend fun take(context: AnonTokenContext): PooledAnonToken {
         val s = session() ?: throw AnonTokenUnavailable(context, "no signed-in session")
         val (token, pending) = synchronized(lock) {
@@ -326,24 +378,33 @@ public class AnonTokenPool(
             if (s.accountKey in forgotten) throw AnonTokenUnavailable(context, "the account was forgotten on this device")
             adoptLocked(s)
             val t = popLiveLocked(context)
-            val refill = if ((queues[context]?.size ?: 0) < policy(context).refillBelow) {
-                ensureRefillLocked(context, s)
-            } else {
-                refills[context]?.result
-            }
-            t to refill
+            // ADR-0078 section 8: a take never starts an issuance. It may
+            // wait for a refill the schedule runs (in flight, or this
+            // session's first).
+            val waitFor: Deferred<*>? = refills[context]?.result ?: initials[context]
+            t to waitFor
         }
         if (token != null) return token
-
-        val result = if (pending == null) {
-            null
-        } else {
-            withTimeoutOrNull(waitMs) { pending.await() }
+        synchronized(lock) {
+            val until = exhaustedUntil[context]
+            val now = nowSecs()
+            if (until != null && now < until) throw AnonTokenQuotaExhausted(context, until - now)
         }
+        if (pending == null) {
+            throw failureFor(context, synchronized(lock) { lastFailure[context] }, timedOut = false, empty = true)
+        }
+        val finished = withTimeoutOrNull(waitMs) { pending.await() } != null
         synchronized(lock) {
             if (owner == s.accountKey) popLiveLocked(context)?.let { return it }
         }
-        throw failureFor(context, result, timedOut = pending != null && result == null)
+        throw failureFor(context, synchronized(lock) { lastFailure[context] }, timedOut = !finished, empty = false)
+    }
+
+    /** Run one scheduled top-up of every context now, awaited (what the
+     *  schedule does one context at a time; tests and diagnostics). */
+    public suspend fun runScheduledRefills() {
+        val gen = synchronized(lock) { generation }
+        for (context in AnonTokenContext.entries) scheduledRefill(context, gen)
     }
 
     override suspend fun takeDetached(session: AnonSession, context: AnonTokenContext): PooledAnonToken {
@@ -358,7 +419,7 @@ public class AnonTokenPool(
         }
         val result = issueBatch(context, session, count = 1)
         if (result is RefillResult.Filled && result.tokens.isNotEmpty()) return result.tokens.first()
-        throw failureFor(context, result, timedOut = false)
+        throw failureFor(context, result, timedOut = false, empty = false)
     }
 
     override fun releaseSession() {
@@ -386,21 +447,79 @@ public class AnonTokenPool(
         context: AnonTokenContext,
         result: RefillResult?,
         timedOut: Boolean,
-    ): AnonTokenException = when (result) {
-        is RefillResult.Quota -> AnonTokenQuotaExhausted(context, result.retryAfterSecs)
-        RefillResult.Disabled -> AnonTokenDisabled(context)
-        is RefillResult.Failed -> AnonTokenUnavailable(context, result.reason, result.cause)
-        is RefillResult.Filled -> AnonTokenUnavailable(context, "the refill brought no live token")
-        null -> AnonTokenUnavailable(
-            context,
-            if (timedOut) "the refill did not finish in ${waitMs} ms" else "no refill possible",
-        )
+        empty: Boolean,
+    ): AnonTokenException = when {
+        timedOut -> AnonTokenUnavailable(context, "the refill did not finish in $waitMs ms")
+        result is RefillResult.Quota -> AnonTokenQuotaExhausted(context, result.retryAfterSecs)
+        result == RefillResult.Disabled -> AnonTokenDisabled(context)
+        result is RefillResult.Failed -> AnonTokenUnavailable(context, result.reason, result.cause)
+        result is RefillResult.Filled -> AnonTokenUnavailable(context, "the refill brought no live token")
+        empty -> AnonTokenUnavailable(context, "pool empty until the next scheduled refill")
+        else -> AnonTokenUnavailable(context, "no refill possible")
     }
 
     private fun adoptLocked(s: AnonSession) {
         if (owner != s.accountKey) {
             resetLocked(newOwner = s.accountKey)
             loadLocked(s.accountKey)
+            startScheduleLocked()
+        }
+    }
+
+    /** Arm every context's schedule for the bound account: a first refill
+     *  within [INITIAL_REFILL_SPREAD_MS], then one every
+     *  [REFILL_INTERVAL_MIN_MS]..[REFILL_INTERVAL_MAX_MS], independently. */
+    private fun startScheduleLocked() {
+        val gen = generation
+        for (context in AnonTokenContext.entries) {
+            val first = CompletableDeferred<Unit>()
+            initials[context] = first
+            schedules[context] = scheduleScope.launch {
+                try {
+                    sleep((random() * INITIAL_REFILL_SPREAD_MS).toLong())
+                    scheduledRefill(context, gen)
+                } finally {
+                    first.complete(Unit)
+                    synchronized(lock) { if (initials[context] === first) initials.remove(context) }
+                }
+                val span = REFILL_INTERVAL_MAX_MS - REFILL_INTERVAL_MIN_MS
+                while (true) {
+                    sleep(REFILL_INTERVAL_MIN_MS + (random() * span).toLong())
+                    if (synchronized(lock) { generation != gen }) return@launch
+                    scheduledRefill(context, gen)
+                }
+            }
+        }
+    }
+
+    /** One scheduled top-up of [context] to its target. Never throws; a
+     *  refill that brought nothing is remembered for the next take. */
+    private suspend fun scheduledRefill(context: AnonTokenContext, gen: Long) {
+        val s = session() ?: return
+        val pending = synchronized(lock) {
+            if (generation != gen || owner != s.accountKey || s.accountKey in forgotten) return
+            val queue = queues[context]
+            if (queue != null) {
+                val current = currentEpochLocked()
+                if (queue.removeAll { !core.isLive(it.epoch, current) }) persistLocked()
+            }
+            if ((queues[context]?.size ?: 0) >= target(context)) return
+            ensureRefillLocked(context, s)
+        } ?: return
+        val result = try {
+            pending.await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            RefillResult.Failed("refill threw", e)
+        }
+        synchronized(lock) {
+            if (generation != gen) return
+            if (result is RefillResult.Filled && result.tokens.isNotEmpty()) {
+                lastFailure.remove(context)
+            } else {
+                lastFailure[context] = result
+            }
         }
     }
 
@@ -450,6 +569,11 @@ public class AnonTokenPool(
         queues.clear()
         for (refill in refills.values) refill.result.cancel()
         refills.clear()
+        for (job in schedules.values) job.cancel()
+        schedules.clear()
+        for (first in initials.values) first.complete(Unit)
+        initials.clear()
+        lastFailure.clear()
         exhaustedUntil.clear()
         epochCorrection = 0
     }
@@ -481,7 +605,8 @@ public class AnonTokenPool(
             if (now < until) return CompletableDeferred(RefillResult.Quota(until - now))
             exhaustedUntil.remove(context)
         }
-        val count = minOf(policy(context).batch, max - (queues[context]?.size ?: 0))
+        val held = queues[context]?.size ?: 0
+        val count = minOf(target(context), max) - held
         if (count <= 0) return null
         val gen = generation
         val id = nextRefillId++

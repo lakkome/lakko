@@ -22,9 +22,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0054 S3 - push-gw's four routes each spend one `push-register`
- * token, carry no session and no proof of work, and nothing asks push-gw for
- * a challenge any more.
+ * ADR-0054 S3 with ADR-0078 - push-gw's two subscription routes each spend
+ * one `push-register` token, carry no session, no proof of work and no device
+ * pseudonym; the wake key is fetched with no token at all.
  */
 class PushClientTokenTest {
 
@@ -44,9 +44,8 @@ class PushClientTokenTest {
                 body = body,
             )
             val reply = when {
-                request.url.encodedPath.endsWith("/register") -> """{"ok":true}"""
-                request.url.encodedPath.endsWith("/unregister") -> """{"ok":true,"removed":true}"""
-                request.url.encodedPath.endsWith("/subscribe") -> """{"ok":true,"inserted":true}"""
+                request.url.encodedPath.endsWith("/subscribe") -> """{"ok":true}"""
+                request.url.encodedPath.endsWith("/wake-key") -> """{"key":"${"A".repeat(43)}"}"""
                 else -> """{"ok":true,"removed":true}"""
             }
             respond(reply, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
@@ -55,37 +54,44 @@ class PushClientTokenTest {
     }
 
     @Test
-    fun theFourRoutesSpendAPushRegisterTokenWithoutSessionOrPow() = runTest {
+    fun theTwoRoutesSpendAPushRegisterTokenWithoutSessionOrPow() = runTest {
         val seen = mutableListOf<Seen>()
         val tokens = FakeAnonTokenSource()
-        val device = ByteArray(32) { 1 }
+        val subId = ByteArray(16) { 1 }
         val group = ByteArray(32) { 2 }
         client(seen, tokens).use { c ->
-            c.register(device, PushClient.Provider.FCM, "fcm".toByteArray())
-            assertTrue(c.subscribeGroup(device, group))
-            assertTrue(c.unsubscribeGroup(device, group))
-            assertTrue(c.unregister(device, PushClient.Provider.FCM))
+            c.subscribe(subId, group, group, byteArrayOf(9))
+            assertTrue(c.unsubscribe(subId))
         }
-        assertEquals(
-            listOf("/push/register", "/push/group/subscribe", "/push/group/unsubscribe", "/push/unregister"),
-            seen.map { it.path },
-        )
-        assertEquals(List(4) { AnonTokenContext.PUSH_REGISTER }, tokens.taken)
+        assertEquals(listOf("/push/subscribe", "/push/unsubscribe"), seen.map { it.path })
+        assertEquals(List(2) { AnonTokenContext.PUSH_REGISTER }, tokens.taken)
         for (s in seen) {
             assertNull(s.authorization)
             assertTrue(s.token != null)
             assertFalse(s.body!!.contains("\"pow\""))
+            assertFalse(s.body.contains("device_pseudonym"))
         }
         assertFalse(seen.any { it.path.endsWith("/pow/challenge") })
     }
 
     @Test
-    fun theLogoutUnregisterDrawsItsTokenWithTheDepartingSession() = runTest {
+    fun theWakeKeyIsFetchedWithoutAToken() = runTest {
+        val seen = mutableListOf<Seen>()
+        val tokens = FakeAnonTokenSource()
+        val key = client(seen, tokens).use { it.wakeKey() }
+        assertEquals(32, key.size)
+        assertEquals("/push/wake-key", seen.single().path)
+        assertNull(seen.single().token)
+        assertTrue(tokens.taken.isEmpty())
+    }
+
+    @Test
+    fun theLogoutUnsubscribeDrawsItsTokenWithTheDepartingSession() = runTest {
         val seen = mutableListOf<Seen>()
         val base = FakeAnonTokenSource()
         val departing = AnonSession("acct", "bearer")
         client(seen, DetachedAnonTokenSource(base, departing)).use { c ->
-            c.unregister(ByteArray(32), PushClient.Provider.FCM)
+            c.unsubscribe(ByteArray(16))
         }
         assertEquals(listOf(departing to AnonTokenContext.PUSH_REGISTER), base.detached)
         assertTrue(base.taken.isEmpty())

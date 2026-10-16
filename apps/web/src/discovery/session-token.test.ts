@@ -52,7 +52,7 @@ describe("DiscoveryClient session token", () => {
     const client = new DiscoveryClient("/api/discovery", { sessionToken: () => "tok" });
     await client.groupInviteUpload({
       sealed: "",
-      issuer_pubkey: "",
+      revocation_pubkey: "",
       expiry_ms: 0,
       max_uses: 0,
     });

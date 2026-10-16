@@ -49,6 +49,22 @@ function sample(): ChannelLogSnapshot {
     ]),
     publisherProviderSnapshot: new Uint8Array([0, 0, 0, 1, 9, 8, 7]),
     publisherLeafKeyB64: "bGVhZg==",
+    coPublisherGroupIds: new Map([[CH_B, "ab".repeat(32)]]),
+    publisherCommits: [
+      {
+        id: "0f".repeat(16),
+        kind: "rotation",
+        channelIdHex: CH_A,
+        groupIdHex: "cd".repeat(32),
+        targetEpoch: "7",
+        serverTargetEpoch: 3,
+        commitB64: null,
+        welcomeB64: null,
+        joinerKeyB64: null,
+        replyGrantB64: null,
+        done: ["journal"],
+      },
+    ],
   };
 }
 
@@ -71,6 +87,20 @@ describe("channel log codec", () => {
     });
     expect(d.publisherProviderSnapshot).toEqual(new Uint8Array([0, 0, 0, 1, 9, 8, 7]));
     expect(d.publisherLeafKeyB64).toBe("bGVhZg==");
+    // ADR-0078 section 6 + G-50.
+    expect(d.coPublisherGroupIds.get(CH_B)).toBe("ab".repeat(32));
+    expect(d.publisherCommits).toEqual(sample().publisherCommits);
+  });
+
+  it("drops a malformed co-publisher id or commit entry alone", () => {
+    const wire = encodeChannelLog(sample());
+    const back = decodeChannelLog({
+      ...wire,
+      coPublisherGroupIds: [...(wire.coPublisherGroupIds ?? []), { channelId: CH_A, groupIdHex: "zz" }],
+      publisherCommits: [...(wire.publisherCommits ?? []), { id: "short", kind: "rotation" }],
+    })!;
+    expect(back.coPublisherGroupIds.size).toBe(1);
+    expect(back.publisherCommits).toHaveLength(1);
   });
 
   it("encodes the documented v1 wire shape", () => {
@@ -116,6 +146,8 @@ describe("channel log codec", () => {
       channelMeta: [],
       publisherProviderSnapshotB64: null,
       publisherLeafKeyB64: null,
+      coPublisherGroupIds: [],
+      publisherCommits: [],
     });
     const back = decodeChannelLog(wire)!;
     expect(back.channels).toEqual([]);

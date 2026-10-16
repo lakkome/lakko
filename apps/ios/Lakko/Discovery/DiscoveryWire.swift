@@ -334,56 +334,32 @@ public struct KeyPackageFetchResponse: Codable, Equatable {
 /// Body of `POST /discovery/invite`, `POST /discovery/call-invite` and
 /// `POST /discovery/group-invite` (ADR-0028 amendment 2026-09-28, sealed
 /// links). The ledger stores the SEALED blob only; what the server used to
-/// read out of the capability arrives in clear fields. `label` and
-/// `bootstrapReferral` are sent for `/i/` only (`nil` omits them).
+/// read out of the capability arrives in clear fields. Since ADR-0078
+/// section 10 nothing names the owner or the issuer: the row holds the
+/// public half of a revocation key minted for the one link.
 public struct InviteUploadRequest: Codable, Equatable {
     /// Standard-alphabet base64 of the sealed link blob (`InviteLinkMint.sealed`).
     public let sealed: String
-    /// Standard-alphabet base64 of the 32-byte Ed25519 key that signed the
-    /// capability — the key an issuer-signed revoke verifies against.
-    public let issuerPubkey: String
+    /// Standard-alphabet base64 of the link's own 32-byte revocation public
+    /// key (``LinkRevocationKey``), the key a revoke verifies against.
+    public let revocationPubkey: String
     /// The capability's expiry (`0` = never), for the fetch filter and pruner.
     public let expiryMs: UInt64
     /// The consume ceiling sentinel (`0` single use, `UInt32.max` unlimited).
     public let maxUses: UInt32
-    /// `/i/` only: the owner's label for its own list.
-    public let label: String?
-    /// `/i/` only: the capability's bootstrap-referral flag.
-    public let bootstrapReferral: Bool?
 
-    public init(
-        sealed: String,
-        issuerPubkey: String,
-        expiryMs: UInt64,
-        maxUses: UInt32,
-        label: String? = nil,
-        bootstrapReferral: Bool? = nil
-    ) {
+    public init(sealed: String, revocationPubkey: String, expiryMs: UInt64, maxUses: UInt32) {
         self.sealed = sealed
-        self.issuerPubkey = issuerPubkey
+        self.revocationPubkey = revocationPubkey
         self.expiryMs = expiryMs
         self.maxUses = maxUses
-        self.label = label
-        self.bootstrapReferral = bootstrapReferral
     }
 
     enum CodingKeys: String, CodingKey {
         case sealed
-        case issuerPubkey = "issuer_pubkey"
+        case revocationPubkey = "revocation_pubkey"
         case expiryMs = "expiry_ms"
         case maxUses = "max_uses"
-        case label
-        case bootstrapReferral = "bootstrap_referral"
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(sealed, forKey: .sealed)
-        try c.encode(issuerPubkey, forKey: .issuerPubkey)
-        try c.encode(expiryMs, forKey: .expiryMs)
-        try c.encode(maxUses, forKey: .maxUses)
-        try c.encodeIfPresent(label, forKey: .label)
-        try c.encodeIfPresent(bootstrapReferral, forKey: .bootstrapReferral)
     }
 }
 
@@ -484,90 +460,6 @@ public struct InviteRevokeRequest: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case signedAtMs = "signed_at_ms"
         case signature
-    }
-}
-
-/// Body of `POST /discovery/invite/by-owner` (Phase
-/// 1.18d2b-list). The owner signs the canonical bytes
-/// (`OWNER_LIST_DOMAIN_V1` ‖ `owner_account_id` ‖
-/// `signed_at_ms` BE) with their identity Ed25519 key; the
-/// server resolves the verifying key from
-/// `identity_bundles.signature_pubkey` for the given
-/// `account_id` and verifies. The session-token middleware on
-/// the route is a DoS gate, not the ownership proof.
-public struct InviteOwnerListRequest: Codable, Equatable {
-    /// Standard-alphabet base64 of the owner's 16-byte UUIDv7
-    /// `account_id`.
-    public let ownerAccountId: String
-    /// UNIX millis at which the body was signed. Same ±10 min
-    /// replay window as the revoke endpoint.
-    public let signedAtMs: Int64
-    /// Standard-alphabet base64 of the 64-byte Ed25519 signature
-    /// from `signOwnerListQuery`.
-    public let signature: String
-
-    public init(ownerAccountId: String, signedAtMs: Int64, signature: String) {
-        self.ownerAccountId = ownerAccountId
-        self.signedAtMs = signedAtMs
-        self.signature = signature
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case ownerAccountId = "owner_account_id"
-        case signedAtMs = "signed_at_ms"
-        case signature
-    }
-}
-
-/// One entry in the `/discovery/invite/by-owner` response —
-/// wire-shape mirror of the server's `OwnerListEntry`. The
-/// camelCase `Codable` properties remap to the snake_case JSON
-/// the server emits.
-public struct InviteOwnerListEntry: Codable, Equatable {
-    public let blobIdSlug: String
-    public let expiryMs: UInt64
-    public let maxUses: UInt32
-    public let usedCount: UInt32
-    public let label: String
-    public let bootstrapReferral: Bool
-    public let createdAt: String
-
-    public init(
-        blobIdSlug: String,
-        expiryMs: UInt64,
-        maxUses: UInt32,
-        usedCount: UInt32,
-        label: String,
-        bootstrapReferral: Bool,
-        createdAt: String
-    ) {
-        self.blobIdSlug = blobIdSlug
-        self.expiryMs = expiryMs
-        self.maxUses = maxUses
-        self.usedCount = usedCount
-        self.label = label
-        self.bootstrapReferral = bootstrapReferral
-        self.createdAt = createdAt
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case blobIdSlug = "blob_id_slug"
-        case expiryMs = "expiry_ms"
-        case maxUses = "max_uses"
-        case usedCount = "used_count"
-        case label
-        case bootstrapReferral = "bootstrap_referral"
-        case createdAt = "created_at"
-    }
-}
-
-/// Wire-level response shape from
-/// `POST /discovery/invite/by-owner`.
-public struct InviteOwnerListResponse: Codable, Equatable {
-    public let invites: [InviteOwnerListEntry]
-
-    public init(invites: [InviteOwnerListEntry]) {
-        self.invites = invites
     }
 }
 

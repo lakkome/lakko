@@ -172,10 +172,7 @@ pub(crate) async fn start(
     .map_err(ApiError::Db)?;
     tx.commit().await.map_err(ApiError::Db)?;
 
-    tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(account_id),
-        "device-authorize: grant minted",
-    );
+    tracing::info!("device-authorize: grant minted",);
 
     Ok(Json(DeviceAuthorizeStartRes {
         grant_token_b64: URL_SAFE_NO_PAD.encode(token),
@@ -214,10 +211,7 @@ pub(crate) async fn redeem(
         return Err(ApiError::InvalidCredential);
     };
 
-    tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(account_id),
-        "device-authorize: grant redeemed, issuing session token",
-    );
+    tracing::info!("device-authorize: grant redeemed, issuing session token",);
 
     let session = crate::session::issue_pair_at(&state, &account_id, key_generation, &device_id)?;
     Ok(Json(DeviceAuthorizeRedeemRes {
@@ -422,7 +416,7 @@ mod device_authorize_e2e_tests {
             turn: None,
             totp_enc_key: None,
             vault_enc_key: None,
-            throttle: crate::throttle::ThrottleConfig::disabled(),
+            room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
             handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),

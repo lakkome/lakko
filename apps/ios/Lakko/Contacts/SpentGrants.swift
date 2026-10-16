@@ -27,19 +27,16 @@ public enum SpentGrants {
         /// `true` for the call-invite ledger (`/c/`), `false` for the
         /// contact-invite ledger (`/i/`).
         public let call: Bool
-        /// The spent reach scope this row belongs to, when this device minted
-        /// the link; `nil` for a row only the owner list named.
+        /// The spent reach scope this row belongs to.
         public let linkIdB64: String?
     }
 
     /// Every ledger row the rotation revokes: each spent link scope that has
-    /// a ledger id (at the ledger of its kind), then every `/i/` row the
-    /// owner list returned that no scope here names (a link another of this
-    /// account's devices minted). A scope with no ledger id (an inline link)
-    /// has nothing to revoke.
-    public static func linksToRevoke(
-        spent: [LinkReach], listedInviteBlobIds: [Data]
-    ) -> [LinkToRevoke] {
+    /// a ledger id (at the ledger of its kind). Since ADR-0078 section 10
+    /// there is no owner list: a link another of this account's devices
+    /// minted is revoked by that device. A scope with no ledger id (an inline
+    /// link) has nothing to revoke.
+    public static func linksToRevoke(spent: [LinkReach]) -> [LinkToRevoke] {
         var out: [LinkToRevoke] = []
         var seen = Set<Data>()
         for link in spent {
@@ -47,9 +44,6 @@ public enum SpentGrants {
                   seen.insert(blobId).inserted else { continue }
             out.append(LinkToRevoke(
                 blobId: blobId, call: link.kind == LinkReach.callKind, linkIdB64: link.linkIdB64))
-        }
-        for blobId in listedInviteBlobIds where seen.insert(blobId).inserted {
-            out.append(LinkToRevoke(blobId: blobId, call: false, linkIdB64: nil))
         }
         return out
     }

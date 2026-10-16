@@ -302,7 +302,10 @@ public object ChannelMemberCards {
             )
             var grant: FfiReachGrant? = null
             if (content.includeGrant) {
-                reach.raiseChannelVersion(input.channelIdHex, input.epoch.toInt())
+                // ADR-0078 section 9: the account's one `channel` key, the
+                // same in every channel; the sync registers it while any
+                // channel is allowed.
+                reach.launchSync()
                 grant = reach.grant(ReachKind.CHANNEL, channelId)
             }
             val pkHex = reachHex(input.keys.publicKey)

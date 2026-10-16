@@ -287,7 +287,7 @@ function seedAccount(acct: string, acctUrl: string): void {
 function seedDeviceSettings(): void {
   local.setItem("lakko.theme", "dark");
   local.setItem("lakko.transparency.last-seen-root.v1", "{\"size\":3}");
-  local.setItem("lakko.push.device.v1", "cHNldWRv");
+  local.setItem("lakko.push.token.v1", "cHNldWRv");
   local.setItem("lakko.composer.recordMode", "voice");
   local.setItem("lakko.media.autoplayVideoNotes", "1");
   local.setItem("lakko.gif.privacyNoteDismissed", "1");
@@ -370,7 +370,7 @@ describe("wipeAccountLocalData", () => {
     for (const k of [
       "lakko.theme",
       "lakko.transparency.last-seen-root.v1",
-      "lakko.push.device.v1",
+      "lakko.push.token.v1",
       "lakko.composer.recordMode",
       "lakko.media.autoplayVideoNotes",
       "lakko.gif.privacyNoteDismissed",
@@ -651,7 +651,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   // The store gate's cross-tab marker: digests of the accounts wiped in the
   // last minute, never an account id; it prunes itself.
   "lakko.account-store-gate.wiped.v1": "device",
-  "lakko.push.device.v1": "device",
+  "lakko.push.token.v1": "device",
   "lakko.composer.recordMode": "device",
   "lakko.media.autoplayVideoNotes": "device",
   "lakko.feed.device-banner-dismissed": "device",

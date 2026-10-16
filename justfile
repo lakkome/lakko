@@ -222,6 +222,15 @@ l10n-compile:
 audit-index-check:
     ./tools/audit-index-check
 
+# ADR-0078 section 11 - no service log line at info or above names an
+# identifier (account, key, journal, mailbox, call, room, channel, push id,
+# device, token, blob), and every TraceLayer records the route template.
+# The source lint over every service plus the capture layer's own tests;
+# the capture tests that drive real routes are DB-gated in the services
+# (`cargo test -p lakko-svc-discovery log_capture`, `-p lakko-svc-ds`).
+log-lint:
+    cargo test -p lakko-log-hygiene --all-features
+
 # Public API that nothing in the shipping code calls.
 #
 # A feature can be fully written, correct and tested, and still
@@ -279,7 +288,7 @@ test-receiver-delay:
 test-sframe-bridge-all: test-sframe-bridge test-receiver-delay
 
 # Everything CI does — run locally before pushing.
-ci: fmt-check lint test audit reuse fuzz-check audit-index-check spec-check
+ci: fmt-check lint test audit reuse fuzz-check audit-index-check spec-check log-lint
 
 # Build for all release targets (host platform only here; cross-builds via Nix).
 build:

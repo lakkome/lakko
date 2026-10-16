@@ -40,11 +40,9 @@ public enum DsStatementError: Error, Equatable, LocalizedError {
     case unauthorized
     /// `403` — the signer's rank is too low for what it asked.
     case rankShortfall
-    /// `409` — a conflict (a different claim, a lower epoch, a binding held by
-    /// another journal), after the one retry a lock race gets.
+    /// `409` — a conflict (a different claim, a lower epoch), after the one
+    /// retry a lock race gets.
     case conflict
-    /// `503 push-binding-disabled` — the DS has no binding pepper.
-    case pushBindingDisabled
     /// `503 key-reset-disabled` — the DS has no pinned attest key, so an
     /// attested reset (ADR-0073) cannot be verified there.
     case keyResetDisabled
@@ -58,7 +56,6 @@ public enum DsStatementError: Error, Equatable, LocalizedError {
         case 401: return .unauthorized
         case 403: return .rankShortfall
         case 409: return .conflict
-        case 503 where body.contains("push-binding-disabled"): return .pushBindingDisabled
         case 503 where body.contains("key-reset-disabled"): return .keyResetDisabled
         default: return .http(status: status, body: body)
         }
@@ -70,25 +67,10 @@ public enum DsStatementError: Error, Equatable, LocalizedError {
         case .unauthorized: return "ds statement refused (401 proof required)"
         case .rankShortfall: return "ds statement refused (403 rank)"
         case .conflict: return "ds statement refused (409 conflict)"
-        case .pushBindingDisabled: return "ds push binding disabled (503)"
         case .keyResetDisabled: return "ds key reset disabled (503)"
         case .http(let status, let body): return "ds statement refused (\(status)): \(body)"
         }
     }
-}
-
-/// What one push-binding attempt came to (ADR-0057 obligation 8).
-public enum PushBindOutcome: Equatable {
-    /// `204`: the journal is bound to the routing id.
-    case bound
-    /// `409`: the routing id is bound to another journal.
-    case conflict
-    /// `503 push-binding-disabled`: wakes are dropped until bound.
-    case disabled
-    /// Offline, a timeout, any other refusal.
-    case failed
-    /// This device is not the owner or an admin: members never bind.
-    case notPermitted
 }
 
 // MARK: - Who registers
@@ -592,127 +574,6 @@ public enum JournalOwnership {
         }
     }
 
-    /// ADR-0073 section 5 — re-root the account's DeviceGroup journal after
-    /// a key reset: the `reset` statement signed by the NEW root (derived
-    /// from the new account seed), carrying the key-reset attestation the
-    /// DS verifies under its pinned attest key. The DS replaces the root,
-    /// drops the epoch chain, the registrars and the push binding, records
-    /// the generation, and registers `epochKey` at `epoch`.
-    ///
-    /// Idempotent on a retry: a `409` (the generation is not newer) means an
-    /// earlier attempt landed, which the root probe confirms (`204` for the
-    /// new root); a probe that answers `401` is a real conflict and is
-    /// thrown. `503 key-reset-disabled` and every other refusal are thrown.
-    ///
-    /// ADR-0074 section 4.6 ("T5 as built" item 21): the DS hears an attested
-    /// reset only with a ROOT ENDORSEMENT beside the attestation, a signature
-    /// by the attested NEW account key over the journal, the generation and
-    /// the key that becomes the root (`root.publicKey()`). `endorse` signs it
-    /// (``RootEndorsement``); without it the DS answers the uniform `401`.
-    public static func attestedReset(
-        root: DsStatementSignerProtocol,
-        journalId: Data,
-        epoch: UInt64,
-        epochKey: Data,
-        attestation: Data,
-        endorse: (_ rootKey: Data) throws -> Data,
-        ds: DsStatementSending
-    ) async throws {
-        let plain = try root.reset(journalId: journalId, epoch: epoch, epochKey: epochKey, registrars: nil)
-        let request = try AttestedResetBody.attach(
-            attestation: attestation, endorsement: try endorse(root.publicKey()), to: plain)
-        do {
-            try await ds.putStatement(request)
-        } catch DsStatementError.conflict {
-            switch try await probeRoot(root: root, journalId: journalId, ds: ds) {
-            case .root:
-                NSLog("ADR-0073: the DeviceGroup journal reset had already landed")
-            case .notRoot:
-                throw DsStatementError.conflict
-            }
-        }
-    }
-
-    /// Obligation 8 — bind the journal to its push routing id. Never throws:
-    /// the outcome says what happened, logged by status. Since the second
-    /// security pass (finding 5) the binding precedes the secret's broadcast
-    /// (``PushGroupRouting``): `409` means the id is bound to another journal
-    /// and the minter mints once more.
-    @discardableResult
-    public static func bindPush(
-        signer: DsStatementSignerProtocol,
-        journalId: Data,
-        pushGid: Data,
-        ds: DsStatementSending
-    ) async -> PushBindOutcome {
-        do {
-            try await ds.putStatement(try signer.pushBinding(journalId: journalId, pushGid: pushGid))
-            return .bound
-        } catch DsStatementError.conflict {
-            NSLog("ADR-0057: push binding refused (409, bound to another journal)")
-            return .conflict
-        } catch DsStatementError.pushBindingDisabled {
-            NSLog("ADR-0057: push binding disabled on the DS (503)")
-            return .disabled
-        } catch {
-            NSLog("ADR-0057: push binding failed: %@", String(describing: error))
-            return .failed
-        }
-    }
-}
-
-// MARK: - The attested reset body (ADR-0073, ADR-0074 section 4.6)
-
-/// `PUT /ds/group/{hex}/reset` (after a reset or a recall) and
-/// `PUT /ds/group/{hex}/root` (after a rotation) with
-/// `{statement_b64, key_reset_attest_b64, root_endorsement_b64}`: the Rust
-/// core spells the statement and its route; the two fields are added here,
-/// next to it, each as standard base64.
-enum AttestedResetBody {
-    static let attestationField = "key_reset_attest_b64"
-    static let endorsementField = "root_endorsement_b64"
-
-    /// `request` with the attestation and the root endorsement added to its
-    /// JSON body. The DS refuses the attestation without the endorsement, so
-    /// there is no way to attach one alone.
-    static func attach(
-        attestation: Data, endorsement: Data, to request: DsStatementRequest
-    ) throws -> DsStatementRequest {
-        guard var object = try JSONSerialization.jsonObject(with: Data(request.bodyJson.utf8))
-                as? [String: Any] else {
-            throw DsStatementError.malformed("statement body is not a JSON object")
-        }
-        guard !endorsement.isEmpty else {
-            throw DsStatementError.malformed("the root endorsement is missing")
-        }
-        object[attestationField] = attestation.base64EncodedString()
-        object[endorsementField] = endorsement.base64EncodedString()
-        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-        guard let json = String(data: data, encoding: .utf8) else {
-            throw DsStatementError.malformed("statement body could not be re-encoded")
-        }
-        return DsStatementRequest(path: request.path, bodyJson: json)
-    }
-}
-
-/// The root endorsement of ADR-0074 section 4.6: the account's NEW identity
-/// key says which key becomes the root of the account's DeviceGroup journal,
-/// at which generation. The DS verifies it with the key inside the
-/// attestation it is already checking, so a served attestation is useless to
-/// anyone but the new identity.
-enum RootEndorsement {
-    /// Sign with the NEW account identity derived from `accountIdentitySeed`
-    /// (the 64-byte phrase seed).
-    static func sign(
-        accountIdentitySeed: Data, journalId: Data, keyGeneration: UInt64, rootKey: Data
-    ) throws -> Data {
-        let account = try Identity.fromSeed(seed: accountIdentitySeed)
-        return try signDsRootEndorsement(
-            newAccountEd25519Seed: account.ed25519Seed(),
-            journalId: journalId,
-            keyGeneration: keyGeneration,
-            rootKey: rootKey)
-    }
 }
 
 // MARK: - Founding marks

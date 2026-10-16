@@ -151,19 +151,6 @@ fn video_given_pairs(json: &str) -> Result<Vec<String>, String> {
     }
 }
 
-/// Re-derive the per-call peer tag (ADR-0021) for a `(call_id,
-/// account_id)` pair — the same canonical derivation the SFU applies.
-///
-/// The web computes this over each of its contacts' account ids and
-/// matches it against a roster entry's `peer_tag` (read off the frame
-/// JSON) to resolve the entry to a display name. One-way (reveals
-/// nothing about the account id) and per-call (keyed on `call_id`).
-#[wasm_bindgen(js_name = "sfuPeerTag")]
-#[must_use]
-pub fn sfu_peer_tag(call_id: &str, account_id: &str) -> String {
-    lakko_sfu_proto::peer_tag(call_id, account_id)
-}
-
 /// Compose a `SignalRelay` to a single peer. `payload` is the raw
 /// opaque bytes (SDP / ICE / SFrame-key envelope); base64url-encoded
 /// into the frame.
@@ -305,7 +292,7 @@ mod tests {
 
     #[test]
     fn validate_recognises_welcome() {
-        let json = r#"{"kind":"welcome","peer_id":"p1","call_id":"c1","roster":[],"server_ts":1}"#;
+        let json = r#"{"kind":"welcome","peer_id":"p1","room":"r1","roster":[],"server_ts":1}"#;
         assert_eq!(validate_sfu_server_frame(json).expect("ok"), "welcome");
     }
 

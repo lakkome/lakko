@@ -16,9 +16,10 @@ import kotlinx.serialization.json.jsonPrimitive
  * progress" on every other phone for the freshness window, and whoever taps
  * Join lands in an empty room. The one party that knows a room is empty is the
  * SFU: the call ends there five seconds after the last socket goes, and
- * `GET /v1/calls/{call_id}` (`Authorization: Bearer <call jwt>`) says so. A
- * phone showing the call
- * as joinable asks every [SFU_CALL_STATE_PROBE_MS] and, on `ENDED`, closes the
+ * `GET /v1/rooms/{room}` says so. No token (ADR-0078 section 2): the room is
+ * `sfuRoomForCall(callId)`, a one-way function of the call id only the call's
+ * members can compute, so no admission token is minted just to ask. A phone
+ * showing the call as joinable asks every [SFU_CALL_STATE_PROBE_MS] and, on `ENDED`, closes the
  * chat's record itself by publishing the End signal — so the banner goes on
  * every device, not only its own. Shared word-for-word with web and iOS.
  */
@@ -27,26 +28,21 @@ import kotlinx.serialization.json.jsonPrimitive
  *  lives at most this long past the SFU's own five-second grace. */
 public const val SFU_CALL_STATE_PROBE_MS: Long = 10_000L
 
-/** What the SFU knows about a call id. */
+/** What the SFU knows about a room. */
 public enum class SfuCallState { UNKNOWN, LIVE, CLOSING, ENDED }
 
 /**
- * The state route for [callIdHex], on the HTTP origin behind the SFU's
- * WebSocket base (`wss://host/sfu` -> `https://host/sfu`). The token never
- * rides the URL (invariant #5: a request line in a log must not name who asked
- * about which call); it goes in the header [sfuCallStateAuthorization] builds.
+ * The state route for [roomHex] (64 lower-case hex), on the HTTP origin
+ * behind the SFU's WebSocket base (`wss://host/sfu` -> `https://host/sfu`).
+ * The request carries no token and no credentials.
  */
-public fun sfuCallStateUrl(sfuBaseUrl: String, callIdHex: String): String {
+public fun sfuCallStateUrl(sfuBaseUrl: String, roomHex: String): String {
     val base = sfuBaseUrl
         .replace(Regex("^wss:", RegexOption.IGNORE_CASE), "https:")
         .replace(Regex("^ws:", RegexOption.IGNORE_CASE), "http:")
         .trimEnd('/')
-    return "$base/v1/calls/$callIdHex"
+    return "$base/v1/rooms/$roomHex"
 }
-
-/** The `Authorization` value for the state route: the same call-admission JWT
- *  the socket uses, bound to this call id, as a bearer token. */
-public fun sfuCallStateAuthorization(jwt: String): String = "Bearer $jwt"
 
 /**
  * The route's answer, or `null` for anything that is not one of the four words

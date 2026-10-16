@@ -29,8 +29,9 @@
  * `{"statement_b64": ...}` and NO proof header; the wasm signer returns
  * `{path, bodyJson}`. Codes: 204 an identical re-send, 400 malformed, 401 a
  * bad or stranger signer (or an unclaimed journal on a non-claim route), 403
- * a rank shortfall, 409 a conflict or a lock race (retried once), 503
- * `push-binding-disabled`.
+ * a rank shortfall, 409 a conflict or a lock race (retried once). The push
+ * binding of ADR-0057 is gone (ADR-0078 section 3): a wake is sealed to
+ * push-gw and signed by the group's wake key, and the DS binds it to nothing.
  *
  * ## Append and Replace (the second security pass, 2026-09-28)
  *
@@ -83,7 +84,6 @@ export interface StatementSignerLike {
   /** `PUT .../root`. Naming the signer's own key is the "am I still the
    *  root?" probe: 204 while it is, the uniform 401 once it is not. */
   rootTransfer(journalId: Uint8Array, newRoot: Uint8Array): StatementRequestLike;
-  pushBinding(journalId: Uint8Array, pushGid: Uint8Array): StatementRequestLike;
   publicKey(): Uint8Array;
   free(): void;
 }
@@ -331,110 +331,12 @@ export async function claimOrReset(
 }
 
 /**
- * ADR-0073 section 5 - the attested reset of the account's DeviceGroup
- * journal after a key reset. The journal id is unchanged (it is derived from
- * the account id) but its root belongs to the OLD seed, so the new root is a
- * stranger to it: `PUT .../reset` carries, beside the Reset statement the
- * NEW root signed, the key-reset attestation (`key_reset_attest_b64`,
- * STANDARD base64 of the 177 bytes) under which the DS hears a Reset from
- * any signer, replaces the root, drops the epoch chain, the registrar set
- * and the push binding, and records the generation.
- *
- * `"reset"` on a 2xx. A `409` means the generation already landed (a retry
- * after a crash) OR a competing registration raced; the two are told apart
- * with the `PUT .../root` probe naming this root: `"already-reset"` when it
- * answers 204, else the 409 is rethrown for the caller to retry later. Any
- * other refusal (401 stranger, 400 bad attestation, 503 `key-reset-disabled`)
- * is thrown as the DS client's error.
- */
-export async function resetWithAttestation(
-  sender: StatementSender,
-  journalId: Uint8Array,
-  root: StatementSignerLike,
-  epoch: bigint,
-  epochKey: Uint8Array,
-  keyResetAttestB64: string,
-  /** ADR-0074 section 4.6 (T5 item 21) - the 64-byte signature by the
-   *  attested NEW account key over `(journal, generation, root.publicKey())`,
-   *  STANDARD base64. The DS refuses an attested reset without it (the
-   *  uniform 401), so a served attestation is useless to anyone but the new
-   *  identity. */
-  rootEndorsementB64: string,
-): Promise<"reset" | "already-reset"> {
-  const [path, statementBody] = readRequest(root.reset(journalId, epoch, epochKey));
-  const body = attestedResetBody(statementBody, keyResetAttestB64, rootEndorsementB64);
-  try {
-    await sender.putStatement(path, body);
-    return "reset";
-  } catch (err) {
-    if (!isStatus(err, 409)) throw err;
-    const probe = await probeRoot(sender, journalId, root);
-    if (probe === "root") return "already-reset";
-    throw err;
-  }
-}
-
-/** The reset body with the attestation added beside the statement the wasm
- *  signer built. Exported for the test; throws on a body that is not the
- *  `{"statement_b64": ...}` object the signer writes. */
-export function attestedResetBody(
-  statementBodyJson: string,
-  keyResetAttestB64: string,
-  rootEndorsementB64: string,
-): string {
-  const parsed = JSON.parse(statementBodyJson) as { statement_b64?: unknown };
-  if (typeof parsed.statement_b64 !== "string") {
-    throw new Error("ds ownership: the statement body has no statement_b64");
-  }
-  if (rootEndorsementB64.length === 0) {
-    // The DS answers the uniform 401 without it; refuse here so the defect
-    // is a named one.
-    throw new Error("ds ownership: an attested statement needs the root endorsement");
-  }
-  return JSON.stringify({
-    statement_b64: parsed.statement_b64,
-    key_reset_attest_b64: keyResetAttestB64,
-    root_endorsement_b64: rootEndorsementB64,
-  });
-}
-
-/**
- * ADR-0074 section 3.5 (T5 item 22) - the attested root TRANSFER of the
- * account's DeviceGroup journal after a key rotation: the OLD root signs a
- * `RootTransfer` naming the root derived from the new seed, and the body
- * carries the attestation and the endorsement of that NEW root. The chain,
- * the registrars and the push binding are kept (a kept device that lags an
- * epoch is not cut off), and the journal records the generation.
- *
- * `"transferred"` on a 2xx. A `409` (the generation already landed) or the
- * uniform `401` (the old root is no longer the root) is `"already"` only when
- * the probe by the NEW root answers 204; otherwise the refusal is rethrown.
- */
-export async function transferRootWithAttestation(
-  sender: StatementSender,
-  journalId: Uint8Array,
-  oldRoot: Pick<StatementSignerLike, "rootTransfer">,
-  newRoot: Pick<StatementSignerLike, "rootTransfer" | "publicKey">,
-  keyResetAttestB64: string,
-  rootEndorsementB64: string,
-): Promise<"transferred" | "already"> {
-  const [path, statementBody] = readRequest(oldRoot.rootTransfer(journalId, newRoot.publicKey()));
-  const body = attestedResetBody(statementBody, keyResetAttestB64, rootEndorsementB64);
-  try {
-    await sender.putStatement(path, body);
-    return "transferred";
-  } catch (err) {
-    if (!isStatus(err, 409) && !isStatus(err, 401)) throw err;
-    const probe = await probeRoot(sender, journalId, newRoot);
-    if (probe === "root") return "already";
-    throw err;
-  }
-}
-
-/**
- * A plain root transfer old -> new for a journal the account owns (an owned
- * group, a PublisherGroup) after a key rotation. `"already"` when the old
- * root is refused and the new root's probe answers 204 (a retry).
+ * A plain root transfer old -> new for a journal the account owns (its
+ * DeviceGroup, an owned group, a PublisherGroup) after a key rotation.
+ * `"already"` when the old root is refused and the new root's probe answers
+ * 204 (a retry). Since ADR-0078 phase 6 the DeviceGroup takes this route too:
+ * the attested transfer and its root endorsement are gone with the journal id
+ * the key-reset attestation used to name.
  */
 export async function transferRoot(
   sender: StatementSender,
@@ -580,53 +482,5 @@ export function desiredRegistrars(args: {
   return out;
 }
 
-// ----------------------------------------------------------------------------
-// Push binding (obligation 8)
-// ----------------------------------------------------------------------------
 
-/** Who binds a push routing id: the root or an admin registrar. A member
- *  registrar would be refused (403), so it does not try. */
-export function mayBindPush(authority: JournalAuthority): boolean {
-  return authority.kind === "root" || (authority.kind === "registrar" && authority.rank === RANK_ADMIN);
-}
 
-/** What a push binding attempt came to. 409 (bound to another journal) and
- *  503 (binding disabled on this server) are logged and the caller continues:
- *  wakes for this group are dropped until fixed, foreground polling still
- *  delivers. */
-export type PushBindingOutcome = "bound" | "not-permitted" | "conflict" | "disabled" | "failed";
-
-/**
- * Obligation 8 - when the owner or an admin mints or rotates the group's push
- * routing secret, bind the journal to its `push_gid` BEFORE the secret is
- * broadcast (finding 5 of the second security pass: binding after the
- * broadcast let any member who read the secret squat the id first). Never
- * throws.
- */
-export async function bindPushRouting(
-  sender: StatementSender,
-  journalId: Uint8Array,
-  authority: JournalAuthority,
-  pushGid: Uint8Array,
-): Promise<PushBindingOutcome> {
-  if (authority.kind === "none" || !mayBindPush(authority)) return "not-permitted";
-  try {
-    await sender.putStatement(...readRequest(authority.signer.pushBinding(journalId, pushGid)));
-    return "bound";
-  } catch (err) {
-    const status = statusOf(err);
-    if (status === 409) {
-      // eslint-disable-next-line no-console
-      console.warn("ds: push binding refused (409), the routing id is bound to another journal");
-      return "conflict";
-    }
-    if (status === 503) {
-      // eslint-disable-next-line no-console
-      console.warn("ds: push binding unavailable (503 push-binding-disabled)");
-      return "disabled";
-    }
-    // eslint-disable-next-line no-console
-    console.warn(`ds: push binding failed (${status === null ? "network" : `HTTP ${status}`})`);
-    return "failed";
-  }
-}

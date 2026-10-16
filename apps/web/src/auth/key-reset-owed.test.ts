@@ -15,7 +15,6 @@ import {
   attestationAge,
   attestationGate,
   clearKeyResetOwed,
-  deviceGroupResetOutcome,
   directoryResetOutcome,
   isKeyResetOwed,
   KEY_RESET_ATTESTATION_LEN,
@@ -154,24 +153,6 @@ describe("the directory step's answer", () => {
   });
 });
 
-describe("the device-group step's answer", () => {
-  it("a 2xx is done; a 409 is done only when the root probe confirms this root", () => {
-    expect(deviceGroupResetOutcome({ status: 204, errorCode: null, probeConfirmedRoot: null })).toBe("done");
-    expect(deviceGroupResetOutcome({ status: 409, errorCode: null, probeConfirmedRoot: true })).toBe("done");
-    expect(deviceGroupResetOutcome({ status: 409, errorCode: null, probeConfirmedRoot: false })).toBe("retry");
-    expect(deviceGroupResetOutcome({ status: 409, errorCode: null, probeConfirmedRoot: null })).toBe("retry");
-  });
-
-  it("a stranger's 401 and a bad attestation are refused; a 503 and the rest retry", () => {
-    expect(deviceGroupResetOutcome({ status: 401, errorCode: null, probeConfirmedRoot: null })).toBe("refused");
-    expect(
-      deviceGroupResetOutcome({ status: 400, errorCode: "key-reset-attestation-invalid", probeConfirmedRoot: null }),
-    ).toBe("refused");
-    expect(deviceGroupResetOutcome({ status: 503, errorCode: "key-reset-disabled", probeConfirmedRoot: null })).toBe("retry");
-    expect(deviceGroupResetOutcome({ status: 0, errorCode: null, probeConfirmedRoot: null })).toBe("retry");
-  });
-});
-
 describe("the 30-day bound", () => {
   it("is usable up to the bound and too old past it; a clock behind the mint reads as fresh", () => {
     expect(attestationAge(NOW, NOW)).toBe("usable");
@@ -193,9 +174,9 @@ describe("the attestation's wire fields", () => {
   function blob(generation: bigint, signedAt: bigint): Uint8Array {
     const out = new Uint8Array(KEY_RESET_ATTESTATION_LEN);
     const view = new DataView(out.buffer);
-    out[0] = 1;
-    view.setBigUint64(1 + 32 + 32, generation, false);
-    view.setBigInt64(1 + 32 + 32 + 8 + 32, signedAt, false);
+    out[0] = 2;
+    view.setBigUint64(1 + 32, generation, false);
+    view.setBigInt64(1 + 32 + 8 + 32, signedAt, false);
     return out;
   }
 
@@ -210,8 +191,8 @@ describe("the attestation's wire fields", () => {
   });
 
   it("refuses a blob of the wrong length", () => {
-    expect(() => keyResetAttestationSignedAtMs(new Uint8Array(176))).toThrow(/177/);
-    expect(() => keyResetAttestationGeneration(new Uint8Array(178))).toThrow(/177/);
+    expect(() => keyResetAttestationSignedAtMs(new Uint8Array(144))).toThrow(/145/);
+    expect(() => keyResetAttestationGeneration(new Uint8Array(177))).toThrow(/145/);
   });
 });
 

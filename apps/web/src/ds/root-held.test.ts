@@ -37,7 +37,7 @@ function labelOf(a: JournalAuthority): string {
   return parseLabel(a);
 }
 function parseLabel(a: Exclude<JournalAuthority, { kind: "none" }>): string {
-  const req = a.signer.pushBinding(GID, new Uint8Array(32));
+  const req = a.signer.rootTransfer(GID, new Uint8Array(32));
   return (JSON.parse(req.bodyJson) as { signer: string }).signer;
 }
 

@@ -374,7 +374,9 @@ final class KeyRotationAnnounceTests: XCTestCase {
     /// and the lost one.
     private func threeDevices(accountId: Data) throws -> (rotating: Device, kept: Device, lost: Device) {
         let founderIdentity = try Identity.fromSeed(seed: randomBytes(32))
-        let founder = try DeviceGroup.createFounder(identity: founderIdentity, accountId: accountId)
+        let founder = try DeviceGroup.createFounder(
+            identity: founderIdentity, accountId: accountId,
+            accountIdentity: try Identity.fromSeed(seed: randomBytes(32)))
         let keptIdentity = try Identity.fromSeed(seed: randomBytes(32))
         let addKept = try founder.addDeviceFromWire(
             identity: founderIdentity, keyPackage: try keptIdentity.createKeyPackage())
@@ -539,7 +541,7 @@ final class KeyRotationRunnerTests: XCTestCase {
         private(set) var committedRevokes: [[Data]] = []
         private(set) var committedProofs: [Data] = []
         private(set) var published: [(attestation: Data?, withProof: Bool)] = []
-        private(set) var dgRoot: [(attestation: Data?, generation: UInt64?)] = []
+        private(set) var dgRoot = 0
         private(set) var freshAuthDropped = 0
         let material: KeyRotationMaterial
         let attestation = Data(repeating: 0xA7, count: KeyResetResult.attestationLength)
@@ -561,7 +563,7 @@ final class KeyRotationRunnerTests: XCTestCase {
         func publishedIdentity(_ attestation: Data?, _ withProof: Bool) {
             published.append((attestation, withProof))
         }
-        func transferred(_ attestation: Data?, _ generation: UInt64?) { dgRoot.append((attestation, generation)) }
+        func transferred() { dgRoot += 1 }
         func droppedFreshAuth() { freshAuthDropped += 1 }
         func nextDiscoveryError() -> Error? { discoveryErrors.isEmpty ? nil : discoveryErrors.removeFirst() }
     }
@@ -634,8 +636,8 @@ final class KeyRotationRunnerTests: XCTestCase {
                 if world.failing.contains("discovery") { throw Down() }
             },
             republishKeyPackage: { try step("keypackage") },
-            transferDeviceGroupRoot: { attestation, generation in
-                world.transferred(attestation, generation)
+            transferDeviceGroupRoot: {
+                world.transferred()
                 try step("dg-root")
             },
             transferOwnedJournals: { try step("journals") },
@@ -692,12 +694,11 @@ final class KeyRotationRunnerTests: XCTestCase {
                 nowUnixSecs: 1_700_000_000),
             world.material.newSignaturePubkey)
         // The directory upload carries the proof AND the attestation; the
-        // DeviceGroup root transfer the attestation and its generation.
+        // DeviceGroup root transfer is plain (ADR-0078 phase 6).
         XCTAssertEqual(world.published.count, 1)
         XCTAssertEqual(world.published.first?.attestation, world.attestation)
         XCTAssertEqual(world.published.first?.withProof, true)
-        XCTAssertEqual(world.dgRoot.first?.attestation, world.attestation)
-        XCTAssertEqual(world.dgRoot.first?.generation, 4)
+        XCTAssertEqual(world.dgRoot, 1)
         XCTAssertEqual(world.freshAuthDropped, 1, "a rotation spends the proof")
         // The words are still to be confirmed.
         XCTAssertEqual(runner.resume, .showWords)
@@ -934,7 +935,7 @@ final class KeyRotationRunnerTests: XCTestCase {
         XCTAssertNil(record.attestation, "the answer that carried it never arrived")
         XCTAssertEqual(world.published.last?.withProof, true)
         XCTAssertNil(world.published.last?.attestation ?? nil, "the upload goes by proof alone")
-        XCTAssertNil(world.dgRoot.last?.attestation ?? nil, "the transfer goes plain")
+        XCTAssertGreaterThan(world.dgRoot, 0, "the transfer goes plain")
         XCTAssertEqual(KeyRotationPlan.remaining(record), [])
     }
 

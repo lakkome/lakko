@@ -91,30 +91,6 @@ export function requestsToResend(
 }
 
 /**
- * The seeds a pre-rotation link's revocation may be signed with: every own
- * predecessor, the newest first (a link is signed by the account key of the
- * moment it was minted). The CURRENT seed is never among them, so a link
- * minted after the rotation cannot be revoked by this step. Pure.
- */
-export function revocationSeedOrder<S>(predecessorSeedsOldestFirst: readonly S[]): S[] {
-  return [...predecessorSeedsOldestFirst].reverse();
-}
-
-/** How a revoke attempt under one seed ended. */
-export type RevokeAttempt = "revoked" | "not-owner" | "unreachable";
-
-/**
- * Fold the attempts made for ONE link, in order: revoked by any seed is
- * done; unreachable is owed; refused by every predecessor seed means the
- * link is not a pre-rotation link of this account and is left alone. Pure.
- */
-export function linkRevokeOutcome(attempts: readonly RevokeAttempt[]): SpentOutcome {
-  if (attempts.includes("revoked")) return "done";
-  if (attempts.includes("unreachable")) return "unreachable";
-  return "skipped";
-}
-
-/**
  * Whether a link this device keeps a local row for was minted before the
  * keys were changed, and is therefore spent. A row with no time was kept
  * before the time was recorded, which is before any rotation this build
@@ -122,25 +98,6 @@ export function linkRevokeOutcome(attempts: readonly RevokeAttempt[]): SpentOutc
  */
 export function localLinkSpent(mintedAtMs: number | null, rotatedAtMs: number): boolean {
   return mintedAtMs === null || mintedAtMs < rotatedAtMs;
-}
-
-/** How a revoke of a link this device minted itself ended at the ledger. */
-export type LocalRevokeAttempt =
-  | "revoked"
-  /** The ledger has no such row for the signer: another device of the
-   *  account already revoked it, or it expired. */
-  | "gone"
-  | "unreachable";
-
-/**
- * Fold the attempts made for ONE link this device minted before the
- * rotation (it is known to be spent, so "the ledger has no row" is as good
- * as a revoke): owed only while the server could not be reached. A link
- * with no ledger row (no attempts) is done. Pure.
- */
-export function localLinkRevokeOutcome(attempts: readonly LocalRevokeAttempt[]): SpentOutcome {
-  if (attempts.includes("revoked")) return "done";
-  return attempts.includes("unreachable") ? "unreachable" : "done";
 }
 
 // ---------------------------------------------------------------------------

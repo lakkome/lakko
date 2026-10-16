@@ -31,6 +31,7 @@ import {
   hydrateChannelsState,
   markChannelsHydrationUnavailable,
 } from "../state/channels-state";
+import { replayPublisherCommits } from "./copublisher";
 
 export const ChannelsHydration: Component = () => {
   const auth = useAuth();
@@ -92,6 +93,10 @@ export const ChannelsHydration: Component = () => {
             }
           },
         });
+        // G-50 — resume the PublisherGroup commits whose steps had not all
+        // landed before the reload, against the provider just restored.
+        if (mine !== generation) return;
+        await replayPublisherCommits(identity);
       })();
     });
   });

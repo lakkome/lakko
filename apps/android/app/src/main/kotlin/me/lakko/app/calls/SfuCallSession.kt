@@ -14,14 +14,12 @@ import org.webrtc.PeerConnection
 import org.webrtc.RtpReceiver
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
-import uniffi.lakko_ffi_uniffi.FfiIncomingEnvelopeKind
 import uniffi.lakko_ffi_uniffi.SfuErrorCode
 import uniffi.lakko_ffi_uniffi.SfuPeerSnapshot
 import uniffi.lakko_ffi_uniffi.SfuVideoGiven
 import uniffi.lakko_ffi_uniffi.SfuVideoWant
 import uniffi.lakko_ffi_uniffi.TileVideoQuality
 import uniffi.lakko_ffi_uniffi.composeMediaState
-import uniffi.lakko_ffi_uniffi.dispatchIncomingEnvelope
 import uniffi.lakko_ffi_uniffi.sfuDecodePayload
 
 /**
@@ -142,14 +140,27 @@ class SfuCallSession(
          * (invariant #4). Defaults to `false` (publish immediately).
          */
         val deferPublish: Boolean = false,
+        /**
+         * ADR-0078 section 2: composes this device's signed peer announcement
+         * and verifies everyone else's against the call's MLS roster. The
+         * session seals it under the call seed's relay key and broadcasts it
+         * (after the Welcome, after every rekey, when someone joins, and every
+         * [PEER_ANNOUNCE_INTERVAL_MS]); a verified one fires
+         * [Callbacks.onPeerIdentified]. `null`: nobody is named (tests).
+         */
+        val peerAnnouncer: CallPeerAnnouncer? = null,
     )
 
     /** Lifecycle + roster callbacks. */
     data class Callbacks(
         val onStateChange: (State) -> Unit = {},
         val onWelcome: (selfPeerId: String, roster: List<SfuPeerSnapshot>) -> Unit = { _, _ -> },
-        val onPeerJoined: (peerId: String, accountPseudonym: String, peerTag: String) -> Unit =
-            { _, _, _ -> },
+        /** A participant joined. The SFU says nothing about who it is;
+         *  [onPeerIdentified] does, once its announcement verifies. */
+        val onPeerJoined: (peerId: String) -> Unit = {},
+        /** A peer's sealed announcement verified against the call's roster
+         *  (ADR-0078 section 2). Fired again on every re-announcement. */
+        val onPeerIdentified: (peerId: String, identity: VerifiedPeerIdentity) -> Unit = { _, _ -> },
         val onPeerLeft: (peerId: String) -> Unit = {},
         val onRemoteVideoTrack: (track: VideoTrack?, streamId: String?) -> Unit = { _, _ -> },
         /** The LOCAL camera video track became available (`config.video`
@@ -229,6 +240,13 @@ class SfuCallSession(
      */
     @Volatile
     private var activeSeed: ByteArray? = config.seed
+
+    /** The relay keys of the current and previous call epoch (ADR-0078
+     *  section 2). Used on [scope] only. */
+    private val relay = CallRelay().also { r -> config.seed?.let(r::setSeed) }
+
+    /** The periodic peer re-announcement. */
+    private var announceJob: Job? = null
 
     /**
      * This client's SFrame KID (MLS leaf). From [Config.localLeaf], or set by
@@ -631,6 +649,12 @@ class SfuCallSession(
                 onKeepaliveTick()
             }
         }
+        announceJob = scope.launch {
+            while (isActive) {
+                delay(PEER_ANNOUNCE_INTERVAL_MS)
+                announceSelf()
+            }
+        }
 
         // ADR-0032 deferred publish — a link joiner stays signaling-only
         // until it holds a Welcome + a derived seed, then calls [publish].
@@ -696,7 +720,11 @@ class SfuCallSession(
         // A call that is over publishes nothing: the Welcome that brought the
         // seed may be handled after the person pressed End.
         if (isOver()) return
-        if (seed != null) activeSeed = seed
+        if (seed != null) {
+            activeSeed = seed
+            relay.setSeed(seed)
+            announceSelf()
+        }
         if (localLeaf != null) publishLeaf = localLeaf
         if (activeSeed == null) {
             throw SfuCallException(
@@ -752,6 +780,9 @@ class SfuCallSession(
      */
     fun rekey(newSeed: ByteArray) {
         if (activeSeed?.contentEquals(newSeed) == true) return
+        // The relay key follows the seed; announce under the new one.
+        relay.setSeed(newSeed)
+        announceSelf()
         val connection = pc ?: return
         // Advance the active epoch BEFORE fanning out so a receiver that
         // arrives concurrently arms at the new epoch.
@@ -781,6 +812,9 @@ class SfuCallSession(
         callbacks.onLocalVideoTrack(null)
         keepaliveJob?.cancel()
         keepaliveJob = null
+        announceJob?.cancel()
+        announceJob = null
+        relay.dispose()
         stopMediaCounters()
         // What was asked of the SFU and what it said go with the call.
         wantsSender.reset()
@@ -1022,7 +1056,23 @@ class SfuCallSession(
      * signaling is not open.
      */
     private fun broadcastMediaState() {
-        signaling?.sendSignalRelayToCall(composeMediaState(localCameraOn))
+        // Sealed under the call's relay key (ADR-0078 section 2): the SFU
+        // relays ciphertext only. No key yet (a link joiner before its
+        // Welcome) means nothing is said.
+        val sealed = relay.seal(composeMediaState(localCameraOn)) ?: return
+        signaling?.sendSignalRelayToCall(sealed)
+    }
+
+    /** Broadcast this device's sealed peer announcement (ADR-0078 section
+     *  2). Best-effort: without an announcer, a self peer id, a relay key or
+     *  an open socket nothing is sent. */
+    private fun announceSelf() {
+        val sig = signaling ?: return
+        val announcer = config.peerAnnouncer ?: return
+        val self = selfPeerId ?: return
+        val announcement = announcer.compose(self) ?: return
+        val sealed = relay.seal(announcement) ?: return
+        sig.sendSignalRelayToCall(sealed)
     }
 
     /**
@@ -1399,7 +1449,7 @@ class SfuCallSession(
         object : SfuSignalingCallbacks {
             override fun onWelcome(
                 selfPeerId: String,
-                callId: String,
+                room: String,
                 roster: List<SfuPeerSnapshot>,
             ) {
                 scope.launch {
@@ -1407,6 +1457,8 @@ class SfuCallSession(
                     this@SfuCallSession.selfPeerId = selfPeerId
                     wantsBook.setPeers(roster.map { it.peerId }.filter { it != selfPeerId })
                     onRosterChanged(joined = false)
+                    // Say who this device is (ADR-0078 section 2).
+                    announceSelf()
                 }
                 callbacks.onWelcome(selfPeerId, roster)
             }
@@ -1435,14 +1487,16 @@ class SfuCallSession(
                 scope.launch { lastInboundMs = nowMs() }
             }
 
-            override fun onPeerJoined(peerId: String, accountPseudonym: String, peerTag: String) {
+            override fun onPeerJoined(peerId: String) {
                 scope.launch {
                     if (peerId != selfPeerId) {
                         wantsBook.addPeer(peerId)
                         onRosterChanged(joined = true)
                     }
+                    // Say who this device is to the newcomer too.
+                    announceSelf()
                 }
-                callbacks.onPeerJoined(peerId, accountPseudonym, peerTag)
+                callbacks.onPeerJoined(peerId)
                 // camera-off-cleanup — re-announce our current camera state
                 // directly to the newcomer (deterministic initial-sync): its
                 // freshly-created tile for us defaults camera-off, and its
@@ -1450,7 +1504,11 @@ class SfuCallSession(
                 // even if we are muted, so this asserts the true state.
                 // Targeted to the joiner, not the whole call, to avoid
                 // re-notifying existing peers.
-                signaling?.sendSignalRelayToPeer(peerId, composeMediaState(localCameraOn))
+                scope.launch {
+                    relay.seal(composeMediaState(localCameraOn))?.let { sealed ->
+                        signaling?.sendSignalRelayToPeer(peerId, sealed)
+                    }
+                }
             }
 
             override fun onPeerLeft(peerId: String) {
@@ -1480,28 +1538,22 @@ class SfuCallSession(
                     // Handled after the call ended: a relay of a call that is
                     // over (a late Welcome above all) starts nothing.
                     if (isOver()) return@launch
-                    // camera-off-cleanup — classify the opaque relay payload.
-                    // A camera on/off media-state signal fires the typed
-                    // [Callbacks.onRemoteMediaState] (so the receiver flips this
-                    // peer's roster camOn even though a mute fires no track
-                    // event); every other payload falls through to the opaque
-                    // [Callbacks.onSignalRelay] orchestrator (the multi-joiner
-                    // KeyPackage / Welcome / commit handshake). A classify
-                    // failure is non-fatal — treat it as an opaque relay.
-                    val cameraOn = try {
-                        val env = dispatchIncomingEnvelope(bytes)
-                        if (env.kind == FfiIncomingEnvelopeKind.MEDIA_STATE) {
-                            env.cameraOn
-                        } else {
-                            null
+                    // ADR-0078 section 2: a payload sealed under the call's
+                    // relay key is consumed here (the camera media state that
+                    // a mute fires no track event for, a peer announcement);
+                    // an unsealed media state is not accepted. Everything
+                    // else falls through to the opaque [Callbacks.onSignalRelay]
+                    // orchestrator (the multi-joiner KeyPackage / Welcome /
+                    // commit handshake).
+                    when (val opened = relay.open(bytes)) {
+                        is CallRelay.Opened.MediaState -> callbacks.onRemoteMediaState(from, opened.cameraOn)
+                        is CallRelay.Opened.Announcement -> {
+                            config.peerAnnouncer?.verify?.invoke(from, opened.bytes)?.let { identity ->
+                                callbacks.onPeerIdentified(from, identity)
+                            }
                         }
-                    } catch (e: Throwable) {
-                        null
-                    }
-                    if (cameraOn != null) {
-                        callbacks.onRemoteMediaState(from, cameraOn)
-                    } else {
-                        callbacks.onSignalRelay(from, bytes)
+                        CallRelay.Opened.Unknown -> Unit
+                        null -> callbacks.onSignalRelay(from, bytes)
                     }
                 }
             }
@@ -1702,3 +1754,9 @@ class SfuCallSession(
         const val MEDIA_LOG_TAG = "SfuCallSession"
     }
 }
+
+/** How often a device re-announces who it is to the call (ADR-0078 section
+ *  2). Chosen, not measured: an announcement sealed under a relay key a peer
+ *  did not hold yet is lost to that peer, and the next one names the tile.
+ *  Same value as web and iOS. */
+public const val PEER_ANNOUNCE_INTERVAL_MS: Long = 15_000L

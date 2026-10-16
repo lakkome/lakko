@@ -89,6 +89,43 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features --no-fail-fast
 
+  log-hygiene:
+    # ADR-0078 section 11 (decision 5): the source lint over every service's
+    # tracing macros, and the capture tests that drive discovery's and the
+    # DS's routes against a real database and fail on any identifier-shaped
+    # value in the log output.
+    name: log hygiene (ADR-0078 section 11)
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_USER: lakko
+          MARIADB_PASSWORD: devpass
+          MARIADB_DATABASE: lakko_discovery_ci
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Source lint
+        run: cargo test -p lakko-log-hygiene --all-features
+      - name: Create the DS test database
+        run: >-
+          mysql -h127.0.0.1 -uroot -proot -e
+          "CREATE DATABASE lakko_ds_ci; GRANT ALL ON lakko_ds_ci.* TO 'lakko'@'%';"
+      - name: Capture tests
+        env:
+          LAKKO_DISCOVERY_TEST_DATABASE_URL: mysql://lakko:devpass@127.0.0.1:3306/lakko_discovery_ci
+          LAKKO_DS_TEST_DATABASE_URL: mysql://lakko:devpass@127.0.0.1:3306/lakko_ds_ci
+        run: |
+          cargo test -p lakko-svc-discovery log_capture
+          cargo test -p lakko-svc-ds log_capture
+
   doc:
     name: cargo doc
     runs-on: ubuntu-latest

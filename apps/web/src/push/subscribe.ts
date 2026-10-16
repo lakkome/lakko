@@ -16,8 +16,11 @@
  *      Returns a `PushSubscription` carrying the endpoint URL plus
  *      a p256dh + auth keypair the server uses to encrypt wake
  *      payloads to us.
- *   3. **`PushClient.register`** — POST the subscription bytes to
- *      `lakko-svc-push-gw` so it knows where to fan out wakes.
+ *   3. **The sealed subscriptions** (ADR-0078 section 3) — the
+ *      subscription bytes are this browser's push token. push-gw holds no
+ *      device pseudonym and no token in the clear: the token is kept on the
+ *      device (`device-token.ts`) and sealed into one push-gw row per group
+ *      (`group-routing.ts` `resubscribeAllForAccount`).
  *
  * ## VAPID key shape
  *
@@ -45,12 +48,11 @@
  * configure VAPID right away.
  */
 
-import { anonTokenQuotaExhausted } from "../tokens/anon-token-pool";
-import { PushClient } from "./client";
-import { clearDevicePushId, getOrCreateDevicePushId } from "./device-id";
+import { clearDevicePushToken, setDevicePushToken } from "./device-token";
+import { resubscribeAllForAccount, unsubscribeAllForAccount } from "./group-routing";
 import { getWakeBinding } from "./group-routing-store";
 import {
-  pseudonymMustRotate,
+  previousBoundAccount,
   recordWakeBinding,
   releaseWakeBinding,
 } from "./wake-binding";
@@ -65,10 +67,6 @@ const VAPID_PUBLIC_KEY_B64URL =
 
 /** Result of `subscribeToPush`. */
 export interface SubscribeResult {
-  /** The 32-byte device pseudonym we registered under. Same value
-   *  you get from `getOrCreateDevicePushId()` — surfaced here so
-   *  the caller can stash it without re-reading localStorage. */
-  devicePseudonym: Uint8Array;
   /** The browser's `PushSubscription.endpoint` — useful for
    *  diagnostics + a "you'll be notified at <provider>" UI hint. */
   endpoint: string;
@@ -91,11 +89,12 @@ export interface SubscribeResult {
  * The caller treats `null` as "push not available, fall back to
  * foreground polling" — no error is thrown for any of the above.
  *
- * ADR-0042, "A wake is shown only for the signed-in account": once
- * `push-gw` accepts the pseudonym, the `(pseudonym, account)` wake binding
- * is recorded for the service worker; and when the binding names another
- * account, a fresh pseudonym is minted first so that account's wakes fail
- * the worker's gate.
+ * ADR-0042, "A wake is shown only for the signed-in account": the
+ * account is recorded as the wake binding for the service worker; when the
+ * binding names another account, that account's push-gw subscriptions are
+ * removed first (ADR-0078: their ids are in its route rows on this browser).
+ * Then every subscription of the signed-in account is sent with the current
+ * token.
  *
  * The call is fire-and-forget from the sign-in paths and one of its awaits is
  * the permission prompt, which has no time limit: the person can leave it
@@ -179,11 +178,9 @@ export async function subscribeToPush(
   } catch {
     existing = null;
   }
-  // Before the pseudonym is touched: rotating it for an account that has
-  // left would cut the wakes of the account that is signed in now.
   if (!isCurrent()) return null;
-  if (pseudonymMustRotate(existing, accountIdB64)) clearDevicePushId();
-  const devicePseudonym = getOrCreateDevicePushId();
+  const previous = previousBoundAccount(existing, accountIdB64);
+  if (previous !== null) await unsubscribeAllForAccount(previous);
 
   // Serialize the subscription into the JSON shape
   // `services/push-gw/src/providers/webpush.rs::Subscription`
@@ -192,55 +189,32 @@ export async function subscribeToPush(
   // emits when its keys are read via `getKey()`).
   const subscriptionJson = subscriptionToJson(subscription);
   const tokenBytes = new TextEncoder().encode(subscriptionJson);
-
-  const pushClient = new PushClient();
-  try {
-    await pushClient.register(devicePseudonym, "web_push", tokenBytes);
-  } catch (err) {
-    // ADR-0054 S3: registration spends an anonymous token. A day's allowance
-    // used up is silent: the next launch registers again, and the app keeps
-    // working by polling meanwhile (docs/ux/anti-abuse.md section 3).
-    if (anonTokenQuotaExhausted(err) !== null) {
-      // eslint-disable-next-line no-console
-      console.info("push token register deferred to the next launch (token allowance used)");
-      return null;
-    }
-    // eslint-disable-next-line no-console
-    console.warn("push token register failed", err);
-    return null;
-  }
-  // The register request spanned a sign-out. push-gw holds a row for a
-  // pseudonym nothing is bound to (the worker's gate drops its wakes, and the
-  // sign-out's own unregister or the next sign-in's rotation replaces it);
-  // what must not happen is this account becoming the worker's signed-in one.
   if (!isCurrent()) return null;
-  await recordWakeBinding(accountIdB64, devicePseudonym);
+  setDevicePushToken(tokenBytes);
+  await recordWakeBinding(accountIdB64);
+  // ADR-0078: every subscription carries the token sealed, so it reaches
+  // push-gw only by sending each subscription (same ids, rows replaced). A
+  // spent token allowance is silent: the next launch sends them again, and
+  // the app keeps working by polling meanwhile (docs/ux/anti-abuse.md 3).
+  await resubscribeAllForAccount(accountIdB64);
+  if (!isCurrent()) return null;
 
-  return {
-    devicePseudonym,
-    endpoint: subscription.endpoint,
-  };
+  return { endpoint: subscription.endpoint };
 }
 
 /**
- * Drop the push subscription locally + tell `push-gw` to forget
- * the token. Called on logout + forget-device. Idempotent + best-
- * effort: failures are logged and swallowed (the user can't
- * really act on "push gateway is down during logout").
+ * Drop the push subscription locally + remove `accountIdB64`'s sealed
+ * subscriptions at push-gw (ADR-0078: one row per group, named by an id kept
+ * in the account's route rows — so this must run BEFORE those rows are
+ * wiped). Called on logout + forget-device. Idempotent + best-effort:
+ * failures are logged and swallowed (the user can't really act on "push
+ * gateway is down during logout").
  */
-export async function unsubscribeFromPush(): Promise<void> {
+export async function unsubscribeFromPush(accountIdB64: string | null): Promise<void> {
   // The callers release the wake binding before anything else; this repeat
   // is idempotent and keeps the invariant for any other caller.
   await releaseWakeBinding();
-  const devicePseudonym = getOrCreateDevicePushId();
-  // Best-effort server tell.
-  try {
-    const pushClient = new PushClient();
-    await pushClient.unregister(devicePseudonym, "web_push");
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn("push token unregister failed", err);
-  }
+  if (accountIdB64 !== null) await unsubscribeAllForAccount(accountIdB64);
   // Browser-side cancel.
   try {
     if (
@@ -259,7 +233,7 @@ export async function unsubscribeFromPush(): Promise<void> {
     // eslint-disable-next-line no-console
     console.warn("push subscribe cancel failed", err);
   }
-  clearDevicePushId();
+  clearDevicePushToken();
 }
 
 /** Convert a base64url-no-pad VAPID public key into the

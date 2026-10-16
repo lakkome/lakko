@@ -24,7 +24,6 @@
 import { announceDeviceGroupChangedHere } from "./sync/growth";
 import { resendServiceEnvelopes } from "../reach/service-envelope-outbox";
 import { loadWasm, type Wasm } from "../wasm";
-import { KeyedError } from "../l10n/keyed-error";
 import type {
   DeviceGroup as WasmDeviceGroup,
   Identity as WasmIdentity,
@@ -113,15 +112,6 @@ export interface JoinRecoveryOutcome {
    *  on a path that knew no id. */
   readonly accountIdBytes: Uint8Array | null;
 }
-
-/** The joined DeviceGroup belongs to another account than the grant
- *  (ADR-0056): refused before anything is stored. Thrown as a
- *  {@link KeyedError} so the screen renders the key in the current language
- *  (ADR-0061 section 6); this constant is the English rendering, kept for
- *  logs and tests. */
-export const JOINED_WRONG_ACCOUNT_KEY = "device_link.error.wrong_account";
-export const JOINED_WRONG_ACCOUNT =
-  "The other device answered for a different account. Nothing was changed on this device.";
 
 /** The exporter half of a joined group (`Group` or `DeviceGroup`). */
 interface PairingExporter {
@@ -576,12 +566,17 @@ export interface AnonymousJoinSession {
  * account id, and the fresh device may not know it at all. So `accept`
  * joins the MLS group first (`Group.joinFromWelcome`, which needs no
  * account), opens the recovery row under the group's exporter, redeems the
- * grant, and learns the account id from the redeem response. Only then is
- * the Welcome bound to the account: the joined group's id must equal
- * `deviceGroupIdFor(account id)` (the check `DeviceGroup.joinFromWelcome`
- * performed up front before), else the whole outcome is refused and nothing
- * is persisted. `known` (a path that already holds a session) keeps the
- * redeem honest: an answer for another account drops the redeemed session.
+ * grant, and learns the account id from the redeem response. The group is
+ * bound to the account by the recovery row itself: only a member of the
+ * group the Welcome joined can seal a row this device opens under that
+ * group's exporter, so the group and the phrase the row carries come from
+ * one source. Since ADR-0078 section 6 the DeviceGroup id is derived from
+ * the account seed, not the account id, so there is no id to compare the
+ * redeemed account against; a row whose phrase is not the redeemed
+ * account's is refused by the restore's check against the published
+ * identity before anything is persisted. `known` (a path that already holds
+ * a session) keeps the redeem honest: an answer for another account drops
+ * the redeemed session.
  */
 export async function prepareAnonymousJoinFlow(args: {
   /** 32-byte login handle of the typed username (ADR-0056). */
@@ -649,11 +644,7 @@ export async function prepareAnonymousJoinFlow(args: {
           return { recovery };
         }
         const accountIdBytes = recovery.accountIdBytes;
-        if (!bytesEqual(wasm.deviceGroupIdFor(accountIdBytes), joined.groupId)) {
-          recovery.phraseEntropy.fill(0);
-          throw new KeyedError(JOINED_WRONG_ACCOUNT_KEY);
-        }
-        const loaded = wasm.loadDeviceGroup(liveIdentity, accountIdBytes);
+        const loaded = wasm.loadDeviceGroupById(liveIdentity, accountIdBytes, joined.groupId);
         if (loaded === undefined) {
           recovery.phraseEntropy.fill(0);
           throw new Error("internal: the joined device group did not load");

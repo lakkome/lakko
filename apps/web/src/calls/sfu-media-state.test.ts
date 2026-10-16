@@ -10,11 +10,16 @@
  * on/off signal over the opaque SFU `signal-relay` payload; the receiver flips
  * that participant's `camOn` deterministically.
  *
- * These tests pin, headlessly (node env, no WebRTC / DOM):
- *   * the RECEIVE + classify path in {@link SfuCallSession}: a `MediaState`
- *     relay is consumed → `onRemoteMediaState` fires; a non-media-state payload
- *     falls through to `onSignalRelay` unchanged (the ADR-0032 orchestrator);
- *     a matched-but-malformed media-state body also falls through;
+ * Since ADR-0078 section 2 the signal is sealed under the call seed's relay
+ * key (the SFU relays ciphertext only). These tests pin, headlessly (node
+ * env, no WebRTC / DOM):
+ *   * the RECEIVE + classify path in {@link SfuCallSession}: a SEALED
+ *     `MediaState` relay is consumed → `onRemoteMediaState` fires; anything
+ *     the relay key does not open falls through to `onSignalRelay` unchanged
+ *     (the ADR-0032 orchestrator), an UNSEALED media state included - it is
+ *     never trusted;
+ *   * a sealed peer announcement is verified by the announcer and fires
+ *     `onPeerIdentified`;
  *   * the {@link createSfuCallUi} mapping: a `MediaState(off/on)` relay flips
  *     the matching store participant's `camOn`;
  *   * the SEND triggers: a camera toggle broadcasts, and a peer-join
@@ -129,6 +134,34 @@ vi.mock("../wasm", () => {
       },
       composeMediaState: (on: boolean): Uint8Array =>
         new TextEncoder().encode(on ? "compose:on" : "compose:off"),
+      // ADR-0078 section 2: a fake relay key. "Sealing" prefixes `sealed:`;
+      // opening accepts only that prefix, so an unsealed payload never opens.
+      CallRelayKey: {
+        fromCallSeed: (): unknown => ({
+          seal: (pt: Uint8Array): Uint8Array =>
+            new TextEncoder().encode(`sealed:${new TextDecoder().decode(pt)}`),
+          open: (sealed: Uint8Array): Uint8Array => {
+            const t = new TextDecoder().decode(sealed);
+            if (!t.startsWith("sealed:")) throw new Error("notOpened");
+            return new TextEncoder().encode(t.slice("sealed:".length));
+          },
+          free: (): void => {},
+        }),
+      },
+      classifyCallRelayPlaintext: (pt: Uint8Array) => {
+        const t = new TextDecoder().decode(pt);
+        const free = (): void => {};
+        if (t === "media:on" || t === "compose:on") {
+          return { kind: "media-state", cameraOn: true, announcement: new Uint8Array(), free };
+        }
+        if (t === "media:off" || t === "compose:off") {
+          return { kind: "media-state", cameraOn: false, announcement: new Uint8Array(), free };
+        }
+        if (t.startsWith("ann:")) {
+          return { kind: "peer-announcement", cameraOn: false, announcement: pt, free };
+        }
+        return { kind: "unknown", cameraOn: false, announcement: new Uint8Array(), free };
+      },
     }),
   };
 });
@@ -175,7 +208,7 @@ afterEach(() => {
 // ---- Receive + classify (session level) --------------------------------
 
 describe("SfuCallSession — relay classification", () => {
-  it("consumes a MediaState relay → onRemoteMediaState (not onSignalRelay)", async () => {
+  it("consumes a sealed MediaState relay → onRemoteMediaState (not onSignalRelay)", async () => {
     const media: Array<[string, boolean]> = [];
     const opaque: Array<[string, Uint8Array]> = [];
     const session = new SfuCallSession(baseConfig(), {
@@ -184,18 +217,55 @@ describe("SfuCallSession — relay classification", () => {
     });
     await session.connect();
 
-    relay("peerX", "media:off");
+    relay("peerX", "sealed:media:off");
     await flush();
     expect(media).toEqual([["peerX", false]]);
     expect(opaque).toHaveLength(0); // consumed, never double-dispatched
 
-    relay("peerX", "media:on");
+    relay("peerX", "sealed:media:on");
     await flush();
     expect(media).toEqual([
       ["peerX", false],
       ["peerX", true],
     ]);
     expect(opaque).toHaveLength(0);
+  });
+
+  it("never trusts an UNSEALED media state: it falls through, no camera flips", async () => {
+    const media: Array<[string, boolean]> = [];
+    const opaque: Array<[string, string]> = [];
+    const session = new SfuCallSession(baseConfig(), {
+      onRemoteMediaState: (peerId, on) => media.push([peerId, on]),
+      onSignalRelay: (from, payload) => opaque.push([from, decode(payload)]),
+    });
+    await session.connect();
+
+    relay("peerX", "media:off");
+    await flush();
+    expect(media).toHaveLength(0);
+    expect(opaque).toEqual([["peerX", "media:off"]]);
+  });
+
+  it("a sealed announcement that verifies names the peer; one that does not, nobody", async () => {
+    const identified: Array<[string, string]> = [];
+    const session = new SfuCallSession(
+      baseConfig({
+        peerAnnouncer: {
+          compose: () => new TextEncoder().encode("ann:self"),
+          verify: (from, ann) =>
+            decode(ann) === `ann:${from}`
+              ? { personKeyB64: `person-of-${from}`, memberKeyHex: `leaf-of-${from}` }
+              : null,
+        },
+      }),
+      { onPeerIdentified: (peerId, id) => identified.push([peerId, id.personKeyB64]) },
+    );
+    await session.connect();
+
+    relay("peerA", "sealed:ann:peerA");
+    relay("peerB", "sealed:ann:someone-else");
+    await flush();
+    expect(identified).toEqual([["peerA", "person-of-peerA"]]);
   });
 
   it("falls through a non-media-state payload to onSignalRelay", async () => {
@@ -230,7 +300,7 @@ describe("SfuCallSession — relay classification", () => {
     expect(opaque).toEqual([["peerP", "profile"]]);
   });
 
-  it("falls through a matched-but-malformed media-state body to onSignalRelay", async () => {
+  it("drops a sealed payload it cannot classify, without passing it on", async () => {
     const media: Array<[string, boolean]> = [];
     const opaque: Array<[string, string]> = [];
     const session = new SfuCallSession(baseConfig(), {
@@ -239,10 +309,10 @@ describe("SfuCallSession — relay classification", () => {
     });
     await session.connect();
 
-    relay("peerZ", "media:malformed");
+    relay("peerZ", "sealed:media:malformed");
     await flush();
     expect(media).toHaveLength(0);
-    expect(opaque).toEqual([["peerZ", "media:malformed"]]);
+    expect(opaque).toHaveLength(0);
   });
 });
 
@@ -263,17 +333,17 @@ describe("createSfuCallUi — media-state flips the roster tile", () => {
     hooks.captured?.onWelcome?.({
       kind: "welcome",
       peer_id: "self",
-      call_id: "c",
-      roster: [{ peer_id: "peerX", account_pseudonym: "abcdef0123" }],
+      room: "r",
+      roster: [{ peer_id: "peerX" }],
       server_ts: 0,
     });
     expect(camOn("peerX")).toBe(false);
 
-    relay("peerX", "media:on");
+    relay("peerX", "sealed:media:on");
     await flush();
     expect(camOn("peerX")).toBe(true);
 
-    relay("peerX", "media:off");
+    relay("peerX", "sealed:media:off");
     await flush();
     expect(camOn("peerX")).toBe(false);
 
@@ -286,12 +356,12 @@ describe("createSfuCallUi — media-state flips the roster tile", () => {
     hooks.captured?.onWelcome?.({
       kind: "welcome",
       peer_id: "self",
-      call_id: "c",
-      roster: [{ peer_id: "peerX", account_pseudonym: "abcdef0123" }],
+      room: "r",
+      roster: [{ peer_id: "peerX" }],
       server_ts: 0,
     });
 
-    relay("ghost", "media:on");
+    relay("ghost", "sealed:media:on");
     await flush();
     // peerX untouched; no participant materialised for "ghost".
     expect(camOn("peerX")).toBe(false);
@@ -311,11 +381,11 @@ describe("SfuCallSession — send triggers", () => {
 
     session.setCameraEnabled(false);
     await flush();
-    expect(hooks.broadcasts.map(decode)).toEqual(["compose:off"]);
+    expect(hooks.broadcasts.map(decode)).toEqual(["sealed:compose:off"]);
 
     session.setCameraEnabled(true);
     await flush();
-    expect(hooks.broadcasts.map(decode)).toEqual(["compose:off", "compose:on"]);
+    expect(hooks.broadcasts.map(decode)).toEqual(["sealed:compose:off", "sealed:compose:on"]);
   });
 
   it("does not re-broadcast when the camera state is unchanged", async () => {
@@ -338,10 +408,9 @@ describe("SfuCallSession — send triggers", () => {
     hooks.captured?.onPeerJoined?.({
       kind: "peer-joined",
       peer_id: "newcomer",
-      account_pseudonym: "abcdef0123",
     });
     await flush();
     // Local camera is on → re-announce "on" so the newcomer is shown on.
-    expect(hooks.broadcasts.map(decode)).toEqual(["compose:on"]);
+    expect(hooks.broadcasts.map(decode)).toEqual(["sealed:compose:on"]);
   });
 });

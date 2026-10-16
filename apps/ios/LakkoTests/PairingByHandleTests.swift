@@ -133,7 +133,9 @@ final class JoinByNameTests: XCTestCase {
     func testTheDeferredCheckAdoptsTheAccountsDeviceGroupAndRefusesAnyOther() throws {
         let accountId = randomBytes(16)
         let founderIdentity = try Identity.fromSeed(seed: randomBytes(32))
-        let founder = try DeviceGroup.createFounder(identity: founderIdentity, accountId: accountId)
+        let founder = try DeviceGroup.createFounder(
+            identity: founderIdentity, accountId: accountId,
+            accountIdentity: try Identity.fromSeed(seed: randomBytes(32)))
 
         let joiner = try Identity.fromSeed(seed: randomBytes(32))
         let addition = try founder.addDeviceFromWire(
@@ -156,12 +158,17 @@ final class JoinByNameTests: XCTestCase {
                 identity: founderIdentity, label: RecoveryPayload.recoveryExporterLabel,
                 context: context, length: 32))
 
+        // ADR-0078 section 6: the group is adopted under its own id (the
+        // DeviceGroup id is derived from the account seed this device does
+        // not hold yet); an id it did not join is refused.
         XCTAssertThrowsError(
-            try PairingOrchestrator.adoptJoinedDeviceGroup(identity: joiner, accountIdBytes: randomBytes(16))
+            try PairingOrchestrator.adoptJoinedDeviceGroup(
+                identity: joiner, accountIdBytes: accountId, groupId: randomBytes(32))
         ) { error in
             XCTAssertEqual(error as? PairingOrchestrator.JoinByNameError, .wrongAccount)
         }
-        let adopted = try PairingOrchestrator.adoptJoinedDeviceGroup(identity: joiner, accountIdBytes: accountId)
+        let adopted = try PairingOrchestrator.adoptJoinedDeviceGroup(
+            identity: joiner, accountIdBytes: accountId, groupId: try plain.groupId())
         XCTAssertEqual(try adopted.groupId(), try founder.groupId())
     }
 }
@@ -522,13 +529,16 @@ final class PendingJoinByNameTests: XCTestCase {
             DeviceGroupSnapshotStore().deleteSnapshot(accountIdB64: b64)
         }
         let founderIdentity = try Identity.fromSeed(seed: randomBytes(32))
-        let founder = try DeviceGroup.createFounder(identity: founderIdentity, accountId: accountId)
+        let founder = try DeviceGroup.createFounder(
+            identity: founderIdentity, accountId: accountId,
+            accountIdentity: try Identity.fromSeed(seed: randomBytes(32)))
         let deviceSeed = randomBytes(32)
         let joiner = try Identity.fromSeed(seed: deviceSeed)
         let addition = try founder.addDeviceFromWire(
             identity: founderIdentity, keyPackage: try joiner.createKeyPackage())
-        _ = try PairingOrchestrator.joinWelcomeByName(welcomeBytes: addition.welcome, identity: joiner)
-        let joined = try PairingOrchestrator.adoptJoinedDeviceGroup(identity: joiner, accountIdBytes: accountId)
+        let plain = try PairingOrchestrator.joinWelcomeByName(welcomeBytes: addition.welcome, identity: joiner)
+        let joined = try PairingOrchestrator.adoptJoinedDeviceGroup(
+            identity: joiner, accountIdBytes: accountId, groupId: try plain.groupId())
 
         let pending = PairingOrchestrator.PendingJoinByName(
             identity: joiner, joined: joined, accountIdBytes: accountId, deviceSeed: deviceSeed)

@@ -26,8 +26,9 @@
  * Left on purpose, and why:
  *
  * - `lakko.transparency.last-seen-root.v1`: the device's KT-log root floor.
- * - `lakko.push.device.v1`: the device push pseudonym; `unsubscribeFromPush`
- *   in `forgetDevice` handles it.
+ * - `lakko.push.token.v1`: the browser's Web Push token (device-wide, ADR-0078);
+ *   `unsubscribeFromPush` in `forgetDevice` handles it, after it removed the
+ *   account's sealed push subscriptions.
  * - `lakko-push-routing` / `wake_binding`: device-wide, released by
  *   `releaseWakeBinding` before this runs.
  * - theme, language and media preferences, the GIF privacy note: device

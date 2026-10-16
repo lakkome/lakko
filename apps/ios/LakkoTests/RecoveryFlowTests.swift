@@ -131,7 +131,7 @@ private final class ScriptedKeyReset: KeyResetAttestationVerifying {
     var keyPackageError: Error?
     var deviceGroupError: Error?
     private(set) var keyPackageCalls: [IdentitySecrets] = []
-    private(set) var deviceGroupCalls: [(accountIdB64: String, attestation: Data)] = []
+    private(set) var deviceGroupCalls: [(accountIdB64: String, accountSeed: Data)] = []
 
     private(set) var events: [String] = []
 
@@ -165,9 +165,9 @@ private final class ScriptedKeyReset: KeyResetAttestationVerifying {
                 self.keyPackageCalls.append(secrets)
                 if let error = self.keyPackageError { throw error }
             },
-            refoundDeviceGroup: { [unowned self] _, accountIdB64, attestation, _ in
+            refoundDeviceGroup: { [unowned self] _, accountIdB64, accountSeed in
                 self.events.append("devicegroup")
-                self.deviceGroupCalls.append((accountIdB64, attestation))
+                self.deviceGroupCalls.append((accountIdB64, accountSeed))
                 if let error = self.deviceGroupError { throw error }
             }
         )
@@ -630,7 +630,6 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(h.reset.verifyCalls[0].pubkey, newKey)
         XCTAssertNil(h.reset.verifyCalls[0].maxAgeMs, "just minted: no freshness bound")
         XCTAssertEqual(h.reset.keyPackageCalls.first?.session.sessionToken, "tok-gen2")
-        XCTAssertEqual(h.reset.deviceGroupCalls.first?.attestation, h.reset.minted[0])
         XCTAssertEqual(h.reset.deviceGroupCalls.first?.accountIdB64, account.b64)
 
         XCTAssertFalse(h.repository.freshPublishPending)
@@ -760,7 +759,7 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(h.reset.events, ["verify", "keypackage", "devicegroup"], "the directory step was done")
         XCTAssertEqual(h.reset.verifyCalls.first?.attestation, stored)
         XCTAssertEqual(h.reset.verifyCalls.first?.maxAgeMs, KeyResetPublish.maxAttestationAgeMs)
-        XCTAssertEqual(h.reset.deviceGroupCalls.first?.attestation, stored)
+        XCTAssertEqual(h.reset.deviceGroupCalls.count, 1)
         XCTAssertEqual(h.reset.resetCalls.count, 0, "never resets")
         XCTAssertFalse(markers.isPublishOwed(accountIdB64: account.b64))
 

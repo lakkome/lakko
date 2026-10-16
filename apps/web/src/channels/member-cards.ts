@@ -140,7 +140,9 @@ async function uploadOwnCard(input: OwnCardInput): Promise<OwnCardOutcome> {
       reachAvailable: session !== null,
     });
     if (content.includeGrant && session !== null) {
-      await session.channelEpoch(idBytes, input.epoch);
+      // ADR-0078 section 9: the account's one `channel` key, the same in
+      // every channel; the sync registers it while any channel is allowed.
+      session.requestSync();
       grant = session.grant("channel", idBytes);
     }
     const pkHex = bytesToHex(input.keys.public);

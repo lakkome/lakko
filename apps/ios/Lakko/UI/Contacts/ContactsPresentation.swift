@@ -150,9 +150,11 @@ struct InviteLinkRow: Equatable, Identifiable {
     let createdAt: Date?
     /// UNIX millis; 0 = never expires.
     let expiryMs: UInt64
-    /// "1 use left", "3 uses left", "Used up", or `nil` for an unlimited
-    /// link, in the interface language of the moment the rows were built.
-    let usesLeft: String?
+    /// The limit the link was minted with ("single-use", "up to 5 uses",
+    /// "unlimited"), in the interface language of the moment the rows were
+    /// built. ADR-0078 section 10: the list is this device's own records, so
+    /// how many uses are left is not known here.
+    let limit: String
     let origin: Origin
 
     var id: String { slug }
@@ -162,9 +164,10 @@ struct InviteLinkRow: Equatable, Identifiable {
 
 enum InviteLinkRows {
 
-    /// The server list first (it is the truth for uses and revocation), then
-    /// session links the server list does not carry, newest first. Expired
-    /// links are dropped: the sheet manages links that still work.
+    /// The links this device keeps a record of (ADR-0078 section 10: there is
+    /// no server list), then session links that list does not carry, newest
+    /// first. Expired links are dropped: the sheet manages links that still
+    /// work.
     static func merge(
         active: [ActiveInvite],
         sessionGenerated: [GeneratedInvite],
@@ -181,7 +184,7 @@ enum InviteLinkRows {
                 label: invite.label,
                 createdAt: parseCreatedAt(invite.createdAt),
                 expiryMs: invite.expiryMs,
-                usesLeft: usesLeftCopy(maxUses: invite.maxUses, usedCount: invite.usedCount),
+                limit: limitCopy(maxUses: invite.maxUses),
                 origin: .server)
         }
         let known = Set(rows.map(\.slug))
@@ -194,8 +197,7 @@ enum InviteLinkRows {
                 label: invite.label,
                 createdAt: Date(timeIntervalSince1970: TimeInterval(invite.createdAtMs) / 1000),
                 expiryMs: expiry,
-                usesLeft: usesLeftCopy(
-                    maxUses: UInt32(clamping: max(0, invite.maxUses)), usedCount: 0),
+                limit: limitCopy(maxUses: UInt32(clamping: max(0, invite.maxUses))),
                 origin: .session(blobId: invite.blobId)))
         }
         return rows.sorted { lhs, rhs in
@@ -222,16 +224,13 @@ enum InviteLinkRows {
         return InviteLinkSecret.link(base: ContactsRepository.inviteUrlPrefix + slug, secret: secret)
     }
 
-    /// Sentinels as `lakko-contacts` defines them: 0 = single use,
-    /// `UInt32.max` = unlimited, else N uses. `nil` for unlimited. Never
-    /// below zero; a link with nothing left reads "Used up" (the web
-    /// `describeInviteUses`, ADR-0061 batch 4).
-    static func usesLeftCopy(maxUses: UInt32, usedCount: UInt32) -> String? {
-        if maxUses == UInt32.max { return nil }
-        let total = maxUses == 0 ? 1 : Int(maxUses)
-        let left = max(0, total - Int(usedCount))
-        if left == 0 { return Localization.text("invite.links.used_up") }
-        return Localization.text("invite.links.uses_left", counts: ["count": UInt64(left)])
+    /// Sentinels as `lakko-contacts` defines them: 0 (or 1) = single use,
+    /// `UInt32.max` = unlimited, else up to N uses (the web
+    /// `describeInviteLimit`).
+    static func limitCopy(maxUses: UInt32) -> String {
+        if maxUses == UInt32.max { return Localization.text("invite.uses.unlimited") }
+        if maxUses <= 1 { return Localization.text("invite.uses.single") }
+        return Localization.text("invite.uses.up_to", counts: ["count": UInt64(maxUses)])
     }
 
     /// "Expires in 3d" / "Expires in 2h" / "Expires in 5m", "Never expires"

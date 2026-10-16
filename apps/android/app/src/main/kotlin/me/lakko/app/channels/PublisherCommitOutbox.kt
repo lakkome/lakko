@@ -1,0 +1,348 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.channels
+
+import android.content.Context
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.Json
+import me.lakko.app.auth.SealedBlobStorage
+import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.PublisherGroup
+import uniffi.lakko_ffi_uniffi.sealSubscriberSeedEnvelope
+
+/**
+ * Durable record of a channel PublisherGroup commit (G-50, the ADR-0040
+ * treatment the chat groups have). Kotlin mirror of
+ * `apps/web/src/channels/publisher-commit-outbox.ts` and
+ * `apps/ios/Lakko/Channels/PublisherCommitOutbox.swift`.
+ *
+ * A PublisherGroup commit (a co-publisher approve, a rotation) eager-merges
+ * epoch N -> N+1 in the channel provider ([ChannelPublisherIdentity]). Its
+ * effects then leave the device in steps: the N+1 epoch key is registered on
+ * the Delivery Service and the Add commit published to the journal, the
+ * joiner's Welcome is written to its mailbox (approve), every subscriber is
+ * resealed to the N+1 seed and the channels service moves to the next epoch,
+ * and the newcomer's co-publisher key is appointed (approve).
+ *
+ * Order: the entry FIRST, then the N+1 provider snapshot
+ * ([ChannelPublisherIdentity.withIdentityPersistingFirst]'s `persistNow`),
+ * both fail-closed, both before any step runs; a failure of either restores
+ * the provider to the snapshot taken before the commit, so nothing records or
+ * publishes an epoch the device does not hold durably. "N+1 durable with no
+ * entry" is impossible by construction; an entry whose snapshot did not land
+ * is a commit none of whose steps ran, and the next replay drops it
+ * ([replayVerdict]).
+ *
+ * Each step marks itself done as it lands; the entry is dropped once none is
+ * left. A replay runs the remaining steps again, each idempotent (a duplicate
+ * commit is dropped by the journal's receivers, a second Welcome for a group
+ * the joiner is in is skipped by it, the reseal counts as done once the
+ * service is at or past the recorded target, an appointment is an upsert).
+ *
+ * An entry holds the commit and Welcome (public MLS artefacts), the joiner's
+ * key and the epochs; the joiner's `reply` grant is not recorded (it is
+ * re-read from the retained knock on every poll). Entries live in one file
+ * per account under `noBackupFilesDir`, sealed under the device key.
+ */
+@Serializable
+public data class PublisherCommitEntry(
+    /** Random hex id. */
+    val id: String,
+    val kind: Kind,
+    /** 32-char hex channel id. */
+    val channelIdHex: String,
+    /** 64-char hex PublisherGroup id (the DS journal). */
+    val groupIdHex: String,
+    /** The MLS epoch the commit moved the group to. */
+    val targetEpoch: Long,
+    /** The channels-service epoch the reseal binds the envelopes to. */
+    val serverTargetEpoch: Long,
+    /** Approve: standard base64 of the Add commit for the journal. */
+    val commitB64: String? = null,
+    /** Approve: standard base64 of the joiner's Welcome. */
+    val welcomeB64: String? = null,
+    /** Approve: standard base64 of the joiner's signature (= account) key. */
+    val joinerKeyB64: String? = null,
+    /** The steps that have landed. */
+    val done: List<Step> = emptyList(),
+) {
+    /** Which commit an entry records. */
+    @Serializable
+    public enum class Kind { APPROVE, ROTATION }
+
+    /** The steps of an entry, in the order they run. */
+    @Serializable
+    public enum class Step { JOURNAL, WELCOME, RESEAL, APPOINT }
+
+    /** The steps still to run, in order. */
+    public val remainingSteps: List<Step> get() = stepsOf(kind).filterNot { it in done }
+
+    /** The entry with [step] marked done (once). */
+    public fun withStepDone(step: Step): PublisherCommitEntry =
+        if (step in done) this else copy(done = done + step)
+
+    /** Whether the reseal of this entry has already landed: the channels
+     *  service is at or past the epoch it resealed to. */
+    public fun resealLanded(serverEpoch: Long): Boolean = serverEpoch >= serverTargetEpoch
+
+    /** Whether the fields are well formed (a malformed entry read back is
+     *  dropped alone). */
+    public val isWellFormed: Boolean
+        get() {
+            fun isHex(s: String, len: Int) = s.length == len && s.all { it in '0'..'9' || it in 'a'..'f' }
+            if (!isHex(id, 32) || !isHex(channelIdHex, 32) || !isHex(groupIdHex, 64)) return false
+            if (targetEpoch < 0 || serverTargetEpoch < 0) return false
+            if (kind == Kind.APPROVE && (commitB64 == null || welcomeB64 == null || joinerKeyB64 == null)) return false
+            return true
+        }
+
+    public companion object {
+        /** The steps an entry of [kind] runs, in order. */
+        public fun stepsOf(kind: Kind): List<Step> = when (kind) {
+            Kind.APPROVE -> listOf(Step.JOURNAL, Step.WELCOME, Step.RESEAL, Step.APPOINT)
+            Kind.ROTATION -> listOf(Step.JOURNAL, Step.RESEAL)
+        }
+
+        /** A fresh random 16-byte hex id. */
+        public fun newId(): String {
+            val bytes = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
+            return bytes.joinToString("") { "%02x".format(it) }
+        }
+    }
+}
+
+/** What a restart does with an entry. */
+public enum class PublisherCommitReplay {
+    /** The commit's N+1 never became durable (a torn write, or the group is
+     *  gone): none of its steps ran, drop it. */
+    DISCARD,
+
+    /** Run the remaining steps. */
+    REPLAY,
+}
+
+/** The verdict for [entry], given the epoch the restored group is at
+ *  (`null`: the group did not load at all). */
+public fun replayVerdict(entry: PublisherCommitEntry, restoredEpoch: Long?): PublisherCommitReplay =
+    if (restoredEpoch == null || restoredEpoch < entry.targetEpoch) {
+        PublisherCommitReplay.DISCARD
+    } else {
+        PublisherCommitReplay.REPLAY
+    }
+
+/** What running the steps of one entry needs; injected so the order is
+ *  testable without a network. */
+public interface PublisherCommitPorts {
+    /** Register the group's CURRENT epoch key (the N+1 one) on the DS with
+     *  the channel's root. Idempotent. Required before an approve publishes
+     *  its commit; best effort for a rotation, which publishes none. */
+    public suspend fun registerEpoch()
+
+    /** Publish the Add commit to the group journal. */
+    public suspend fun publishCommit(commit: ByteArray)
+
+    /** Write the Welcome to the joiner's mailbox. */
+    public suspend fun deliverWelcome(welcome: ByteArray, joinerKey: ByteArray)
+
+    /** The channels service's current epoch. */
+    public suspend fun serverEpoch(): Long
+
+    /** Reseal the group's CURRENT seed to every subscriber and move the
+     *  service to [targetEpoch] (stage + commit). */
+    public suspend fun reseal(targetEpoch: Long)
+
+    /** Appoint the joiner's co-publisher key. Never fails the entry. */
+    public suspend fun appoint(joinerKey: ByteArray)
+
+    /** Durably record [entry] (a step landed). */
+    public fun save(entry: PublisherCommitEntry)
+
+    /** The entry is finished: drop it. */
+    public fun finish(entry: PublisherCommitEntry)
+}
+
+private fun b64(s: String): ByteArray = java.util.Base64.getDecoder().decode(s)
+
+/**
+ * Run the remaining steps of [entry] in order, recording each as it lands.
+ * Throws the first step's failure, leaving the entry (with what did land) for
+ * the next run.
+ */
+public suspend fun runPublisherCommit(
+    entry: PublisherCommitEntry,
+    ports: PublisherCommitPorts,
+    /** Where a failure that does not hold the entry is logged (a host test
+     *  passes its own: the host JVM has no `android.util.Log`). */
+    warn: (message: String, cause: Throwable) -> Unit = { message, cause ->
+        android.util.Log.w("PublisherCommit", message, cause)
+    },
+) {
+    var current = entry
+    for (step in current.remainingSteps) {
+        when (step) {
+            PublisherCommitEntry.Step.JOURNAL ->
+                if (current.kind == PublisherCommitEntry.Kind.ROTATION) {
+                    // A rotation commit is not published to the journal, so no
+                    // peer can hold an unregistered epoch: the registration
+                    // stays best effort, as it always was (a co-publisher's is
+                    // refused, its root is not the journal's).
+                    try {
+                        ports.registerEpoch()
+                    } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        warn("ADR-0057: rotated epoch not registered", e)
+                    }
+                } else {
+                    ports.registerEpoch()
+                    current.commitB64?.let { ports.publishCommit(b64(it)) }
+                }
+            PublisherCommitEntry.Step.WELCOME -> {
+                val welcome = current.welcomeB64
+                val joiner = current.joinerKeyB64
+                if (welcome != null && joiner != null) ports.deliverWelcome(b64(welcome), b64(joiner))
+            }
+            PublisherCommitEntry.Step.RESEAL ->
+                if (!current.resealLanded(ports.serverEpoch())) ports.reseal(current.serverTargetEpoch)
+            PublisherCommitEntry.Step.APPOINT ->
+                current.joinerKeyB64?.let { joiner ->
+                    try {
+                        ports.appoint(b64(joiner))
+                    } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        // An appointment is retried by the next co-publisher
+                        // open; it never holds the entry.
+                        warn("ADR-0059: appointment after an approve failed", e)
+                    }
+                }
+        }
+        current = current.withStepDone(step)
+        ports.save(current)
+    }
+    ports.finish(current)
+}
+
+/**
+ * The per-account store of recorded PublisherGroup commits: one file per
+ * account, the JSON array of entries, sealed under the device key. Every
+ * call runs under the channel provider's lock (the callers are inside
+ * [ChannelPublisherIdentity.withIdentity]), so a read-modify-write is never
+ * interleaved.
+ */
+public class PublisherCommitStore(private val storage: SealedBlobStorage) {
+    private val json = Json { ignoreUnknownKeys = false }
+    private val serializer = ListSerializer(PublisherCommitEntry.serializer())
+
+    /** Every well-formed entry of the account. An unreadable file reads as
+     *  empty; a malformed entry is dropped alone. */
+    public fun entries(accountIdB64: String): List<PublisherCommitEntry> {
+        val name = nameOf(accountIdB64) ?: return emptyList()
+        val plain = storage.read(name) ?: return emptyList()
+        return try {
+            json.decodeFromString(serializer, plain.decodeToString()).filter { it.isWellFormed }
+        } catch (_: Throwable) {
+            emptyList()
+        } finally {
+            plain.fill(0)
+        }
+    }
+
+    /** Insert or replace [entry], durably. Throws when it was not written
+     *  (fail-closed: a commit whose entry is not on disk is never published). */
+    public fun put(accountIdB64: String, entry: PublisherCommitEntry) {
+        val name = nameOf(accountIdB64) ?: throw IllegalStateException("no account to record the commit for")
+        val all = entries(accountIdB64).filterNot { it.id == entry.id } + entry
+        // Refused (a signed-out or wiped account) or failed: throws.
+        me.lakko.app.account.AccountStoreGate.writeOrEnd(accountIdB64) {
+            storage.write(name, json.encodeToString(serializer, all).encodeToByteArray())
+        }
+    }
+
+    /** Drop the entry [id]. Best effort: a lost removal replays the entry,
+     *  whose steps are all done or idempotent. */
+    public fun remove(accountIdB64: String, id: String) {
+        val name = nameOf(accountIdB64) ?: return
+        val rest = entries(accountIdB64).filterNot { it.id == id }
+        try {
+            if (rest.isEmpty()) {
+                storage.delete(name)
+            } else {
+                me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+                    storage.write(name, json.encodeToString(serializer, rest).encodeToByteArray())
+                }
+            }
+        } catch (_: Throwable) {
+            // best effort
+        }
+    }
+
+    private fun nameOf(accountIdB64: String): String? =
+        me.lakko.app.auth.KeyRotationFiles.hexOf(accountIdB64)
+
+    public companion object {
+        /** The folder under `noBackupFilesDir`. */
+        public const val DIR: String = "lakko-publisher-commits"
+
+        public fun onDevice(context: Context): PublisherCommitStore =
+            PublisherCommitStore(me.lakko.app.auth.DeviceSealedBlobStorage(context.applicationContext, DIR))
+
+        /** Forget device: delete [accountIdB64]'s file without opening it. */
+        public fun deleteAll(context: Context, accountIdB64: String) {
+            val hex = me.lakko.app.auth.KeyRotationFiles.hexOf(accountIdB64) ?: return
+            java.io.File(java.io.File(context.noBackupFilesDir, DIR), hex).delete()
+        }
+    }
+}
+
+/**
+ * Reseal [publisherGroup]'s CURRENT seed to every subscriber bound to
+ * [targetEpoch], stage the envelopes in bounded chunks and commit (ADR-0030;
+ * C-42: the commit is the one atomic point). A single seal failure aborts
+ * the whole batch. Requests are signed with this account's publisher role
+ * (ADR-0059 section 9).
+ */
+public suspend fun resealToSubscribers(
+    channelsClient: ChannelsClient,
+    identity: Identity,
+    publisherGroup: PublisherGroup,
+    channelIdHex: String,
+    targetEpoch: Long,
+) {
+    val seed = publisherGroup.channelSeed(identity)
+    val channelIdBytes = publisherGroup.channelId()
+    val target = targetEpoch.toUInt()
+    ChannelPublisherSigners.derive(identity, channelIdHex).use { proofs ->
+        val subscribers = channelsClient.listSubscribersAsPublisher(channelIdHex, proofs)
+        val batch = ArrayList<RotateBatchEntry>(subscribers.size)
+        for (subscriberHex in subscribers) {
+            val subscriberBytes = hexToBytesOrNull(subscriberHex)
+                ?: throw CoPublisher.CoPublisherException.MalformedSubscriberHex(subscriberHex)
+            val envelope = sealSubscriberSeedEnvelope(subscriberBytes, channelIdBytes, target, seed)
+            batch.add(
+                RotateBatchEntry(
+                    subscriber_pubkey_hex = subscriberHex,
+                    envelope_b64 = java.util.Base64.getEncoder().encodeToString(envelope),
+                ),
+            )
+        }
+        var start = 0
+        while (start < batch.size) {
+            val end = minOf(start + ChannelsClient.MAX_STAGE_CHUNK_ENTRIES, batch.size)
+            channelsClient.stageRotation(channelIdHex, target, batch.subList(start, end), proofs)
+            start = end
+        }
+        channelsClient.commitRotation(channelIdHex, target, proofs)
+    }
+}
+
+private fun hexToBytesOrNull(hex: String): ByteArray? {
+    if (hex.isEmpty() || hex.length % 2 != 0) return null
+    val out = ByteArray(hex.length / 2)
+    for (i in out.indices) {
+        out[i] = (hex.substring(i * 2, i * 2 + 2).toIntOrNull(16) ?: return null).toByte()
+    }
+    return out
+}

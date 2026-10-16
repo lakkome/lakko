@@ -770,24 +770,22 @@ public final class DiscoveryClient {
     /// Upload a freshly-minted SEALED `/i/` link (ADR-0028 amendment
     /// 2026-09-28) and receive the server-minted `blobId` (6 random bytes).
     /// The ledger stores only `mint.sealed`; the clear fields carry what the
-    /// server needs (revoke key, expiry, consume ceiling, the owner's label).
-    /// A second upload of the same bytes gets a second id.
+    /// server needs (the link's own revocation key, expiry, consume ceiling;
+    /// ADR-0078 section 10: nothing names the owner). A second upload of the
+    /// same bytes gets a second id.
     public func uploadInvite(
         mint: InviteLinkMint,
+        revocationPubkey: Data,
         expiryMs: UInt64,
-        maxUses: UInt32,
-        label: String,
-        bootstrapReferral: Bool
+        maxUses: UInt32
     ) async throws -> Data {
         try Self.checkSealed(mint.sealed, ceiling: Self.maxCapabilityBytes)
         let resp = try await inviteUpload(
             InviteUploadRequest(
                 sealed: base64Encode(mint.sealed),
-                issuerPubkey: base64Encode(mint.issuerPubkey),
+                revocationPubkey: base64Encode(revocationPubkey),
                 expiryMs: expiryMs,
-                maxUses: maxUses,
-                label: label,
-                bootstrapReferral: bootstrapReferral
+                maxUses: maxUses
             )
         )
         return try Self.parseBlobId(resp.blobId, endpoint: "/discovery/invite")
@@ -1044,6 +1042,7 @@ public final class DiscoveryClient {
     /// `POST /discovery/call-invite`. Every upload gets a fresh id.
     public func uploadCallInvite(
         mint: InviteLinkMint,
+        revocationPubkey: Data,
         expiryMs: UInt64,
         maxUses: UInt32
     ) async throws -> Data {
@@ -1051,7 +1050,7 @@ public final class DiscoveryClient {
         let resp = try await callInviteUpload(
             InviteUploadRequest(
                 sealed: base64Encode(mint.sealed),
-                issuerPubkey: base64Encode(mint.issuerPubkey),
+                revocationPubkey: base64Encode(revocationPubkey),
                 expiryMs: expiryMs,
                 maxUses: maxUses
             )
@@ -1189,6 +1188,7 @@ public final class DiscoveryClient {
     /// security boundary): `0` = single-use, `0xFFFFFFFF` = unlimited.
     public func uploadGroupInvite(
         mint: InviteLinkMint,
+        revocationPubkey: Data,
         expiryMs: UInt64,
         maxUses: UInt32
     ) async throws -> Data {
@@ -1196,7 +1196,7 @@ public final class DiscoveryClient {
         let resp = try await groupInviteUpload(
             InviteUploadRequest(
                 sealed: base64Encode(mint.sealed),
-                issuerPubkey: base64Encode(mint.issuerPubkey),
+                revocationPubkey: base64Encode(revocationPubkey),
                 expiryMs: expiryMs,
                 maxUses: maxUses
             )
@@ -1464,113 +1464,6 @@ public final class DiscoveryClient {
             endpoint: "\(endpoint) (DELETE)",
             body: bodyText
         )
-    }
-
-    /// Owner-signed list of every live invite this account owns
-    /// (Phase 1.18d2b-list). Distinct Ed25519 domain separator
-    /// from ``revokeInvite(blobId:signingSeed:)`` ensures a
-    /// captured revoke signature cannot be replayed against this
-    /// endpoint.
-    ///
-    /// Returns ``ListInvitesResult/list(_:)`` with the parsed
-    /// rows on 200 (empty array when the owner has no live
-    /// invites — distinct from a malformed-request failure), or
-    /// ``ListInvitesResult/notFoundOrNotOwner`` on 404 (server
-    /// folds "no identity_bundle for `accountId`" / "signature
-    /// mismatch" into one status to deny status-code probing).
-    /// Other non-2xx still throw.
-    public func listInvitesByOwner(
-        accountId: Data,
-        signingSeed: Data
-    ) async throws -> ListInvitesResult {
-        guard accountId.count == Self.accountIdLength else {
-            throw DiscoveryClientError.argument(
-                "accountId must be \(Self.accountIdLength) bytes"
-            )
-        }
-        guard signingSeed.count == Self.signingSeedLength else {
-            throw DiscoveryClientError.argument(
-                "signingSeed must be \(Self.signingSeedLength) bytes"
-            )
-        }
-
-        let signedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
-        let signature = try signOwnerListQuery(
-            signingSeed: signingSeed,
-            ownerAccountId: accountId,
-            signedAtMs: UInt64(signedAtMs)
-        )
-        let endpoint = "/discovery/invite/by-owner"
-        let url = try buildURL(endpoint: endpoint)
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        attachAuthorizationHeader(to: &request)
-        let body = InviteOwnerListRequest(
-            ownerAccountId: base64Encode(accountId),
-            signedAtMs: signedAtMs,
-            signature: base64Encode(signature)
-        )
-        do {
-            request.httpBody = try encoder.encode(body)
-        } catch {
-            throw DiscoveryClientError.argument(
-                "failed to encode \(endpoint) body: \(error)"
-            )
-        }
-
-        let raw: (Data, URLResponse)
-        do {
-            raw = try await AntiCensorshipTransport.perform(
-                request, session: session, config: antiCensorship)
-        } catch {
-            throw DiscoveryClientError.network(
-                endpoint: "\(endpoint) (POST)",
-                underlying: error
-            )
-        }
-        guard let httpResponse = raw.1 as? HTTPURLResponse else {
-            throw DiscoveryClientError.http(
-                status: 0,
-                endpoint: "\(endpoint) (POST)",
-                body: "non-HTTP response"
-            )
-        }
-        if httpResponse.statusCode == 404 {
-            return .notFoundOrNotOwner
-        }
-        if !(200..<300).contains(httpResponse.statusCode) {
-            let bodyText = Self.truncate(
-                String(data: raw.0, encoding: .utf8) ?? "<binary>"
-            )
-            throw DiscoveryClientError.http(
-                status: httpResponse.statusCode,
-                endpoint: "\(endpoint) (POST)",
-                body: bodyText
-            )
-        }
-        let decoded: InviteOwnerListResponse
-        do {
-            decoded = try decoder.decode(InviteOwnerListResponse.self, from: raw.0)
-        } catch {
-            throw DiscoveryClientError.http(
-                status: httpResponse.statusCode,
-                endpoint: "\(endpoint) (POST)",
-                body: "failed to decode response: \(error)"
-            )
-        }
-        let mapped = decoded.invites.map { entry in
-            ActiveInvite(
-                blobIdSlug: entry.blobIdSlug,
-                expiryMs: entry.expiryMs,
-                maxUses: entry.maxUses,
-                usedCount: entry.usedCount,
-                label: entry.label,
-                bootstrapReferral: entry.bootstrapReferral,
-                createdAt: entry.createdAt
-            )
-        }
-        return .list(mapped)
     }
 
     /// Public-facing 404→nil GET fetch of a ledger blob. Carries no session and
@@ -2016,12 +1909,10 @@ public enum RevokeInviteResult: Equatable {
     case notFoundOrNotOwner
 }
 
-/// One row in the
-/// ``DiscoveryClient/listInvitesByOwner(accountId:signingSeed:)``
-/// response — normalised TS-parity view of the wire shape
-/// (Phase 1.18d2b-list). `blobIdSlug` is the URL-safe base64
-/// the owner uses to reconstruct the share URL or feed back
-/// into ``DiscoveryClient/revokeInvite(blobId:signingSeed:)``.
+/// One row of the owner's "Invite links" list. Since ADR-0078 section 10 it
+/// is built from this device's own records (``OwnLinkStore``), not from a
+/// server query: no ledger row names its owner. `usedCount` is therefore not
+/// known (0), and the list states the limit the link was minted with.
 public struct ActiveInvite: Equatable {
     /// URL-safe base64 (no padding) of the 6-byte blob_id —
     /// same `/i/<slug>` segment that appears in the share URL.
@@ -2061,14 +1952,11 @@ public struct ActiveInvite: Equatable {
     }
 }
 
-/// Result of
-/// ``DiscoveryClient/listInvitesByOwner(accountId:signingSeed:)``.
+/// Result of ``ContactsRepository/listActiveInvites()``.
 public enum ListInvitesResult: Equatable {
-    /// Server returned the live-invite list (possibly empty).
+    /// The links this device minted and still keeps (possibly empty).
     case list([ActiveInvite])
-    /// 404. Server folds "no identity_bundle for `accountId`" /
-    /// "signature mismatch" / "stored pubkey malformed" into
-    /// one status to deny status-code probing.
+    /// Kept for the callers; the local list never answers it.
     case notFoundOrNotOwner
 }
 

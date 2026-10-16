@@ -35,8 +35,6 @@ const hooks = vi.hoisted(() => ({
       selfPeerId: string,
       roster: ReadonlyArray<{
         peer_id: string;
-        account_pseudonym: string;
-        peer_tag?: string;
       }>,
     ) => void;
     onPeerLeft?: (peerId: string) => void;
@@ -118,7 +116,7 @@ function camOn(peerId: string): boolean | undefined {
 /** Build a one-remote roster (peerX) so the tile exists to be flipped. */
 function seedRosterWithPeerX(): void {
   hooks.captured?.onWelcome?.("self", [
-    { peer_id: "peerX", account_pseudonym: "abcdef0123" },
+    { peer_id: "peerX" },
   ]);
 }
 

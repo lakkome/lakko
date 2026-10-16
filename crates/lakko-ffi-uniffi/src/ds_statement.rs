@@ -461,21 +461,6 @@ impl DsStatementSigner {
         let new_root = key32(&new_root, "new root key")?;
         self.request(&journal_id, StatementBody::RootTransfer { new_root })
     }
-
-    /// `PUT .../push-binding`: the root or an admin binds the journal to one
-    /// ADR-0042 `push_gid` (replacing its previous binding).
-    ///
-    /// # Errors
-    ///
-    /// [`FfiError::Codec`] on a wrong-length input.
-    pub fn push_binding(
-        &self,
-        journal_id: Vec<u8>,
-        push_gid: Vec<u8>,
-    ) -> Result<DsStatementRequest, FfiError> {
-        let push_gid = key32(&push_gid, "push_gid")?;
-        self.request(&journal_id, StatementBody::PushBinding { push_gid })
-    }
 }
 
 /// Compose the registrar-seed envelope a root sends one member inside the
@@ -626,9 +611,25 @@ mod tests {
         assert_eq!(s.body.kind(), StatementKind::Claim);
         assert_eq!(s.signer.to_vec(), signer.public_key());
         s.verify(now_ms()).unwrap();
-        let bind = signer.push_binding(journal, vec![9; 32]).unwrap();
-        assert!(bind.path.ends_with("/push-binding"));
-        assert!(signer.push_binding(vec![1; 31], vec![9; 32]).is_err());
+        let transfer = signer
+            .root_transfer(
+                journal,
+                lakko_ds_proof::SigningKey::from_seed(&[8; 32])
+                    .verifying_key()
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .unwrap();
+        assert!(transfer.path.ends_with("/root"));
+        assert!(signer
+            .root_transfer(
+                vec![1; 31],
+                lakko_ds_proof::SigningKey::from_seed(&[8; 32])
+                    .verifying_key()
+                    .to_bytes()
+                    .to_vec()
+            )
+            .is_err());
     }
 
     #[test]

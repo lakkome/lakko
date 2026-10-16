@@ -8,7 +8,9 @@
  */
 import {
   AnonTokenPool,
+  INITIAL_REFILL_SPREAD_MS,
   type AnonTokenWasm,
+  type RefillTimers,
   type WasmAnonToken,
   type WasmAnonTokenRequest,
 } from "./anon-token-pool";
@@ -28,8 +30,13 @@ export interface IssuerRequest {
 
 /** Knobs of the fake issuer. */
 export interface FakeIssuerOptions {
-  /** Answer the next issuance(s) with these responses first. */
-  readonly issueScript?: Array<{ status: number; json: unknown; retryAfter?: string }>;
+  /** Answer the next issuance(s) of `context` with these responses first. */
+  readonly issueScript?: Array<{
+    status: number;
+    json: unknown;
+    retryAfter?: string;
+    context: string;
+  }>;
   /** The key the key route serves (default {@link FAKE_ISSUER_KEY}). */
   readonly keyRouteKey?: string;
   /** The `public_key` the issuance response carries. */
@@ -45,10 +52,53 @@ export interface FakeIssuerOptions {
   readonly session?: string | null;
 }
 
+/** The refill schedule's timers in a test: a context's first refill after a
+ *  session is installed runs on the next macrotask (as if its random moment
+ *  were now); every later scheduled refill is only recorded, and runs when
+ *  the test calls {@link ManualTimers.fireScheduled}. */
+export interface ManualTimers extends RefillTimers {
+  /** Delays of the later refills armed so far. */
+  readonly armed: number[];
+  /** Run every later refill armed so far, once. */
+  fireScheduled(): void;
+}
+
+export function manualTimers(): ManualTimers {
+  const pending = new Map<number, () => void>();
+  const armed: number[] = [];
+  let next = 1;
+  return {
+    armed,
+    set(fn, ms) {
+      const id = next++;
+      if (ms <= INITIAL_REFILL_SPREAD_MS) {
+        const handle = setTimeout(fn, 0);
+        pending.set(id, () => clearTimeout(handle));
+        return { id, initial: true, handle };
+      }
+      armed.push(ms);
+      pending.set(id, fn);
+      return { id, initial: false };
+    },
+    clear(handle) {
+      const h = handle as { id: number; initial: boolean; handle?: ReturnType<typeof setTimeout> };
+      if (h.initial && h.handle !== undefined) clearTimeout(h.handle);
+      pending.delete(h.id);
+    },
+    fireScheduled() {
+      const due = [...pending.entries()];
+      pending.clear();
+      for (const [, fn] of due) fn();
+    },
+  };
+}
+
 /** A fake wasm core: epoch = floor(secs / 86400); a token is live in its own
- *  epoch and the next; `finalize` checks the key it is given. */
+ *  epoch and the next; `finalize` checks the key it is given. Tokens are
+ *  numbered per context (`tok-1`, `tok-2`, ...), since every context's
+ *  first refill runs when a session is installed (ADR-0078 section 8). */
 export function fakeAnonWasm(evaluatedUnder: () => string): AnonTokenWasm & { finalizeKeys: string[] } {
-  let serial = 0;
+  const serials = new Map<string, number>();
   const finalizeKeys: string[] = [];
   class Request implements WasmAnonTokenRequest {
     constructor(
@@ -69,7 +119,8 @@ export function fakeAnonWasm(evaluatedUnder: () => string): AnonTokenWasm & { fi
         throw new Error("proof-verification: the proof does not verify under that key");
       }
       return evaluations.map(() => {
-        serial += 1;
+        const serial = (serials.get(this.context) ?? 0) + 1;
+        serials.set(this.context, serial);
         const token: WasmAnonToken = {
           context: this.context,
           epoch: this.epoch,
@@ -97,11 +148,13 @@ export function fakeTokenPool(options: FakeIssuerOptions = {}): {
   pool: AnonTokenPool;
   issuer: IssuerRequest[];
   wasm: ReturnType<typeof fakeAnonWasm>;
+  timers: ManualTimers;
 } {
   const issuer: IssuerRequest[] = [];
   const script = [...(options.issueScript ?? [])];
   const keyRouteKey = options.keyRouteKey ?? FAKE_ISSUER_KEY;
   const wasm = fakeAnonWasm(() => options.evaluatedUnder ?? FAKE_ISSUER_KEY);
+  const timers = manualTimers();
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const headers = (init?.headers ?? {}) as Record<string, string>;
     const url = String(input);
@@ -125,7 +178,9 @@ export function fakeTokenPool(options: FakeIssuerOptions = {}): {
         { status: 200 },
       );
     }
-    const next = script.shift();
+    const requested = (body as { context?: string } | undefined)?.context;
+    const at = script.findIndex((s) => s.context === requested);
+    const next = at < 0 ? undefined : script.splice(at, 1)[0];
     if (next !== undefined) {
       const h = new Headers();
       if (next.retryAfter !== undefined) h.set("retry-after", next.retryAfter);
@@ -152,8 +207,10 @@ export function fakeTokenPool(options: FakeIssuerOptions = {}): {
     now: options.now ?? (() => 1_700_000_000_000),
     takeWaitMs: 1_000,
     store: options.store ?? null,
+    random: () => 0.5,
+    timers,
   });
   const session = options.session === undefined ? "v1.QUNDT1VOVA.0.tag" : options.session;
   if (session !== null) pool.setSessionToken(session);
-  return { pool, issuer, wasm };
+  return { pool, issuer, wasm, timers };
 }

@@ -147,8 +147,7 @@ export interface ProfileApi {
   ownUsernameCertificate(): Uint8Array | null;
   /** The 16-byte auth account id a person CLAIMED in their profile, as 32
    *  lower-case hex characters, or `null` when none is held. For the viewer's
-   *  own key it is the signed-in account. Reactive. What the call roster
-   *  derives the ADR-0021 peer tag from. */
+   *  own key it is the signed-in account. Reactive. */
   accountIdHexOf(keyB64: string): string | null;
   /** Every stored profile that carries an account id, as
    *  `(personKeyB64, accountIdHex)` pairs. The own account is not among them
@@ -337,9 +336,9 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     // (signed out mid-publish) sends none.
     const grants = groupIdB64 === undefined ? [] : grantsFor(groupIdB64);
     try {
-      // ADR-0048 v2 — the own account id rides along so a member who never
-      // accepted this account as a contact can still derive its ADR-0021 peer
-      // tag and name its call tile. `undefined` for a session without one.
+      // ADR-0048 v2 — the own account id rides along (the username
+      // certificate binds the username to it). `undefined` for a session
+      // without one.
       // ADR-0060 v3 — the username certificate, and the grants.
       return w.composeProfileEnvelope(
         own.displayName,

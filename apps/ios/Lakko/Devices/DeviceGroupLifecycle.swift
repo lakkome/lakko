@@ -20,6 +20,39 @@ import LakkoCore
 /// DeviceIdentity provider's storage only.
 public enum DeviceGroupLifecycle {
 
+    /// Refused: this device holds no account seed yet, so it cannot name its
+    /// DeviceGroup (ADR-0078 section 6: the id is a function of the seed).
+    public struct NoAccountSeed: Error {}
+
+    /// ADR-0078 section 6 — the 64-byte seed the account's DeviceGroup id is
+    /// derived from: the seed the conversation leaves are bound to, i.e. the
+    /// OLDEST own predecessor after a proven rotation (a rotation keeps the
+    /// DeviceGroup, so its id must not move), else `currentSeed` when given,
+    /// else the device's stored account seed. `nil` when none is held.
+    public static func lineageSeed(
+        accountIdB64: String,
+        currentSeed: Data? = nil,
+        predecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore()
+    ) -> Data? {
+        let held = predecessors.load(accountIdB64: accountIdB64)
+        if let oldest = held.first { return oldest }
+        if let currentSeed { return currentSeed }
+        return try? AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: accountIdB64)
+    }
+
+    /// The account's DeviceGroup journal id ([`lineageSeed`]); `nil` when
+    /// this device cannot derive it yet.
+    public static func groupId(
+        accountIdB64: String,
+        currentSeed: Data? = nil,
+        predecessors: OwnPredecessorStoring = KeychainOwnPredecessorStore()
+    ) -> Data? {
+        guard let seed = lineageSeed(
+            accountIdB64: accountIdB64, currentSeed: currentSeed, predecessors: predecessors),
+              let account = try? Identity.fromSeed(seed: seed) else { return nil }
+        return deviceGroupIdFor(accountIdentity: account)
+    }
+
     /// Result of [`ensureDeviceGroup`].
     public struct Ensured {
         /// The Identity built from the DeviceIdentity seed,
@@ -77,12 +110,22 @@ public enum DeviceGroupLifecycle {
     /// the same `(accountIdB64, deviceIdentitySeed)` returns
     /// the same group (the bootstrap branch fires only when
     /// the snapshot is absent).
+    ///
+    /// The DeviceGroup id is derived from the account seed ([`lineageSeed`],
+    /// ADR-0078 section 6); `accountSeed` is the current one when the caller
+    /// holds it (a key reset passes the NEW seed). Throws ``NoAccountSeed``
+    /// when the device holds none.
     public static func ensureDeviceGroup(
         accountIdBytes: Data,
         accountIdB64: String,
         deviceIdentitySeed: Data,
+        accountSeed: Data? = nil,
         snapshotStore: DeviceGroupSnapshotStore = DeviceGroupSnapshotStore()
     ) throws -> Ensured {
+        guard let seed = lineageSeed(accountIdB64: accountIdB64, currentSeed: accountSeed) else {
+            throw NoAccountSeed()
+        }
+        let lineage = try Identity.fromSeed(seed: seed)
         // Build the per-device Identity from the cached seed.
         // This is the DeviceIdentity (ADR-0007), NOT the
         // AccountIdentity ChatRepository holds.
@@ -95,7 +138,8 @@ public enum DeviceGroupLifecycle {
                 try identity.restoreStorage(snapshot: snapshot)
                 if let group = try loadDeviceGroup(
                     identity: identity,
-                    accountId: accountIdBytes
+                    accountId: accountIdBytes,
+                    accountIdentity: lineage
                 ) {
                     return Ensured(
                         identity: identity,
@@ -118,7 +162,8 @@ public enum DeviceGroupLifecycle {
         // Bootstrap. Local device becomes the founding leaf.
         let group = try DeviceGroup.createFounder(
             identity: identity,
-            accountId: accountIdBytes
+            accountId: accountIdBytes,
+            accountIdentity: lineage
         )
         let fresh = try identity.snapshotStorage()
         snapshotStore.putSnapshot(

@@ -75,7 +75,7 @@ fn build_state(pool: MySqlPool, limits: Limits) -> AppState {
         turn: None,
         totp_enc_key: None,
         vault_enc_key: None,
-        throttle: crate::throttle::ThrottleConfig::disabled(),
+        room_cap: std::sync::Arc::new(crate::room_cap::RoomAdmissionCap::disabled()),
         backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
         anon_tokens: None,
         handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),

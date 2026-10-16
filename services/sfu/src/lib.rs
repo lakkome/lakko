@@ -77,8 +77,8 @@ pub fn build_router(state: Arc<AppState>, cfg: Config, jwks: JwksCache) -> Route
             }),
         )
         .route("/v1/connect", get(signaling::ws_handler))
-        .route("/v1/calls/{call_id}", get(signaling::call_state_handler))
-        .layer(TraceLayer::new_for_http())
+        .route("/v1/rooms/{room}", get(signaling::room_state_handler))
+        .layer(TraceLayer::new_for_http().make_span_with(lakko_log_hygiene::request_span))
         .with_state(state)
 }
 

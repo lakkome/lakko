@@ -1553,8 +1553,10 @@ final class NseServiceEnvelopeTests: XCTestCase {
         let rows: [NseFetchedRow]
         let groupIdBytes = Data(repeating: 0xAA, count: 32)
 
-        func boundAccount(wakeDevicePseudonymHex: String?) -> String? { "acct" }
-        func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? { nil }
+        func boundAccount(wakeSubscriptionIdHex: String?) -> String? { "acct" }
+        func lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?) -> String? {
+            accountIdB64 == "acct" ? pushGidHex : nil
+        }
         func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool {
             accountIdB64 == "acct"
         }

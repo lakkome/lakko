@@ -11,7 +11,13 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.content.OutgoingContent
 import io.ktor.http.content.TextContent
 import io.ktor.http.headersOf
+import java.util.Collections
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -23,15 +29,22 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0054 S3 - the anonymous-token pool, host-side: the native core and the
- * issuer sit behind [AnonTokenCore] / [AnonTokenIssuerApi], so no native
- * library is loaded. What is pinned: a take triggers a background refill below
- * two, batches of eight up to thirty-two, a dead token is dropped, tokens are
- * per account (a logout keeps them on disk, a switch loads the other account's
- * own, the wipe removes one account's only), a batch is verified against the key from
- * the GET route and discarded when it does not verify, a used-up quota and a
- * disabled issuer surface as their own failures, and a disagreeing epoch is
+ * ADR-0054 S3 / ADR-0078 section 8 - the anonymous-token pool, host-side: the
+ * native core and the issuer sit behind [AnonTokenCore] / [AnonTokenIssuerApi],
+ * so no native library is loaded. What is pinned: a bound session tops every
+ * context up to its target on a randomised schedule, and NOTHING a take does
+ * starts an issuance; a take waits only for a refill the schedule runs; never
+ * more than thirty-two held; a dead token is dropped; tokens are per account
+ * (a logout keeps them on disk, a switch loads the other account's own, the
+ * wipe removes one account's only); a batch is verified against the key from
+ * the GET route and discarded when it does not verify; a used-up quota and a
+ * disabled issuer surface as their own failures; a disagreeing epoch is
  * rebuilt once.
+ *
+ * The schedule runs in the test's background scope: the first refill of each
+ * context fires at once (the random draw is 0), every later one waits until
+ * the test calls [AnonTokenPool.runScheduledRefills], which is what a timer
+ * tick does.
  */
 class AnonTokenPoolTest {
 
@@ -39,8 +52,8 @@ class AnonTokenPoolTest {
 
     /** Epoch = unixSecs / window; a token is live in its epoch and the next. */
     private class FakeCore(private val goodKey: String = "GOOD") : AnonTokenCore {
-        val begun = mutableListOf<Triple<AnonTokenContext, Long, Int>>()
-        val keysUsed = mutableListOf<String>()
+        val begun: MutableList<Triple<AnonTokenContext, Long, Int>> = Collections.synchronizedList(mutableListOf())
+        val keysUsed: MutableList<String> = Collections.synchronizedList(mutableListOf())
         private var serial = 0
 
         override val headerName: String = "x-lakko-anon-token"
@@ -62,24 +75,35 @@ class AnonTokenPoolTest {
                 ): List<PooledAnonToken> {
                     keysUsed += publicKey
                     if (publicKey != goodKey) throw AnonFinalizeFailed("proof-verification")
-                    return evaluations.map { PooledAnonToken(context, epoch, "t${serial++}") }
+                    return synchronized(this@FakeCore) {
+                        evaluations.map { PooledAnonToken(context, epoch, "${context.wire}-${serial++}") }
+                    }
                 }
 
                 override fun close() = Unit
             }
         }
+
+        fun issuesFor(context: AnonTokenContext): List<Triple<AnonTokenContext, Long, Int>> =
+            synchronized(begun) { begun.filter { it.first == context } }
     }
 
-    /** Issues [count]-many evaluations for the body's epoch, or the scripted outcome. */
+    /** Issues [count]-many evaluations for the body's epoch, or the outcome
+     *  scripted for the body's context. */
     private class FakeApi(var key: String? = "GOOD") : AnonTokenIssuerApi {
-        val sessions = mutableListOf<AnonSession>()
-        val scripted = ArrayDeque<AnonIssueOutcome>()
+        val sessions: MutableList<AnonSession> = Collections.synchronizedList(mutableListOf())
+        val scripted = HashMap<String, ArrayDeque<AnonIssueOutcome>>()
         var gate: CompletableDeferred<Unit>? = null
+
+        fun script(context: AnonTokenContext, outcome: AnonIssueOutcome) {
+            scripted.getOrPut(context.wire) { ArrayDeque() }.addLast(outcome)
+        }
 
         override suspend fun issue(session: AnonSession, bodyJson: String): AnonIssueOutcome {
             sessions += session
             gate?.await()
-            scripted.removeFirstOrNull()?.let { return it }
+            val context = Regex("\"context\":\"([a-z-]+)\"").find(bodyJson)!!.groupValues[1]
+            synchronized(scripted) { scripted[context]?.removeFirstOrNull() }?.let { return it }
             val epoch = Regex("\"epoch\":(\\d+)").find(bodyJson)!!.groupValues[1].toLong()
             val count = Regex("\"count\":(\\d+)").find(bodyJson)!!.groupValues[1].toInt()
             return AnonIssueOutcome.Issued(epoch, List(count) { "e$it" }, "proof")
@@ -91,20 +115,31 @@ class AnonTokenPoolTest {
     private val alice = AnonSession("alice", "bearer-a")
     private val bob = AnonSession("bob", "bearer-b")
 
+    /** The first refill fires at once, every later one waits for the test. */
+    private val parked: suspend (Long) -> Unit = { ms -> if (ms >= REFILL_INTERVAL_MIN_MS) awaitCancellation() }
+
     private fun TestScope.pool(
         core: FakeCore,
         api: FakeApi,
         session: () -> AnonSession?,
         now: () -> Long = { 1_000L },
         store: AnonTokenStore = NoAnonTokenStore,
+        waitMs: Long = 5_000,
+        target: (AnonTokenContext) -> Int = ::anonPoolTargetFor,
+        forgotten: Set<String> = emptySet(),
     ) = AnonTokenPool(
         core = core,
         api = api,
         session = session,
         scope = this,
         nowSecs = now,
-        waitMs = 5_000,
+        waitMs = waitMs,
+        target = target,
         store = store,
+        forgottenAccounts = forgotten,
+        scheduleScope = backgroundScope,
+        sleep = parked,
+        random = { 0.0 },
     )
 
     /** What a store on disk keeps, without the disk: one pool per account. */
@@ -112,12 +147,8 @@ class AnonTokenPoolTest {
         val pools = HashMap<String, PersistedAnonPool>()
         val deletes = mutableListOf<String>()
 
-        /** Alice's pool, the account most tests use. */
-        var persisted: PersistedAnonPool?
-            get() = pools["alice"]
-            set(value) {
-                if (value == null) pools.remove("alice") else pools[value.owner] = value
-            }
+        fun held(owner: String, context: AnonTokenContext): Int =
+            pools[owner]?.tokens?.count { it.context == context } ?: 0
 
         override fun load(accountKey: String): PersistedAnonPool? = pools[accountKey]
         override fun save(pool: PersistedAnonPool) {
@@ -129,40 +160,126 @@ class AnonTokenPoolTest {
         }
     }
 
-    // ------------------------------------------------------------ batch sizes (S5)
+    /** Run the schedule's background work too: `advanceUntilIdle` alone
+     *  stops once only background tasks remain. */
+    private fun TestScope.settle() {
+        repeat(4) {
+            runCurrent()
+            advanceUntilIdle()
+        }
+    }
+
+    private val lookup = AnonTokenContext.DISCOVERY_LOOKUP
+    private val push = AnonTokenContext.PUSH_REGISTER
+
+    // ------------------------------------------------------------ the schedule (ADR-0078 section 8)
 
     @Test
-    fun eachContextDrawsItsOwnBatchSize() = runTest {
+    fun aBoundSessionTopsEveryContextUpToItsTarget() = runTest {
         val core = FakeCore()
         val pool = pool(core, FakeApi(), { alice })
-        for (context in AnonTokenContext.entries) pool.take(context)
-        advanceUntilIdle()
-        val firstBatch = core.begun.groupBy { it.first }.mapValues { it.value.first().third }
+        pool.bindSession()
+        settle()
+        val firstBatch = AnonTokenContext.entries.associateWith { core.issuesFor(it).single().third }
         assertEquals(
             mapOf(
-                AnonTokenContext.DISCOVERY_LOOKUP to 8,
-                AnonTokenContext.PUSH_REGISTER to 4,
-                AnonTokenContext.INVITE_CONSUME to 2,
-                AnonTokenContext.DS_KNOCK to 2,
-                AnonTokenContext.DISCOVERY_REGISTER to 1,
-                // ADR-0059 S2 contexts (`anonBatchPolicyFor`).
-                AnonTokenContext.CHANNEL_SUBSCRIBE to 2,
-                AnonTokenContext.DIRECTORY_SEARCH to 1,
-                // ADR-0064 / ADR-0065 contexts; chosen, not measured.
-                AnonTokenContext.VAULT_CLAIM to 4,
-                AnonTokenContext.BLOB_UPLOAD to 2,
-                AnonTokenContext.BLOB_READ to 2,
-                // ADR-0078; chosen, not measured.
-                AnonTokenContext.MAILBOX_WRITE to 2,
+                AnonTokenContext.DISCOVERY_LOOKUP to 16,
+                AnonTokenContext.DISCOVERY_REGISTER to 2,
+                AnonTokenContext.INVITE_CONSUME to 4,
+                AnonTokenContext.DS_KNOCK to 8,
+                AnonTokenContext.PUSH_REGISTER to 8,
+                AnonTokenContext.CHANNEL_SUBSCRIBE to 4,
+                AnonTokenContext.DIRECTORY_SEARCH to 4,
+                AnonTokenContext.VAULT_CLAIM to 8,
+                AnonTokenContext.BLOB_UPLOAD to 4,
+                AnonTokenContext.BLOB_READ to 4,
+                AnonTokenContext.MAILBOX_WRITE to 4,
+                AnonTokenContext.CALL_JOIN to 4,
             ),
             firstBatch,
         )
+        for (context in AnonTokenContext.entries) {
+            assertEquals(context.wire, anonPoolTargetFor(context), pool.held(context))
+        }
     }
 
     @Test
-    fun theContextListIsTheCoresElevenNamesInWireOrder() {
+    fun thePoolRefillsOnATimerNotOnSpend() = runTest {
+        val core = FakeCore()
+        val pool = pool(core, FakeApi(), { alice })
+        pool.bindSession()
+        settle()
+        val afterFirst = core.begun.size
+        // Spend every lookup token: not one issuance follows.
+        repeat(16) { pool.take(lookup) }
+        advanceUntilIdle()
+        assertEquals("no spend starts an issuance", afterFirst, core.begun.size)
+        val empty = runCatching { pool.take(lookup) }.exceptionOrNull()
+        advanceUntilIdle()
+        assertTrue("an empty context waits for the schedule", empty is AnonTokenUnavailable)
+        assertEquals("not even an empty one", afterFirst, core.begun.size)
+        // The timer fires: only what is missing is issued.
+        pool.runScheduledRefills()
+        advanceUntilIdle()
+        assertEquals(afterFirst + 1, core.begun.size)
+        assertEquals(Triple(lookup, 10L, 16), core.begun.last())
+        assertEquals(16, pool.held(lookup))
+    }
+
+    @Test
+    fun aScheduledRefillTopsUpOnlyWhatIsMissing() = runTest {
+        val core = FakeCore()
+        val pool = pool(core, FakeApi(), { alice })
+        pool.bindSession()
+        settle()
+        repeat(3) { pool.take(push) }
+        pool.runScheduledRefills()
+        advanceUntilIdle()
+        assertEquals(listOf(8, 3), core.issuesFor(push).map { it.third })
+        assertEquals(8, pool.held(push))
+    }
+
+    @Test
+    fun theScheduleIsRandomisedWithinItsWindows() = runTest {
+        val slept = Collections.synchronizedList(mutableListOf<Long>())
+        val pool = AnonTokenPool(
+            core = FakeCore(),
+            api = FakeApi(),
+            session = { alice },
+            scope = this,
+            nowSecs = { 1_000L },
+            scheduleScope = backgroundScope,
+            sleep = { ms ->
+                slept += ms
+                if (ms >= REFILL_INTERVAL_MIN_MS) awaitCancellation()
+            },
+            random = { 0.5 },
+        )
+        pool.bindSession()
+        settle()
+        val contexts = AnonTokenContext.entries.size
+        assertEquals(List(contexts) { INITIAL_REFILL_SPREAD_MS / 2 }, slept.filter { it < REFILL_INTERVAL_MIN_MS })
+        val interval = REFILL_INTERVAL_MIN_MS + (REFILL_INTERVAL_MAX_MS - REFILL_INTERVAL_MIN_MS) / 2
+        assertEquals(List(contexts) { interval }, slept.filter { it >= REFILL_INTERVAL_MIN_MS })
+    }
+
+    @Test
+    fun aTakeOnAFreshSessionWaitsForItsFirstRefill() = runTest {
+        val api = FakeApi()
+        api.gate = CompletableDeferred()
+        val pool = pool(FakeCore(), api, { alice })
+        val taken = backgroundScope.async { pool.take(lookup) }
+        runCurrent()
+        assertTrue("waiting on the first scheduled refill", !taken.isCompleted)
+        api.gate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(lookup, taken.await().context)
+    }
+
+    @Test
+    fun theContextListIsTheCoresTwelveNamesInWireOrder() {
         // The source of truth is `TokenContext::ALL` / `TokenContext::name` in
-        // `crates/lakko-anon-token/src/context.rs` (wire bytes 1..=11), which
+        // `crates/lakko-anon-token/src/context.rs` (wire bytes 1..=12), which
         // `anonTokenContexts()` in `crates/lakko-ffi-uniffi/src/anon_token.rs`
         // returns in that order. The host JVM cannot load the native library,
         // so the names are pinned here as literals: a context added to or
@@ -181,39 +298,10 @@ class AnonTokenPoolTest {
                 "blob-upload",
                 "blob-read",
                 "mailbox-write",
+                "call-join",
             ),
             AnonTokenContext.entries.map { it.wire },
         )
-    }
-
-    @Test
-    fun theStorageContextsDrawSmallBatchesAndRefillWhenEmpty() {
-        assertEquals(AnonBatchPolicy(batch = 4, refillBelow = 1), anonBatchPolicyFor(AnonTokenContext.VAULT_CLAIM))
-        assertEquals(AnonBatchPolicy(batch = 2, refillBelow = 1), anonBatchPolicyFor(AnonTokenContext.BLOB_UPLOAD))
-        assertEquals(AnonBatchPolicy(batch = 2, refillBelow = 1), anonBatchPolicyFor(AnonTokenContext.BLOB_READ))
-    }
-
-    @Test
-    fun aRareContextRefillsOnlyWhenEmpty() = runTest {
-        val core = FakeCore()
-        val pool = pool(core, FakeApi(), { alice })
-        pool.take(AnonTokenContext.PUSH_REGISTER) // batch of 4, three left
-        advanceUntilIdle()
-        repeat(2) { pool.take(AnonTokenContext.PUSH_REGISTER) }
-        advanceUntilIdle()
-        assertEquals("one left: no refill yet", 1, core.begun.size)
-        pool.take(AnonTokenContext.PUSH_REGISTER) // now empty
-        advanceUntilIdle()
-        assertEquals(2, core.begun.size)
-        assertEquals(4, pool.held(AnonTokenContext.PUSH_REGISTER))
-    }
-
-    @Test
-    fun aLookupStillRefillsBelowTwo() {
-        assertEquals(AnonBatchPolicy(batch = 8, refillBelow = 2), anonBatchPolicyFor(AnonTokenContext.DISCOVERY_LOOKUP))
-        for (context in AnonTokenContext.entries - AnonTokenContext.DISCOVERY_LOOKUP) {
-            assertEquals(context.wire, 1, anonBatchPolicyFor(context).refillBelow)
-        }
     }
 
     // ------------------------------------------------------------ persistence (S5)
@@ -224,23 +312,22 @@ class AnonTokenPoolTest {
         val core = FakeCore()
         val api = FakeApi()
         val first = pool(core, api, { alice }, store = store)
-        val spent = first.take(AnonTokenContext.DISCOVERY_LOOKUP) // seven left
-        assertEquals(7, store.persisted!!.tokens.size)
-        assertEquals("alice", store.persisted!!.owner)
-        assertTrue(store.persisted!!.tokens.none { it.headerValue == spent.headerValue })
+        val spent = first.take(lookup)
+        advanceUntilIdle()
+        assertEquals(15, store.held("alice", lookup))
+        assertTrue(store.pools["alice"]!!.tokens.none { it.headerValue == spent.headerValue })
+        val persisted = store.pools["alice"]!!.tokens.filter { it.context == lookup }.map { it.headerValue }.toSet()
 
         // A new process: a fresh pool over the same store.
         val relaunched = pool(core, api, { alice }, store = store)
-        val next = relaunched.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        assertEquals("t1", next.headerValue)
-        assertEquals("served from disk: no new issuance", 1, api.sessions.size)
-        assertEquals(6, store.persisted!!.tokens.size)
+        val next = relaunched.take(lookup)
+        assertTrue("served from disk", next.headerValue in persisted)
     }
 
     @Test
     fun deadEpochTokensAreDroppedOnLoad() = runTest {
         val store = MemoryStore()
-        store.persisted = PersistedAnonPool(
+        store.pools["alice"] = PersistedAnonPool(
             owner = "alice",
             tokens = listOf(
                 PooledAnonToken(AnonTokenContext.DS_KNOCK, 8, "dead"),
@@ -248,92 +335,70 @@ class AnonTokenPoolTest {
                 PooledAnonToken(AnonTokenContext.DS_KNOCK, 10, "live-current"),
             ),
         )
-        val api = FakeApi()
-        val pool = pool(FakeCore(), api, { alice }, store = store) // epoch 10
+        val pool = pool(FakeCore(), FakeApi(), { alice }, store = store) // epoch 10
         assertEquals("live-previous", pool.take(AnonTokenContext.DS_KNOCK).headerValue)
-        assertTrue(store.persisted!!.tokens.none { it.headerValue == "dead" })
-        assertEquals(listOf("live-current"), store.persisted!!.tokens.map { it.headerValue })
-        assertTrue(api.sessions.isEmpty())
+        assertTrue(store.pools["alice"]!!.tokens.none { it.headerValue == "dead" })
+        assertTrue(store.pools["alice"]!!.tokens.any { it.headerValue == "live-current" })
     }
 
     @Test
     fun logoutKeepsTheAccountsTokensForItsNextSignIn() = runTest {
         val store = MemoryStore()
         var who: AnonSession? = alice
-        val api = FakeApi()
-        val pool = pool(FakeCore(), api, { who }, store = store)
-        pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        assertEquals(7, store.persisted!!.tokens.size)
+        val pool = pool(FakeCore(), FakeApi(), { who }, store = store)
+        pool.take(lookup)
+        advanceUntilIdle()
+        assertEquals(15, store.held("alice", lookup))
         // Log out: the memory goes, the disk does not.
         pool.releaseSession()
         who = null
-        assertEquals(0, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
-        assertEquals(7, store.persisted!!.tokens.size)
+        assertEquals(0, pool.held(lookup))
+        assertEquals(15, store.held("alice", lookup))
         assertTrue(store.deletes.isEmpty())
-        // The same account signs in again: its tokens load, no new issuance.
+        val persisted = store.pools["alice"]!!.tokens.map { it.headerValue }.toSet()
+        // The same account signs in again: its tokens load.
         who = alice
-        assertEquals("t1", pool.take(AnonTokenContext.DISCOVERY_LOOKUP).headerValue)
-        assertEquals(1, api.sessions.size)
+        assertTrue(pool.take(lookup).headerValue in persisted)
     }
 
     @Test
     fun anotherAccountNeverLoadsThePersistedTokensAndLeavesThemOnDisk() = runTest {
         val store = MemoryStore()
-        pool(FakeCore(), FakeApi(), { alice }, store = store).take(AnonTokenContext.DISCOVERY_LOOKUP)
-        val aliceTokens = store.persisted!!.tokens
+        pool(FakeCore(), FakeApi(), { alice }, store = store).take(lookup)
+        advanceUntilIdle()
+        val aliceTokens = store.pools["alice"]!!.tokens
         val api = FakeApi()
-        val core = FakeCore()
-        val asBob = pool(core, api, { bob }, store = store)
-        asBob.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        // Bob's token came from an issuance to Bob, not from Alice's pool.
-        assertEquals(listOf(bob), api.sessions)
+        val asBob = pool(FakeCore(), api, { bob }, store = store)
+        val token = asBob.take(lookup)
+        advanceUntilIdle()
+        // Bob's tokens came from issuances to Bob, not from Alice's pool.
+        assertTrue(api.sessions.all { it == bob })
+        assertTrue(token.headerValue !in aliceTokens.map { it.headerValue })
         assertEquals("bob", store.pools["bob"]!!.owner)
         // Alice's stay on disk, untouched.
-        assertEquals(aliceTokens, store.persisted!!.tokens)
+        assertEquals(aliceTokens, store.pools["alice"]!!.tokens)
         assertTrue(store.deletes.isEmpty())
-    }
-
-    @Test
-    fun twoAccountsTokensCoexistAndASwitchBackLoadsTheFirstAccountsOwn() = runTest {
-        val store = MemoryStore()
-        var who = alice
-        val core = FakeCore()
-        val api = FakeApi()
-        val pool = pool(core, api, { who }, store = store)
-        val a1 = pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        who = bob
-        val b1 = pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        assertEquals(7, store.pools["alice"]!!.tokens.size)
-        assertEquals(7, store.pools["bob"]!!.tokens.size)
-        val bobHeld = store.pools["bob"]!!.tokens.map { it.headerValue }.toSet()
-        // Back to Alice: served from Alice's own pool, never one of Bob's.
-        who = alice
-        val a2 = pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        assertEquals(2, core.begun.size)
-        assertTrue(a2.headerValue !in bobHeld && a2.headerValue != b1.headerValue)
-        assertTrue(a2.headerValue != a1.headerValue)
-        assertEquals(6, store.pools["alice"]!!.tokens.size)
-        assertEquals(7, store.pools["bob"]!!.tokens.size)
     }
 
     @Test
     fun theWipeRemovesOnlyTheWipedAccountsTokens() = runTest {
         val store = MemoryStore()
         var who = alice
-        val api = FakeApi()
-        val pool = pool(FakeCore(), api, { who }, store = store)
-        pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
+        val pool = pool(FakeCore(), FakeApi(), { who }, store = store)
+        pool.take(lookup)
+        advanceUntilIdle()
         who = bob
-        pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
+        pool.take(lookup)
+        advanceUntilIdle()
         // Bob is held in memory; wiping Alice leaves Bob's memory and disk.
         pool.forgetAccount("alice")
-        assertEquals(null, store.pools["alice"])
-        assertEquals(7, store.pools["bob"]!!.tokens.size)
-        assertEquals(7, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
+        assertNull(store.pools["alice"])
+        assertEquals(15, store.held("bob", lookup))
+        assertEquals(15, pool.held(lookup))
         // Wiping Bob (held) drops his memory and his file.
         pool.forgetAccount("bob")
-        assertEquals(0, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
-        assertEquals(null, store.pools["bob"])
+        assertEquals(0, pool.held(lookup))
+        assertNull(store.pools["bob"])
         assertEquals(listOf("alice", "bob"), store.deletes)
     }
 
@@ -341,14 +406,11 @@ class AnonTokenPoolTest {
     fun aRefillInFlightAtTheWipeDoesNotWriteTheFileBack() = runTest {
         val store = MemoryStore()
         val api = FakeApi()
-        val pool = pool(FakeCore(), api, { alice }, store = store)
-        pool.take(AnonTokenContext.DISCOVERY_LOOKUP) // seven left, below none
-        // Drain to below the refill threshold with the issuer held, so a
-        // refill is in flight when the wipe runs.
         api.gate = CompletableDeferred()
-        repeat(6) { pool.take(AnonTokenContext.DISCOVERY_LOOKUP) }
+        val pool = pool(FakeCore(), api, { alice }, store = store)
+        pool.bindSession()
         runCurrent()
-        assertEquals("the refill is out, waiting on the issuer", 2, api.sessions.size)
+        assertTrue("the first refills are out, waiting on the issuer", api.sessions.isNotEmpty())
         pool.forgetAccount("alice")
         api.gate!!.complete(Unit)
         advanceUntilIdle()
@@ -361,11 +423,11 @@ class AnonTokenPoolTest {
         // and clears them only afterwards: a take in that window.
         val store = MemoryStore()
         val core = FakeCore()
-        val api = FakeApi()
-        val pool = pool(core, api, { alice }, store = store)
+        val pool = pool(core, FakeApi(), { alice }, store = store)
         pool.forgetAccount("alice")
-        val err = runCatching { pool.take(AnonTokenContext.DISCOVERY_LOOKUP) }.exceptionOrNull()
-        advanceUntilIdle()
+        val err = runCatching { pool.take(lookup) }.exceptionOrNull()
+        pool.bindSession()
+        settle()
         assertTrue(err is AnonTokenUnavailable)
         assertTrue("nothing issued for a forgotten account", core.begun.isEmpty())
         assertNull(store.pools["alice"])
@@ -374,12 +436,11 @@ class AnonTokenPoolTest {
     @Test
     fun aForgottenAccountsPoolIsNeitherSpentNorRewrittenByADetachedTake() = runTest {
         val store = MemoryStore()
-        val api = FakeApi()
-        val pool = pool(FakeCore(), api, { null }, store = store)
+        val pool = pool(FakeCore(), FakeApi(), { null }, store = store)
         pool.forgetAccount("alice")
         // A file that reappeared by some other route is not read back.
-        store.pools["alice"] = PersistedAnonPool("alice", listOf(PooledAnonToken(AnonTokenContext.PUSH_REGISTER, 10, "old")))
-        val t = pool.takeDetached(alice, AnonTokenContext.PUSH_REGISTER)
+        store.pools["alice"] = PersistedAnonPool("alice", listOf(PooledAnonToken(push, 10, "old")))
+        val t = pool.takeDetached(alice, push)
         assertTrue(t.headerValue != "old")
         assertEquals("left as it was, never rewritten", "old", store.pools["alice"]!!.tokens.single().headerValue)
     }
@@ -390,29 +451,22 @@ class AnonTokenPoolTest {
         val pool = pool(FakeCore(), FakeApi(), { alice }, store = store)
         pool.forgetAccount("alice")
         pool.accountLanded("alice")
-        pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        assertEquals(7, store.pools["alice"]!!.tokens.size)
+        pool.take(lookup)
+        advanceUntilIdle()
+        assertEquals(15, store.held("alice", lookup))
     }
 
     @Test
     fun aWipeRecordedBeforeThePoolWasBuiltStillHolds() = runTest {
         val store = MemoryStore()
-        val core = FakeCore()
-        val pool = AnonTokenPool(
-            core = core,
-            api = FakeApi(),
-            session = { alice },
-            scope = this,
-            nowSecs = { 1_000L },
-            store = store,
-            forgottenAccounts = setOf("alice"),
-        )
-        assertTrue(runCatching { pool.take(AnonTokenContext.DISCOVERY_LOOKUP) }.exceptionOrNull() is AnonTokenUnavailable)
+        val pool = pool(FakeCore(), FakeApi(), { alice }, store = store, forgotten = setOf("alice"))
+        assertTrue(runCatching { pool.take(lookup) }.exceptionOrNull() is AnonTokenUnavailable)
         assertNull(store.pools["alice"])
         // Bob is not affected.
-        val bobPool = AnonTokenPool(core, FakeApi(), { bob }, this, nowSecs = { 1_000L }, store = store, forgottenAccounts = setOf("alice"))
-        bobPool.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        assertEquals(7, store.pools["bob"]!!.tokens.size)
+        val bobPool = pool(FakeCore(), FakeApi(), { bob }, store = store, forgotten = setOf("alice"))
+        bobPool.take(lookup)
+        advanceUntilIdle()
+        assertEquals(15, store.held("bob", lookup))
     }
 
     @Test
@@ -420,12 +474,13 @@ class AnonTokenPoolTest {
         val store = MemoryStore()
         var who: AnonSession? = alice
         val pool = pool(FakeCore(), FakeApi(), { who }, store = store)
-        pool.take(AnonTokenContext.PUSH_REGISTER)
-        assertEquals(3, store.persisted!!.tokens.size)
+        pool.take(push)
+        advanceUntilIdle()
+        assertEquals(7, store.held("alice", push))
         pool.releaseSession()
         who = null
-        pool.takeDetached(alice, AnonTokenContext.PUSH_REGISTER)
-        assertEquals(2, store.persisted!!.tokens.size)
+        pool.takeDetached(alice, push)
+        assertEquals(6, store.held("alice", push))
     }
 
     @Test
@@ -434,73 +489,36 @@ class AnonTokenPoolTest {
         var who: AnonSession? = alice
         val api = FakeApi()
         val pool = pool(FakeCore(), api, { who }, store = store)
-        pool.take(AnonTokenContext.PUSH_REGISTER) // four drawn, three left
-        assertEquals(3, store.persisted!!.tokens.size)
+        pool.take(push)
+        advanceUntilIdle()
+        assertEquals(7, store.held("alice", push))
         pool.releaseSession()
         who = null
-        val t = pool.takeDetached(alice, AnonTokenContext.PUSH_REGISTER)
-        assertEquals(AnonTokenContext.PUSH_REGISTER, t.context)
-        assertEquals("served from disk: no new issuance", 1, api.sessions.size)
-        assertEquals(2, store.persisted!!.tokens.size)
+        val issuedBefore = api.sessions.size
+        val t = pool.takeDetached(alice, push)
+        assertEquals(push, t.context)
+        assertEquals("served from disk: no new issuance", issuedBefore, api.sessions.size)
+        assertEquals(6, store.held("alice", push))
         // Bob's detached take never draws from Alice's pool.
-        pool.takeDetached(bob, AnonTokenContext.PUSH_REGISTER)
+        pool.takeDetached(bob, push)
         assertEquals(bob, api.sessions.last())
-        assertEquals(2, store.persisted!!.tokens.size)
+        assertEquals(6, store.held("alice", push))
     }
 
-    // ------------------------------------------------------------ take + refill
-
-    @Test
-    fun anEmptyPoolWaitsForOneBatchOfEightThenServesFromIt() = runTest {
-        val core = FakeCore()
-        val api = FakeApi()
-        val pool = pool(core, api, { alice })
-        val first = pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        assertEquals("t0", first.headerValue)
-        assertEquals(listOf(Triple(AnonTokenContext.DISCOVERY_LOOKUP, 10L, 8)), core.begun)
-        // Seven left: the next six come from the pool with no new issuance.
-        repeat(6) { pool.take(AnonTokenContext.DISCOVERY_LOOKUP) }
-        assertEquals(1, core.begun.size)
-        assertEquals(1, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
-        // Below two: this take refills in the background.
-        pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        advanceUntilIdle()
-        assertEquals(2, core.begun.size)
-        assertEquals(8, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
-        assertEquals(listOf(alice, alice), api.sessions)
-    }
+    // ------------------------------------------------------------ holding
 
     @Test
     fun aContextNeverHoldsMoreThanThirtyTwo() = runTest {
         val core = FakeCore()
-        val api = FakeApi()
-        val pool = AnonTokenPool(
-            core,
-            api,
-            { alice },
-            this,
-            nowSecs = { 1_000L },
-            policy = { AnonBatchPolicy(batch = 8, refillBelow = 100) },
-        )
-        // A threshold above the cap: every take asks for a refill, the cap stops it.
-        repeat(6) {
-            pool.take(AnonTokenContext.PUSH_REGISTER)
-            advanceUntilIdle()
+        val pool = pool(core, FakeApi(), { alice }, target = { 100 })
+        pool.bindSession()
+        settle()
+        pool.runScheduledRefills()
+        advanceUntilIdle()
+        for (context in AnonTokenContext.entries) {
+            assertTrue(pool.held(context) <= AnonTokenPool.MAX_HELD)
         }
-        assertTrue(pool.held(AnonTokenContext.PUSH_REGISTER) <= AnonTokenPool.MAX_HELD)
-        assertTrue(core.begun.all { it.third in 1..8 })
-    }
-
-    @Test
-    fun contextsAreSeparate() = runTest {
-        val core = FakeCore()
-        val pool = pool(core, FakeApi(), { alice })
-        pool.take(AnonTokenContext.DS_KNOCK)
-        pool.take(AnonTokenContext.INVITE_CONSUME)
-        assertEquals(
-            listOf(AnonTokenContext.DS_KNOCK, AnonTokenContext.INVITE_CONSUME),
-            core.begun.map { it.first },
-        )
+        assertTrue(core.begun.all { it.third in 1..AnonTokenPool.MAX_HELD })
     }
 
     @Test
@@ -508,44 +526,54 @@ class AnonTokenPoolTest {
         var now = 1_000L
         val core = FakeCore()
         val pool = pool(core, FakeApi(), { alice }, now = { now })
-        pool.take(AnonTokenContext.DISCOVERY_LOOKUP) // epoch 10, seven left
+        pool.take(lookup) // epoch 10
+        advanceUntilIdle()
         now = 1_250L // epoch 12: the epoch-10 tokens are dead
-        val t = pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
+        assertTrue(runCatching { pool.take(lookup) }.exceptionOrNull() is AnonTokenUnavailable)
+        pool.runScheduledRefills()
+        advanceUntilIdle()
+        val t = pool.take(lookup)
         assertEquals(12L, t.epoch)
-        assertEquals(12L, core.begun.last().second)
+        assertEquals(12L, core.issuesFor(lookup).last().second)
     }
 
     // ------------------------------------------------------------ release
 
     @Test
-    fun logoutReleasesTheMemory() = runTest {
+    fun logoutReleasesTheMemoryAndStopsTheSchedule() = runTest {
         val core = FakeCore()
         val pool = pool(core, FakeApi(), { alice })
-        pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        assertEquals(7, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
+        pool.bindSession()
+        settle()
+        assertEquals(16, pool.held(lookup))
         pool.releaseSession()
-        assertEquals(0, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
+        assertEquals(0, pool.held(lookup))
+        val issued = core.begun.size
+        pool.runScheduledRefills()
+        advanceUntilIdle()
+        assertEquals("a released pool refills nothing", issued, core.begun.size)
     }
 
     @Test
     fun anAccountSwitchNeverHandsOverTheOtherAccountsTokens() = runTest {
         var who = alice
-        val core = FakeCore()
         val api = FakeApi()
-        val pool = pool(core, api, { who })
-        val a = pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
+        val pool = pool(FakeCore(), api, { who })
+        val a = pool.take(lookup)
+        advanceUntilIdle()
         who = bob
-        val b = pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
+        val b = pool.take(lookup)
         assertTrue(a.headerValue != b.headerValue)
         assertEquals(bob, api.sessions.last())
-        assertEquals(2, core.begun.size)
     }
 
     @Test
     fun noSessionMeansNoTokenAndNoIssuance() = runTest {
         val core = FakeCore()
         val pool = pool(core, FakeApi(), { null })
-        val err = runCatching { pool.take(AnonTokenContext.PUSH_REGISTER) }.exceptionOrNull()
+        pool.bindSession()
+        val err = runCatching { pool.take(push) }.exceptionOrNull()
+        advanceUntilIdle()
         assertTrue(err is AnonTokenUnavailable)
         assertTrue(core.begun.isEmpty())
     }
@@ -555,11 +583,11 @@ class AnonTokenPoolTest {
         val core = FakeCore()
         val api = FakeApi()
         val pool = pool(core, api, { null })
-        val t = pool.takeDetached(alice, AnonTokenContext.PUSH_REGISTER)
-        assertEquals("t0", t.headerValue)
-        assertEquals(listOf(alice), api.sessions)
+        val t = pool.takeDetached(alice, push)
+        assertEquals(push, t.context)
+        assertEquals(listOf(alice), api.sessions.toList())
         assertEquals(1, core.begun.single().third)
-        assertEquals(0, pool.held(AnonTokenContext.PUSH_REGISTER))
+        assertEquals(0, pool.held(push))
     }
 
     // ------------------------------------------------------------ issuer outcomes
@@ -569,10 +597,11 @@ class AnonTokenPoolTest {
         val core = FakeCore(goodKey = "GOOD")
         val api = FakeApi(key = "SOMEONE-ELSES")
         val pool = pool(core, api, { alice })
-        val err = runCatching { pool.take(AnonTokenContext.DISCOVERY_LOOKUP) }.exceptionOrNull()
+        val err = runCatching { pool.take(lookup) }.exceptionOrNull()
+        advanceUntilIdle()
         assertTrue(err is AnonTokenUnavailable)
-        assertEquals(listOf("SOMEONE-ELSES"), core.keysUsed)
-        assertEquals("nothing of the batch is kept", 0, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
+        assertTrue(core.keysUsed.isNotEmpty() && core.keysUsed.all { it == "SOMEONE-ELSES" })
+        assertEquals("nothing of the batch is kept", 0, pool.held(lookup))
     }
 
     @Test
@@ -580,23 +609,27 @@ class AnonTokenPoolTest {
         var now = 1_000L
         val core = FakeCore()
         val api = FakeApi()
-        api.scripted += AnonIssueOutcome.QuotaExhausted(retryAfterSecs = 50)
+        api.script(lookup, AnonIssueOutcome.QuotaExhausted(retryAfterSecs = 50))
         val pool = pool(core, api, { alice }, now = { now })
-        val err = runCatching { pool.take(AnonTokenContext.DISCOVERY_LOOKUP) }.exceptionOrNull()
+        val err = runCatching { pool.take(lookup) }.exceptionOrNull()
         assertTrue(err is AnonTokenQuotaExhausted)
         assertEquals(50L, (err as AnonTokenQuotaExhausted).retryAfterSecs)
-        val again = runCatching { pool.take(AnonTokenContext.DISCOVERY_LOOKUP) }.exceptionOrNull()
+        pool.runScheduledRefills()
+        advanceUntilIdle()
+        val again = runCatching { pool.take(lookup) }.exceptionOrNull()
         assertTrue(again is AnonTokenQuotaExhausted)
-        assertEquals("the issuer is not asked again", 1, api.sessions.size)
+        assertEquals("the issuer is not asked again", 1, core.issuesFor(lookup).size)
         now = 1_060L
-        pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        assertEquals(2, api.sessions.size)
+        pool.runScheduledRefills()
+        advanceUntilIdle()
+        pool.take(lookup)
+        assertEquals(2, core.issuesFor(lookup).size)
     }
 
     @Test
     fun aDisabledIssuerIsItsOwnFailure() = runTest {
         val api = FakeApi()
-        api.scripted += AnonIssueOutcome.Disabled
+        api.script(AnonTokenContext.DS_KNOCK, AnonIssueOutcome.Disabled)
         val err = runCatching {
             pool(FakeCore(), api, { alice }).take(AnonTokenContext.DS_KNOCK)
         }.exceptionOrNull()
@@ -607,28 +640,30 @@ class AnonTokenPoolTest {
     fun aDisagreeingEpochIsRebuiltOnceForTheIssuersEpoch() = runTest {
         val core = FakeCore()
         val api = FakeApi()
-        api.scripted += AnonIssueOutcome.EpochNotIssuable(currentEpoch = 11)
+        api.script(lookup, AnonIssueOutcome.EpochNotIssuable(currentEpoch = 11))
         val pool = pool(core, api, { alice })
-        val t = pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        assertEquals(11L, t.epoch)
-        assertEquals(listOf(10L, 11L), core.begun.map { it.second })
-        // The correction sticks: the next batch is built for 11 straight away.
-        repeat(7) { pool.take(AnonTokenContext.DISCOVERY_LOOKUP) }
+        val t = pool.take(lookup)
         advanceUntilIdle()
-        assertEquals(11L, core.begun.last().second)
+        assertEquals(11L, t.epoch)
+        assertEquals(listOf(10L, 11L), core.issuesFor(lookup).map { it.second })
+        // The correction sticks: the next batch is built for 11 straight away.
+        repeat(3) { pool.take(lookup) }
+        pool.runScheduledRefills()
+        advanceUntilIdle()
+        assertEquals(11L, core.issuesFor(lookup).last().second)
     }
 
     @Test
     fun aTakeThatOutwaitsTheRefillFailsAsUnavailable() = runTest {
         val api = FakeApi()
         api.gate = CompletableDeferred()
-        val pool = AnonTokenPool(FakeCore(), api, { alice }, this, nowSecs = { 1_000L }, waitMs = 1_000)
-        val err = runCatching { pool.take(AnonTokenContext.DISCOVERY_LOOKUP) }.exceptionOrNull()
+        val pool = pool(FakeCore(), api, { alice }, waitMs = 1_000)
+        val err = runCatching { pool.take(lookup) }.exceptionOrNull()
         assertTrue(err is AnonTokenUnavailable)
         api.gate!!.complete(Unit)
         advanceUntilIdle()
         // The refill still lands for the next action.
-        assertEquals(8, pool.held(AnonTokenContext.DISCOVERY_LOOKUP))
+        assertEquals(16, pool.held(lookup))
     }
 
     // ------------------------------------------------------------ retry once
@@ -705,10 +740,20 @@ class AnonTokenPoolTest {
         )
         val core = FakeCore(goodKey = "GOOD")
         // The MockEngine answers on a real dispatcher, so this runs in real
-        // time rather than the test scheduler's virtual time.
-        val pool = AnonTokenPool(core, api, { alice }, this, nowSecs = { 1_000L })
+        // time rather than the test scheduler's virtual time. Only the lookup
+        // context is scheduled, and the schedule's own scope is cancelled at
+        // the end.
+        val scheduleScope = CoroutineScope(SupervisorJob())
+        val pool = AnonTokenPool(
+            core, api, { alice }, this, nowSecs = { 1_000L },
+            target = { if (it == AnonTokenContext.DISCOVERY_LOOKUP) 2 else 0 },
+            scheduleScope = scheduleScope,
+            sleep = { ms -> if (ms >= REFILL_INTERVAL_MIN_MS) awaitCancellation() },
+            random = { 0.0 },
+        )
         pool.take(AnonTokenContext.DISCOVERY_LOOKUP)
-        assertEquals(listOf("GOOD"), core.keysUsed)
+        scheduleScope.cancel()
+        assertEquals(listOf("GOOD"), core.keysUsed.toList())
         val issue = seen.first { it.path == "/auth/auth/tokens" }
         assertEquals(HttpMethod.Post, issue.method)
         assertEquals("Bearer bearer-a", issue.authorization)

@@ -61,8 +61,11 @@ final class ScopedDiscoveryDeviceSyncTests: XCTestCase {
         let c = try center()
         c.updateSetting(setContactsOfContacts(setting: c.setting, on: true))
         let before = c.fofGrant()
+        // ADR-0078 section 9: the setting change rotated this device's group
+        // and channel keys, which the incoming state lacks, so the two are
+        // merged and the merge goes back to the other devices.
         XCTAssertEqual(c.adoptDeviceEnvelope(try reachStateEnvelope(fofVersion: 7, stamp: 500)),
-                       .adoptedReachState)
+                       .mergedReachState)
         XCTAssertEqual(c.fofGrant()?.version, 7)
         XCTAssertNotEqual(c.fofGrant()?.seed, before?.seed)
     }
@@ -97,10 +100,11 @@ final class ScopedDiscoveryDeviceSyncTests: XCTestCase {
         let localStamp = try decodeReachStateEnvelope(plaintext: try XCTUnwrap(sent.last)).updatedAtMs
         sent.removeAll()
 
-        // The other device rotated this account's `member` key for group A,
-        // not knowing about the `fof` rotation, stamped later.
+        // The other device rotated this account's `member` key (one for the
+        // account, ADR-0078 section 9), not knowing about the `fof` rotation,
+        // stamped later.
         let theirs = try composeReachStateEnvelope(state: FfiReachState(
-            entries: [FfiReachStateEntry(class: .member, scopeId: groupA, version: 2)],
+            entries: [FfiReachStateEntry(class: .member, scopeId: Data(), version: 2)],
             updatedAtMs: localStamp + 10))
         XCTAssertEqual(c.adoptDeviceEnvelope(theirs), .mergedReachState)
         XCTAssertEqual(c.fofGrant()?.version, 1, "this device's rotation survives")
@@ -112,7 +116,7 @@ final class ScopedDiscoveryDeviceSyncTests: XCTestCase {
         let merged = try decodeReachStateEnvelope(plaintext: sent[0])
         XCTAssertGreaterThan(merged.updatedAtMs, localStamp + 10)
         XCTAssertEqual(ReachRules.version(of: .fof, scope: Data(), in: merged), 1)
-        XCTAssertEqual(ReachRules.version(of: .member, scope: groupA, in: merged), 2)
+        XCTAssertEqual(ReachRules.version(of: .member, scope: Data(), in: merged), 2)
         XCTAssertEqual(c.deviceEnvelopes(accountIdB64: "acct").last, sent[0],
                        "kept exactly as sent, stamp included")
 
@@ -149,9 +153,12 @@ final class ScopedDiscoveryDeviceSyncTests: XCTestCase {
         XCTAssertTrue(sent.isEmpty)
         c.updateSetting(chooseVisibilityMode(setting: c.setting, mode: .everyone))
         c.rotate(.fof)
-        XCTAssertEqual(sent.count, 2)
+        // The setting, the state after the setting's group and channel
+        // rotation (ADR-0078 section 9), and the state after the fof rotation.
+        XCTAssertEqual(sent.count, 3)
         XCTAssertEqual(try decodeVisibilityEnvelope(plaintext: sent[0]).updatedAtMs, c.setting.updatedAtMs)
-        XCTAssertEqual(c.deviceEnvelopes(accountIdB64: "acct"), sent)
+        // A new device gets the setting and the newest state only.
+        XCTAssertEqual(c.deviceEnvelopes(accountIdB64: "acct"), [sent[0], sent[2]])
     }
 
     /// The untouched default (stamp 0) is not sent to a new device: it holds

@@ -335,6 +335,14 @@ public object AnonTokens {
         sessionSource = source
     }
 
+    /** The signed-in session changed: bind it and start its refill schedule
+     *  (ADR-0078 section 8), so the pool fills ahead of any spend. Never
+     *  throws; a pool that cannot be built (no native library in a host
+     *  test) stays unbuilt. */
+    public fun sessionBound() {
+        runCatching { pool().bindSession() }
+    }
+
     /** Log out: drop the tokens held in memory. The account's persisted
      *  tokens stay for its next sign-in (maintainer decision, 2026-10-01). */
     public fun releaseSession() {

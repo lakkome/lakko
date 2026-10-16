@@ -4,14 +4,22 @@
 import Foundation
 import LakkoCore
 
+// ADR-0078 section 2: `POST /call/jwt` takes no session. It spends one
+// anonymous `call-join` token (``AnonTokenRoute``, on ``AnonymousHTTP``) and
+// names the ROOM, computed here from the call id (`sfuRoomForCall`), so
+// neither the issuer nor the SFU sees the call id or learns which account
+// joins. The token names the room and a random peer id; a TURN credential
+// with a random username tag comes back beside it.
+
 /// Client-side HTTP transport for the Phase 3b4 call-admission JWT
 /// pipeline — iOS mirror of the web `CallJwtClient` (apps/web/src/calls/
 /// call-jwt-client.ts).
 ///
-///   * ``mint(callId:role:)``             — `POST /call/jwt` with a
-///                                          bearer session token.
-///                                          Returns the JWT + parsed
-///                                          (UNVERIFIED) claims.
+///   * ``mint(callId:role:)``             — `POST /call/jwt`, paid for by
+///                                          one anonymous `call-join`
+///                                          token. Returns the JWT, its
+///                                          parsed (UNVERIFIED) claims and
+///                                          the TURN credential.
 ///   * ``fetchJwks()``                    — `GET /.well-known/jwks.json`.
 ///                                          Anonymous; caller caches.
 ///   * ``parseUnverified(jwt:)``          — Wraps the UniFFI
@@ -41,21 +49,25 @@ public final class CallJwtClient: @unchecked Sendable {
     /// `URLSession` is injectable so tests can use an ephemeral
     /// session with a stub `URLProtocol`.
     private let session: URLSession
+    private let anonymousSession: URLSession
+    private let tokens: AnonTokenSource
 
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
     private let stateLock = NSLock()
-    private var sessionToken: String?
     private var jwksCache: JwksCacheEntry?
 
     public init(
         baseURL: String = CallJwtClient.defaultBaseURL,
         session: URLSession = .shared,
-        jwksTtl: TimeInterval = CallJwtClient.defaultJwksTtl
+        jwksTtl: TimeInterval = CallJwtClient.defaultJwksTtl,
+        tokens: AnonTokenSource = AnonTokenPool.shared
     ) {
         self.baseURL = baseURL
         self.session = session
+        self.anonymousSession = AnonymousHTTP.session(pairedWith: session)
+        self.tokens = tokens
         self.jwksTtl = max(jwksTtl, 0)
         let encoder = JSONEncoder()
         encoder.outputFormatting = []
@@ -63,12 +75,6 @@ public final class CallJwtClient: @unchecked Sendable {
         self.decoder = JSONDecoder()
     }
 
-    /// Rebind the bearer token. `nil` clears (sign-out).
-    public func setSessionToken(_ token: String?) {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        sessionToken = token
-    }
 
     /// Drop the cached JWKS doc. Call after a verify failure
     /// that suggests a key rotation has happened (the
@@ -80,11 +86,6 @@ public final class CallJwtClient: @unchecked Sendable {
         jwksCache = nil
     }
 
-    private func currentSessionToken() -> String? {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return sessionToken
-    }
 
     private func cachedJwksIfFresh() -> Data? {
         stateLock.lock()
@@ -102,49 +103,72 @@ public final class CallJwtClient: @unchecked Sendable {
 
     // MARK: - Mint
 
-    /// `POST /call/jwt` — mints a JWT scoped to
-    /// `(account_id-from-bearer, callId, role)`. Returns the
-    /// raw JWS Compact representation along with the
-    /// **unverified** parsed claims for UI convenience.
-    ///
-    /// - Throws ``CallJwtClientError/argument(_:)`` when `callId`
-    ///   doesn't match `^[0-9a-f]{32}$` or no bearer token is set.
-    /// - Throws ``CallJwtClientError/http(status:endpoint:body:)``
-    ///   on a non-2xx response (401 on missing / bad bearer,
-    ///   400 on the server's own `call_id` validation, 500 on
-    ///   a mint failure).
-    /// - Throws ``CallJwtClientError/network(endpoint:underlying:)``
-    ///   on transport errors.
-    public func mint(callId: String, role: CallRole = .participant) async throws -> MintCallJwtResult {
-        guard CallJwtClient.isValidCallId(callId) else {
-            throw CallJwtClientError.argument(
-                "call_id must be 32 lower-case hex chars, got \(callId.count) chars"
-            )
+    /// ``mint(room:role:)`` for the room of the 16-byte `callId`.
+    public func mint(callId: Data, role: CallRole = .participant) async throws -> MintCallJwtResult {
+        let room: String
+        do {
+            room = try sfuRoomForCall(callId: callId)
+        } catch {
+            throw CallJwtClientError.argument("call id must be 16 bytes: \(error)")
         }
-        guard let token = currentSessionToken() else {
+        return try await mint(room: room, role: role)
+    }
+
+    /// `POST /call/jwt` for `room` (64 lower-case hex), paid for by one
+    /// `call-join` token. Throws ``AnonTokenUnavailable`` when no token can
+    /// be had, ``CallJwtClientError/http(status:endpoint:body:)`` on any other
+    /// non-2xx (`429 room-admission-limit` included).
+    public func mint(room: String, role: CallRole = .participant) async throws -> MintCallJwtResult {
+        guard CallJwtClient.isValidRoom(room) else {
             throw CallJwtClientError.argument(
-                "session token is not bound — call setSessionToken before mint()"
+                "room must be 64 lower-case hex chars, got \(room.count) chars"
             )
         }
         let endpoint = "/call/jwt"
         let url = try buildURL(endpoint: endpoint)
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let body: Data
         do {
-            request.httpBody = try encoder.encode(IssueRequest(callId: callId, role: role))
+            body = try encoder.encode(IssueRequest(room: room, role: role))
         } catch {
-            throw CallJwtClientError.argument(
-                "failed to encode \(endpoint) body: \(error)"
+            throw CallJwtClientError.argument("failed to encode \(endpoint) body: \(error)")
+        }
+        let (data, http) = try await AnonTokenRoute.send(context: .callJoin, tokens: tokens) { header in
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(header, forHTTPHeaderField: AnonTokenRoute.headerName)
+            request.httpBody = body
+            let raw: (Data, URLResponse)
+            do {
+                raw = try await AntiCensorshipTransport.perform(
+                    request, session: self.anonymousSession, config: .current)
+            } catch {
+                throw CallJwtClientError.network(endpoint: endpoint, underlying: error)
+            }
+            guard let http = raw.1 as? HTTPURLResponse else {
+                throw CallJwtClientError.http(status: 0, endpoint: endpoint, body: "non-HTTP response")
+            }
+            return (raw.0, http)
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw CallJwtClientError.http(
+                status: http.statusCode,
+                endpoint: endpoint,
+                body: truncate(String(data: data, encoding: .utf8) ?? "<binary>")
             )
         }
-        let response: IssueResponse = try await execute(endpoint: endpoint, request: request)
+        let response: IssueResponse
+        do {
+            response = try decoder.decode(IssueResponse.self, from: data)
+        } catch {
+            throw CallJwtClientError.http(status: 200, endpoint: endpoint, body: "decode failed: \(error)")
+        }
         let claims = try parseUnverified(jwt: response.jwt)
         return MintCallJwtResult(
             jwt: response.jwt,
             expiresAtUnixSecs: response.expiresAtUnixSecs,
-            claims: claims
+            claims: claims,
+            turn: response.turn.flatMap(TurnCredential.init(wire:))
         )
     }
 
@@ -263,17 +287,9 @@ public final class CallJwtClient: @unchecked Sendable {
         return false
     }
 
-    private static let callIdPattern: NSRegularExpression = {
-        do {
-            return try NSRegularExpression(pattern: "^[0-9a-f]{32}$", options: [])
-        } catch {
-            preconditionFailure("call_id regex compile failed: \(error)")
-        }
-    }()
-
-    private static func isValidCallId(_ callId: String) -> Bool {
-        let range = NSRange(callId.startIndex..., in: callId)
-        return callIdPattern.firstMatch(in: callId, options: [], range: range) != nil
+    /// Whether `room` is 64 lower-case hex characters.
+    static func isValidRoom(_ room: String) -> Bool {
+        room.utf8.count == 64 && room.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
     }
 
     private func buildURL(endpoint: String) throws -> URL {
@@ -350,8 +366,11 @@ public enum CallRole: String, Codable, Sendable, Equatable {
 public struct ParsedCallJwt: Equatable, Sendable {
     public let iss: String
     public let aud: String
-    public let sub: String
-    public let callId: String
+    /// The room, 64 lower-case hex characters (ADR-0078 section 2: no
+    /// account, no call id in the token).
+    public let room: String
+    /// The SFU peer id, 32 lower-case hex characters, random per token.
+    public let peerId: String
     public let role: CallRole
     public let iat: UInt64
     public let exp: UInt64
@@ -360,8 +379,8 @@ public struct ParsedCallJwt: Equatable, Sendable {
     init(ffi: FfiCallJwtClaims) {
         self.iss = ffi.iss
         self.aud = ffi.aud
-        self.sub = ffi.sub
-        self.callId = ffi.callId
+        self.room = ffi.room
+        self.peerId = ffi.peerId
         self.role = ParsedCallJwt.role(from: ffi.role)
         self.iat = ffi.iat
         self.exp = ffi.exp
@@ -387,6 +406,32 @@ public struct MintCallJwtResult: Equatable, Sendable {
     public let jwt: String
     public let expiresAtUnixSecs: UInt64
     public let claims: ParsedCallJwt
+    /// The TURN credential minted beside the token, or `nil` when the
+    /// deployment has no relay (the call proceeds on STUN alone).
+    public let turn: TurnCredential?
+}
+
+/// A TURN credential in the coturn REST shape (`services/auth/src/turn.rs`):
+/// the username's tag is random per credential (ADR-0078 section 2).
+public struct TurnCredential: Equatable, Sendable {
+    public let urls: [String]
+    public let username: String
+    public let password: String
+
+    init?(wire: TurnCredentialWire) {
+        let urls = wire.urls.filter { !$0.isEmpty }
+        guard !urls.isEmpty, !wire.username.isEmpty, !wire.password.isEmpty else { return nil }
+        self.urls = urls
+        self.username = wire.username
+        self.password = wire.password
+    }
+}
+
+/// The `turn` object of a `POST /call/jwt` answer.
+struct TurnCredentialWire: Decodable {
+    let urls: [String]
+    let username: String
+    let password: String
 }
 
 /// Typed errors surfaced by ``CallJwtClient``.
@@ -419,25 +464,21 @@ private struct JwksCacheEntry {
     let fetchedAt: Date
 }
 
-/// `POST /call/jwt` request shape — snake_case keys match
-/// the server. Kept private; callers use ``CallJwtClient/mint(callId:role:)``.
+/// `POST /call/jwt` request shape: the room and the role, nothing else.
 private struct IssueRequest: Encodable {
-    let callId: String
+    let room: String
     let role: CallRole
-
-    enum CodingKeys: String, CodingKey {
-        case callId = "call_id"
-        case role
-    }
 }
 
 /// `POST /call/jwt` response shape.
 private struct IssueResponse: Decodable {
     let jwt: String
     let expiresAtUnixSecs: UInt64
+    let turn: TurnCredentialWire?
 
     enum CodingKeys: String, CodingKey {
         case jwt
         case expiresAtUnixSecs = "expires_at_unix_secs"
+        case turn
     }
 }

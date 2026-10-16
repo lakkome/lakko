@@ -259,21 +259,24 @@ final class CallKitIncomingTests: XCTestCase {
         XCTAssertNotEqual(PushTokenKind.alert.provider, PushTokenKind.voip.provider)
     }
 
-    func testTheVoipProviderSerialisesAsTheServerWouldNameIt() {
-        XCTAssertEqual(PushClient.Provider.apnsVoip.rawValue, "apns_voip")
+    func testTheVoipTokenRidesTheSubscriptionBesideTheAlertToken() {
+        let suite = "push-tokens-\(UUID().uuidString)"
+        let tokens = PushDeviceTokens(defaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        tokens.setAlert(Data([1]))
+        tokens.setVoip(Data([2]))
+        XCTAssertEqual(tokens.entries().map(\.provider), [.apns, .apnsVoip])
     }
 
-    func testAnUnchangedTokenIsNotReRegistered() {
-        let token = Data([1, 2, 3])
-        XCTAssertTrue(PushTokenRegistration.shouldRegister(token: token, lastRegistered: nil))
-        XCTAssertFalse(PushTokenRegistration.shouldRegister(token: token, lastRegistered: token))
-        XCTAssertTrue(
-            PushTokenRegistration.shouldRegister(token: token, lastRegistered: Data([9]))
-        )
-    }
-
-    func testAnEmptyTokenIsNeverSent() {
-        XCTAssertFalse(PushTokenRegistration.shouldRegister(token: Data(), lastRegistered: nil))
+    func testAnUnchangedTokenIsNotAChange() {
+        let suite = "push-tokens-\(UUID().uuidString)"
+        let tokens = PushDeviceTokens(defaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        XCTAssertTrue(tokens.setAlert(Data([1, 2, 3])))
+        XCTAssertFalse(tokens.setAlert(Data([1, 2, 3])), "the same token again is not a change")
+        XCTAssertTrue(tokens.setAlert(Data([9])))
+        XCTAssertFalse(tokens.setAlert(Data()) && tokens.alert != nil, "an empty token is never stored")
+        XCTAssertNil(tokens.alert)
     }
 
     // MARK: - The name mirror

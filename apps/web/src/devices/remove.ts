@@ -23,8 +23,8 @@
  * The DeviceGroup journal is the existing
  * `POST/GET /ds/group/{group_id_hex}/messages` endpoint —
  * `group_id` is the deterministic
- * `BLAKE3("lakko-device-group/v1" || account_id)` value the
- * server already accepts as opaque bytes.
+ * `BLAKE3-derive-key("lakko/device-group/id/v2", account_seed)` value
+ * (ADR-0078 section 6) the server accepts as opaque bytes.
  */
 import {
   ensureDeviceGroup,

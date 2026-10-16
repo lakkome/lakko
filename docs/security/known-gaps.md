@@ -73,7 +73,7 @@ entry's status line, not a mechanical fact.
 | [G-47](./known-gaps.md#g-47) | A fresh identity's phrase rule (ADR-0077 decision 3) | Partly closed | the window between a server reset that succeeded and the owed marker; owed-marking rules still differ |
 | [G-48](./known-gaps.md#g-48) | Account store gate coverage (ADR-0077 decision 4) | Partly closed | the stores and paths listed in the entry |
 | [G-49](./known-gaps.md#g-49) | An overtaken sign-in can already have changed server state; binding residuals | Open | see the entry |
-| [G-50](./known-gaps.md#g-50) | Channel PublisherGroup commits publish before they persist | Open | an outbox-style record; iOS and Android not checked |
+| [G-50](./known-gaps.md#g-50) | Channel PublisherGroup commits publish before they persist | Closed in code (2026-10-16) | a durable commit record on web, iOS and Android; host-tested, not walked |
 | [G-51](./known-gaps.md#g-51) | Channel publish counters restart at 0 after Forget device | Not real as reported | the reported path holds on none of the three; two adjacent reuse paths were fixed |
 
 ## MLS state machine
@@ -1547,6 +1547,20 @@ closing. See ADR-0038 § "Freshness model + residual".
 ### G-36: Push routing under an opaque `push_gid`
 
 **Status:** The co-membership cluster and the surviving delivery-side residuals ([ADR-0042](../adr/0042-push-opaque-group-routing-id.md) + [ADR-0043](../adr/0043-push-routing-secret-rotation-on-removal.md), 2026-08)
+
+**Update 2026-10-16 ([ADR-0078](../adr/0078-servers-cannot-link-accounts.md) phase 3, C-77, host-tested, not deployed).**
+The at-rest half of residual 1 is closed: push-gw no longer stores
+`(device pseudonym, push_gid)` rows or tokens in the clear; each subscription is
+`(random sub_id, push_gid, wake_pk, tokens sealed under a key derived from the
+routing secret)`, and the unlock key reaches push-gw only inside a sealed wake. The
+live half stays (push-gw opens a woken group's rows to deliver, so it sees which
+tokens are woken together), and so does the provider-side stable pseudonym. The
+premises below about `POST /push/group/subscribe` and
+`/push/group/unsubscribe` describe routes that no longer exist: subscribing now
+needs only the routing secret (to derive `wake_pk` and seal), and unsubscribing
+needs the row's random `sub_id`, which only the subscribing device holds. A wake
+must be signed by the group's wake key, so a non-member can no longer wake a group
+by naming its `push_gid`; an evicted member can until the next rotation.
 
 [ADR-0042](../adr/0042-push-opaque-group-routing-id.md) landed end-to-end (core +
 FFI + web + iOS + Android; `lakko-security` **APPROVE-WITH-NOTES**, no
@@ -3030,7 +3044,48 @@ sign-out during each sign-in route on all three clients.
 <a id="g-50"></a>
 ### G-50: Channel PublisherGroup commits publish before they persist
 
-**Status:** **OPEN** (found on web 2026-10-14 by the residual pass after ADR-0077; iOS and Android not checked; not fixed)
+**Status:** **CLOSED IN CODE** (2026-10-16, on web, iOS and Android, together with ADR-0078 phase 6; unit-tested on all three, not walked live, no deployment). Found on web 2026-10-14 by the residual pass after ADR-0077.
+
+**Resolution 2026-10-16.** A PublisherGroup commit (a co-publisher approve, a
+rotation) now has the ADR-0040 treatment, one record per commit
+(`PublisherCommitEntry`: kind, channel, group, the MLS epoch the commit moved
+to, the channels-service epoch the reseal binds to, the commit and the
+Welcome for an approve, the joiner's key, the steps already landed):
+
+- The channels-service epoch is read BEFORE the commit, so nothing that can
+  fail sits between the eager merge and the record.
+- The record and the N+1 provider snapshot are written before any step runs,
+  fail-closed. Web: one channel-log row (one IndexedDB put) holds both, and a
+  failed write poisons the in-memory state (no later flush may persist the
+  unrecorded N+1; the next hydration reloads). iOS: the entry first (a
+  device-key-encrypted record, `PublisherCommitStore`), then the snapshot of
+  the channel provider (`ChannelPublisherIdentity.persistOrThrow`); on a
+  failure the in-memory provider is dropped and re-restored from disk.
+  Android: the entry first (a file under `noBackupFilesDir` sealed under the
+  device key), then `persistNow` of `withIdentityPersistingFirst`; on a
+  failure the provider is restored from the snapshot taken before the commit
+  and the screen reopens its handle.
+- The steps run in order (journal: register the N+1 epoch key, publish the
+  approve's commit; Welcome; reseal through the ADR-0030 staged fanout at the
+  recorded target; appointment), each recorded as it lands. A failed step
+  leaves the record; the steps resume on the next session (web: hydration;
+  iOS: the session models; Android: the channels state bind and the owner's
+  co-publisher poll). An entry whose restored group is below its target epoch
+  is a commit none of whose steps ran and is dropped.
+- A rotation's epoch registration stays best effort (it was before: the
+  rotation commit is not published, and a co-publisher's registration is
+  refused); an approve's is required before its commit is published.
+
+**Found while closing it, on iOS:** the channel PublisherGroup was not durable
+at all. Every iOS channel screen built a throwaway provider from the account
+seed, so each screen founded a fresh group: a co-publisher approved on one
+screen was in a group the next screen no longer had, and a rotation resealed a
+seed no co-publisher could derive. iOS now runs every channel path on one
+snapshotted channel provider (`ChannelPublisherIdentity`, the Android and web
+shape), and the co-publish request keeps its KeyPackage keys in it (the
+separate `CoPublishRequestKeys` row is gone).
+
+The entry as found:
 
 ADR-0040 closed the device-ahead class for chat groups; the channel
 PublisherGroup has the same shape and no outbox. Read at `3af913ad` on web:
@@ -3055,8 +3110,8 @@ N+1 with the publish never made is the device-ahead case ADR-0040 describes):
 it needs an outbox-style record of the commit and the reseal, as ADR-0040 keeps
 for chat groups.
 
-**Closing:** an outbox-style record for PublisherGroup commits; check iOS and
-Android.
+**Closing (as written when found):** an outbox-style record for
+PublisherGroup commits; check iOS and Android.
 
 <a id="g-51"></a>
 ### G-51: Channel publish counters restart at 0 after Forget device

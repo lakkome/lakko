@@ -18,7 +18,7 @@
  *   - the reverse index (`push_gid -> account/group`) is populated from the
  *     derived `push_gid` — the map the Sprint-4 decrypt reverse-resolves.
  *
- * The store / push-gw / device-id / device-key are mocked; the wasm core is
+ * The store / push-gw / device-token / device-key are mocked; the wasm core is
  * REAL (loaded through the Node `__wbindgen_init` glue), so `derivePushGid`
  * / `composePushRoutingSecret` / `decodePushRoutingSecret` are the true
  * deterministic functions.
@@ -55,7 +55,18 @@ const h = vi.hoisted(() => ({
   distributed: new Map<string, boolean>(),
   mintEpochs: new Map<string, bigint>(),
   routes: new Map<string, { accountId: string; groupIdB64: string }>(),
+  // ADR-0078 — the subscription id each push_gid was given, and back.
+  subToGid: new Map<string, string>(),
 }));
+
+/** ADR-0078 — the mocked store's subscription id for a push_gid: the first
+ *  16 bytes of the gid, so a test can name a torn-down gid from the id the
+ *  unsubscribe was sent. */
+function subIdOfGidHex(gidHex: string): Uint8Array {
+  const out = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) out[i] = Number.parseInt(gidHex.slice(2 * i, 2 * i + 2), 16);
+  return out;
+}
 
 vi.mock("./group-routing-store", () => ({
   putGroupRouting: vi.fn(
@@ -131,7 +142,36 @@ vi.mock("./group-routing-store", () => ({
       h.routes.delete(pushGidHex);
     }
   }),
+  // ADR-0078 — this device's subscription id per push_gid (deterministic in
+  // the mock: the gid's first 16 bytes), recorded for `gidOfSub`.
+  ensureRouteSubId: vi.fn(async (_accountId: string, pushGidHex: string) => {
+    const sub = subIdOfGidHex(pushGidHex);
+    h.subToGid.set(toHexHoisted(sub), pushGidHex);
+    return sub;
+  }),
+  getRouteSubId: vi.fn(async (accountId: string, pushGidHex: string) => {
+    if (h.routes.get(pushGidHex)?.accountId !== accountId) return null;
+    const sub = subIdOfGidHex(pushGidHex);
+    h.subToGid.set(toHexHoisted(sub), pushGidHex);
+    return sub;
+  }),
+  listRoutesForAccount: vi.fn(async (accountId: string) =>
+    Array.from(h.routes.entries())
+      .filter(([, r]) => r.accountId === accountId)
+      .map(([gid, r]) => ({ key: gid, pushGidHex: gid, ...r })),
+  ),
 }));
+
+function toHexHoisted(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+/** The push_gid (hex) an unsubscribe was sent for, from its subscription id. */
+function gidOfSub(subId: Uint8Array): string | undefined {
+  return h.subToGid.get(toHexHoisted(subId));
+}
 
 // getDeviceKey returns a non-null placeholder — the store is mocked, so the
 // key is never used for real crypto here.
@@ -139,26 +179,27 @@ vi.mock("../auth/key-store", () => ({
   getDeviceKey: vi.fn(async () => ({}) as unknown as CryptoKey),
 }));
 
-vi.mock("./device-id", () => ({
-  getOrCreateDevicePushId: (): Uint8Array => new Uint8Array(32).fill(7),
+/** ADR-0078 — push-gw's wake key, fixed for the tests. */
+const GW_KEY = vi.hoisted(() => new Uint8Array(32).fill(0x31));
+vi.mock("./wake-key", () => ({ pushWakeKey: async (): Promise<Uint8Array> => GW_KEY }));
+
+vi.mock("./device-token", () => ({
+  getDevicePushToken: (): Uint8Array => new Uint8Array([7, 7, 7]),
 }));
 
-const subscribeGroup = vi.fn(
-  (_device: Uint8Array, _group: Uint8Array): Promise<{ inserted: boolean }> =>
-    Promise.resolve({ inserted: true }),
-);
-/** ADR-0043 — the first real caller of `unsubscribeGroup` (dead code until
- *  now). Records the group pseudonym so a test can prove the RETIRED gid is
- *  the one torn down. */
+type SealedSub = { subId: Uint8Array; pushGid: Uint8Array; wakePk: Uint8Array; sealed: Uint8Array };
+/** ADR-0078 — `POST /push/subscribe` with a sealed subscription. */
+const subscribeGroup = vi.fn((_req: SealedSub): Promise<void> => Promise.resolve());
+/** ADR-0043 / ADR-0078 — `POST /push/unsubscribe` by subscription id; a test
+ *  names the RETIRED gid through `gidOfSub`. */
 const unsubscribeGroup = vi.fn(
-  (_device: Uint8Array, _group: Uint8Array): Promise<{ removed: boolean }> =>
-    Promise.resolve({ removed: true }),
+  (_subId: Uint8Array): Promise<{ removed: boolean }> => Promise.resolve({ removed: true }),
 );
 vi.mock("./client", () => ({
   DEFAULT_BASE_URL: "/api/push",
   PushClient: class {
-    subscribeGroup = subscribeGroup;
-    unsubscribeGroup = unsubscribeGroup;
+    subscribe = subscribeGroup;
+    unsubscribe = unsubscribeGroup;
   },
 }));
 
@@ -181,9 +222,11 @@ import {
   redistributeSecretToGroup,
   rotatePushRoutingSecret,
   rotatePushRoutingSecretIfMembershipShrank,
+  resubscribeAllForAccount,
   routingSecretVerdict,
+  sealedWakeForGroup,
+  unsubscribeAllForAccount,
   ROUTING_NETWORK_TIMEOUT_MS,
-  setPushBindingSender,
   subscribeGroupUnderPushGid,
   tryDecodeSecretEnvelope,
   verdictAccepts,
@@ -195,8 +238,6 @@ import {
   putGroupRouting,
 } from "./group-routing-store";
 import { base64Encode } from "../auth/account-id";
-import { dsAccess } from "../ds/access";
-import { fakeRegistrarAuthority, fakeRootAuthority } from "../ds/access-test-doubles";
 
 // ---- helpers -------------------------------------------------------------
 
@@ -365,6 +406,7 @@ beforeEach(() => {
   h.distributed.clear();
   h.mintEpochs.clear();
   h.routes.clear();
+  h.subToGid.clear();
   subscribeGroup.mockClear();
   unsubscribeGroup.mockClear();
   vi.mocked(putGroupRouting).mockClear();
@@ -409,86 +451,9 @@ describe("group-routing orchestration (ADR-0042)", () => {
 
     // Subscribed under push_gid — NOT the DS group_id.
     await vi.waitFor(() => expect(subscribeGroup).toHaveBeenCalled());
-    const subTarget = subscribeGroup.mock.calls[0]![1];
+    const subTarget = subscribeGroup.mock.calls[0]![0].pushGid;
     expect(Array.from(subTarget)).toEqual(Array.from(pushGid));
     expect(Array.from(subTarget)).not.toEqual(Array.from(groupId));
-  });
-
-  it("ADR-0057 obligation 8 (finding 5) — the owner's mint binds the journal to its push_gid BEFORE the broadcast", async () => {
-    const groupId = new Uint8Array(32).fill(0x3e);
-    const group = mockGroup(groupId, wasm.Role.Owner);
-    const off = dsAccess.registerOwnerSource(() => true);
-    dsAccess.setAuthorityFactory({ root: () => fakeRootAuthority("root"), registrar: () => ({ kind: "none" }) });
-    const events: string[] = [];
-    const binds: Array<{ path: string; body: string }> = [];
-    setPushBindingSender({
-      putStatement: async (path, body) => {
-        events.push("bind");
-        binds.push({ path, body });
-      },
-    });
-    try {
-      await ensureGroupPushRouting("acctBind", group, DUMMY_IDENTITY, async () => {
-        events.push("broadcast");
-      });
-      expect(events).toEqual(["bind", "broadcast"]);
-      const putArg = vi.mocked(putGroupRouting).mock.calls[0]![0];
-      expect(binds[0]!.path).toBe(`/ds/group/${"3e".repeat(32)}/push-binding`);
-      expect(JSON.parse(binds[0]!.body).pushGid).toBe(putArg.pushGidHex);
-    } finally {
-      off();
-      dsAccess.setAuthorityFactory(null);
-      setPushBindingSender(null);
-    }
-  });
-
-  it("finding 5 — a 409 (the id is bound elsewhere) mints a fresh secret once and binds that; 503 still broadcasts", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const groupId = new Uint8Array(32).fill(0x3f);
-    const group = mockGroup(groupId, wasm.Role.Owner);
-    const off = dsAccess.registerOwnerSource(() => true);
-    dsAccess.setAuthorityFactory({ root: () => fakeRootAuthority("root"), registrar: () => ({ kind: "none" }) });
-    const statuses = [409, 503];
-    const binds: string[] = [];
-    const events: string[] = [];
-    setPushBindingSender({
-      putStatement: async (_path, body) => {
-        events.push("bind");
-        binds.push(JSON.parse(body).pushGid as string);
-        const status = statuses.shift() ?? 204;
-        if (status >= 400) throw Object.assign(new Error(`HTTP ${status}`), { status });
-      },
-    });
-    try {
-      const broadcasts: Uint8Array[] = [];
-      await ensureGroupPushRouting("acct409", group, DUMMY_IDENTITY, async (b) => {
-        events.push("broadcast");
-        broadcasts.push(b);
-      });
-      // Two binds (the second for a fresh secret), then the broadcast.
-      expect(events).toEqual(["bind", "bind", "broadcast"]);
-      expect(binds[0]).not.toBe(binds[1]);
-      const putArg = vi.mocked(putGroupRouting).mock.calls[0]![0];
-      expect(putArg.pushGidHex).toBe(binds[1]);
-      expect(toHex(wasm.derivePushGid(decodeSecret(broadcasts[0]!)))).toBe(binds[1]);
-    } finally {
-      off();
-      dsAccess.setAuthorityFactory(null);
-      setPushBindingSender(null);
-      warn.mockRestore();
-    }
-  });
-
-  it("finding 5 — a member never binds (it never mints)", async () => {
-    const group = mockGroup(new Uint8Array(32).fill(0x40), wasm.Role.Member);
-    const sender = { putStatement: vi.fn(async () => undefined) };
-    setPushBindingSender(sender);
-    try {
-      await ensureGroupPushRouting("acctMem", group, DUMMY_IDENTITY, async () => {});
-      expect(sender.putStatement).not.toHaveBeenCalled();
-    } finally {
-      setPushBindingSender(null);
-    }
   });
 
   it("a second provision of the same owned group is a no-op (no re-mint / re-broadcast)", async () => {
@@ -547,7 +512,7 @@ describe("group-routing orchestration (ADR-0042)", () => {
     expect(putArg.pushGidHex).toBe(toHex(ownerPushGid));
 
     await vi.waitFor(() => expect(subscribeGroup).toHaveBeenCalled());
-    const subTarget = subscribeGroup.mock.calls[0]![1];
+    const subTarget = subscribeGroup.mock.calls[0]![0].pushGid;
     expect(Array.from(subTarget)).toEqual(Array.from(ownerPushGid));
   });
 
@@ -1552,35 +1517,6 @@ describe("rotatePushRoutingSecret (ADR-0043)", () => {
     });
   }
 
-  it("finding 5 — an admin's rotation binds the NEW push_gid before broadcasting it", async () => {
-    seedSettled(OLD);
-    const group = mockGroup(GROUP_ID, undefined);
-    const events: string[] = [];
-    const binds: string[] = [];
-    dsAccess.setAuthorityFactory({
-      root: () => ({ kind: "none" }),
-      registrar: () => fakeRegistrarAuthority("adm", 2),
-    });
-    setPushBindingSender({
-      putStatement: async (_path, body) => {
-        events.push("bind");
-        binds.push(JSON.parse(body).pushGid as string);
-      },
-    });
-    try {
-      const outcome = await rotatePushRoutingSecret(ACCT, group, "admin", async () => {
-        events.push("broadcast");
-      });
-      expect(outcome).toBe("rotated");
-      expect(events).toEqual(["bind", "broadcast"]);
-      const stored = h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array;
-      expect(binds[0]).toBe(toHex(wasm.derivePushGid(stored)));
-    } finally {
-      dsAccess.setAuthorityFactory(null);
-      setPushBindingSender(null);
-    }
-  });
-
   it("the OWNER re-keys: new secret persisted + broadcast, NEW gid subscribed + indexed, OLD gid unsubscribed + de-indexed", async () => {
     seedSettled(OLD);
     const oldGidHex = toHex(wasm.derivePushGid(OLD));
@@ -1607,12 +1543,12 @@ describe("rotatePushRoutingSecret (ADR-0043)", () => {
 
     // Subscribed under the NEW gid.
     expect(subscribeGroup).toHaveBeenCalledTimes(1);
-    expect(toHex(subscribeGroup.mock.calls[0]![1])).toBe(newGidHex);
+    expect(toHex(subscribeGroup.mock.calls[0]![0].pushGid)).toBe(newGidHex);
 
-    // Unsubscribed from the OLD gid — the first live call site of
-    // `PushClient.unsubscribeGroup`, dead code before this ADR.
+    // Unsubscribed from the OLD gid, by this device's subscription id for it
+    // (ADR-0078).
     expect(unsubscribeGroup).toHaveBeenCalledTimes(1);
-    expect(toHex(unsubscribeGroup.mock.calls[0]![1])).toBe(oldGidHex);
+    expect(gidOfSub(unsubscribeGroup.mock.calls[0]![0])).toBe(oldGidHex);
 
     // The reverse index carries the new entry and NOT the retired one:
     // without the delete every rotation grows the map by a dead row.
@@ -1692,7 +1628,7 @@ describe("rotatePushRoutingSecret (ADR-0043)", () => {
     const newGidHex = toHex(
       wasm.derivePushGid(h.secrets.get(`${ACCT}\0${GRP_B64}`) as Uint8Array),
     );
-    const torndown = toHex(unsubscribeGroup.mock.calls[0]![1]);
+    const torndown = gidOfSub(unsubscribeGroup.mock.calls[0]![0]);
     expect(torndown).toBe(oldGidHex);
     expect(torndown).not.toBe(newGidHex);
     // ... and the device is armed under the new id before the old one is
@@ -1786,7 +1722,7 @@ describe("rotatePushRoutingSecret (ADR-0043)", () => {
     const gid1 = toHex(wasm.derivePushGid(s1));
     const finalGid = toHex(wasm.derivePushGid(s2));
     expect(unsubscribeGroup).toHaveBeenCalledTimes(2);
-    expect(unsubscribeGroup.mock.calls.map((c) => toHex(c[1]))).toEqual([
+    expect(unsubscribeGroup.mock.calls.map((c) => gidOfSub(c[0]))).toEqual([
       oldGidHex,
       gid1,
     ]);
@@ -1954,7 +1890,7 @@ describe("rotation trigger — the membership-shrink entry point (ADR-0043)", ()
     expect(await trigger("owner", [A, B, C], [A, B], sent)).toBe("rotated");
     expect(sent.length).toBe(1);
     expect(unsubscribeGroup).toHaveBeenCalledTimes(1);
-    expect(toHex(unsubscribeGroup.mock.calls[0]![1])).toBe(
+    expect(gidOfSub(unsubscribeGroup.mock.calls[0]![0])).toBe(
       toHex(wasm.derivePushGid(HELD)),
     );
   });
@@ -2031,7 +1967,7 @@ describe("receive-side teardown of a superseded push_gid (ADR-0043)", () => {
     const oldGidHex = toHex(wasm.derivePushGid(HELD));
     const newGidHex = toHex(wasm.derivePushGid(ROTATED));
     await vi.waitFor(() => expect(unsubscribeGroup).toHaveBeenCalled());
-    expect(toHex(unsubscribeGroup.mock.calls[0]![1])).toBe(oldGidHex);
+    expect(gidOfSub(unsubscribeGroup.mock.calls[0]![0])).toBe(oldGidHex);
     expect(h.routes.has(oldGidHex)).toBe(false);
     expect(h.routes.has(newGidHex)).toBe(true);
   });
@@ -2048,7 +1984,7 @@ describe("receive-side teardown of a superseded push_gid (ADR-0043)", () => {
       await receivePushRoutingSecretGated(ACCT, group, GRP, ADMIN_LEAF, ROTATED, ROTATED_EPOCH),
     ).toBe("accept-admin-rotate");
     await vi.waitFor(() => expect(unsubscribeGroup).toHaveBeenCalled());
-    expect(toHex(unsubscribeGroup.mock.calls[0]![1])).toBe(
+    expect(gidOfSub(unsubscribeGroup.mock.calls[0]![0])).toBe(
       toHex(wasm.derivePushGid(HELD)),
     );
   });
@@ -2371,7 +2307,7 @@ describe("the F-A replay, end to end (G-36 residual 9)", () => {
     const gidOld = toHex(wasm.derivePushGid(S_OLD));
     const gidLive = toHex(wasm.derivePushGid(S1));
     await vi.waitFor(() => expect(unsubscribeGroup).toHaveBeenCalledTimes(1));
-    expect(toHex(unsubscribeGroup.mock.calls[0]![1])).toBe(gidOld);
+    expect(gidOfSub(unsubscribeGroup.mock.calls[0]![0])).toBe(gidOld);
     expect(h.routes.has(gidLive)).toBe(true);
 
     // (3) the stale re-broadcast — from the OWNER, the highest authority
@@ -3004,7 +2940,7 @@ describe("the receive gate is SERIALISED per (account, group)", () => {
     // ... and gid(S_OLD) is retired: torn down exactly once, by the rotation,
     // and never re-armed by the replay.
     await vi.waitFor(() => expect(unsubscribeGroup).toHaveBeenCalledTimes(1));
-    expect(toHex(unsubscribeGroup.mock.calls[0]![1])).toBe(gidOld);
+    expect(gidOfSub(unsubscribeGroup.mock.calls[0]![0])).toBe(gidOld);
     expect(h.routes.has(gidOld)).toBe(false);
     // Exactly one write: the refused replay must persist nothing at all.
     expect(vi.mocked(putGroupRouting)).toHaveBeenCalledTimes(1);
@@ -3633,9 +3569,7 @@ describe("network IO under the lock is BOUNDED (the row cannot wedge)", () => {
     h.distributed.set(`${ACCT}\0${GRP_B64}`, true);
     const group = mockGroup(GROUP_ID, undefined, 11n);
 
-    subscribeGroup.mockImplementationOnce(
-      () => new Promise<{ inserted: boolean }>(() => undefined),
-    );
+    subscribeGroup.mockImplementationOnce(() => new Promise<void>(() => undefined));
 
     const rotation = rotatePushRoutingSecret(ACCT, group, "owner", async () => {
       /* the broadcast lands */
@@ -3649,5 +3583,68 @@ describe("network IO under the lock is BOUNDED (the row cannot wedge)", () => {
 
     await vi.advanceTimersByTimeAsync(ROUTING_NETWORK_TIMEOUT_MS + 1);
     expect(await rotation).toBe("rotated");
+  });
+});
+
+describe("ADR-0078 section 3 — sealed subscriptions and sealed wakes", () => {
+  const ACCT = "acct78";
+  const GROUP_ID = new Uint8Array(32).fill(0x78);
+  const GRP_B64 = base64Encode(GROUP_ID);
+  const SECRET = new Uint8Array(32).fill(0x42);
+
+  it("a subscription carries the token sealed, the group's wake key and this device's id", async () => {
+    seedStoredSecret(ACCT, GRP_B64, SECRET);
+    expect(await subscribeGroupUnderPushGid(ACCT, GRP_B64)).toBe("subscribed");
+    const req = subscribeGroup.mock.calls[0]![0];
+    const gidHex = toHex(wasm.derivePushGid(SECRET));
+    expect(toHex(req.pushGid)).toBe(gidHex);
+    expect(toHex(req.wakePk)).toBe(toHex(wasm.derivePushWakePublicKey(SECRET)));
+    expect(toHex(req.subId)).toBe(toHex(subIdOfGidHex(gidHex)));
+    // Sealed: a padded block (version + nonce + 256 + tag), and the token
+    // bytes are not in it.
+    expect(req.sealed.length).toBe(1 + 12 + 256 + 16);
+    expect(toHex(req.sealed)).not.toContain("070707");
+  });
+
+  it("no secret: deferred, nothing sent", async () => {
+    expect(await subscribeGroupUnderPushGid(ACCT, "nope")).toBe("deferred");
+    expect(subscribeGroup).not.toHaveBeenCalled();
+  });
+
+  it("a token change re-sends every subscription of the account; sign-out removes each", async () => {
+    const other = new Uint8Array(32).fill(0x43);
+    const otherB64 = base64Encode(new Uint8Array(32).fill(0x79));
+    seedStoredSecret(ACCT, GRP_B64, SECRET);
+    seedStoredSecret(ACCT, otherB64, other);
+    const gidA = toHex(wasm.derivePushGid(SECRET));
+    const gidB = toHex(wasm.derivePushGid(other));
+    h.routes.set(gidA, { accountId: ACCT, groupIdB64: GRP_B64 });
+    h.routes.set(gidB, { accountId: ACCT, groupIdB64: otherB64 });
+    h.routes.set("ff".repeat(32), { accountId: "someone-else", groupIdB64: GRP_B64 });
+
+    await resubscribeAllForAccount(ACCT);
+    expect(subscribeGroup.mock.calls.map((c) => toHex(c[0].pushGid)).sort()).toEqual(
+      [gidA, gidB].sort(),
+    );
+
+    // Only rows that recorded a subscription id are torn down; the mocked
+    // listing carries none, so seed them as the real store would.
+    for (const gid of [gidA, gidB]) {
+      (h.routes.get(gid) as { subIdHex?: string }).subIdHex = toHex(subIdOfGidHex(gid));
+      h.subToGid.set(toHex(subIdOfGidHex(gid)), gid);
+    }
+    await unsubscribeAllForAccount(ACCT);
+    expect(unsubscribeGroup.mock.calls.map((c) => gidOfSub(c[0])).sort()).toEqual(
+      [gidA, gidB].sort(),
+    );
+  });
+
+  it("a sealed wake is the 312-character header, never the push_gid in the clear", async () => {
+    seedStoredSecret(ACCT, GRP_B64, SECRET);
+    const value = await sealedWakeForGroup(ACCT, GRP_B64, "call");
+    expect(value).not.toBeNull();
+    expect(value!.length).toBe(312);
+    expect(value).not.toContain(Buffer.from(wasm.derivePushGid(SECRET)).toString("base64url").slice(0, 16));
+    expect(await sealedWakeForGroup(ACCT, "nope", "message")).toBeNull();
   });
 });

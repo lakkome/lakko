@@ -18,9 +18,10 @@ vi.mock("../wasm", () => ({
     composeGroupInviteCapabilityWithPreview: () => ({
       sealed: new Uint8Array(160).fill(0x41),
       linkSecret: new Uint8Array(12).fill(0x07),
-      issuerPubkey: new Uint8Array(32).fill(0x09),
       free: () => {},
     }),
+    // ADR-0078 section 10: the link's own revocation key.
+    linkRevocationPublicKey: () => new Uint8Array(32).fill(0x0a),
     // The widths the real core exports (ADR-0028 short-link amendment).
     inviteBlobIdLen: () => 6,
     inviteBlobIdUrlLen: () => 8,
@@ -65,13 +66,13 @@ describe("createGroupInviteLink — pointer, inline, or an error", () => {
     expect(link).toBe("https://x.test/g/________#BwcHBwcHBwcHBwcH");
   });
 
-  it("uploads the sealed blob and the clear fields, never the link secret", async () => {
+  it("uploads the sealed blob, the link's own revocation key and the clear fields, never the link secret or an issuer key", async () => {
     const client = clientWith(async () => new Uint8Array(6).fill(0xff));
     await client.createGroupInviteLink(null, GROUP, 1234n, "https://x.test", PREVIEW, 7);
     expect(uploaded).toEqual([
       {
         sealed: new Uint8Array(160).fill(0x41),
-        issuerPubkey: new Uint8Array(32).fill(0x09),
+        revocationPubkey: new Uint8Array(32).fill(0x0a),
         expiryMs: 1234n,
         maxUses: 7,
       },

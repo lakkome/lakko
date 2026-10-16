@@ -73,11 +73,6 @@ public class RecordingStatementSigner(
         return DsStatement("/ds/group/${hex(journalId)}/registrars", """{"by":"$name"}""")
     }
 
-    override fun pushBinding(journalId: ByteArray, pushGid: ByteArray): DsStatement {
-        calls += "push-binding"
-        return DsStatement("/ds/group/${hex(journalId)}/push-binding", """{"by":"$name"}""")
-    }
-
     public var lastNewRoot: ByteArray? = null
 
     override fun rootTransfer(journalId: ByteArray, newRoot: ByteArray): DsStatement {

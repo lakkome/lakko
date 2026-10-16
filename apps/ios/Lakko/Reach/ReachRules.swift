@@ -18,7 +18,8 @@ import LakkoCore
 /// section 1): the class, its scope, its version and an optional expiry.
 public struct ReachKeySpec: Hashable {
     public let reachClass: FfiReachClass
-    /// Empty for `contact` / `fof`, the scope id otherwise.
+    /// Empty for every account-wide class (all but `link` / `reply`; ADR-0078
+    /// section 9), the scope id otherwise.
     public let scopeId: Data
     public let version: UInt32
     /// Unix ms after which the DS stops honouring the key; `nil` for keys that
@@ -110,9 +111,10 @@ public enum ReachRules {
     /// one `(class, scope)` a device with no version state for it derives and
     /// looks for among the keys its mailbox holds (versions `0...limit`).
     ///
-    /// A version advances once per rotation of that one `(class, scope)`: the
-    /// `contact` / `fof` keys on each removed contact, a group's `group` /
-    /// `member` keys on each shrink of that group. 256 rotations of one scope
+    /// A version advances once per rotation of that one class: the `contact`
+    /// / `fof` keys on each removed contact, the `group` / `member` keys on
+    /// each shrink of a group and each group left, `group` / `channel` on each
+    /// change of the setting, `channel` on each channel left. 256 rotations of one class
     /// is the bound this client recovers; chosen, not measured. Above it a
     /// restored device finds no registered key and starts the class at 0 like
     /// one that never had any (the stated residual). The cost is up to 257 key
@@ -122,10 +124,9 @@ public enum ReachRules {
 
     /// A `(class, scope)` whose version is a counter the account's devices
     /// keep, i.e. one ``recoveredVersions(slots:registered:limit:publicKey:)``
-    /// can recover: `contact`, `fof` (empty scope), `group`, `member` (a group
-    /// id). Not `link` / `reply` (one random scope per capability, never
-    /// rotated) and not `channel` (its version is the channel's seed epoch,
-    /// which this device reads from the channel itself).
+    /// can recover: every account-wide class (`contact`, `fof`, `group`,
+    /// `member`, `channel`; empty scope, ADR-0078 section 9). Not `link` /
+    /// `reply` (one random scope per capability, never rotated).
     public struct VersionSlot: Hashable {
         public let reachClass: FfiReachClass
         public let scopeId: Data
@@ -141,10 +142,71 @@ public enum ReachRules {
 
     /// Whether `reachClass` carries a recoverable version counter.
     public static func isCounterClass(_ reachClass: FfiReachClass) -> Bool {
+        isAccountWide(reachClass)
+    }
+
+    /// ADR-0078 section 9 — whether `reachClass` is ONE key per account (an
+    /// empty scope): every class but `link` and `reply`. A `group`, `member`
+    /// or `channel` key is the same in every group and channel, so a write
+    /// under one no longer names the group its writer shares with the owner.
+    public static func isAccountWide(_ reachClass: FfiReachClass) -> Bool {
         switch reachClass {
-        case .contact, .fof, .group, .member: return true
-        case .link, .reply, .channel: return false
+        case .link, .reply: return false
+        case .contact, .fof, .group, .member, .channel: return true
         }
+    }
+
+    /// The groups and channels (hex ids, sorted) the account was in at the
+    /// last registration, so the next one sees which it left (ADR-0078
+    /// section 9).
+    public struct Membership: Codable, Equatable {
+        public var groups: [String]
+        public var channels: [String]
+
+        public init(groups: [String], channels: [String]) {
+            self.groups = groups
+            self.channels = channels
+        }
+    }
+
+    /// What the account left since the last registration (ADR-0078 section
+    /// 9). Pure; the same rule as web's `departuresOf` and Android's.
+    public struct Departures: Equatable {
+        /// A group the account was in is no longer among its groups.
+        public let leftGroup: Bool
+        /// A channel the account was in is no longer among its channels.
+        public let leftChannel: Bool
+        /// The membership to record for the next registration.
+        public let membership: Membership
+    }
+
+    /// Which classes the account's departures rotate. A group or channel
+    /// present at the last registration and absent now was left (or the
+    /// account was removed from it): its members still hold this account's
+    /// class key, so the class is rotated. An empty current list while the
+    /// last one was not is read as "not loaded yet", never as leaving
+    /// everything (with no group at all no `group` / `member` key is
+    /// registered anyway). `previous == nil` (the first registration) rotates
+    /// nothing.
+    public static func departures(previous: Membership?, groupIds: [Data], channelIds: [Data]) -> Departures {
+        func hexes(_ ids: [Data]) -> [String] {
+            Array(Set(ids.map { $0.map { String(format: "%02x", $0) }.joined() })).sorted()
+        }
+        let groups = hexes(groupIds)
+        let channels = hexes(channelIds)
+        guard let previous else {
+            return Departures(
+                leftGroup: false, leftChannel: false, membership: Membership(groups: groups, channels: channels))
+        }
+        func left(_ before: [String], _ now: [String]) -> Bool {
+            !now.isEmpty && before.contains { !now.contains($0) }
+        }
+        return Departures(
+            leftGroup: left(previous.groups, groups),
+            leftChannel: left(previous.channels, channels),
+            membership: Membership(
+                groups: groups.isEmpty ? previous.groups : groups,
+                channels: channels.isEmpty ? previous.channels : channels))
     }
 
     /// The counter slots among `specs` that `state` holds no version for and
@@ -217,10 +279,12 @@ public enum ReachRules {
     /// issues it for less so a re-send is due well before it lapses.
     public static let delegationLifetimeMs: UInt64 = 20 * 60 * 60 * 1000
 
-    /// The version of `(class, scope)` in `state`, or ``initialVersion``.
+    /// The version of `(class, scope)` in `state`, or ``initialVersion``. An
+    /// account-wide class ignores `scope` (ADR-0078 section 9).
     public static func version(
         of reachClass: FfiReachClass, scope: Data, in state: FfiReachState
     ) -> UInt32 {
+        let scope = isAccountWide(reachClass) ? Data() : scope
         for entry in state.entries where entry.class == reachClass && entry.scopeId == scope {
             return entry.version
         }
@@ -232,6 +296,7 @@ public enum ReachRules {
     public static func bumping(
         _ reachClass: FfiReachClass, scope: Data, in state: FfiReachState, nowMs: UInt64
     ) -> FfiReachState {
+        let scope = isAccountWide(reachClass) ? Data() : scope
         let next = version(of: reachClass, scope: scope, in: state) &+ 1
         var entries = state.entries.filter { !($0.class == reachClass && $0.scopeId == scope) }
         entries.append(FfiReachStateEntry(class: reachClass, scopeId: scope, version: next))
@@ -244,43 +309,46 @@ public enum ReachRules {
     }
 
     /// Every reach key the owner must have registered right now (ADR-0060
-    /// sections 1 and 6).
+    /// sections 1 and 6; ADR-0078 section 9).
     ///
     /// - `contact`: always — every contact holds it.
-    /// - `member` per group the account is in, whatever the setting (a
+    /// - `member` while the account is in any group, whatever the setting (a
     ///   co-member must always be able to deliver a Welcome for the owner's new
     ///   device).
-    /// - `group` per group the setting lets find the owner
-    ///   (`allowsScope`).
+    /// - `group` while the setting lets the members of any group find the
+    ///   owner (`allowsScope`).
+    /// - `channel` while the setting lets the members of any channel find it.
     /// - `link` per live link, `reply` per unexpired reply.
     /// - `fof` while contacts of contacts may find the owner.
     ///
-    /// Expired links and replies are left out: the DS drops them anyway, and
-    /// leaving them out makes the next sync unregister them.
+    /// `group`, `member` and `channel` are ONE key each for the account, never
+    /// one per group or channel. Expired links and replies are left out: the
+    /// DS drops them anyway, and leaving them out makes the next sync
+    /// unregister them.
     public static func desiredKeys(
         setting: FfiVisibilitySetting,
         state: FfiReachState,
         groupIds: [Data],
         links: [LinkReach],
         replies: [ReplyReach],
-        channels: [(id: Data, epoch: UInt32)] = [],
+        channelIds: [Data] = [],
         nowMs: UInt64,
         allowsScope: (FfiVisibilitySetting, FfiScopeId) -> Bool,
         allowsFof: (FfiVisibilitySetting) -> Bool
     ) -> [ReachKeySpec] {
         var out: [ReachKeySpec] = []
-        out.append(ReachKeySpec(
-            reachClass: .contact, scopeId: Data(),
-            version: version(of: .contact, scope: Data(), in: state), expiresAtMs: nil))
-        for groupId in groupIds where !groupId.isEmpty && groupId.count <= 64 {
-            out.append(ReachKeySpec(
-                reachClass: .member, scopeId: groupId,
-                version: version(of: .member, scope: groupId, in: state), expiresAtMs: nil))
-            if allowsScope(setting, groupScope(groupId)) {
-                out.append(ReachKeySpec(
-                    reachClass: .group, scopeId: groupId,
-                    version: version(of: .group, scope: groupId, in: state), expiresAtMs: nil))
-            }
+        func accountWide(_ reachClass: FfiReachClass) -> ReachKeySpec {
+            ReachKeySpec(
+                reachClass: reachClass, scopeId: Data(),
+                version: version(of: reachClass, scope: Data(), in: state), expiresAtMs: nil)
+        }
+        out.append(accountWide(.contact))
+        let groups = groupIds.filter { !$0.isEmpty && $0.count <= 64 }
+        if !groups.isEmpty {
+            out.append(accountWide(.member))
+        }
+        if groups.contains(where: { allowsScope(setting, groupScope($0)) }) {
+            out.append(accountWide(.group))
         }
         for link in links where link.expiresAtMs > nowMs {
             guard let id = Data(base64Encoded: link.linkIdB64), !id.isEmpty else { continue }
@@ -294,19 +362,13 @@ public enum ReachRules {
                 reachClass: .reply, scopeId: id, version: initialVersion,
                 expiresAtMs: reply.expiresAtMs))
         }
-        // `channel` per channel the setting lets find the owner, versioned
-        // by the channel's current seed epoch (ADR-0060 section 3).
-        for channel in channels where !channel.id.isEmpty && channel.id.count <= 64 {
-            if allowsScope(setting, FfiScopeId(kind: .channel, id: channel.id)) {
-                out.append(ReachKeySpec(
-                    reachClass: .channel, scopeId: channel.id, version: channel.epoch,
-                    expiresAtMs: nil))
-            }
+        if channelIds.contains(where: {
+            !$0.isEmpty && $0.count <= 64 && allowsScope(setting, FfiScopeId(kind: .channel, id: $0))
+        }) {
+            out.append(accountWide(.channel))
         }
         if allowsFof(setting) {
-            out.append(ReachKeySpec(
-                reachClass: .fof, scopeId: Data(),
-                version: version(of: .fof, scope: Data(), in: state), expiresAtMs: nil))
+            out.append(accountWide(.fof))
         }
         return out
     }

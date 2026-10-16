@@ -18,6 +18,12 @@
   `docs/PRODUCT-READINESS.md`, not here; T7 and T8 are not built. The recon
   was done by reading the tree.
 - **Date:** 2026-10-07
+- **Amended by [ADR-0078](0078-servers-cannot-link-accounts.md) phase 6 (2026-10-16):**
+  the root endorsement (`root_endorsement_b64`, `sign_ds_root_endorsement`)
+  and the attested DeviceGroup reset and root transfer are removed. The
+  DeviceGroup id is derived from the lineage seed (the oldest own
+  predecessor), so a rotation keeps the journal and moves its root with a
+  plain `root` transfer signed by the old root.
 - **Context:** account recovery, Part 5 (after
   [ADR-0072](0072-recovery-model-simplification.md) and
   [ADR-0073](0073-account-key-reset.md))

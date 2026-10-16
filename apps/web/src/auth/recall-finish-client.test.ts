@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthClient, AuthHttpError, AuthNetworkError, type RecallPendingFinish } from "./client";
 import type { RecallFinishRequest } from "./wire";
 
-const ATTESTATION_B64URL = "A".repeat(236); // 177 bytes, URL-safe base64 without padding
+const ATTESTATION_B64URL = "A".repeat(194); // 145 bytes, URL-safe base64 without padding
 
 function okBody(): string {
   return JSON.stringify({
@@ -92,7 +92,7 @@ describe("recall/finish asked again (T5 item 25)", () => {
     expect(sent).toHaveLength(3);
     expect(new Set(sent).size).toBe(1);
     expect(JSON.parse(sent[0] as string).statement_b64).toBe("signed-now");
-    expect(result.attestation).toHaveLength(177);
+    expect(result.attestation).toHaveLength(145);
     expect(result.session.keyGeneration).toBe(4n);
     expect(p.resigned).toEqual([]);
   });

@@ -178,7 +178,8 @@ class ReachDeviceSyncTest {
         assertEquals(1_001uL, nextSyncStamp(1_000, 1_000uL))
     }
 
-    private val scopeA = ByteArray(16) { 0x22 }
+    /** ADR-0078 section 9: `group` is account-wide, empty-scoped. */
+    private val scopeA = ByteArray(0)
 
     private fun state(stamp: ULong, contact: UInt, group: UInt? = null) = FfiReachState(
         entries = listOfNotNull(
@@ -270,7 +271,8 @@ class ReachDeviceSyncTest {
 
     @Test
     fun `counters convert to and from ReachState entries`() {
-        val scope = ByteArray(16) { 0x11 }
+        // ADR-0078 section 9: `group` is account-wide, so its entry is empty-scoped.
+        val scope = ByteArray(0)
         val state = FfiReachState(
             entries = listOf(
                 FfiReachStateEntry(FfiReachClass.CONTACT, ByteArray(0), 2u),

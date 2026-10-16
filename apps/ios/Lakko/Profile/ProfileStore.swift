@@ -19,11 +19,9 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
     /// Sender-clock UNIX milliseconds at which the profile was set.
     public let updatedAtMs: UInt64
     /// The sender's 16-byte account id (profile envelope v2), or `nil` when
-    /// the envelope carried none. What lets a group-call tile be matched to
-    /// this person: the SFU's per-call `peer_tag` (ADR-0021) is derived over
-    /// the account id, never over the signature key. Like every other field it
-    /// is a claim; the sender can only mis-state its own tag, which then
-    /// matches nobody on the call.
+    /// the envelope carried none. Like every other field it is a claim; what
+    /// binds it is a username certificate (ADR-0060 section 5), which names an
+    /// account id.
     public let accountId: Data?
     /// ADR-0060 section 5 — the discovery-signed certificate of `username`
     /// (profile envelope v3), or `nil`. The username is shown only once it
@@ -235,10 +233,9 @@ final class ReceivedProfileStore {
     }
 
     /// Every stored profile that names an account id, as
-    /// `(signature key, account id)` — the input a group-call roster needs to
-    /// re-derive each person's per-call `peer_tag`. Rows stored before the
-    /// envelope carried an id (or from a sender that sent none) are simply
-    /// absent here; they still resolve a name everywhere else.
+    /// `(signature key, account id)`. Rows stored before the envelope carried
+    /// an id (or from a sender that sent none) are simply absent here; they
+    /// still resolve a name everywhere else.
     func profilesWithAccountId() -> [(signatureKeyB64: String, accountId: Data)] {
         profiles.compactMap { key, claim in
             claim.accountId.map { (signatureKeyB64: key, accountId: $0) }

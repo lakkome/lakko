@@ -229,3 +229,10 @@ path = "fuzz_targets/mailbox_binding_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "push_wake_open"
+path = "fuzz_targets/push_wake_open.rs"
+test = false
+doc = false
+bench = false

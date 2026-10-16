@@ -82,10 +82,9 @@ export default defineConfig({
         rewrite: (p) => p.replace(/^\/api\/storage/, ""),
       },
       // 1.20b: lakko-svc-push-gw defaults to 127.0.0.1:8085.
-      // POST /push/register / /push/unregister carries the
-      // device pseudonym + provider + (base64-encoded) token.
-      // GET /pow/challenge issues the per-call PoW seed. The
-      // SW side calls these via the same `/api/push` prefix.
+      // ADR-0078: POST /push/subscribe / /push/unsubscribe carry a
+      // sealed subscription (no device pseudonym, no clear token);
+      // GET /push/wake-key serves the key wakes are sealed to.
       "/api/push": {
         target: "http://127.0.0.1:8085",
         changeOrigin: true,

@@ -408,11 +408,11 @@ export const callActions = {
   setQuality(id: string, tier: QualityTier): void {
     patchParticipant(id, { quality: tier });
   },
-  /** Rename a participant in place. The SFU adapter re-runs its name
-   *  resolution when a profile lands mid-call (ADR-0048 v2 carries the
-   *  account id the ADR-0021 peer tag is derived from), so a tile that
-   *  joined as a pseudonym picks up the person's name. No-op on unknown id
-   *  or an unchanged name. */
+  /** Rename a participant in place. The SFU adapter names a tile when the
+   *  peer's sealed announcement verifies (ADR-0078 section 2) and re-runs
+   *  its name resolution when a profile lands mid-call, so a tile that
+   *  joined unnamed picks up the person's name. No-op on unknown id or an
+   *  unchanged name. */
   setParticipantName(id: string, displayName: string): void {
     setParticipants((list) =>
       list.some((p) => p.id === id && p.displayName !== displayName)

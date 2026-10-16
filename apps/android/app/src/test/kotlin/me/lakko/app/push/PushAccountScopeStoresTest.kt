@@ -72,14 +72,35 @@ class PushAccountScopeStoresTest {
     fun `the wake binding round-trips and clears`() {
         val store = PushWakeBindingStore(context)
         assertNull(store.load())
-        val pseudonym = ByteArray(32) { 0x0A }
-        store.bind(pseudonym, accountA)
+        store.bind(accountA)
         val loaded = store.load()
-        assertEquals(PushWakeBinding("0a".repeat(32), accountA), loaded)
-        assertEquals(accountA, wakeAccountFor("0a".repeat(32), loaded))
+        assertEquals(PushWakeBinding(accountA), loaded)
+        assertEquals(accountA, wakeAccountFor("0a".repeat(16), loaded))
 
         store.clear()
         assertNull(store.load())
+    }
+
+    /** ADR-0078 — a wake routes only for a subscription id the account holds
+     *  for that `push_gid`, and the ids go with the account's rows. */
+    @Test
+    fun `the route lookup requires the account's own subscription id`() {
+        val store = PushRouteStore(context)
+        store.put(accountA, pushGid, groupA)
+        val held = store.ensureSubscriptionId(accountA, pushGid)
+        assertEquals(16, held.size)
+        assertTrue("one id per subscription, kept", held.contentEquals(store.ensureSubscriptionId(accountA, pushGid)))
+        assertEquals(groupA, store.lookup(accountA, pushGid, PushClient.pseudonymHex(held)))
+        assertNull(store.lookup(accountA, pushGid, "0b".repeat(16)))
+        assertNull(store.lookup(accountA, pushGid, null))
+        assertEquals(1, store.subscriptionIds(accountA).size)
+
+        store.remove(accountA, pushGid)
+        assertNull("the id goes with the route row", store.subscriptionId(accountA, pushGid))
+        store.put(accountA, pushGid, groupA)
+        store.ensureSubscriptionId(accountA, pushGid)
+        store.clearForAccount(accountA)
+        assertTrue(store.subscriptionIds(accountA).isEmpty())
     }
 
     @Test
@@ -106,7 +127,7 @@ class PushAccountScopeStoresTest {
     }
 
     private fun bindAndNotify() {
-        PushWakeBindingStore(context).bind(ByteArray(32) { 0x0A }, accountA)
+        PushWakeBindingStore(context).bind(accountA)
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel("test", "test", NotificationManager.IMPORTANCE_HIGH),

@@ -22,13 +22,13 @@ import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.GroupInviteCapability
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.PublisherGroup
-import uniffi.lakko_ffi_uniffi.channelIdFromPublisherGroupId
-import uniffi.lakko_ffi_uniffi.composeGroupInviteCapability
+import uniffi.lakko_ffi_uniffi.composeCoPublisherInviteCapability
 import uniffi.lakko_ffi_uniffi.composeGroupJoinAttribution
 import uniffi.lakko_ffi_uniffi.composeChannelCopublisherBinding
 import uniffi.lakko_ffi_uniffi.decodeChannelCopublisherBinding
+import uniffi.lakko_ffi_uniffi.publisherGroupLoad
+import uniffi.lakko_ffi_uniffi.publisherGroupLoadJoined
 import uniffi.lakko_ffi_uniffi.publisherGroupOpenOrCreate
-import uniffi.lakko_ffi_uniffi.sealSubscriberSeedEnvelope
 
 /**
  * ADR-0028 OQ3 — channel co-publisher management (owner + joiner side, Android).
@@ -44,10 +44,20 @@ import uniffi.lakko_ffi_uniffi.sealSubscriberSeedEnvelope
  * (the epoch-keyed exporter output) CHANGES. Every existing subscriber holds the
  * OLD seed, so the owner MUST reseal the new seed to all subscribers (the
  * ADR-0010 / C-54 rotation fanout) or those subscribers can no longer decrypt.
- * [approve] does this via [resealSubscribers] — the same audited
- * `sealSubscriberSeedEnvelope` + atomic `POST /v1/channels/:id/rotate` fanout as
- * [RotationCron], but WITHOUT a second `rotate()` (the Add already advanced the
- * epoch; the reseal binds to the post-approve epoch the co-publisher joins at).
+ * [approve] does this through [resealToSubscribers] — the same staged ADR-0030
+ * fanout as [RotationCron], but WITHOUT a second `rotate()` (the Add already
+ * advanced the epoch; the reseal binds to the post-approve epoch the
+ * co-publisher joins at).
+ *
+ * **G-50.** The approve is recorded ([PublisherCommitEntry]) with the N+1
+ * provider snapshot before any of its effects leaves the device, and the
+ * effects resume from that record ([replayPublisherCommits]).
+ *
+ * **ADR-0078 section 6.** A PublisherGroup id is derived from the owner's
+ * account seed and the channel id, so only the owner computes it; a
+ * co-publisher opens the group under the id its link conveyed (recorded per
+ * channel in [CoPublishedJournalMarks]), and the link carries the channel id
+ * in its sealed preview.
  *
  * The end-to-end correctness of the reseal under a real 2-publisher topology
  * needs a live 2-publisher e2e against a deployed channels backend — deferred
@@ -90,12 +100,23 @@ public object CoPublisher {
     // -----------------------------------------------------------------
 
     /** Open (or create) the persistent PublisherGroup handle for a channel. The
-     *  caller owns the returned handle and MUST `.close()` it when done. */
-    public fun openPublisherGroup(identity: Identity, channelIdHex: String): PublisherGroup {
+     *  caller owns the returned handle and MUST `.close()` it when done. A
+     *  co-published channel ([coPublished]) is opened under the group id its
+     *  link conveyed and never founded here (ADR-0078 section 6). */
+    public fun openPublisherGroup(
+        identity: Identity,
+        channelIdHex: String,
+        coPublished: CoPublishedJournalMarks? = null,
+    ): PublisherGroup {
         val channelId = hexToBytes(channelIdHex)
             ?: throw CoPublisherException.BadChannelId(channelIdHex)
         return try {
-            publisherGroupOpenOrCreate(identity, channelId)
+            loadPublisherGroup(identity, channelIdHex, coPublished)
+                ?: if (coPublished?.journalIdOf(channelIdHex) != null) {
+                    throw CoPublisherException.NotAChannelGroup
+                } else {
+                    publisherGroupOpenOrCreate(identity, channelId)
+                }
         } catch (e: Throwable) {
             // A channel minted under the retired v1 derivation refuses here and
             // cannot be repaired — surface the readable copy, not the raw string.
@@ -103,16 +124,45 @@ public object CoPublisher {
         }
     }
 
+    /** The channel's PublisherGroup from [identity]'s provider, or `null`.
+     *  A co-published channel is opened under the group id its link conveyed,
+     *  an owned one under the owner's derivation (ADR-0078 section 6). Never
+     *  creates. The caller owns the returned handle. */
+    public fun loadPublisherGroup(
+        identity: Identity,
+        channelIdHex: String,
+        coPublished: CoPublishedJournalMarks? = null,
+    ): PublisherGroup? {
+        val channelId = hexToBytes(channelIdHex)
+            ?: throw CoPublisherException.BadChannelId(channelIdHex)
+        val joinedId = coPublished?.journalIdOf(channelIdHex)?.let(::hexToBytes)
+        return if (joinedId != null) {
+            publisherGroupLoadJoined(identity, joinedId, channelId)
+        } else {
+            publisherGroupLoad(identity, channelId)
+        }
+    }
+
     /** Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`.
      *  A non-member opens it, requests to join, and the owner approves (reusing
-     *  the ADR-0027/0028 external-join machinery). `0` = never expires. */
+     *  the ADR-0027/0028 external-join machinery). `0` = never expires.
+     *  ADR-0078 section 6 — the joiner cannot recover the channel id from the
+     *  group id, so the capability's sealed preview carries it (and the
+     *  channel's name when known). */
     public fun createCoPublisherLink(
         identity: Identity,
         publisherGroup: PublisherGroup,
+        channelName: String? = null,
         origin: String = DEFAULT_ORIGIN,
     ): String {
         val groupId = publisherGroup.groupId()
-        val mint = composeGroupInviteCapability(identity.ed25519Seed(), groupId, 0uL)
+        val mint = composeCoPublisherInviteCapability(
+            identity.ed25519Seed(),
+            groupId,
+            0uL,
+            publisherGroup.channelId(),
+            channelName?.takeIf { it.isNotBlank() },
+        )
         // Sealed links (2026-09-28): the inline form carries the SEALED
         // capability, and the fragment carries the secret that opens it. A
         // co-publisher link has never gone through the ledger; that is
@@ -294,11 +344,20 @@ public object CoPublisher {
         publisherGroup.pendingExternalJoins()
 
     /** Approve a pending co-publisher. Commits the Add (advances the
-     *  PublisherGroup epoch), registers the new epoch's journal key and
-     *  broadcasts the commit (ADR-0053), sends the Welcome to the joiner's own
-     *  mailbox (the not-yet-member joiner polls it), then RESEALS the
-     *  new-epoch channel seed to all subscribers — the Add changed the exporter
-     *  output, so existing subscribers must get the new seed or they break. */
+     *  PublisherGroup epoch), then, in order: registers the new epoch's journal
+     *  key and publishes the commit (ADR-0053), sends the Welcome to the
+     *  joiner's own mailbox, RESEALS the new-epoch channel seed to all
+     *  subscribers (the Add changed the exporter output, so existing
+     *  subscribers must get the new seed or they break), and appoints the
+     *  newcomer's co-publisher key (ADR-0059).
+     *
+     *  G-50 — the server epoch the reseal binds to is read BEFORE the Add:
+     *  after the eager merge nothing may fail before the commit's record is
+     *  durable. The record goes to [store] and then the N+1 provider snapshot
+     *  ([persistNow], `withIdentityPersistingFirst`), both fail-closed; on a
+     *  failure of either the provider is restored to its state before the
+     *  Add and the error is rethrown (the caller must reopen [publisherGroup],
+     *  whose in-memory state is the rolled-back one). Then the steps run. */
     public suspend fun approve(
         ds: DsClient,
         channelsClient: ChannelsClient,
@@ -306,64 +365,186 @@ public object CoPublisher {
         publisherGroup: PublisherGroup,
         proposalRef: ByteArray,
         channelIdHex: String,
+        accountIdB64: String,
+        store: PublisherCommitStore,
+        persistNow: () -> Unit,
     ) {
-        val groupId = publisherGroup.groupId()
-        val signerBeforeCommit = signerOf(publisherGroup, identity)
-        // ADR-0078: the joiner's account key. A PublisherGroup leaf carries
-        // no device binding: the co-publisher joins under its account
-        // identity, so the proposal's leaf key IS that account key. The reply
-        // grant's binding is verified against it before the Welcome is sealed.
-        val joinerAccount = proposalRef
-        val added = publisherGroup.approveExternalJoin(identity, proposalRef)
-        // ADR-0057 — register epoch N+1's key with the owner's root before the
-        // commit is published. A refusal throws: the
-        // caller's `withIdentity` then persists nothing, so the durable group
-        // stays at N and nothing reached the wire.
-        val commitSigner = me.lakko.app.ds.registerEpochBeforePublish(
-            journalId = groupId,
-            before = signerBeforeCommit,
-            after = signerOf(publisherGroup, identity),
-            statements = me.lakko.app.ds.FfiDsStatementSigning.root(identity, groupId),
-            revoke = emptyList(),
-            put = { make -> ds.putStatement(make) },
+        val current = channelsClient.fetchEpoch(channelIdHex)
+        if (current == UInt.MAX_VALUE) throw CoPublisherException.UnexpectedServerEpoch(current)
+        val serverTarget = (current + 1u).toLong()
+        val entry = recordCommit(identity, accountIdB64, store, persistNow) {
+            val added = publisherGroup.approveExternalJoin(identity, proposalRef)
+            PublisherCommitEntry(
+                id = PublisherCommitEntry.newId(),
+                kind = PublisherCommitEntry.Kind.APPROVE,
+                channelIdHex = channelIdHex.lowercase(),
+                groupIdHex = DsClient.pseudonymHex(publisherGroup.groupId()),
+                targetEpoch = publisherGroup.epoch().toLong(),
+                serverTargetEpoch = serverTarget,
+                commitB64 = Base64.encodeToString(added.commit, Base64.NO_WRAP),
+                welcomeB64 = Base64.encodeToString(added.welcome, Base64.NO_WRAP),
+                joinerKeyB64 = Base64.encodeToString(proposalRef, Base64.NO_WRAP),
+            )
+        }
+        runPublisherCommit(
+            entry,
+            commitPorts(ds, channelsClient, identity, publisherGroup, channelIdHex, accountIdB64, store),
         )
-        ds.publishGroup(groupId, added.commit, signer = commitSigner)
-        // ADR-0053 client contract point 8 — the Welcome goes to the joiner's
-        // own mailbox; nothing is written to the journal for a non-member to
-        // read. ADR-0060 §6 — written with the reply key the joiner's
-        // attribution carried. ADR-0078 — sealed as a WELCOME_RENDEZVOUS row
-        // to the mailbox that grant's binding names, verified against the
-        // joiner's account; with no verified grant nothing is written (the
-        // reseal below still runs: the commit is on the wire).
-        val dest = joinerReplyGrants[me.lakko.app.reach.reachHex(proposalRef)]?.let { grant ->
-            verifiedGrantDest(grant, joinerAccount, mailboxCrypto) { seed ->
-                me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(seed))
+    }
+
+    /**
+     * G-50 — create a PublisherGroup commit with [create] and record it: the
+     * entry FIRST, then the N+1 provider snapshot, both fail-closed. On a
+     * failure of the create, the record or the snapshot, the provider is
+     * restored to the snapshot taken before, a written entry is removed, and
+     * the error is rethrown: nothing runs.
+     */
+    internal fun recordCommit(
+        identity: Identity,
+        accountIdB64: String,
+        store: PublisherCommitStore,
+        persistNow: () -> Unit,
+        create: () -> PublisherCommitEntry,
+    ): PublisherCommitEntry {
+        val before = identity.snapshotStorage()
+        var recorded: PublisherCommitEntry? = null
+        try {
+            val entry = create()
+            store.put(accountIdB64, entry)
+            recorded = entry
+            persistNow()
+            return entry
+        } catch (e: Throwable) {
+            recorded?.let { store.remove(accountIdB64, it.id) }
+            try {
+                identity.restoreStorage(before)
+            } catch (restore: Throwable) {
+                android.util.Log.w("CoPublisher", "G-50: the provider was not rolled back after a failed record", restore)
+            }
+            throw e
+        } finally {
+            before.fill(0)
+        }
+    }
+
+    /** G-50 — the ports a recorded commit of [publisherGroup] runs through. */
+    internal fun commitPorts(
+        ds: DsClient,
+        channelsClient: ChannelsClient,
+        identity: Identity,
+        publisherGroup: PublisherGroup,
+        channelIdHex: String,
+        accountIdB64: String,
+        store: PublisherCommitStore,
+    ): PublisherCommitPorts = object : PublisherCommitPorts {
+        override suspend fun registerEpoch() {
+            val groupId = publisherGroup.groupId()
+            val signer = signerOf(publisherGroup, identity)
+                ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the channel journal key could not be derived")
+            val root = me.lakko.app.ds.FfiDsStatementSigning.root(identity, groupId)
+            try {
+                ds.putStatement { root.registerEpoch(groupId, signer.epoch, signer.verifyingKey, emptyList()) }
+            } catch (e: me.lakko.app.ds.DsHttpError) {
+                // A 409 is this device's own earlier registration of the epoch.
+                if (e.status != HTTP_CONFLICT) throw e
             }
         }
-        if (dest != null) {
-            val sealed = mailboxCrypto.sealFor(dest, MailboxRowKind.WELCOME_RENDEZVOUS, added.welcome)
-            ds.publishMailbox(sealed.address, sealed.row, reach = dest.auth)
-        } else {
-            android.util.Log.w("CoPublisher", "ADR-0078: no verified reply grant for the joiner; Welcome not written")
+
+        override suspend fun publishCommit(commit: ByteArray) {
+            ds.publishGroup(publisherGroup.groupId(), commit, signer = signerOf(publisherGroup, identity))
         }
-        resealSubscribers(channelsClient, identity, publisherGroup, channelIdHex)
-        // ADR-0059 — appoint the newcomer's co-publisher key so its own
-        // rotation fanout can read the subscriber list. After the
-        // load-bearing reseal; never fails the approve. Only the owner can
-        // appoint: a co-publisher approving another gets a 401 here, logged.
-        val key = coPublisherBindings[bindingSlot(groupId, proposalRef)]
-        if (key == null) {
-            android.util.Log.w("CoPublisher", "ADR-0059: no binding read for the approved joiner; not appointed")
-        } else {
+
+        override suspend fun deliverWelcome(welcome: ByteArray, joinerKey: ByteArray) {
+            // ADR-0053 client contract point 8 — the Welcome goes to the
+            // joiner's own mailbox. ADR-0060 §6 — written with the reply key
+            // the joiner's attribution carried, re-read from the retained
+            // knock on every poll. ADR-0078 — sealed as a WELCOME_RENDEZVOUS
+            // row to the mailbox that grant's binding names, verified against
+            // the joiner's account (a PublisherGroup leaf IS the account key).
+            // With no verified grant yet the step stays owed.
+            val dest = joinerReplyGrants[me.lakko.app.reach.reachHex(joinerKey)]?.let { grant ->
+                verifiedGrantDest(grant, joinerKey, mailboxCrypto) { seed ->
+                    me.lakko.app.ds.DsReachAuth(me.lakko.app.ds.reachSigner(seed))
+                }
+            } ?: throw IllegalStateException("no verified reply grant for the joiner yet")
+            val sealed = mailboxCrypto.sealFor(dest, MailboxRowKind.WELCOME_RENDEZVOUS, welcome)
+            ds.publishMailbox(sealed.address, sealed.row, reach = dest.auth)
+        }
+
+        override suspend fun serverEpoch(): Long = channelsClient.fetchEpoch(channelIdHex).toLong()
+
+        override suspend fun reseal(targetEpoch: Long) {
+            resealToSubscribers(channelsClient, identity, publisherGroup, channelIdHex, targetEpoch)
+        }
+
+        override suspend fun appoint(joinerKey: ByteArray) {
+            // Only the owner can appoint: a co-publisher approving another
+            // gets a 401 here, logged by the runner.
+            val key = coPublisherBindings[bindingSlot(publisherGroup.groupId(), joinerKey)]
+            if (key == null) {
+                android.util.Log.w("CoPublisher", "ADR-0059: no binding read for the approved joiner; not appointed")
+                return
+            }
+            channelsClient.setCoPublisherAppointment(true, channelIdHex, identity, key)
+        }
+
+        override fun save(entry: PublisherCommitEntry) = store.put(accountIdB64, entry)
+
+        override fun finish(entry: PublisherCommitEntry) = store.remove(accountIdB64, entry.id)
+    }
+
+    /**
+     * G-50 — resume every recorded commit of [accountIdB64] whose steps had
+     * not all landed (a restart, a failed step), on the channel provider
+     * [identity]. An entry whose group did not reach its target epoch is
+     * dropped ([replayVerdict]). Errors are logged; the entry stays for the
+     * next run. Returns the channels whose commit finished (their content
+     * seed changed).
+     */
+    public suspend fun replayPublisherCommits(
+        ds: DsClient,
+        channelsClient: ChannelsClient,
+        identity: Identity,
+        accountIdB64: String,
+        store: PublisherCommitStore,
+        coPublished: CoPublishedJournalMarks?,
+    ): List<String> {
+        val finished = ArrayList<String>()
+        for (entry in store.entries(accountIdB64)) {
+            val group = try {
+                loadPublisherGroup(identity, entry.channelIdHex, coPublished)
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                null
+            }
             try {
-                channelsClient.setCoPublisherAppointment(true, channelIdHex, identity, key)
+                when (replayVerdict(entry, group?.epoch()?.toLong())) {
+                    PublisherCommitReplay.DISCARD -> {
+                        android.util.Log.w("CoPublisher", "G-50: a commit whose epoch never became durable was dropped")
+                        store.remove(accountIdB64, entry.id)
+                    }
+                    PublisherCommitReplay.REPLAY -> {
+                        val pg = group ?: continue
+                        runPublisherCommit(
+                            entry,
+                            commitPorts(ds, channelsClient, identity, pg, entry.channelIdHex, accountIdB64, store),
+                        )
+                        finished += entry.channelIdHex
+                    }
+                }
             } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                android.util.Log.w("CoPublisher", "ADR-0059: appointing the co-publisher key failed", e)
+                android.util.Log.w("CoPublisher", "G-50: a recorded commit did not finish; retried later", e)
+            } finally {
+                group?.close()
             }
         }
+        return finished
     }
+
+    private const val HTTP_CONFLICT: Int = 409
 
     /** Co-publisher keys read off PublisherGroup knock queues (ADR-0059
      *  section 1), filed under the joiner account key each binding was
@@ -419,7 +600,8 @@ public object CoPublisher {
     public data class CoPublishRequest(
         /** The PublisherGroup's MLS `group_id` (the journal channel to poll). */
         val groupId: ByteArray,
-        /** The 32-char lowercase-hex channel id recovered from the `group_id`. */
+        /** The 32-char lowercase-hex channel id the link's sealed preview
+         *  carried (ADR-0078 section 6). */
         val channelIdHex: String,
         /** This identity's signature key — the one its proposal carried, whose
          *  mailbox the owner's Welcome is sent to. */
@@ -428,7 +610,8 @@ public object CoPublisher {
 
     /** ADR-0028 OQ3 — joiner side: request to become a co-publisher of a channel
      *  from a `/g/` co-publisher link. Decodes + verifies the capability,
-     *  recovers the channel id from the PublisherGroup `group_id`, and knocks
+     *  reads the channel id from its sealed preview (ADR-0078 section 6: the
+     *  group id is the owner's derivation and cannot be inverted), and knocks
      *  (ADR-0053 §4): an empty knock learns the epoch, a second carries a
      *  self-signed join-attribution (OQ2) and the external-join proposal
      *  (ADR-0027) for it. The journal is never read. The caller then polls
@@ -458,14 +641,20 @@ public object CoPublisher {
         }
         val groupId: ByteArray
         val wire: ByteArray
+        val previewChannelId: ByteArray?
         try {
             groupId = cap.groupId()
             // The attribution is computed over the PLAINTEXT capability.
             wire = cap.wire()
+            previewChannelId = try {
+                cap.openPreview(secret)?.channelId
+            } catch (_: Throwable) {
+                null
+            }
         } finally {
             cap.close()
         }
-        val channelIdBytes = channelIdFromPublisherGroupId(groupId)
+        val channelIdBytes = previewChannelId?.takeIf { it.size == CHANNEL_ID_LEN }
             ?: throw if (LegacyChannelV1.isLegacyV1PublisherGroupId(groupId)) {
                 // A link minted under the retired v1 derivation — distinct from
                 // a `/g/` link that simply targets a chat group, and it needs
@@ -478,7 +667,9 @@ public object CoPublisher {
         // ADR-0057 — this device asks to CO-publish, so it is not the channel
         // owner: it must never claim the PublisherGroup journal. Marked before
         // the knock, so no later open of this channel can claim first.
-        coPublished.mark(DsClient.pseudonymHex(groupId))
+        // ADR-0078 section 6: with the channel, since this account cannot
+        // derive the owner's group id.
+        coPublished.markChannel(DsClient.pseudonymHex(groupId), channelIdHex)
         // ADR-0053 client contract point 6 — the PublisherGroup journal is
         // claimed, so a prospective co-publisher never reads it: an empty knock
         // learns the epoch, a second knock carries the self-signed attribution
@@ -560,10 +751,10 @@ public object CoPublisher {
             },
         )
         // Join the PublisherGroup from the Welcome — this persists the joined
-        // MLS state under the deterministic PublisherGroup `group_id` in the
-        // identity's provider. The handle itself is throwaway (close it);
-        // freshPublisherKeys re-opens the now-joined PublisherGroup by
-        // channel id and derives the shared content-key seed + a fresh
+        // MLS state under the PublisherGroup `group_id` the link conveyed in
+        // the identity's provider. The handle itself is throwaway (close it);
+        // freshPublisherKeys re-opens the now-joined PublisherGroup under
+        // that id and derives the shared content-key seed + a fresh
         // per-device signing key so this device can publish. Newest first,
         // and a Welcome this identity cannot open (a chat Welcome sharing
         // the mailbox, or one sealed to a KeyPackage it no longer holds) is
@@ -586,65 +777,7 @@ public object CoPublisher {
         // the mark set when the request was sent).
         coPublished.mark(DsClient.pseudonymHex(groupId))
         return ChannelsComposer.freshPublisherKeys(
-            identity, channelIdHex, existingSigningSeed)
-    }
-
-    // -----------------------------------------------------------------
-    // Reseal (mirror RotationCron steps 2-4, WITHOUT rotate())
-    // -----------------------------------------------------------------
-
-    /** Reseal the CURRENT (post-approve) channel seed to all subscribers — the
-     *  [RotationCron] fanout WITHOUT advancing the MLS epoch (the Add already
-     *  did). Binds the envelopes to the new server epoch the `/rotate` endpoint
-     *  sets; a single seal failure aborts the whole batch (the atomic posture
-     *  the server enforces). */
-    private suspend fun resealSubscribers(
-        channelsClient: ChannelsClient,
-        identity: Identity,
-        publisherGroup: PublisherGroup,
-        channelIdHex: String,
-    ) {
-        val newSeed = publisherGroup.channelSeed(identity)
-        val channelIdBytes = publisherGroup.channelId()
-        val currentEpoch = channelsClient.fetchEpoch(channelIdHex)
-        if (currentEpoch == UInt.MAX_VALUE) {
-            throw CoPublisherException.UnexpectedServerEpoch(currentEpoch)
-        }
-        val newServerEpoch = currentEpoch + 1u
-        // ADR-0059 section 9: the list and the rotate are signed with this
-        // account's publisher role, derived once for both.
-        ChannelPublisherSigners.derive(identity, channelIdHex).use { proofs ->
-            resealWith(channelsClient, proofs, channelIdBytes, newServerEpoch, newSeed, channelIdHex)
-        }
-    }
-
-    private suspend fun resealWith(
-        channelsClient: ChannelsClient,
-        proofs: ChannelPublisherProofs,
-        channelIdBytes: ByteArray,
-        newServerEpoch: UInt,
-        newSeed: ByteArray,
-        channelIdHex: String,
-    ) {
-        val subscribers = channelsClient.listSubscribersAsPublisher(channelIdHex, proofs)
-        val batch = ArrayList<RotateBatchEntry>(subscribers.size)
-        for (subscriberHex in subscribers) {
-            val subscriberBytes = hexToBytes(subscriberHex)
-                ?: throw CoPublisherException.MalformedSubscriberHex(subscriberHex)
-            val envelope = sealSubscriberSeedEnvelope(
-                subscriberBytes,
-                channelIdBytes,
-                newServerEpoch,
-                newSeed,
-            )
-            batch.add(
-                RotateBatchEntry(
-                    subscriber_pubkey_hex = subscriberHex,
-                    envelope_b64 = Base64.encodeToString(envelope, Base64.NO_WRAP),
-                ),
-            )
-        }
-        channelsClient.rotateChannel(channelIdHex, batch, proofs)
+            identity, channelIdHex, existingSigningSeed, joinedGroupId = groupId)
     }
 
     // -----------------------------------------------------------------
@@ -700,6 +833,9 @@ public object CoPublisher {
         }
         return out
     }
+
+    /** Bytes of a channel id. */
+    private const val CHANNEL_ID_LEN: Int = 16
 
     private fun base64UrlEncode(bytes: ByteArray): String =
         Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.URL_SAFE or Base64.NO_PADDING)

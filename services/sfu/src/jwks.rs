@@ -219,8 +219,8 @@ mod tests {
         let claims = CallJwtClaims {
             iss: JWT_ISSUER.into(),
             aud: JWT_AUDIENCE.into(),
-            sub: "deadbeefdeadbeefdeadbeefdeadbeef".into(),
-            call_id: "0123456789abcdef0123456789abcdef".into(),
+            room: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            peer_id: "deadbeefdeadbeefdeadbeefdeadbeef".into(),
             role: CallRole::Publisher,
             iat: if expired {
                 now - JWT_TTL_SECS - 60

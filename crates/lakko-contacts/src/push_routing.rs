@@ -170,6 +170,8 @@ use core::cmp::Ordering;
 use core::result::Result as CoreResult;
 
 use lakko_crypto::hash::blake3_keyed;
+use lakko_crypto::signing::SigningKey;
+use lakko_crypto::SecretBytes;
 use thiserror::Error;
 
 /// Length of a `push_routing_secret` in bytes.
@@ -352,6 +354,61 @@ pub fn push_routing_secret_is_newer(
 #[must_use]
 pub fn derive_push_gid(push_routing_secret: &[u8; PUSH_ROUTING_SECRET_LEN]) -> [u8; PUSH_GID_LEN] {
     blake3_keyed(push_routing_secret, PUSH_GID_DERIVE_DOMAIN_V1)
+}
+
+/// Message the wake signing seed is keyed-hashed from (ADR-0078 section 3).
+/// Frozen: changing it moves every group's wake key.
+pub const PUSH_WAKE_SIGN_DERIVE_DOMAIN_V1: &[u8] = b"lakko/push/wake-sign/v1";
+
+/// Message the wake unlock key is keyed-hashed from (ADR-0078 section 3).
+/// Frozen.
+pub const PUSH_WAKE_UNLOCK_DERIVE_DOMAIN_V1: &[u8] = b"lakko/push/wake-unlock/v1";
+
+/// Length of a wake signing seed, a wake public key and a wake unlock key.
+pub const PUSH_WAKE_KEY_LEN: usize = 32;
+
+/// The group's **wake signing seed** (ADR-0078 section 3):
+/// `keyed-BLAKE3(push_routing_secret, "lakko/push/wake-sign/v1")`, the
+/// Ed25519 seed of the key every member signs a sealed wake with. push-gw
+/// holds only its public half ([`derive_push_wake_public_key`]), registered
+/// by each subscriber, so a wake is accepted only from somebody who holds
+/// the group's routing secret - a member. Secret: whoever holds it can wake
+/// the group.
+#[must_use]
+pub fn derive_push_wake_signing_seed(
+    push_routing_secret: &[u8; PUSH_ROUTING_SECRET_LEN],
+) -> SecretBytes<PUSH_WAKE_KEY_LEN> {
+    SecretBytes::new(blake3_keyed(
+        push_routing_secret,
+        PUSH_WAKE_SIGN_DERIVE_DOMAIN_V1,
+    ))
+}
+
+/// The public half of the group's wake signing key: what a subscriber
+/// registers at push-gw, and what a sealed wake must verify under.
+#[must_use]
+pub fn derive_push_wake_public_key(
+    push_routing_secret: &[u8; PUSH_ROUTING_SECRET_LEN],
+) -> [u8; PUSH_WAKE_KEY_LEN] {
+    SigningKey::from_seed(derive_push_wake_signing_seed(push_routing_secret).as_bytes())
+        .verifying_key()
+        .to_bytes()
+}
+
+/// The group's **wake unlock key** (ADR-0078 section 3):
+/// `keyed-BLAKE3(push_routing_secret, "lakko/push/wake-unlock/v1")`. Every
+/// subscription row push-gw stores is sealed under it
+/// ([`crate::push_wake::seal_push_subscription`]); it reaches push-gw only
+/// inside a sealed wake and is never stored there, so the push-gw database
+/// at rest holds no readable token. Secret.
+#[must_use]
+pub fn derive_push_wake_unlock_key(
+    push_routing_secret: &[u8; PUSH_ROUTING_SECRET_LEN],
+) -> SecretBytes<PUSH_WAKE_KEY_LEN> {
+    SecretBytes::new(blake3_keyed(
+        push_routing_secret,
+        PUSH_WAKE_UNLOCK_DERIVE_DOMAIN_V1,
+    ))
 }
 
 /// Compose a push-routing-secret distribution envelope (v2) for
@@ -581,6 +638,53 @@ mod tests {
         ];
         let gid = derive_push_gid(&SAMPLE_SECRET);
         assert_eq!(gid, GOLDEN_PUSH_GID);
+    }
+
+    fn hex32(bytes: &[u8; 32]) -> String {
+        use core::fmt::Write as _;
+        let mut s = String::with_capacity(64);
+        for b in bytes {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
+    }
+
+    #[test]
+    fn golden_pins_the_wake_derivations() {
+        // ADR-0078 section 3. A change here moves every group's wake key
+        // and unlock key; the FFI surfaces pin the same values.
+        assert_eq!(
+            hex32(derive_push_wake_signing_seed(&SAMPLE_SECRET).as_bytes()),
+            "c2b7e3f9f1879679b1a79d2e32d5bba52e3fb03e9ff1e22a8de363188cfae362",
+        );
+        assert_eq!(
+            hex32(&derive_push_wake_public_key(&SAMPLE_SECRET)),
+            "2153e575c8abc4a91af2b70258982068480edc0e0451f6b6bdf6c0692e5c8e56",
+        );
+        assert_eq!(
+            hex32(derive_push_wake_unlock_key(&SAMPLE_SECRET).as_bytes()),
+            "d76a3ce72be511a512c6afce89447fa73d9595c5b0fe0942780137a7d1f4cd0a",
+        );
+    }
+
+    #[test]
+    fn the_wake_derivations_are_separated_from_each_other_and_the_gid() {
+        let gid = derive_push_gid(&SAMPLE_SECRET);
+        let seed = *derive_push_wake_signing_seed(&SAMPLE_SECRET).as_bytes();
+        let unlock = *derive_push_wake_unlock_key(&SAMPLE_SECRET).as_bytes();
+        let pk = derive_push_wake_public_key(&SAMPLE_SECRET);
+        for (a, b) in [
+            (gid, seed),
+            (gid, unlock),
+            (seed, unlock),
+            (gid, pk),
+            (unlock, pk),
+        ] {
+            assert_ne!(a, b);
+        }
+        let other = [0x43u8; 32];
+        assert_ne!(derive_push_wake_public_key(&other), pk);
+        assert_ne!(*derive_push_wake_unlock_key(&other).as_bytes(), unlock);
     }
 
     #[test]

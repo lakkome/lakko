@@ -43,11 +43,10 @@ class SfuCallUi(
     scope: CoroutineScope,
     private val ui: CallUiState,
     localDisplayName: String = "",
-    /** The name on a remote tile (`CallTileName.kt`), empty while the peer is
-     *  unnamed. The default knows nobody; it never shows the SFU pseudonym,
-     *  which is a piece of the account id. */
-    resolveDisplayName: (peerId: String, accountPseudonym: String, peerTag: String) -> String =
-        { _, _, _ -> "" },
+    /** Who each remote tile is, from the peers' verified announcements
+     *  (ADR-0078 section 2, `CallPeerNames.kt`). `null`: every remote tile
+     *  stays unnamed (the tile's unnamed state, `CallTileName.kt`). */
+    peerNames: CallPeerNames? = null,
 ) {
     /** The underlying session (for direct control if needed). */
     val session: SfuCallSession
@@ -141,23 +140,21 @@ class SfuCallUi(
                 val local = localParticipant(localDisplayName, config.audio, config.video)
                 val remotes = roster
                     .filter { it.peerId != selfPeerId }
-                    .map {
-                        remoteParticipant(
-                            resolveDisplayName(it.peerId, it.accountPseudonym, it.peerTag),
-                            it.peerId,
-                        )
-                    }
+                    .map { remoteParticipant(peerNames?.name(it.peerId).orEmpty(), it.peerId) }
                 ui.setParticipants(listOf(local) + remotes)
             },
-            onPeerJoined = { peerId, accountPseudonym, peerTag ->
-                ui.participantJoined(
-                    remoteParticipant(
-                        resolveDisplayName(peerId, accountPseudonym, peerTag),
-                        peerId,
-                    )
-                )
+            onPeerJoined = { peerId ->
+                ui.participantJoined(remoteParticipant(peerNames?.name(peerId).orEmpty(), peerId))
+            },
+            onPeerIdentified = { peerId, identity ->
+                // The peer's sealed announcement verified against the call's
+                // roster (ADR-0078 section 2): name its tile.
+                if (peerNames?.peerIdentified(peerId, identity.personKeyB64, identity.memberKeyHex) == true) {
+                    ui.setParticipantName(participantId(peerId), peerNames.name(peerId))
+                }
             },
             onPeerLeft = { peerId ->
+                peerNames?.forget(peerId)
                 val id = participantId(peerId)
                 // Drop the peer's video track first so its tile stops
                 // rendering a frozen last frame, then remove the roster entry.

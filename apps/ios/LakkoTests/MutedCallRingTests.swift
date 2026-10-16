@@ -218,15 +218,28 @@ final class MutedCallRingTests: XCTestCase {
 
     // MARK: - The CallKit report
 
-    /// The pseudonym this device registered, and the binding that names the
-    /// signed-in account for it (ADR-0042, amended 2026-09-30).
-    private let device = String(repeating: "d", count: 64)
-    private var binding: PushAccountBinding {
-        PushAccountBinding(devicePseudonymHex: device, accountIdB64: acct)
-    }
+    /// The binding that names the signed-in account (ADR-0042, amended
+    /// 2026-09-30, with ADR-0078).
+    private var binding: PushAccountBinding { PushAccountBinding(accountIdB64: acct) }
 
-    private func wake(_ group: String?, d: String? = nil) -> VoipWakePayload {
-        VoipWakePayload(groupHex: group, pointer: 7, isCallWake: true, devicePseudonymHex: d ?? device)
+    /// A wake for `pushGid`, routed for the bound account to `group` (the
+    /// same string unless given), carrying the subscription id this device
+    /// holds for that row. `subId` overrides what the wake carries.
+    private func wake(_ pushGid: String?, group: String? = nil, subId: String?? = .none) -> VoipWakePayload {
+        var held: String?
+        if let pushGid {
+            let routes = PushRoutingStore(defaults: defaults)
+            routes.putRouting(
+                accountIdB64: acct, groupIdHex: group ?? pushGid, secret: Data(repeating: 0x33, count: 32),
+                pushGidHex: pushGid, distributed: true, mintEpoch: 0)
+            held = PushAccountBinding.hex(routes.ensureSubscriptionId(accountIdB64: acct, pushGidHex: pushGid))
+        }
+        let carried: String?
+        switch subId {
+        case .none: carried = held ?? String(repeating: "5", count: 32)
+        case .some(let value): carried = value
+        }
+        return VoipWakePayload(groupHex: pushGid, pointer: 7, isCallWake: true, subscriptionIdHex: carried)
     }
 
     private func decide(_ wake: VoipWakePayload, binding: PushAccountBinding?) -> VoipWakeDecision {
@@ -260,16 +273,8 @@ final class MutedCallRingTests: XCTestCase {
             .ring(VoipWakeTarget(accountIdB64: acct, groupIdHex: group)))
     }
 
-    /// A wake that names no conversation rings. There is nothing to look up,
-    /// and a VoIP push that quietly goes nowhere is a call the person never
-    /// hears about — worse than an unwanted ring in every case.
-    func testAWakeWithNoGroupRings() {
-        XCTAssertEqual(decide(wake(nil), binding: binding), .ring(nil))
-    }
-
-    /// And so does one whose conversation this device has no mirror row for —
-    /// the fresh-install and unprovisioned-suite case, on the path where being
-    /// wrong is most expensive.
+    /// A wake whose conversation this device has no mute mirror row for —
+    /// the fresh-install and unprovisioned-suite case — rings.
     func testAWakeForAnUnmirroredConversationRings() {
         XCTAssertEqual(
             decide(wake("cc33"), binding: binding),
@@ -289,38 +294,35 @@ final class MutedCallRingTests: XCTestCase {
         XCTAssertEqual(decide(wake(nil), binding: nil), .refuse)
     }
 
-    /// A wake sent to another sign-in session's pseudonym, or with no `d`.
-    func testAWakeForAnotherPseudonymIsRefused() {
+    /// ADR-0078 — a wake for a subscription this account does not hold, with
+    /// no `s`, or naming no conversation, is refused.
+    func testAWakeForASubscriptionNotHeldIsRefused() {
         let group = String(repeating: "a", count: 64)
-        XCTAssertEqual(decide(wake(group, d: String(repeating: "e", count: 64)), binding: binding), .refuse)
-        XCTAssertEqual(
-            decide(VoipWakePayload(groupHex: group, pointer: 7, isCallWake: true), binding: binding),
-            .refuse)
+        XCTAssertEqual(decide(wake(group, subId: String(repeating: "e", count: 32)), binding: binding), .refuse)
+        XCTAssertEqual(decide(wake(group, subId: .some(nil)), binding: binding), .refuse)
+        XCTAssertEqual(decide(wake(nil), binding: binding), .refuse)
     }
 
     /// The reverse index is read for the bound account: a row another account
-    /// filed under the same `push_gid` is a miss, and the wake falls back to
-    /// its raw `g` for the bound account.
+    /// filed under the same `push_gid` (with its own subscription) is a miss.
     func testTheRouteIsReadForTheBoundAccountOnly() {
         let pushGid = String(repeating: "f", count: 64)
         let mine = String(repeating: "1", count: 64)
         let theirs = String(repeating: "2", count: 64)
         let routes = PushRoutingStore(defaults: defaults)
-        let secret = Data(repeating: 0x33, count: 32)
         routes.putRouting(
-            accountIdB64: other, groupIdHex: theirs, secret: secret, pushGidHex: pushGid,
-            distributed: true, mintEpoch: 0)
+            accountIdB64: other, groupIdHex: theirs, secret: Data(repeating: 0x33, count: 32),
+            pushGidHex: pushGid, distributed: true, mintEpoch: 0)
+        let theirSub = PushAccountBinding.hex(routes.ensureSubscriptionId(accountIdB64: other, pushGidHex: pushGid))
         XCTAssertEqual(
-            decide(wake(pushGid), binding: binding),
-            .ring(VoipWakeTarget(accountIdB64: acct, groupIdHex: pushGid)),
+            decide(VoipWakePayload(groupHex: pushGid, pointer: 7, isCallWake: true, subscriptionIdHex: theirSub),
+                   binding: binding),
+            .refuse,
             "another account's row is a miss")
 
-        routes.putRouting(
-            accountIdB64: acct, groupIdHex: mine, secret: secret, pushGidHex: pushGid,
-            distributed: true, mintEpoch: 0)
         ConversationMuteMirror.replaceAll(accountIdB64: acct, mutedGroupIdsHex: [mine], defaults: defaults)
         XCTAssertEqual(
-            decide(wake(pushGid), binding: binding),
+            decide(wake(pushGid, group: mine), binding: binding),
             .silent(VoipWakeTarget(accountIdB64: acct, groupIdHex: mine)))
     }
 

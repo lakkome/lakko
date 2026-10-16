@@ -143,17 +143,15 @@ public data class InviteLinkArgument(val slug: String, val fragment: String?) {
 /**
  * What an upload to one of the three ledgers carries (all but `sealed` in
  * clear, for the fetch filter, the consume ceiling, the pruner and the
- * issuer's revoke): the sealed link, the 32-byte key that signed the
- * capability, and the capability's `expiry_ms` / `max_uses`. [label] and
- * [bootstrapReferral] are sent by the `/i/` ledger only.
+ * revoke): the sealed link, the public half of the link's own revocation key
+ * (ADR-0078 section 10: never the issuer's identity key, and no owner), and
+ * the capability's `expiry_ms` / `max_uses`.
  */
 public class SealedInviteUpload(
     public val sealed: ByteArray,
-    public val issuerPubkey: ByteArray,
+    public val revocationPubkey: ByteArray,
     public val expiryMs: Long,
     public val maxUses: Long,
-    public val label: String = "",
-    public val bootstrapReferral: Boolean = false,
 )
 
 /**

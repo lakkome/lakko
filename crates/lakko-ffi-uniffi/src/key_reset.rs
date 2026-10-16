@@ -6,16 +6,16 @@
 //! Mirror of `crates/lakko-ffi-wasm/src/key_reset.rs` for iOS + Android.
 //! **Verify only**: `services/auth` signs the attestation inside
 //! `POST /account/keys/reset/finish`, and a client verifies the one it is
-//! handed before carrying it to discovery (the identity upload) and to the
-//! Delivery Service (the DeviceGroup journal reset), the same posture as the
-//! backup-head and genesis FFIs (ADR-0036 / ADR-0037: signing is off-device).
+//! handed before carrying it to discovery (the identity upload), the same
+//! posture as the backup-head and genesis FFIs (ADR-0036 / ADR-0037: signing
+//! is off-device). Since ADR-0078 phase 6 it names no DeviceGroup journal and
+//! the Delivery Service never sees it.
 //!
-//! The client supplies its own 16-byte account id; the two per-account values
-//! the attestation names, `account_ref` and the DeviceGroup journal id, are
-//! derived here from it so no client re-implements either hash. The
-//! derivations are also exposed on their own, [`key_reset_account_ref`] and
-//! [`device_group_journal_id`], for a client that wants to compare them with
-//! what a server answered.
+//! The client supplies its own 16-byte account id; the per-account value the
+//! attestation names, `account_ref`, is derived here from it so no client
+//! re-implements the hash. The derivation is also exposed on its own,
+//! [`key_reset_account_ref`], for a client that wants to compare it with what
+//! a server answered.
 //!
 //! **Error posture (the backup-head split).** A stale attestation is a
 //! distinct [`FfiError::KeyResetAttestationStale`]: ADR-0073 section 4.2 has a
@@ -25,7 +25,6 @@
 //! [`FfiError::KeyResetAttestation`].
 
 use lakko_attest::{
-    device_group_journal_id as inner_device_group_journal_id,
     key_reset_account_ref as inner_key_reset_account_ref,
     verify_key_reset_binding as inner_verify_key_reset_binding,
     verify_key_reset_fresh as inner_verify_key_reset_fresh, KeyResetAttestError,
@@ -45,8 +44,8 @@ impl From<KeyResetAttestError> for FfiError {
 }
 
 /// The authenticated claims a verified key-reset attestation carries — the
-/// UniFFI projection of [`lakko_attest::KeyResetAttestation`] minus the two
-/// derived per-account values the caller supplied the input for. `Debug` is
+/// UniFFI projection of [`lakko_attest::KeyResetAttestation`] minus the
+/// derived per-account value the caller supplied the input for. `Debug` is
 /// safe: every field is a public, signed commitment.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct VerifiedKeyResetAttestation {
@@ -83,20 +82,19 @@ fn parse_inputs(
 }
 
 /// Verify a key-reset attestation's signature and its binding to
-/// `expected_account_id` (through the derived `account_ref` and DeviceGroup
-/// journal id) and to `expected_pubkey`, with **no** freshness check
+/// `expected_account_id` (through the derived `account_ref`) and to
+/// `expected_pubkey`, with **no** freshness check
 /// (ADR-0073 section 2.2). Returns the authenticated generation and mint
 /// time.
 ///
-/// `attestation` is the raw 177-byte blob (`key_reset_attest_b64` decoded).
+/// `attestation` is the raw 145-byte blob (`key_reset_attest_b64` decoded).
 /// `attest_verifying_key` is the 32-byte client-pinned auth attest key.
 ///
 /// # Errors
 ///
 /// [`FfiError::KeyResetAttestation`] — a bad verifying key / wrong-length
 /// account id or pubkey, a malformed / wrong-length / wrong-version blob, a
-/// signature that does not verify, or an `account_ref` / journal / pubkey
-/// mismatch. Never [`FfiError::KeyResetAttestationStale`].
+/// signature that does not verify, or an `account_ref` / pubkey mismatch. Never [`FfiError::KeyResetAttestationStale`].
 #[uniffi::export]
 pub fn verify_key_reset_attestation(
     attestation: Vec<u8>,
@@ -113,7 +111,6 @@ pub fn verify_key_reset_attestation(
         &attestation,
         &verifying,
         &inner_key_reset_account_ref(&account),
-        &inner_device_group_journal_id(&account),
         &pubkey,
     )?;
     Ok(att.into())
@@ -147,7 +144,6 @@ pub fn verify_key_reset_attestation_fresh(
         &attestation,
         &verifying,
         &inner_key_reset_account_ref(&account),
-        &inner_device_group_journal_id(&account),
         &pubkey,
         now_millis,
         max_age_millis,
@@ -169,22 +165,6 @@ pub fn key_reset_account_ref(account_id: Vec<u8>) -> Result<Vec<u8>, FfiError> {
         .try_into()
         .map_err(|_| FfiError::KeyResetAttestation("account_id must be 16 bytes".into()))?;
     Ok(inner_key_reset_account_ref(&account).to_vec())
-}
-
-/// `BLAKE3("lakko-device-group/v1" || account_id)`: the account's DeviceGroup
-/// journal id, byte-identical to `DeviceGroup::group_id_for`. Returns the
-/// 32-byte id.
-///
-/// # Errors
-///
-/// [`FfiError::KeyResetAttestation`] when `account_id` is not 16 bytes.
-#[uniffi::export]
-pub fn device_group_journal_id(account_id: Vec<u8>) -> Result<Vec<u8>, FfiError> {
-    let account: [u8; 16] = account_id
-        .as_slice()
-        .try_into()
-        .map_err(|_| FfiError::KeyResetAttestation("account_id must be 16 bytes".into()))?;
-    Ok(inner_device_group_journal_id(&account).to_vec())
 }
 
 #[cfg(test)]
@@ -277,21 +257,11 @@ mod tests {
     }
 
     #[test]
-    fn journal_id_matches_the_mls_derivation() {
-        // The attest crate repeats `DeviceGroup::group_id_for` so auth and the
-        // clients need no MLS crate for it; this crate links both, so pin
-        // them equal here.
-        for id in [[0u8; 16], [0xAA; 16], [0x42; 16]] {
-            assert_eq!(
-                device_group_journal_id(id.to_vec()).unwrap(),
-                lakko_mls::DeviceGroup::group_id_for(&id)
-            );
-        }
-        assert_ne!(
-            key_reset_account_ref(ACCOUNT.to_vec()).unwrap(),
-            device_group_journal_id(ACCOUNT.to_vec()).unwrap()
-        );
+    fn account_ref_is_one_way_and_length_checked() {
+        let r = key_reset_account_ref(ACCOUNT.to_vec()).unwrap();
+        assert_eq!(r.len(), 32);
+        assert_ne!(&r[..16], &ACCOUNT[..]);
         assert!(key_reset_account_ref(vec![0u8; 15]).is_err());
-        assert!(device_group_journal_id(vec![0u8; 17]).is_err());
+        assert!(key_reset_account_ref(vec![0u8; 17]).is_err());
     }
 }

@@ -9,14 +9,13 @@ import android.util.Log
 import androidx.core.app.NotificationManagerCompat
 
 /**
- * The `(device pseudonym, account)` binding the FCM service gates every wake
- * on (ADR-0042, amended 2026-09-30; the rule itself is [wakeAccountFor]).
+ * The account binding the FCM service gates every wake on (ADR-0042, amended
+ * 2026-09-30, with ADR-0078; the rule itself is [wakeAccountFor]).
  *
  * Plain app [SharedPreferences], like [PushRouteStore]: the service reads it
- * on the FCM callback thread before anything else, and neither value is
- * secret — the pseudonym travels in every wake, and the account id is the key
- * of every per-account store on this device. One binding at a time: a device
- * has at most one active account.
+ * on the FCM callback thread before anything else, and the value is not
+ * secret — the account id is the key of every per-account store on this
+ * device. One binding at a time: a device has at most one active account.
  *
  * Writes the service depends on use `commit()` so that a [clear] has taken
  * effect before the caller does anything else.
@@ -26,32 +25,29 @@ public class PushWakeBindingStore(context: Context) {
     private val prefs: SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    /** Record that [devicePseudonym] is registered for [accountIdB64],
-     *  replacing any earlier binding. */
-    public fun bind(devicePseudonym: ByteArray, accountIdB64: String) {
-        prefs.edit()
-            .putString(KEY_DEVICE, PushClient.pseudonymHex(devicePseudonym))
-            .putString(KEY_ACCOUNT, accountIdB64)
-            .commit()
+    /** Record that push is set up for [accountIdB64], replacing any earlier
+     *  binding. An empty account is not recorded. */
+    public fun bind(accountIdB64: String) {
+        if (accountIdB64.isEmpty()) return
+        prefs.edit().putString(KEY_ACCOUNT, accountIdB64).commit()
     }
 
-    /** The current binding, or `null` when none (or a half-written one). */
+    /** The current binding, or `null` when none. */
     public fun load(): PushWakeBinding? {
-        val device = prefs.getString(KEY_DEVICE, null) ?: return null
         val account = prefs.getString(KEY_ACCOUNT, null) ?: return null
-        if (device.isEmpty() || account.isEmpty()) return null
-        return PushWakeBinding(devicePseudonymHex = device, accountIdB64 = account)
+        if (account.isEmpty()) return null
+        return PushWakeBinding(accountIdB64 = account)
     }
 
     /** Drop the binding, synchronously. */
     public fun clear() {
-        prefs.edit().remove(KEY_DEVICE).remove(KEY_ACCOUNT).commit()
+        prefs.edit().remove(KEY_ACCOUNT).commit()
     }
 
     public companion object {
-        /** Shared prefs file name — the FCM service opens this by name. */
-        public const val PREFS_NAME: String = "me.lakko.push-wake-binding.v1"
-        private const val KEY_DEVICE: String = "device"
+        /** Shared prefs file name — the FCM service opens this by name. v2
+         *  since ADR-0078 (v1 carried a device pseudonym beside the account). */
+        public const val PREFS_NAME: String = "me.lakko.push-wake-binding.v2"
         private const val KEY_ACCOUNT: String = "account"
     }
 }

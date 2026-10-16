@@ -47,6 +47,15 @@ import android.content.SharedPreferences
  * hex, neither containing a SPACE, so the split is unambiguous).
  * Value: the lowercase-hex `group_id`. The v1 file (keyed by `push_gid`
  * alone) is simply no longer read.
+ *
+ * ## Subscription ids (ADR-0078 section 3)
+ *
+ * A second file, `"me.lakko.push-sub.v1"`, same keys, holds this device's
+ * push-gw subscription id per `(account, push_gid)` (32 lowercase hex). A
+ * wake names the id as `s`, and the background path handles it only when the
+ * bound account's row for the wake's `g` holds that id ([lookup] with a
+ * subscription id); the device removes its own push-gw row by it. No device
+ * pseudonym exists any more.
  */
 public class PushRouteStore(context: Context) {
 
@@ -75,6 +84,59 @@ public class PushRouteStore(context: Context) {
         prefs.getString(keyFor(accountIdB64, pushGidHex), null)?.takeIf { it.isNotEmpty() }
 
     /**
+     * ADR-0078 — the reverse map for a WAKE: the `group_id` [accountIdB64]
+     * filed under [pushGidHex], but only when this device's subscription id
+     * for that row equals [subscriptionIdHex] (the wake's `s`). A wake for a
+     * subscription this account does not hold is a miss.
+     */
+    public fun lookup(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?): String? {
+        val presented = normalizeSubscriptionIdHex(subscriptionIdHex) ?: return null
+        val held = subPrefs.getString(keyFor(accountIdB64, pushGidHex), null)
+            ?.let(::normalizeSubscriptionIdHex) ?: return null
+        if (held != presented) return null
+        return lookup(accountIdB64, pushGidHex)
+    }
+
+    /** ADR-0078 — this device's subscription id for `(account, push_gid)`,
+     *  or `null` when it never subscribed under it. */
+    public fun subscriptionId(accountIdB64: String, pushGidHex: String): ByteArray? =
+        subPrefs.getString(keyFor(accountIdB64, pushGidHex), null)
+            ?.let(::normalizeSubscriptionIdHex)
+            ?.let(::hexBytes)
+
+    /** ADR-0078 — this device's subscription id for `(account, push_gid)`,
+     *  minting and recording 16 random bytes when none is held. */
+    public fun ensureSubscriptionId(accountIdB64: String, pushGidHex: String): ByteArray {
+        subscriptionId(accountIdB64, pushGidHex)?.let { return it }
+        val fresh = ByteArray(PushClient.SUBSCRIPTION_ID_LEN).also { java.security.SecureRandom().nextBytes(it) }
+        me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
+            subPrefs.edit().putString(keyFor(accountIdB64, pushGidHex), PushClient.pseudonymHex(fresh)).commit()
+        }
+        return fresh
+    }
+
+    /** Every group id [accountIdB64] has a route row for (re-sending every
+     *  subscription after a token change). */
+    public fun groupIds(accountIdB64: String): Set<String> {
+        val prefix = accountIdB64 + SEPARATOR
+        return prefs.all.entries
+            .filter { it.key.startsWith(prefix) }
+            .mapNotNull { (it.value as? String)?.takeIf { v -> v.isNotEmpty() } }
+            .toSet()
+    }
+
+    /** Every subscription id [accountIdB64] holds on this device. Must be
+     *  read BEFORE [clearForAccount]. */
+    public fun subscriptionIds(accountIdB64: String): List<ByteArray> {
+        val prefix = accountIdB64 + SEPARATOR
+        return subPrefs.all.entries
+            .filter { it.key.startsWith(prefix) }
+            .mapNotNull { (it.value as? String)?.let(::normalizeSubscriptionIdHex) }
+            .distinct()
+            .map(::hexBytes)
+    }
+
+    /**
      * Delete [accountIdB64]'s row for [pushGidHex].
      *
      * ADR-0043: a rotation only ever ADDS a row under the new id, so the
@@ -85,6 +147,7 @@ public class PushRouteStore(context: Context) {
     public fun remove(accountIdB64: String, pushGidHex: String) {
         me.lakko.app.account.AccountStoreGate.write(accountIdB64) {
             prefs.edit().remove(keyFor(accountIdB64, pushGidHex)).apply()
+            subPrefs.edit().remove(keyFor(accountIdB64, pushGidHex)).apply()
         }
     }
 
@@ -101,6 +164,11 @@ public class PushRouteStore(context: Context) {
             if (key.startsWith(prefix)) editor.remove(key)
         }
         editor.apply()
+        val subEditor = subPrefs.edit()
+        for (key in subPrefs.all.keys) {
+            if (key.startsWith(prefix)) subEditor.remove(key)
+        }
+        subEditor.apply()
         val retired = retiredPrefs
         val retiredEditor = retired.edit()
         for ((key, value) in retired.all) {
@@ -112,6 +180,9 @@ public class PushRouteStore(context: Context) {
     private val retiredPrefs: SharedPreferences =
         context.applicationContext.getSharedPreferences(RETIRED_PREFS_NAME, Context.MODE_PRIVATE)
 
+    private val subPrefs: SharedPreferences =
+        context.applicationContext.getSharedPreferences(SUB_PREFS_NAME, Context.MODE_PRIVATE)
+
     public companion object {
         /** Shared prefs file name — the FMS opens this by name. */
         public const val PREFS_NAME: String = "me.lakko.push-routing.v2"
@@ -119,6 +190,12 @@ public class PushRouteStore(context: Context) {
         /** The v1 file (keyed by `push_gid` alone), never read since
          *  2026-09-30. */
         public const val RETIRED_PREFS_NAME: String = "me.lakko.push-routing.v1"
+
+        /** ADR-0078 — the subscription ids, keyed like the routes. */
+        public const val SUB_PREFS_NAME: String = "me.lakko.push-sub.v1"
+
+        private fun hexBytes(hex: String): ByteArray =
+            ByteArray(hex.length / 2) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
 
         /** Key field separator. Neither base64 nor hex contains a space. */
         private const val SEPARATOR: String = " "

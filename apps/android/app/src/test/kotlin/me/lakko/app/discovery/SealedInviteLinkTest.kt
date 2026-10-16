@@ -110,7 +110,7 @@ class SealedInviteLinkTest {
         }
         val upload = SealedInviteUpload(
             sealed = ByteArray(120) { 7 },
-            issuerPubkey = ByteArray(32) { 2 },
+            revocationPubkey = ByteArray(32) { 2 },
             expiryMs = 1234L,
             maxUses = 4294967295L,
         )
@@ -121,7 +121,7 @@ class SealedInviteLinkTest {
         }
         for ((path, body) in bodies) {
             val json = Json.parseToJsonElement(body).jsonObject
-            assertEquals(setOf("sealed", "issuer_pubkey", "expiry_ms", "max_uses"), json.keys)
+            assertEquals(setOf("sealed", "revocation_pubkey", "expiry_ms", "max_uses"), json.keys)
             assertEquals("1234", json["expiry_ms"]!!.jsonPrimitive.content)
             assertEquals("4294967295", json["max_uses"]!!.jsonPrimitive.content)
             assertTrue(path, path.endsWith("/discovery/group-invite") || path.endsWith("/discovery/call-invite"))

@@ -33,8 +33,10 @@
 //!    4. delete the account's device grants and device requests: a grant an
 //!       old device minted must not land a fresh device in a session that
 //!       then holds the old keys;
-//!    5. mint the [`KeyResetAttestation`] over `(account_ref, journal id, g,
-//!       new_signature_pubkey, now)` with the shared attest key;
+//!    5. mint the [`KeyResetAttestation`] over `(account_ref, g,
+//!       new_signature_pubkey, now)` with the shared attest key (since
+//!       ADR-0078 phase 6 it names no DeviceGroup journal: auth cannot derive
+//!       that id and must not learn it);
 //!    6. issue the caller an access token and a refresh credential at `g`.
 //!
 //! After the commit every other device's credentials are of generation
@@ -176,9 +178,8 @@ pub(crate) struct ResetFinishReq {
 /// Response of `POST /account/keys/reset/finish`.
 #[derive(Serialize)]
 pub(crate) struct ResetFinishRes {
-    /// URL-safe base64 of the 177-byte key-reset attestation the client
-    /// carries to discovery (the identity upload) and to the DS (the
-    /// DeviceGroup journal reset).
+    /// URL-safe base64 of the 145-byte key-reset attestation the client
+    /// carries to discovery (the identity upload).
     pub(crate) key_reset_attest_b64: String,
     /// `key_generation` (the generation the account is now at),
     /// `session_token`, `session_expires_at_ms`, `refresh_token`,
@@ -412,11 +413,7 @@ pub(crate) async fn finish(
 
     tx.commit().await.map_err(ApiError::Db)?;
 
-    tracing::info!(
-        account_id = %URL_SAFE_NO_PAD.encode(account_id),
-        key_generation,
-        "account keys reset",
-    );
+    tracing::info!(key_generation, "account keys reset",);
     Ok(Json(ResetFinishRes {
         key_reset_attest_b64: URL_SAFE_NO_PAD.encode(attestation),
         session,

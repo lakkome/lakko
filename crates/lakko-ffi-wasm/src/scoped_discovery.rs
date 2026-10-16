@@ -224,11 +224,12 @@ pub enum ReachClass {
     Link = 2,
     /// The one party a request of the owner's went to. Scope: a random id.
     Reply = 3,
-    /// Members of a group the owner lets find them. Scope: the group id.
+    /// Members of every group the owner lets find them. Empty scope: one
+    /// key per account (ADR-0078 section 9).
     Group = 4,
-    /// Every co-member of a group, whatever the setting. Scope: the group id.
+    /// Every co-member of every group, whatever the setting. Empty scope.
     Member = 5,
-    /// Members of a channel the owner lets find them. Scope: the channel id.
+    /// Members of every channel the owner lets find them. Empty scope.
     Channel = 6,
     /// Contacts of contacts. Empty scope.
     Fof = 7,
@@ -1369,7 +1370,7 @@ impl ReachStateEntry {
         self.class
     }
 
-    /// The scope (empty for `Contact` / `Fof`).
+    /// The scope (empty for every class but `Link` / `Reply`).
     #[wasm_bindgen(getter, js_name = scopeId)]
     #[must_use]
     pub fn scope_id(&self) -> Vec<u8> {
@@ -2099,14 +2100,14 @@ mod tests {
     /// iOS, Android and web derive the same reach key for the same account.
     #[test]
     fn reach_seed_reproduces_the_core_golden() {
-        let seed = reach_seed(&ACCOUNT_SEED, ReachClass::Group, b"group-1", 3).unwrap();
+        let seed = reach_seed(&ACCOUNT_SEED, ReachClass::Link, b"link-1", 3).unwrap();
         assert_eq!(
             hex(&seed),
-            "00cad2ad9a1885862187f17ef75e33818653b1b54b9a480dad919d3d3d9d851e"
+            "69e756d3faf95aae33944de2bdb27569fe890279b0817350e3980d23dd137cb6"
         );
         assert_eq!(
             hex(&reach_verifying_key(&seed).unwrap()),
-            "e7c2e2aa6ff74083318d5f6b1dfa7939c3cc074549376d9e91c5592a67a35e8f"
+            "f81b813554d8b791c378ffb6e836d2218f76ddf26e2e8d0be1209b0c2adac4d5"
         );
     }
 
@@ -2137,17 +2138,17 @@ mod tests {
 
     #[test]
     fn reach_seed_matches_the_core_and_grants_round_trip() {
-        let seed = reach_seed(&ACCOUNT_SEED, ReachClass::Group, &[7; 8], 3).unwrap();
-        let core = rust_reach_seed(&ACCOUNT_SEED, RustReachClass::Group, &[7; 8], 3).unwrap();
+        let seed = reach_seed(&ACCOUNT_SEED, ReachClass::Link, &[7; 8], 3).unwrap();
+        let core = rust_reach_seed(&ACCOUNT_SEED, RustReachClass::Link, &[7; 8], 3).unwrap();
         assert_eq!(seed, core.as_bytes().to_vec());
-        let grant = derive_reach_grant(&ACCOUNT_SEED, ReachClass::Group, &[7; 8], 3).unwrap();
+        let grant = derive_reach_grant(&ACCOUNT_SEED, ReachClass::Link, &[7; 8], 3).unwrap();
         assert_eq!(grant.seed(), seed);
         assert_eq!(grant.verifying_key(), reach_verifying_key(&seed).unwrap());
         let wire = encode_reach_grant(&grant);
         assert_eq!(wire.len(), reach_grant_len());
         assert_eq!(decode_reach_grant(&wire).unwrap(), grant);
         assert_eq!(
-            ReachGrant::new(ReachClass::Group, 3, &seed, &grant.binding()).unwrap(),
+            ReachGrant::new(ReachClass::Link, 3, &seed, &grant.binding()).unwrap(),
             grant
         );
         assert_eq!(reach_grant_len(), 134);
@@ -2369,7 +2370,7 @@ mod tests {
         let state = ReachState::new(
             vec![
                 ReachStateEntry::new(ReachClass::Contact, vec![], 2),
-                ReachStateEntry::new(ReachClass::Group, vec![1; 8], 5),
+                ReachStateEntry::new(ReachClass::Link, vec![1; 8], 5),
             ],
             11,
         );
@@ -2378,7 +2379,7 @@ mod tests {
         assert_eq!(decoded, state);
         assert_eq!(decoded.entries().len(), 2);
         assert_eq!(
-            reach_state_version_of(&state, ReachClass::Group, &[1; 8]),
+            reach_state_version_of(&state, ReachClass::Link, &[1; 8]),
             Some(5)
         );
         assert_eq!(reach_state_version_of(&state, ReachClass::Fof, &[]), None);
@@ -2405,7 +2406,7 @@ mod tests {
             decode_visibility_inner(b"x").unwrap_err().code,
             "wrongDomain"
         );
-        let state = ReachState::new(vec![ReachStateEntry::new(ReachClass::Group, vec![], 1)], 1);
+        let state = ReachState::new(vec![ReachStateEntry::new(ReachClass::Link, vec![], 1)], 1);
         let e = Refusal::from(rust_compose_reach_state(&state.inner).unwrap_err());
         assert_eq!(e.code, "reach.scopeIdEmpty");
         assert_eq!(

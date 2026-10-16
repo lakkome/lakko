@@ -366,44 +366,47 @@ pub enum SfuProtoError {
     FrameTooLarge(usize),
 }
 
-/// Domain-separation context for the per-call peer tag (ADR-0021).
-const PEER_TAG_CONTEXT: &str = "lakko/sfu/peer-tag/v1";
+/// Domain-separation context for the room id (ADR-0078 section 2).
+pub const ROOM_CONTEXT: &str = "lakko/sfu/room/v1";
 
-/// Length of the per-call peer tag in bytes (rendered as `2×` lower-case
-/// hex chars). 8 bytes = 64 bits — birthday-safe for the few-hundred
-/// participants a call holds, and short on the wire / as a fallback
-/// display label.
-pub const PEER_TAG_LEN: usize = 8;
+/// Length of a call id in bytes (16 random bytes, chosen by the caller).
+pub const CALL_ID_LEN: usize = 16;
 
-/// Derive the per-call **peer tag** (ADR-0021).
+/// Length of a room id in bytes (rendered as 64 lower-case hex chars).
+pub const ROOM_ID_LEN: usize = 32;
+
+/// The SFU room a call lives in (ADR-0078 section 2):
+/// `BLAKE3_derive_key("lakko/sfu/room/v1", call_id)`.
 ///
-/// A privacy-preserving, collision-resistant, per-call identifier the SFU
-/// emits for each peer (over the JWT-verified `account_id`) and the
-/// clients re-derive over their contacts' account ids to resolve a roster
-/// entry to a display name.
-///
-/// `peer_tag = BLAKE3_derive_key(PEER_TAG_CONTEXT, len(call_id) ‖ call_id
-/// ‖ len(account_id) ‖ account_id)` truncated to [`PEER_TAG_LEN`] bytes,
-/// lower-case hex. The big-endian length framing prevents a
-/// `(call_id, account_id)` concatenation ambiguity; keying on `call_id`
-/// makes the tag fresh per call (unlinkable across calls); the one-way
-/// hash never reveals the `account_id`. Deterministic + canonical, so the
-/// SFU and every client compute byte-identical strings.
+/// The call id is 16 random bytes that travel only inside the E2EE call
+/// signalling, so only the call's members can compute the room; the SFU
+/// and the issuer of the admission token see the room and never the call
+/// id. One-way, so the room does not reveal the call id. Every client and
+/// the SFU-side tests use this one definition (golden-pinned).
 #[must_use]
-pub fn peer_tag(call_id: &str, account_id: &str) -> String {
+pub fn room_id(call_id: &[u8; CALL_ID_LEN]) -> [u8; ROOM_ID_LEN] {
+    blake3::derive_key(ROOM_CONTEXT, call_id)
+}
+
+/// [`room_id`] as 64 lower-case hex characters, the form the admission
+/// token's `room` claim and the `/v1/rooms/{room}` route carry.
+#[must_use]
+pub fn room_hex(call_id: &[u8; CALL_ID_LEN]) -> String {
     use core::fmt::Write as _;
-    let mut hasher = blake3::Hasher::new_derive_key(PEER_TAG_CONTEXT);
-    hasher.update(&(call_id.len() as u64).to_be_bytes());
-    hasher.update(call_id.as_bytes());
-    hasher.update(&(account_id.len() as u64).to_be_bytes());
-    hasher.update(account_id.as_bytes());
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(PEER_TAG_LEN * 2);
-    for b in &digest.as_bytes()[..PEER_TAG_LEN] {
+    let room = room_id(call_id);
+    let mut out = String::with_capacity(ROOM_ID_LEN * 2);
+    for b in &room {
         // Writing a `u8` as hex into a `String` is infallible.
         let _ = write!(out, "{b:02x}");
     }
     out
+}
+
+/// Whether `s` is a room id as the route and the token carry it: exactly
+/// 64 lower-case hex characters.
+#[must_use]
+pub fn is_room_hex(s: &str) -> bool {
+    s.len() == ROOM_ID_LEN * 2 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Server-to-client frame.
@@ -413,10 +416,12 @@ pub enum ServerFrame {
     /// First frame after the WS upgrade. Confirms admission and seeds
     /// the client's view of the call.
     Welcome {
-        /// Server-assigned id for this connection.
+        /// This connection's peer id: the random `peer_id` of the
+        /// admission token (ADR-0078 section 2). The client announces it,
+        /// signed with its MLS leaf key, to the other members.
         peer_id: String,
-        /// Call this peer was admitted to (from the JWT).
-        call_id: String,
+        /// The room this peer was admitted to (the token's `room`).
+        room: String,
         /// Every other peer currently in the call. Empty list means
         /// the joiner is alone (typical at call creation).
         roster: Vec<PeerSnapshot>,
@@ -425,19 +430,12 @@ pub enum ServerFrame {
         server_ts: u64,
     },
 
-    /// A new peer joined the same call.
+    /// A new peer joined the same call. The SFU knows nothing about who
+    /// the peer is (ADR-0078 section 2); members learn that from the
+    /// peer's own sealed announcement over `signal-relay`.
     PeerJoined {
         /// New peer's id.
         peer_id: String,
-        /// Pseudonymised account id (first 8 hex chars). The SFU
-        /// never broadcasts the raw `sub`. Legacy display tag — kept
-        /// during the ADR-0021 rollout; superseded by `peer_tag`.
-        account_pseudonym: String,
-        /// Per-call peer tag (ADR-0021) — [`peer_tag`] over the
-        /// JWT-verified `account_id` + the `call_id`. `#[serde(default)]`
-        /// for forward/backward compatibility during rollout.
-        #[serde(default)]
-        peer_tag: String,
     },
 
     /// A peer disconnected.
@@ -738,23 +736,13 @@ pub enum RelayTarget {
     Call,
 }
 
-/// Snapshot of a peer in the welcome roster.
+/// Snapshot of a peer in the welcome roster: the peer id and nothing
+/// else (ADR-0078 section 2; the ADR-0021 account pseudonym and peer tag
+/// are gone).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PeerSnapshot {
-    /// Server-assigned peer id.
+    /// The peer's id (its admission token's random `peer_id`).
     pub peer_id: String,
-    /// First 8 hex chars of the account id. The SFU never publishes
-    /// the full `sub`. Legacy display tag — kept during the ADR-0021
-    /// rollout; superseded by [`PeerSnapshot::peer_tag`].
-    pub account_pseudonym: String,
-    /// Per-call peer tag (ADR-0021) — [`peer_tag`] over the JWT-verified
-    /// `account_id` + the `call_id`. The client re-derives it over its
-    /// contacts' account ids to resolve this entry to a display name.
-    /// `#[serde(default)]` so a frame from a pre-ADR-0021 SFU (or a
-    /// fixture) still decodes (empty tag → no resolution, falls back to
-    /// the pseudonym).
-    #[serde(default)]
-    pub peer_tag: String,
 }
 
 /// Machine-readable error codes the SFU may emit.
@@ -885,11 +873,9 @@ mod tests {
     fn welcome_round_trip_via_json() {
         let frame = ServerFrame::Welcome {
             peer_id: "p123".into(),
-            call_id: "0123456789abcdef0123456789abcdef".into(),
+            room: room_hex(&[0x01; CALL_ID_LEN]),
             roster: vec![PeerSnapshot {
                 peer_id: "p100".into(),
-                account_pseudonym: "deadbeef".into(),
-                peer_tag: peer_tag("0123456789abcdef0123456789abcdef", "p100acct"),
             }],
             server_ts: 1_700_000_000,
         };
@@ -1258,61 +1244,53 @@ mod tests {
         assert!(decode_payload_b64("not valid base64!!").is_err());
     }
 
-    // -- ADR-0021 per-call peer tag ----------------------------------
-
-    const ACCT_A: &str = "deadbeefdeadbeefdeadbeefdeadbeef";
+    // -- ADR-0078 section 2 room id ------------------------------------
 
     #[test]
-    fn peer_tag_is_deterministic() {
-        assert_eq!(peer_tag("call-1", ACCT_A), peer_tag("call-1", ACCT_A));
+    fn room_is_deterministic_and_per_call() {
+        assert_eq!(room_id(&[0x07; CALL_ID_LEN]), room_id(&[0x07; CALL_ID_LEN]));
+        assert_ne!(room_id(&[0x07; CALL_ID_LEN]), room_id(&[0x08; CALL_ID_LEN]));
     }
 
     #[test]
-    fn peer_tag_shape_is_lowercase_hex() {
-        let t = peer_tag("call-1", ACCT_A);
-        assert_eq!(t.len(), PEER_TAG_LEN * 2);
-        assert!(t
-            .chars()
-            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+    fn room_hex_is_64_lower_case_hex_and_never_the_call_id() {
+        let call_id = [0xab; CALL_ID_LEN];
+        let room = room_hex(&call_id);
+        assert!(is_room_hex(&room));
+        assert!(!room.contains("abababababababababababababababab"));
     }
 
     #[test]
-    fn peer_tag_is_per_call_unlinkable() {
-        // Same account, different call → different tag.
-        assert_ne!(peer_tag("call-1", ACCT_A), peer_tag("call-2", ACCT_A));
+    fn is_room_hex_refuses_anything_else() {
+        assert!(!is_room_hex(""));
+        assert!(!is_room_hex(&"a".repeat(63)));
+        assert!(!is_room_hex(&"A".repeat(64)));
+        assert!(!is_room_hex(&"g".repeat(64)));
+        assert!(is_room_hex(&"0".repeat(64)));
     }
 
+    /// Pins the canonical derivation so the SFU, auth and every client
+    /// agree on the room of a call.
     #[test]
-    fn peer_tag_distinguishes_accounts() {
-        assert_ne!(
-            peer_tag("call-1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-            peer_tag("call-1", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
-        );
+    fn room_golden_vector() {
+        let call_id: [u8; CALL_ID_LEN] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ];
+        assert_eq!(room_hex(&call_id), ROOM_GOLDEN);
     }
 
-    #[test]
-    fn peer_tag_length_framing_avoids_concatenation_ambiguity() {
-        // ("ab","c") vs ("a","bc") must not collide.
-        assert_ne!(peer_tag("ab", "c"), peer_tag("a", "bc"));
-    }
+    const ROOM_GOLDEN: &str = "084b368ae5f3030d27355b44dc67aaea5a00f394e8ed7c5338b29698dbc25f15";
 
+    /// A roster entry carries the peer id only.
     #[test]
-    fn peer_tag_golden_vector() {
-        // Pins the canonical derivation so the SFU + every client agree.
-        assert_eq!(
-            peer_tag("call-golden", "00000000000000000000000000000000"),
-            PEER_TAG_GOLDEN,
-        );
-    }
-
-    const PEER_TAG_GOLDEN: &str = "2151ad585010e90b";
-
-    #[test]
-    fn peer_snapshot_decodes_without_peer_tag() {
-        // serde(default) — a pre-ADR-0021 frame (no peer_tag) still parses.
-        let json = r#"{"peer_id":"p1","account_pseudonym":"deadbeef…"}"#;
-        let snap: PeerSnapshot = serde_json::from_str(json).expect("decode");
-        assert_eq!(snap.peer_tag, "");
+    fn peer_snapshot_carries_only_the_peer_id() {
+        let json = encode_server_frame(&ServerFrame::PeerJoined {
+            peer_id: "p1".into(),
+        })
+        .expect("encode");
+        assert_eq!(json, r#"{"kind":"peer-joined","peer_id":"p1"}"#);
+        let snap: PeerSnapshot = serde_json::from_str(r#"{"peer_id":"p1"}"#).expect("decode");
         assert_eq!(snap.peer_id, "p1");
     }
 
@@ -1517,14 +1495,12 @@ mod tests {
         let frames = [
             ServerFrame::Welcome {
                 peer_id: "p".into(),
-                call_id: "c".into(),
+                room: "r".into(),
                 roster: vec![],
                 server_ts: 0,
             },
             ServerFrame::PeerJoined {
                 peer_id: "p".into(),
-                account_pseudonym: "a".into(),
-                peer_tag: "t".into(),
             },
             ServerFrame::PeerLeft {
                 peer_id: "p".into(),

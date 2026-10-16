@@ -3,7 +3,6 @@
 
 package me.lakko.app.calls
 
-import me.lakko.app.transport.lakkoHttpEngine
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
@@ -11,6 +10,7 @@ import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.request.headers
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -26,9 +26,16 @@ import java.security.SecureRandom
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import me.lakko.app.anon.AnonTokenContext
+import me.lakko.app.anon.AnonTokenSource
+import me.lakko.app.anon.AnonTokens
+import me.lakko.app.anon.AnonymousHttp
+import me.lakko.app.anon.sendWithToken
+import kotlin.coroutines.cancellation.CancellationException
 import uniffi.lakko_ffi_uniffi.FfiCallJwtClaims
 import uniffi.lakko_ffi_uniffi.FfiCallRole
 import uniffi.lakko_ffi_uniffi.parseCallJwtUnverified
+import uniffi.lakko_ffi_uniffi.sfuRoomForCall
 import uniffi.lakko_ffi_uniffi.verifyCallJwtWithJwks
 
 /**
@@ -37,8 +44,10 @@ import uniffi.lakko_ffi_uniffi.verifyCallJwtWithJwks
  * (`apps/web/src/calls/call-jwt-client.ts`) and the iOS
  * `CallJwtClient.swift`.
  *
- *   * [mint] — `POST /call/jwt` with a bearer session token.
- *               Returns the JWT + parsed (UNVERIFIED) claims.
+ *   * [mint] — `POST /call/jwt`, paid for by one anonymous `call-join`
+ *               token (ADR-0078 section 2): no session, no account. The
+ *               token names a room (`sfuRoomForCall(callId)`) and a random
+ *               peer id; the answer carries a TURN credential beside it.
  *   * [fetchJwks] — `GET /.well-known/jwks.json`. Anonymous;
  *                    caller caches.
  *   * [parseUnverified] — Wraps the UniFFI
@@ -60,14 +69,17 @@ public class CallJwtClient(
      *  endpoint behind the Cloudflare tunnel. Emulator dev:
      *  `http://10.0.2.2:8081` to reach the dev workstation. */
     public val baseUrl: String = DEFAULT_BASE_URL,
-    /** Ktor engine. Production: `OkHttp` (default below). Tests:
-     *  `MockEngine` for deterministic responses without a network. */
+    /** Ktor engine. Production: [AnonymousHttp.engine] (its own pool, no
+     *  cookies: the mint is anonymous). Tests: `MockEngine` for
+     *  deterministic responses without a network. */
     engine: HttpClientEngine? = null,
     /** Time-to-live for the in-memory JWKS cache, in
      *  milliseconds. Defaults to 24 h per ADR-0008. Passing
      *  `0` disables caching — every call fetches fresh.
      *  Negative values are clamped to 0. */
     public val jwksTtlMs: Long = DEFAULT_JWKS_TTL_MS,
+    /** Where the mint draws its `call-join` token. */
+    private val anonTokens: AnonTokenSource = AnonTokens.shared,
 ) : AutoCloseable {
 
     /**
@@ -84,13 +96,10 @@ public class CallJwtClient(
             install(ContentNegotiation) { json(json) }
         }
     } else {
-        HttpClient(lakkoHttpEngine()) {
+        HttpClient(AnonymousHttp.engine) {
             install(ContentNegotiation) { json(json) }
         }
     }
-
-    @Volatile
-    private var sessionToken: String? = null
 
     /** JWKS cache — guarded by the same `@Volatile` lock to
      *  keep the read-then-write window short. Reads return
@@ -98,11 +107,6 @@ public class CallJwtClient(
      *  [jwksTtlMs] of [JwksCacheEntry.fetchedAtMs]. */
     @Volatile
     private var jwksCache: JwksCacheEntry? = null
-
-    /** Rebind the bearer token. `null` clears (sign-out). */
-    public fun setSessionToken(token: String?) {
-        sessionToken = token
-    }
 
     /** Drop the cached JWKS doc. Call after a verify
      *  failure that suggests a key rotation has happened —
@@ -131,39 +135,52 @@ public class CallJwtClient(
     // Mint
     // -----------------------------------------------------------------
 
-    /**
-     * `POST /call/jwt` — mints a JWT scoped to
-     * `(account_id-from-bearer, callId, role)`. Returns the
-     * raw JWS Compact representation along with the
-     * **unverified** parsed claims for UI convenience.
-     *
-     * @throws CallJwtArgError when [callId] doesn't match
-     *         `^[0-9a-f]{32}$` or no bearer token is set.
-     * @throws CallJwtHttpError on a non-2xx response (401 on
-     *         missing / bad bearer, 400 on the server's own
-     *         `call_id` validation, 500 on a mint failure).
-     * @throws CallJwtNetworkError on transport errors.
-     */
+    /** [mint] for the room of the 16-byte [callId]. */
     public suspend fun mint(
-        callId: String,
+        callId: ByteArray,
         role: CallRole = CallRole.PARTICIPANT,
     ): MintCallJwtResult {
-        require(CALL_ID_PATTERN.matches(callId)) {
-            "call_id must be 32 lower-case hex chars, got ${callId.length} chars"
-        }
-        val token = sessionToken
-            ?: throw CallJwtArgError("session token is not bound — call setSessionToken before mint()")
-        val endpoint = "/call/jwt"
-        val response: HttpResponse = try {
-            client.post("$baseUrl$endpoint") {
-                contentType(ContentType.Application.Json)
-                headers { append(HttpHeaders.Authorization, "Bearer $token") }
-                setBody(IssueRequest(callId = callId, role = role.wire))
-            }
-        } catch (cause: CallJwtArgError) {
-            throw cause
+        if (callId.size != 16) throw CallJwtArgError("call id must be 16 bytes, got ${callId.size}")
+        val room = try {
+            sfuRoomForCall(callId)
         } catch (cause: Throwable) {
-            throw CallJwtNetworkError(endpoint, cause)
+            throw CallJwtArgError("call id refused: ${cause.message}")
+        }
+        return mintForRoom(room, role)
+    }
+
+    /**
+     * `POST /call/jwt` for [room] (64 lower-case hex), paid for by one
+     * `call-join` token, never a session. The answer is the call token (no
+     * account, no call id in it) and, when the deployment has a relay, a TURN
+     * credential whose username tag is random.
+     *
+     * @throws CallJwtArgError when [room] is not 64 lower-case hex.
+     * @throws me.lakko.app.anon.AnonTokenException when no token can be had.
+     * @throws CallJwtHttpError on any other non-2xx (`429
+     *         room-admission-limit` included).
+     * @throws CallJwtNetworkError on transport errors.
+     */
+    public suspend fun mintForRoom(
+        room: String,
+        role: CallRole = CallRole.PARTICIPANT,
+    ): MintCallJwtResult {
+        if (!ROOM_PATTERN.matches(room)) {
+            throw CallJwtArgError("room must be 64 lower-case hex chars, got ${room.length} chars")
+        }
+        val endpoint = "/call/jwt"
+        val response: HttpResponse = anonTokens.sendWithToken(AnonTokenContext.CALL_JOIN) { name, value ->
+            try {
+                client.post("$baseUrl$endpoint") {
+                    header(name, value)
+                    contentType(ContentType.Application.Json)
+                    setBody(IssueRequest(room = room, role = role.wire))
+                }
+            } catch (cause: CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                throw CallJwtNetworkError(endpoint, cause)
+            }
         }
         if (!response.status.isSuccess()) {
             throw CallJwtHttpError(response.status.value, endpoint, response.safeReadBody())
@@ -174,6 +191,7 @@ public class CallJwtClient(
             jwt = body.jwt,
             expiresAtUnixSecs = body.expiresAtUnixSecs,
             claims = claims,
+            turn = body.turn?.let(TurnCredential::fromWire),
         )
     }
 
@@ -297,7 +315,7 @@ public class CallJwtClient(
         /** Default JWKS cache TTL — 24 h per ADR-0008. */
         public const val DEFAULT_JWKS_TTL_MS: Long = 24L * 60L * 60L * 1000L
 
-        private val CALL_ID_PATTERN: Regex = Regex("^[0-9a-f]{32}$")
+        private val ROOM_PATTERN: Regex = Regex("^[0-9a-f]{64}$")
         private val secureRandom: SecureRandom = SecureRandom()
 
         /**
@@ -337,8 +355,11 @@ public enum class CallRole(internal val wire: String) {
 public data class ParsedCallJwt(
     val iss: String,
     val aud: String,
-    val sub: String,
-    val callId: String,
+    /** The room, 64 lower-case hex (ADR-0078 section 2: no account and no
+     *  call id in the token). */
+    val room: String,
+    /** The SFU peer id, 32 lower-case hex, random per token. */
+    val peerId: String,
     val role: CallRole,
     val iat: ULong,
     val exp: ULong,
@@ -348,8 +369,8 @@ public data class ParsedCallJwt(
         internal fun from(ffi: FfiCallJwtClaims): ParsedCallJwt = ParsedCallJwt(
             iss = ffi.iss,
             aud = ffi.aud,
-            sub = ffi.sub,
-            callId = ffi.callId,
+            room = ffi.room,
+            peerId = ffi.peerId,
             role = CallRole.fromFfi(ffi.role),
             iat = ffi.iat,
             exp = ffi.exp,
@@ -366,7 +387,27 @@ public data class MintCallJwtResult(
     val jwt: String,
     val expiresAtUnixSecs: ULong,
     val claims: ParsedCallJwt,
+    /** The TURN credential minted beside the token, or `null` when the
+     *  deployment has no relay (the call proceeds on STUN alone). */
+    val turn: TurnCredential? = null,
 )
+
+/** A TURN credential in the coturn REST shape (`services/auth/src/turn.rs`):
+ *  the username's tag is random per credential (ADR-0078 section 2). */
+public data class TurnCredential(
+    val urls: List<String>,
+    val username: String,
+    val password: String,
+) {
+    internal companion object {
+        /** `null` for a credential with no URL, username or password. */
+        internal fun fromWire(wire: TurnCredentialWire): TurnCredential? {
+            val urls = wire.urls.filter { it.isNotEmpty() }
+            if (urls.isEmpty() || wire.username.isEmpty() || wire.password.isEmpty()) return null
+            return TurnCredential(urls, wire.username, wire.password)
+        }
+    }
+}
 
 // -----------------------------------------------------------------
 // Typed errors
@@ -409,7 +450,7 @@ private data class JwksCacheEntry(
  *  server. Kept internal; callers use [CallJwtClient.mint]. */
 @Serializable
 private data class IssueRequest(
-    @SerialName("call_id") val callId: String,
+    val room: String,
     val role: String,
 )
 
@@ -418,6 +459,15 @@ private data class IssueRequest(
 private data class IssueResponse(
     val jwt: String,
     @SerialName("expires_at_unix_secs") val expiresAtUnixSecs: ULong,
+    val turn: TurnCredentialWire? = null,
+)
+
+/** The `turn` object of a `POST /call/jwt` answer. */
+@Serializable
+internal data class TurnCredentialWire(
+    val urls: List<String> = emptyList(),
+    val username: String = "",
+    val password: String = "",
 )
 
 // -----------------------------------------------------------------

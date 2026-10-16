@@ -154,11 +154,7 @@ fn decode_binding(
     // else's account_id (useless to the attacker, but it would burn the
     // name for the victim).
     if account_id != authed.0 {
-        tracing::warn!(
-            body_account_id = %B64.encode(account_id),
-            token_account_id = %B64.encode(authed.0),
-            "username binding: body account_id does not match token's"
-        );
+        tracing::warn!("username binding: body account_id does not match token's");
         return Err(plain((
             StatusCode::FORBIDDEN,
             "account_id mismatch between body and session token".to_string(),
@@ -240,10 +236,7 @@ pub(crate) async fn register(
 
     match result {
         Ok(_) => {
-            tracing::info!(
-                account_id = %B64.encode(account_id),
-                "username registered",
-            );
+            tracing::info!("username registered",);
             Ok(Json(RegisterResponse {
                 ok: true,
                 username_certificate_b64: crate::visibility::sign_certificate(
@@ -424,11 +417,7 @@ pub(crate) async fn replace(
     .map_err(internal("record rename"))?;
     tx.commit().await.map_err(internal("commit rename"))?;
 
-    tracing::info!(
-        account_id = %B64.encode(account_id),
-        revived = revive,
-        "username replaced",
-    );
+    tracing::info!(revived = revive, "username replaced",);
     Ok(Json(RegisterResponse {
         ok: true,
         username_certificate_b64: crate::visibility::sign_certificate(

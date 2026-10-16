@@ -121,6 +121,7 @@ pub mod profile;
 pub mod profile_request;
 pub mod pseudonym;
 pub mod push_routing;
+pub mod push_wake;
 pub mod reach;
 pub mod registrar_seed;
 pub mod request;
@@ -195,10 +196,11 @@ pub use introduction::{
     MAX_INTRODUCTION_TERMS, OPRF_OUTPUT_LEN, WRAPPED_KEY_LEN,
 };
 pub use invite::{
-    compute_joiner_tag, generate_blob_id, generate_link_id, owner_list_canonical_bytes,
-    revoke_canonical_bytes, sign_owner_list, sign_revocation, InviteCapability, BLOB_ID_B64URL_LEN,
-    BLOB_ID_LEN, JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1, LINK_ID_LEN, MAX_LABEL_LEN,
-    NEVER_EXPIRES, OWNER_LIST_DOMAIN_V1, REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS, SINGLE_USE,
+    compute_joiner_tag, generate_blob_id, generate_link_id, revocation_public_key,
+    revoke_canonical_bytes, sign_revocation, InviteCapability, BLOB_ID_B64URL_LEN, BLOB_ID_LEN,
+    JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1, LINK_ID_LEN, MAX_LABEL_LEN, NEVER_EXPIRES,
+    OWNER_LIST_DOMAIN_V1, REVOCATION_KEY_LEN, REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS,
+    SINGLE_USE,
 };
 pub use key_rotation::{
     compose_key_rotation, decode_key_rotation, try_unwrap_key_rotation, KeyRotation,
@@ -239,11 +241,21 @@ pub use profile_request::{
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
 pub use push_routing::{
     compose_push_routing_secret, decode_push_routing_secret, derive_push_gid,
+    derive_push_wake_public_key, derive_push_wake_signing_seed, derive_push_wake_unlock_key,
     push_routing_secret_is_newer, try_unwrap_push_routing_secret, PushRoutingSecretEnvelope,
     PushRoutingSecretError, PUSH_GID_DERIVE_DOMAIN_V1, PUSH_GID_LEN,
     PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1, PUSH_ROUTING_SECRET_LEN,
     PUSH_ROUTING_SECRET_MINT_EPOCH_LEN, PUSH_ROUTING_SECRET_PAYLOAD_LEN,
-    PUSH_ROUTING_SECRET_VERSION_V2,
+    PUSH_ROUTING_SECRET_VERSION_V2, PUSH_WAKE_KEY_LEN, PUSH_WAKE_SIGN_DERIVE_DOMAIN_V1,
+    PUSH_WAKE_UNLOCK_DERIVE_DOMAIN_V1,
+};
+pub use push_wake::{
+    is_well_formed_subscription_len, open_push_subscription, open_push_wake,
+    seal_push_subscription, seal_push_subscription_for_secret, seal_push_wake, OpenedPushWake,
+    PushGwKey, PushProvider, PushTokenEntry, PushWakeError, PushWakeKind,
+    MAX_PUSH_SUBSCRIPTION_LEN, MAX_PUSH_TOKENS, MAX_PUSH_TOKEN_LEN, MIN_PUSH_SUBSCRIPTION_LEN,
+    PUSH_GW_KEY_LEN, PUSH_SUBSCRIPTION_ID_LEN, PUSH_WAKE_HEADER_LEN, PUSH_WAKE_LEN,
+    PUSH_WAKE_NONCE_LEN,
 };
 pub use reach::{
     continuity_reach_seed, reach_seed, reach_verifying_key, ReachClass, ReachError, ReachGrant,
@@ -338,5 +350,29 @@ pub mod fuzz_api {
     #[must_use]
     pub fn mailbox_binding_decode(bytes: &[u8]) -> Option<bool> {
         crate::mailbox::fuzz_binding(bytes)
+    }
+
+    /// Open `wire` as a sealed wake (ADR-0078 section 3) under a fixed
+    /// push-gw key. `None` when the open refuses; `Some(true)` when what
+    /// opened carries a known kind and a verified signature.
+    #[must_use]
+    pub fn push_wake_open(wire: &[u8]) -> Option<bool> {
+        crate::push_wake::fuzz_open_wake(wire)
+    }
+
+    /// Parse and verify a wake plaintext, which a fuzzer cannot reach
+    /// through the AEAD. `None` when it refuses; `Some(true)` when the
+    /// accepted wake names the `push_gid` it carried.
+    #[must_use]
+    pub fn push_wake_plaintext(plain: &[u8]) -> Option<bool> {
+        crate::push_wake::fuzz_wake_plaintext(plain)
+    }
+
+    /// Parse a subscription token-list plaintext, which a fuzzer cannot
+    /// reach through the AEAD. `None` when it refuses; `Some(true)` when
+    /// what parsed re-seals to a row that opens to the same entries.
+    #[must_use]
+    pub fn push_subscription_plaintext(plain: &[u8]) -> Option<bool> {
+        crate::push_wake::fuzz_subscription_plaintext(plain)
     }
 }

@@ -22,9 +22,7 @@ import { pendingAfterArrival, createPendingInbox } from "./inbox-store";
 import { requestTargetAfterFetch } from "./request-target";
 import { isProvenSuccessor } from "./proven-successor";
 import {
-  linkRevokeOutcome,
   requestsToResend,
-  revocationSeedOrder,
   rotatedAtMsOf,
   spentFailureOutcome,
   spentStepVerdict,
@@ -498,15 +496,6 @@ describe("the rotating device's owed steps", () => {
     expect(spentFailureOutcome({ variant: { kind: "wrapped", cause: network } })).toBe("unreachable");
     expect(spentFailureOutcome(new Error("keys reset"))).toBe("skipped");
     expect(spentFailureOutcome("text")).toBe("skipped");
-  });
-
-  it("a link is revoked under a predecessor seed, the newest first, never the current one", () => {
-    expect(revocationSeedOrder(["k1", "k2"])).toEqual(["k2", "k1"]);
-    expect(linkRevokeOutcome(["not-owner", "revoked"])).toBe("done");
-    expect(linkRevokeOutcome(["unreachable"])).toBe("unreachable");
-    // No predecessor signed it: a link minted after the rotation. Left alone.
-    expect(linkRevokeOutcome(["not-owner", "not-owner"])).toBe("skipped");
-    expect(linkRevokeOutcome([])).toBe("skipped");
   });
 
   it("only requests sent before the keys were changed are sent again, once", () => {

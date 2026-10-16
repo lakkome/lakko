@@ -68,26 +68,32 @@ enum CallTileName {
             claimedUsername: directory.storedProfile(signatureKeyB64: base64Encode(signatureKey))?.username)
     }
 
-    /// Whether the account a sealed profile claims is the account the SFU
-    /// admitted the relaying peer as.
+    /// A link-call profile with its account claim kept only when that claim
+    /// is bound (ADR-0078 section 2). Mirror of the web `boundProfileClaim`.
     ///
-    /// A profile in a link call comes from a stranger, and a username
-    /// certificate binds a username to an ACCOUNT ID, not to the key that sent
-    /// the profile. The ADR-0021 peer tag is derived from the account id in
-    /// the peer's call-admission token, so a profile is filed in the profile
-    /// store, and its username may ever read as verified, only when the
-    /// claimed account id gives that peer's tag. A participant therefore
-    /// cannot present another account's id together with that account's
-    /// certificate.
-    static func profileClaimMatchesPeer(
-        claimedAccountId: Data?,
-        peerTag: String?,
-        tagOf: (_ accountIdHex: String) -> String
-    ) -> Bool {
-        guard let claimedAccountId, claimedAccountId.count == 16,
-              let peerTag, !peerTag.isEmpty
-        else { return false }
-        return tagOf(hexEncode(claimedAccountId)) == peerTag
+    /// A username certificate binds a username to an ACCOUNT ID, not to the
+    /// key that sent the profile. Until ADR-0078 the SFU's peer tag tied the
+    /// claim to the admitted account; the SFU knows no account any more. The
+    /// one account id a link call knows independently is the owner's, in the
+    /// signed capability, so the claim (account id and certificate) is kept
+    /// only for a profile the owner sealed that names that account; anyone
+    /// else's is filed without it, so its username reads as claimed, never as
+    /// verified.
+    static func boundProfileClaim(
+        _ profile: ProfileClaim,
+        fromOwner: Bool,
+        ownerAccountId: Data
+    ) -> ProfileClaim {
+        if fromOwner, let claimed = profile.accountId, claimed == ownerAccountId {
+            return profile
+        }
+        return ProfileClaim(
+            displayName: profile.displayName,
+            username: profile.username,
+            updatedAtMs: profile.updatedAtMs,
+            accountId: nil,
+            usernameCertificate: nil,
+            grants: profile.grants)
     }
 }
 

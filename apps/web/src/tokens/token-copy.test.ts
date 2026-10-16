@@ -35,6 +35,7 @@ describe("anonTokenMessage", () => {
     "blob-upload",
     "blob-read",
     "mailbox-write",
+    "call-join",
   ] as const)(
     "%s: the allowance copy",
     (context) => {

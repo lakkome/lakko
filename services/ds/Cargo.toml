@@ -22,6 +22,8 @@ path = "src/main.rs"
 [dependencies]
 tokio.workspace = true
 tracing.workspace = true
+# ADR-0078 section 11: the request span that records the route template.
+lakko-log-hygiene.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -60,12 +62,10 @@ http-body-util = "0.1"
 # Ed25519 key types, so no direct lakko-crypto dependency is needed here.
 lakko-ds-proof.workspace = true
 
-# ADR-0073 section 5 - the one auth-signed artefact the DS verifies: a
-# key-reset attestation lets a stranger root re-root an account's DeviceGroup
-# journal. Verified under a pinned key (`LAKKO_DS_ATTEST_KEY`), never fetched.
-# lakko-attest's whole dependency set is lakko-crypto + thiserror, both
-# already in this graph through lakko-ds-proof.
-lakko-attest.workspace = true
+# ADR-0078 section 3 - the shape of a sealed wake (its length and version
+# byte), which is all the DS checks before forwarding it unread. Already in
+# this graph through lakko-ds-proof.
+lakko-contacts.workspace = true
 
 # ADR-0053 section 4 - the knock (a non-member's request to join) is the one
 # unauthenticated write to a claimed group; since ADR-0054 S3 it spends an
@@ -89,3 +89,5 @@ reqwest = { version = "0.12", default-features = false, features = [
 tower = { version = "0.5", features = ["util"] }
 # Mint spendable tokens in-process for the knock tests.
 lakko-anon-token-server = { workspace = true, features = ["testing"] }
+# ADR-0078 section 11: the capture layer the log test asserts with.
+lakko-log-hygiene = { workspace = true, features = ["capture"] }

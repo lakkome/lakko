@@ -46,7 +46,9 @@ import { ownDeviceKeyPackageUsable } from "../devices/own-conversation-key";
 import type { ConversationKind } from "../chat/conversation-kind";
 import type { Wasm } from "../wasm";
 import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
-import { base64Decode, base64Encode } from "../auth/account-id";
+import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
+import { mintedLinkFor, rememberMintedLink } from "./minted-links";
+import { newRevocationKey, revokeMintedLink } from "./own-links";
 import {
   appendGroupInviteLinkSecret,
   composeInlineGroupInviteUrl,
@@ -4658,8 +4660,11 @@ export class ContactsClient {
     }
     const sealed = mint.sealed;
     const linkSecret = mint.linkSecret;
-    const issuerPubkey = mint.issuerPubkey;
     mint.free();
+    // ADR-0078 section 10: the ledger row carries a key minted for this link
+    // alone; its seed is kept with the link's record and is the only thing
+    // that revokes it.
+    const revocation = await newRevocationKey();
     // Production default (ADR-0028 OQ1): upload the SEALED blob to the
     // discovery ledger (sealed-link amendment, 2026-09-28: the server cannot
     // open it; the clear fields carry what it needs) and return the short
@@ -4678,11 +4683,19 @@ export class ContactsClient {
     try {
       const blobId = await this.discovery.uploadGroupInvite({
         sealed,
-        issuerPubkey,
+        revocationPubkey: revocation.publicKey,
         expiryMs,
         maxUses,
       });
       url = composePointerGroupInviteUrl(blobId, widths, origin);
+      if (identity !== null) {
+        await rememberMintedLink(base64Encode(identity.accountId), "group", base64UrlEncodeNoPad(blobId), {
+          linkSecret,
+          linkId: new Uint8Array(),
+          revocationSeed: revocation.seed,
+          facts: { label: "", expiryMs: Number(expiryMs), maxUses, bootstrapReferral: false },
+        });
+      }
     } catch (err) {
       if (!(err instanceof DiscoveryNetworkError)) {
         const status = (err as { status?: unknown }).status;
@@ -4704,9 +4717,10 @@ export class ContactsClient {
   /** ADR-0028 revoke — the issuer revokes a previously-created group invite
    *  link. Only the server-backed pointer form (a 6-byte ledger id) is
    *  revocable; an inline link has no ledger row. Parses the `blob_id` out of
-   *  the `/g/<slug>` link, signs the revocation with the issuer's identity key,
-   *  and DELETEs the ledger row. Returns `false` (nothing to do) for an inline /
-   *  malformed link. */
+   *  the `/g/<slug>` link, signs the revocation with the link's own revocation
+   *  seed from this device's record of it (ADR-0078 section 10), and DELETEs
+   *  the ledger row. Returns `false` (nothing to do) for an inline / malformed
+   *  link, or one this device keeps no key for (it lives until it expires). */
   async revokeGroupInviteLink(
     identity: IdentitySecrets | null,
     link: string,
@@ -4722,14 +4736,22 @@ export class ContactsClient {
       return false; // malformed, or a pre-amendment link
     }
     if (parsed.kind !== "pointer") return false; // inline link — no ledger row
-    const blobId = parsed.blobId;
-    const myIdentity = await this.resolveAccountIdentity(identity);
+    if (identity === null) return false;
+    const accountIdB64 = base64Encode(identity.accountId);
+    const slug = base64UrlEncodeNoPad(parsed.blobId);
+    const kept = await mintedLinkFor(accountIdB64, "group", slug);
+    if (kept === null || kept.revocationSeed === null) return false;
     try {
-      await this.discovery.revokeGroupInvite(blobId, myIdentity.ed25519Seed);
+      const outcome = await revokeMintedLink(this.discovery, accountIdB64, {
+        ...kept,
+        kind: "group",
+        blobIdSlug: slug,
+        mintedAtMs: null,
+      });
+      return outcome === "done";
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    return true;
   }
 
   /** ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the SEALED link blob,

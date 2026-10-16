@@ -526,6 +526,12 @@ covers the verifier's `kid` discrimination.
 
 ### C-21: `POST /call/jwt` requires a valid session token
 
+**Superseded by [ADR-0078](../adr/0078-servers-cannot-link-accounts.md)
+section 2 (2026-10-16), see C-76.** The route takes no session any more: it
+spends one anonymous `call-join` token, the body carries `room` and `role`,
+and the minted token names no account. The text below records the
+2026-05 design; the tests it names were replaced by the C-76 tests.
+
 Bearer-auth via the same `webauthn::require_session`
 middleware passkey routes use. A request without
 `Authorization: Bearer <session-token>` (or with an
@@ -1770,15 +1776,17 @@ integration) asserts:
    `fanout_never_crosses_calls_over_the_live_sfu`
    (live e2e). `lakko-security`: APPROVE.
 
-4. **Account ids are pseudonymised in every outbound
-   frame and every log line.** The `account_pseudonym`
-   field on `ServerFrame::PeerJoined` is the first 8 hex
-   characters of the JWT `sub`. The full account id never
-   crosses the SFU's outbound surface; tracing log lines
-   from `services/sfu/src/signaling.rs` use the same
-   8-char truncation. Test: `pseudonymise_truncates`
-   (unit) + assertions inside
-   `two_peers_in_same_call_see_each_other` (integration).
+4. **The SFU holds no account id** (since
+   [ADR-0078](../adr/0078-servers-cannot-link-accounts.md)
+   section 2, 2026-10-16; until then the `account_pseudonym`
+   field and the log lines carried the first 8 hex
+   characters of the JWT `sub`). The admission token
+   carries a room and a random `peer_id`, the SFU keys a
+   peer on that id, and no frame carries an account
+   pseudonym or a `peer_tag`. Tests:
+   `peer::tests::the_peer_type_has_no_account_field`
+   (unit) + `two_peers_in_same_call_see_each_other`
+   (integration). See C-76.
 
 5. **Broadcast respects sender exclusion.** A `signal-
    relay` with `to = RelayTarget::Call` reaches every
@@ -2616,6 +2624,13 @@ including `open_or_create_is_idempotent`,
 ## TURN-credential invariants (G3-{1,2}-turn)
 
 ### C-51: TURN credential follows the coturn `static-auth-secret` REST scheme; bound to a per-call expiry
+
+**Amended by [ADR-0078](../adr/0078-servers-cannot-link-accounts.md)
+section 2 (2026-10-16):** `POST /call/turn-credential` is gone. A credential
+is minted beside the call token in the `POST /call/jwt` answer (one
+anonymous `call-join` token), and the username tag is 16 random bytes per
+credential (`<unix_expiry_secs>:<random_hex>`), so coturn and its logs see
+no account id. The scheme and expiry below are unchanged.
 
 `POST /call/turn-credential` (services/auth) mints a
 short-lived credential the WebRTC `RTCIceServer.urls`
@@ -4362,7 +4377,8 @@ fully in effect.
 | Per-participant nonce salt | ❌ | ✅ | Same derivation chain |
 | SFrame header (sender leaf + counter + timestamp) | ✅ | ✅ | Forwarding metadata only |
 | Encrypted frame body | ✅ (opaque) | ✅ (decoded) | AEAD-sealed |
-| JWT `(account_id, call_id, role, expires_at)` | ✅ (validate via cached JWKS) | ✅ (mint via `POST /call/jwt`) | Claims shape per ADR-0008, which ADR-0011 superseded for the SFU choice; the shape itself survives in `crates/lakko-call-jwt`. C-15..C-23 |
+| JWT `(room, peer_id, role, iat, exp)` | ✅ (validate via cached JWKS) | ✅ (mint via `POST /call/jwt`, paid by an anonymous `call-join` token) | Since ADR-0078 section 2 no `sub` and no `call_id`; the room is a one-way function of the call id. C-15..C-20, C-22, C-23, C-76 |
+| Who a peer is | ❌ | ✅ | A sealed, leaf-signed announcement over `signal-relay` (C-76); the ADR-0021 `peer_tag` is gone |
 | Ed25519 signing seed for call JWTs | ❌ | ❌ (stays on `services/auth` host) | Persisted in `call_jwt_signing_key.seed`. Public half published at `/.well-known/jwks.json` |
 | Plaintext SDP / ICE | ❌ | ✅ | 1x1 rides MLS; group rides the Rust SFU's own signaling channel (ADR-0011), which never sees keys |
 
@@ -4879,11 +4895,13 @@ account that ran the reset.
 and `src/key_reset.rs` (`verify_upload_attestation`, `floor_refuses`);
 `crates/lakko-attest/src/key_reset.rs` (`verify_key_reset_binding`, no
 freshness, because a retried upload may legitimately be days old and an applied
-generation cannot be applied again); migration `0026`. The DS applies the same
+generation cannot be applied again); migration `0026`. The DS applied the same
 artefact to the DeviceGroup journal (`services/ds/src/key_reset.rs`,
-`ds_group_owner.key_generation`, migration `0009`): a Reset from any signer is
-heard only with an attestation for exactly that journal at a strictly greater
-generation. Clients never attempt the heal: the landing rule (web
+`ds_group_owner.key_generation`, migration `0009`) until ADR-0078 phase 6
+(2026-10-16) removed the journal id from the attestation and the attested arm
+from the DS (migration `0012` drops the column): a reset now founds a new
+DeviceGroup journal at the id the new seed derives (C-79) and claims it
+plainly. Clients never attempt the heal: the landing rule (web
 `apps/web/src/auth/landing-rule.ts`, iOS `KeyResetLanding`, Android
 `LandingVerdict` in `IdentityPublication.kt`) lands, wipes or publishes-because-nothing-is-published, and
 never uploads over a different published key. Pinned by discovery's DB-gated
@@ -5048,3 +5066,233 @@ request (ADR-0078 phase 5). Nor the ADR-0073 continuity path, which has no
 carrier for a reset account's new mailbox (a recorded no-op on all three
 clients, the ADR's open question).
 
+## Calls admitted without an account (C-76)
+
+### C-76: No server in the call path learns which account is in which call
+
+[ADR-0078](../adr/0078-servers-cannot-link-accounts.md) section 2, phase 2.
+**The rule.** `POST /call/jwt` takes no session; it spends one anonymous
+`call-join` token and mints a token whose closed claim set is `iss`, `aud`,
+`room`, `peer_id`, `role`, `iat`, `exp`, where `room =
+BLAKE3-derive-key("lakko/sfu/room/v1", call_id)` and `peer_id` is 16 random
+bytes. The SFU keys a peer on that id and stores no account; the room-state
+probe `GET /v1/rooms/{room}` needs no token; a TURN credential rides the same
+answer with a random username tag. Who a peer is travels only inside the
+call: each participant sends a peer announcement (its SFU peer id, signed with
+its MLS leaf key) sealed under `BLAKE3-derive-key("lakko/call/relay/v1",
+call_seed)`, and a receiver accepts it only when the relay sender is the
+announced peer and the signer is an account-bound leaf of the call's roster.
+The camera media state is sealed under the same key.
+
+**Why it is indexed.** Before this auth saw `(account_id, call_id)` at every
+admission and stored it for the ADR-0033 throttle, the token's `sub` reached
+the SFU, the SFU sent every client a `peer_tag` derived from the account id
+and an `account_pseudonym`, the probe minted a token, and the TURN username
+named the account. Together that was a per-call attendance list held by the
+operator.
+
+**Where it is enforced.** `crates/lakko-call-jwt` (closed claims),
+`crates/lakko-sfu-proto` (`room_id`, no `peer_tag`), `crates/lakko-calls/src/relay.rs`
+(seal, open, compose, verify; fuzz `relay_open`), `services/auth/src/call_jwt.rs`
++ `room_cap.rs` + `turn.rs`, migrations `0034` / `0035`,
+`services/sfu/src/{peer,router,signaling}.rs`, and the three clients' SFU
+sessions (web `calls/call-relay.ts`, iOS `Calls/CallRelay.swift`, Android
+`calls/CallRelay.kt`). Tests: `a_minted_jwt_has_no_sub_and_no_call_id` and
+`a_token_with_a_sub_claim_is_refused` (lakko-call-jwt);
+`a_minted_jwt_names_no_account`, `the_call_admission_tables_are_gone`,
+`a_mint_without_a_token_is_refused`, `the_room_cap_refuses_past_its_limit`
+(services/auth, DB-gated); `the_peer_type_has_no_account_field`,
+`the_room_probe_needs_no_jwt`, `the_call_id_route_is_gone` (services/sfu);
+the relay unit tests in `lakko-calls`. Host-tested on 2026-10-16; not
+deployed and no call placed.
+**Does NOT** cover: the SFU still sees the set of random peer ids in a room,
+their addresses and timing (class (c), ADR-0078 section 12); the media loop's
+logs still name the random peer id and the room (section 11); the room cap
+lives in one auth process's memory; a link-call joiner cannot see before its
+Welcome whether the owner is present.
+
+
+
+## Push the server cannot read at rest (C-77)
+
+### C-77: push-gw stores no device pseudonym and no token in the clear, and a wake is opened only by push-gw and accepted only when signed by a member
+
+[ADR-0078](../adr/0078-servers-cannot-link-accounts.md) section 3, phase 3.
+**The rule.** A push-gw subscription row is `(sub_id, push_gid, wake_pk,
+sealed)`: `sub_id` is 16 random bytes the device keeps per subscription,
+`wake_pk` the public half of the group's wake key, `sealed` the device's
+provider tokens under the group's unlock key; both keys are derived from the
+push routing secret (`lakko/push/wake-sign/v1`, `lakko/push/wake-unlock/v1`),
+which no server holds. The `x-lakko-wake` header is a box to push-gw's X25519
+key over the `push_gid`, the kind, a nonce, a timestamp, the unlock key and a
+signature by the wake key. The DS forwards it unread. push-gw delivers only a
+wake whose signature verifies, whose timestamp is within 10 minutes and whose
+nonce it has not seen, and only to the rows whose `(push_gid, wake_pk)` match;
+the unlock key is used for that wake and never stored.
+
+**Why it is indexed.** Before this the push-gw database was the device x group
+graph in the clear (`push_group_subscriptions` joined to `push_tokens` keyed by
+a device pseudonym), the DS saw which group a publish woke, and since ADR-0057
+it stored a peppered `push_gid` per journal.
+
+**Where it is enforced.** `crates/lakko-contacts/src/push_wake.rs` and
+`push_routing.rs` (derivations golden-pinned; fuzz `push_wake_open`);
+`services/push-gw` migration `0006_sealed_subscriptions.sql`, `src/notify.rs`,
+`src/wake_guard.rs`, `src/wake_key.rs`, with `tests/sealed_wake_tests.rs`
+asserting no column holds a token or a pseudonym and an unsigned or forged wake
+is refused; `services/ds` migration `0011_drop_push_bindings.sql` and the test
+that no DS table names a push binding. Host-tested on 2026-10-16; not walked
+live and not deployed.
+
+**Does NOT** hide co-membership from a live push-gw (it opens every
+subscription a wake names, the class (b) residual), nor the timing link between
+a publish at the DS and a wake at push-gw, nor stop an evicted member signing
+wakes until the next ADR-0043 rotation (rate-capped), nor hide a group's
+subscription tokens from an operator who is a member of that group.
+
+
+
+## Tokens, reach keys, ledgers and logs that name nobody (C-78)
+
+### C-78: No anonymous-token issuance follows a spend, no reach key names a group, no invite row names its owner, no server log line carries an identifier
+
+[ADR-0078](../adr/0078-servers-cannot-link-accounts.md) sections 8 to 11,
+phase 8.
+**The rule.** Four properties, one per section:
+
+- *Tokens.* A client refills its anonymous-token pool on a randomised
+  schedule that does not look at spending (a first top-up within 20 s of a
+  session being bound, then every 30 to 90 minutes per context, to a target
+  of about a day of use); a take never starts an issuance. The issuance and
+  the spends travel on separate connections.
+- *Reach keys.* `group`, `member` and `channel` are one key per class per
+  account (`lakko_contacts::reach`: a scope on those classes is refused), so
+  a mailbox write under one does not say which group or channel its writer
+  shares with the owner. The class rotates when a group shrinks, when the
+  account leaves a group or a channel, and when the setting is changed, and
+  the profile is republished in every remaining group.
+- *Ledgers.* No invite ledger row (`/i/`, `/c/`, `/g/`) carries an owner
+  account id or an issuer key: each holds the public half of a revocation
+  key minted for that link alone, whose seed only the minting device keeps;
+  there is no route that lists an account's links, and account deletion
+  deletes no invite by owner.
+- *Logs.* No `tracing` line at info or above in a service names an account
+  id, identity key, journal id, mailbox, call or room id, channel id,
+  `push_gid`, device pseudonym, push token, blob id, or a prefix of one;
+  request spans record the route template, never the URI.
+
+**Why it is indexed.** Before this, the token issuer and the spending
+service could pair an issuance with the spend it refilled for by time; a
+`group` reach key per group told the DS which group a writer shared with the
+owner; the ledgers named every link's owner and issuer; and the services'
+logs carried account ids, journal ids and the like, so a log alone rebuilt
+much of the graph.
+
+**Where it is enforced.** Tokens: web `tokens/anon-token-pool.ts`, iOS
+`AntiAbuse/AnonTokenPool.swift`, Android `anon/AnonTokenPool.kt` (the test
+"the pool refills on a timer, not on spend" on each). Reach keys:
+`crates/lakko-contacts/src/reach.rs` and the three clients' reach rules
+(web `reach/reach-model.ts`, iOS `Reach/ReachRules.swift`, Android
+`reach/ReachRules.kt`). Ledgers: `services/discovery` migration
+`0031_ownerless_invite_ledgers.sql` and the test
+`no_ledger_table_has_an_owner_or_issuer_column`; the clients' own-link
+records (web `contacts/minted-links.ts`, iOS `Contacts/OwnLinkStore.swift`,
+Android `contacts/OwnLinkStore.kt`). Logs: `crates/lakko-log-hygiene` (the
+source lint over every service and the capture tests in `services/discovery`
+and `services/ds`), both in CI. Host-tested on 2026-10-16; not walked live,
+not deployed.
+**Does NOT** cover network origin and timing (class (c), section 12): the
+issuer and a spending service on one host still see the same address. A
+link this device has no record of (minted on another device, or a record
+lost) cannot be revoked from here and lives until it expires. The capture
+tests cover the routes they drive, not every log line; the lint judges
+names (fields, format arguments, inline captures), so an identifier held in
+an innocuously named variable is caught only by a capture test, on the routes
+it drives.
+
+
+
+## Unlinkable journal ids and durable PublisherGroup commits (C-79, C-82)
+
+### C-79: A DeviceGroup or PublisherGroup journal id is not computable from an account id or a channel id
+
+[ADR-0078](../adr/0078-servers-cannot-link-accounts.md) section 6, phase 6.
+**The rule.** The DeviceGroup journal id is
+`BLAKE3-derive-key("lakko/device-group/id/v2", account_seed)` and the
+PublisherGroup journal id is
+`BLAKE3-derive-key("lakko/pubgrp/id/v3", owner_account_seed ‖ channel_id)`.
+The account seed is the lineage seed: the oldest own predecessor after an
+ADR-0074 rotation (a rotation keeps the DeviceGroup and its journal; the root
+moves by a plain transfer), else the current seed; an ADR-0073 key reset
+clears the predecessors, so the new seed names a new journal, which the
+resetting device founds and claims plainly. Only the channel owner computes a
+PublisherGroup id; a co-publisher opens the group under the id its `/g/` link
+conveyed (`publisher_group_load_joined`), and the link's sealed preview
+carries the channel id (preview kind 2), since the group id no longer reveals
+it.
+
+**Why it is indexed.** Before this both ids were public functions of an
+identifier the servers hold: `DeviceGroup::group_id_for(account_id)` and a
+`lakko/pubgrp/v2/` prefix over the channel id. Any party holding an account id
+or a channel id could name the journal, so the DS journal table linked
+accounts to their device groups and channels to their publishers.
+
+**Where it is enforced.** `crates/lakko-mls/src/device_group.rs`
+(`group_id_for`, `load`, `load_by_group_id`; `join_from_welcome` binds no id)
+and `src/publisher_group.rs` (`publisher_group_id_for`, `load_joined`);
+`crates/lakko-attest/src/key_reset.rs` (version 2, 145 bytes, no journal id);
+`services/ds` (no attested reset, migration `0012`);
+`crates/lakko-contacts/src/group_invite.rs` (channel preview); both FFI
+surfaces (`deviceGroupIdFor`, `loadDeviceGroupById`, `publisherGroupIdFor`,
+`publisherGroupLoadJoined`, `composeCoPublisherInviteCapability`). Pinned by
+proptests (`group_id_is_not_computable_from_the_account_id`,
+`group_id_is_not_computable_from_the_channel_id`, each id a pure function of
+its secret), goldens, and the group-invite preview round-trip tests (the
+`group_invite_preview_decode` fuzz target covers the new branch).
+Host-tested on 2026-10-16; not walked live and not deployed.
+
+**What this does NOT do.** It does not hide that a journal exists, how big it
+is or when its epoch changes (the epoch-key registrations are on the DS), and
+it does nothing about network origin and timing (class (c)). A fresh device
+joining by name cannot check the joined DeviceGroup against the account the
+redeem names by id any more; the binding is the recovery row sealed under the
+group's exporter and the restore's check of the phrase against the published
+identity.
+
+### C-82: A channel PublisherGroup commit is recorded with its N+1 state before any of its effects leaves the device
+
+G-50, the [ADR-0040](../adr/0040-durable-pending-commit-outbox.md) treatment.
+**The rule.** A co-publisher approve or a channel rotation reads the
+channels-service epoch before the commit, then records a
+`PublisherCommitEntry` (kind, channel, group, the MLS epoch the commit moved
+to, the channels-service epoch the reseal binds to, the approve's commit,
+Welcome and joiner key, the landed steps) together with the N+1 provider
+snapshot, fail-closed, before any step runs. The steps then run in order:
+the journal (the N+1 epoch key registered with the channel's root; for an
+approve the commit published, a registration refusal stopping it; for a
+rotation best effort, since a rotation commit is not published), the
+Welcome, the reseal through the ADR-0030 staged fanout at the recorded
+target (done once the service is at or past it), the appointment (never
+holding the entry). Each step is recorded as it lands. A restart resumes the
+remaining steps and drops an entry whose restored group is below its target
+epoch (a commit none of whose steps ran).
+
+**Where it is enforced.** Web `apps/web/src/channels/publisher-commit-outbox.ts`,
+the channel log row (`channel-log-codec.ts`, entries and snapshot in one
+IndexedDB put; a failed write poisons the in-memory state until the next
+hydration), `rotation-cron.ts`, `copublisher.ts`; iOS
+`Channels/PublisherCommitOutbox.swift`, `ChannelPublisherCommits.swift`,
+`ChannelPublisherIdentity.swift` (the channel provider made durable),
+`CoPublisher.swift`, `RotationCron.swift`; Android
+`channels/PublisherCommitOutbox.kt`, `CoPublisher.kt` (`recordCommit`,
+`commitPorts`, `replayPublisherCommits`), `RotationCron.kt`. Pinned by the
+three platforms' outbox suites (order, resume after a failure, replay
+verdict, reseal already landed, rotation registration best effort, approve
+registration required, appointment never holds the entry, codec).
+Unit-tested on 2026-10-16; not walked live.
+
+**What this does NOT do.** It does not survive Forget device (the provider and
+the records are deleted with the account). It does not publish a rotation
+commit to the journal; a co-publisher still learns a rotation only through
+the reseal. On web a refused record leaves the tab without channel writes
+until it reloads.

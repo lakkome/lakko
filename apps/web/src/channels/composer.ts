@@ -116,9 +116,9 @@ export interface ChannelPublisherKeys {
  * 16-byte channel id as a 32-char hex string.
  *
  * G4-2-mls-persistence step 3 — the PublisherGroup is now
- * **persisted** in the OpenMLS provider keyed by
- * `channelIdHex` (deterministic group id derived from the
- * 16-byte channel id). The first publish on this browser
+ * **persisted** in the OpenMLS provider (deterministic group id
+ * derived from the owner's account seed and the channel id,
+ * ADR-0078 section 6). The first publish on this browser
  * profile mints + persists; every subsequent publish
  * reuses the same MLS state, so the exporter output is
  * stable across page reloads. Subscribers who received a
@@ -142,11 +142,16 @@ export interface ChannelPublisherKeys {
  * the publisher keeps signing under the same key across a
  * reload; a wrong-length seed falls back to a fresh one rather
  * than failing the open (the caller re-persists what it gets).
+ *
+ * `joinedGroupId` — ADR-0078 section 6: a co-publisher's PublisherGroup id
+ * (the owner's derivation, which a co-publisher cannot compute). When given,
+ * the group is opened under it and never founded.
  */
 export async function freshPublisherKeys(
   identity: WasmIdentity,
   channelIdHex: string,
   existingSigningSeed?: Uint8Array,
+  joinedGroupId?: Uint8Array,
 ): Promise<ChannelPublisherKeys> {
   const wasm = await loadWasm();
   const channelId = channelIdFromHex(channelIdHex);
@@ -156,7 +161,13 @@ export async function freshPublisherKeys(
   // load-or-create dance in `crates/lakko-mls`; the seed
   // is stable across page reloads for the same identity +
   // channel id.
-  const publisher = await openOrFoundPublisherGroup(wasm, identity, channelId);
+  const publisher =
+    joinedGroupId === undefined
+      ? await openOrFoundPublisherGroup(wasm, identity, channelId)
+      : wasm.PublisherGroup.loadJoined(identity, joinedGroupId, channelId);
+  if (publisher === undefined) {
+    throw new Error("co-publisher: the joined PublisherGroup is not on this device");
+  }
   let seed: Uint8Array;
   try {
     seed = publisher.channelSeed(identity);

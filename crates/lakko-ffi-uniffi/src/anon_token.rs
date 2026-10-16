@@ -174,7 +174,7 @@ pub fn anon_token_header_name() -> String {
 /// Every context name, in wire order: `discovery-lookup`,
 /// `discovery-register`, `invite-consume`, `ds-knock`, `push-register`,
 /// `channel-subscribe`, `directory-search`, `vault-claim`, `blob-upload`,
-/// `blob-read`, `mailbox-write`.
+/// `blob-read`, `mailbox-write`, `call-join`.
 #[uniffi::export]
 pub fn anon_token_contexts() -> Vec<String> {
     TokenContext::ALL
@@ -334,6 +334,7 @@ mod tests {
                 "blob-upload",
                 "blob-read",
                 "mailbox-write",
+                "call-join",
             ]
         );
         // Every listed name is one a request can be built for.

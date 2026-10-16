@@ -6,7 +6,6 @@ package me.lakko.app.config
 import me.lakko.app.BuildConfig
 import me.lakko.app.auth.AuthClient
 import me.lakko.app.calls.CallJwtClient
-import me.lakko.app.calls.TurnCredentialClient
 import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.ds.DsClient
@@ -60,7 +59,6 @@ class ApiEndpointsTest {
         assertEquals(ApiEndpoints.resolve(base, ApiService.AUTH), AuthClient.DEFAULT_BASE_URL)
         assertEquals(AuthClient.DEFAULT_BASE_URL, WebauthnClient.DEFAULT_BASE_URL)
         assertEquals(AuthClient.DEFAULT_BASE_URL, CallJwtClient.DEFAULT_BASE_URL)
-        assertEquals(AuthClient.DEFAULT_BASE_URL, TurnCredentialClient.DEFAULT_BASE_URL)
         assertEquals(ApiEndpoints.resolve(base, ApiService.DS), DsClient.DEFAULT_BASE_URL)
         assertEquals(ApiEndpoints.resolve(base, ApiService.STORAGE), StorageClient.DEFAULT_BASE_URL)
         assertEquals(ApiEndpoints.resolve(base, ApiService.DISCOVERY), DiscoveryClient.DEFAULT_BASE_URL)

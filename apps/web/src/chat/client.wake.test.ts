@@ -5,12 +5,13 @@
  * ADR-0054 decision 1 — the group wake rides the signed DS publish.
  *
  * Pins:
- *   - a chat message passes `{ wake: { pushGid, kind: "message" } }` to
- *     `publishGroup`, naming the opaque `push_gid` (never the DS group_id);
- *   - the `push_gid` is resolved BEFORE the message is sealed;
+ *   - a chat message passes `{ wake: { headerValue } }` to `publishGroup`,
+ *     the sealed wake the sealer built for kind `message` (ADR-0078: the
+ *     `push_gid` and the kind are inside the seal, never the DS group_id);
+ *   - the wake is sealed BEFORE the message is sealed;
  *   - a control envelope passes no wake; a call frame opted in passes `call`;
- *   - no resolver, a `null` resolution, a failing resolver and a wrong-length
- *     id all publish WITHOUT a wake, and never fail the send (invariant #5:
+ *   - no sealer, a `null` result, a failing sealer and a wrong-length header
+ *     all publish WITHOUT a wake, and never fail the send (invariant #5:
  *     the group_id never stands in for the push_gid);
  *   - the client never makes a network request of its own to wake anybody —
  *     the DS is mocked, so any `fetch` at all would be a push-gw call.
@@ -26,7 +27,8 @@ import type {
 } from "../../wasm/lakko_ffi_wasm";
 
 const GROUP_ID = new Uint8Array([9, 9, 9, 9]);
-const PUSH_GID = new Uint8Array(32).fill(0xab);
+/** A stand-in for a sealed wake: 312 characters naming its kind. */
+const SEALED = (kind: string): string => (kind === "call" ? "c" : "m").repeat(312);
 const IDENTITY_TOKEN = {} as unknown as WasmIdentity;
 
 function mockGroup(order: string[] = []): WasmGroup {
@@ -75,23 +77,21 @@ afterEach(() => {
 });
 
 describe("ChatClient — the wake is a header of the publish (ADR-0054)", () => {
-  it("a message carries a message wake naming the push_gid, not the group_id", async () => {
+  it("a message carries a sealed message wake", async () => {
     const { ds, publishGroup } = mockDs();
     const client = new ChatClient(ds, {
       identityProvider: () => IDENTITY_TOKEN,
-      pushGidResolver: async () => PUSH_GID,
+      wakeSealer: async (_g: Uint8Array, kind: string) => SEALED(kind),
     });
 
     await client.sendMessage(null, mockGroup(), new Uint8Array([7]));
 
     const wake = wakeOf(publishGroup);
-    expect(wake?.kind).toBe("message");
-    expect(Array.from(wake?.pushGid ?? [])).toEqual(Array.from(PUSH_GID));
-    expect(Array.from(wake?.pushGid ?? [])).not.toEqual(Array.from(GROUP_ID));
+    expect(wake?.headerValue).toBe(SEALED("message"));
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("resolves the push_gid before sealing, and publishes last", async () => {
+  it("seals the wake before the message, and publishes last", async () => {
     const order: string[] = [];
     const { ds } = mockDs(order);
     const client = new ChatClient(ds, {
@@ -99,9 +99,9 @@ describe("ChatClient — the wake is a header of the publish (ADR-0054)", () => 
       onPersist: async () => {
         order.push("persist");
       },
-      pushGidResolver: async () => {
+      wakeSealer: async (_g: Uint8Array, kind: string) => {
         order.push("resolve");
-        return PUSH_GID;
+        return SEALED(kind);
       },
     });
 
@@ -112,10 +112,10 @@ describe("ChatClient — the wake is a header of the publish (ADR-0054)", () => 
 
   it("a control envelope carries no wake and never consults the resolver", async () => {
     const { ds, publishGroup } = mockDs();
-    const resolver = vi.fn(async () => PUSH_GID);
+    const resolver = vi.fn(async () => SEALED("message"));
     const client = new ChatClient(ds, {
       identityProvider: () => IDENTITY_TOKEN,
-      pushGidResolver: resolver,
+      wakeSealer: resolver,
     });
 
     await client.broadcastControl(null, mockGroup(), new Uint8Array([7]));
@@ -129,14 +129,13 @@ describe("ChatClient — the wake is a header of the publish (ADR-0054)", () => 
     const { ds, publishGroup } = mockDs();
     const client = new ChatClient(ds, {
       identityProvider: () => IDENTITY_TOKEN,
-      pushGidResolver: async () => PUSH_GID,
+      wakeSealer: async (_g: Uint8Array, kind: string) => SEALED(kind),
     });
 
     await client.broadcastControl(null, mockGroup(), new Uint8Array([7]), { wake: "call" });
 
     const wake = wakeOf(publishGroup);
-    expect(wake?.kind).toBe("call");
-    expect(Array.from(wake?.pushGid ?? [])).toEqual(Array.from(PUSH_GID));
+    expect(wake?.headerValue).toBe(SEALED("call"));
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -155,7 +154,7 @@ describe("ChatClient — the wake is a header of the publish (ADR-0054)", () => 
     const { ds, publishGroup } = mockDs();
     const client = new ChatClient(ds, {
       identityProvider: () => IDENTITY_TOKEN,
-      pushGidResolver: async () => null,
+      wakeSealer: async () => null,
     });
 
     await client.sendMessage(null, mockGroup(), new Uint8Array([7]));
@@ -169,7 +168,7 @@ describe("ChatClient — the wake is a header of the publish (ADR-0054)", () => 
     const { ds, publishGroup } = mockDs();
     const client = new ChatClient(ds, {
       identityProvider: () => IDENTITY_TOKEN,
-      pushGidResolver: async () => {
+      wakeSealer: async () => {
         throw new Error("IndexedDB unavailable");
       },
     });
@@ -181,12 +180,12 @@ describe("ChatClient — the wake is a header of the publish (ADR-0054)", () => 
     warn.mockRestore();
   });
 
-  it("a wrong-length push_gid is dropped rather than failing the publish", async () => {
+  it("a wrong-length sealed wake is dropped rather than failing the publish", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { ds, publishGroup } = mockDs();
     const client = new ChatClient(ds, {
       identityProvider: () => IDENTITY_TOKEN,
-      pushGidResolver: async () => new Uint8Array(16),
+      wakeSealer: async () => "x".repeat(16),
     });
 
     await client.sendMessage(null, mockGroup(), new Uint8Array([7]));

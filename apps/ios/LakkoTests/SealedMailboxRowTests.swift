@@ -299,7 +299,7 @@ final class SealedMailboxRowTests: XCTestCase {
         let c = try center()
         let sender = try identity(0x73), impostor = try identity(0x74)
         let member = try deriveReachGrant(
-            accountSeed: impostor.ed25519Seed(), class: .member, scopeId: Data(repeating: 2, count: 32), version: 0)
+            accountSeed: impostor.ed25519Seed(), class: .member, scopeId: Data(), version: 0)
         XCTAssertFalse(c.keep(
             member, carrier: .groupProfile,
             fromAccountKeyB64: sender.signaturePublicKey().base64EncodedString(), scopeHex: "aa"),

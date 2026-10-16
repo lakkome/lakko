@@ -476,7 +476,7 @@ class AccountLocalWipeTest {
         // last filled by A.
         File(context.noBackupFilesDir, "lakko-anon-tokens/pool.json").apply { parentFile?.mkdirs() }
             .writeText("""{"v":1,"owner":"$a","tokens":[]}""")
-        PushWakeBindingStore(context).bind(ByteArray(32) { 0x0A }, a)
+        PushWakeBindingStore(context).bind(a)
         SessionStore(context).save(PersistedSession(accountIdB64 = a, username = "alice"))
         for (path in listOf("chat-media/s1/e1/voice.m4a", "chat-media-outbox/take", "shared-attachments/u1/photo.jpg")) {
             File(context.cacheDir, path).apply { parentFile?.mkdirs() }.writeText("plaintext")

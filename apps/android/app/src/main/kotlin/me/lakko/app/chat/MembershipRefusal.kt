@@ -515,6 +515,12 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // ADR-0064 - a refused vault operation; not a membership
                 // refusal.
                 is FfiException.Vault,
+                // ADR-0078 section 2 - a refused call relay payload or peer
+                // announcement; not a membership refusal.
+                is FfiException.CallRelay,
+                // ADR-0078 section 3 - a push wake or subscription that could
+                // not be sealed; not a membership refusal.
+                is FfiException.PushWake,
                 -> null
 
                 // Everything that is NOT a membership refusal. Enumerated

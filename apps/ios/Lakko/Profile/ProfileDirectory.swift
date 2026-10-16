@@ -314,11 +314,9 @@ public final class ProfileDirectory: ObservableObject {
 
     /// The own profile for a contact request, or `nil` without an account.
     ///
-    /// Carries the account's 16 raw bytes (profile envelope v2) so a receiver
-    /// can match this device's owner to a group-call tile: the SFU's per-call
-    /// `peer_tag` (ADR-0021) is derived over the account id, which a signature
-    /// key alone cannot produce. The id is already public to every peer that
-    /// holds the identity bundle; here it only travels inside the E2EE
+    /// Carries the account's 16 raw bytes (profile envelope v2), the account
+    /// a username certificate names. The id is already public to every peer
+    /// that holds the identity bundle; here it only travels inside the E2EE
     /// envelope. An account id that is not exactly 16 bytes is sent as none —
     /// `composeProfileEnvelope` refuses any other length.
     ///
@@ -377,9 +375,8 @@ public final class ProfileDirectory: ObservableObject {
     }
 
     /// Every received profile that names an account id, as
-    /// `(signature key, account id)`. What a group-call roster folds into its
-    /// per-call `peer_tag` map alongside the accepted contacts, so a member
-    /// who is not a contact is still named on their tile.
+    /// `(signature key, account id)`: the account id a one-to-one peer's
+    /// contact row carries.
     func profilesWithAccountId() -> [(signatureKeyB64: String, accountId: Data)] {
         received.profilesWithAccountId()
     }

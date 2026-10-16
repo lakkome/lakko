@@ -545,14 +545,6 @@ class JournalOwnershipTest {
         }
     }
 
-    @Test
-    fun `a push binding refusal is classified, never thrown`() {
-        assertEquals(PushBindingOutcome.BOUND, pushBindingOutcomeOf(null))
-        assertEquals(PushBindingOutcome.CONFLICT, pushBindingOutcomeOf(DsHttpError(409, "/push-binding", "")))
-        assertEquals(PushBindingOutcome.DISABLED, pushBindingOutcomeOf(DsHttpError(503, "/push-binding", "push-binding-disabled")))
-        assertEquals(PushBindingOutcome.FAILED, pushBindingOutcomeOf(IllegalStateException("x")))
-    }
-
     // ------------------------------------------------------------ second security pass
 
     @Test

@@ -85,6 +85,7 @@ import {
   type SfuWelcome,
 } from "./sfu-signaling-client";
 import { loadWasm } from "../wasm";
+import { CallRelay, type PeerAnnouncer, type VerifiedPeerIdentity } from "./call-relay";
 import { describeLocalCamera } from "./local-preview";
 import {
   attachReceiverSFrame,
@@ -194,6 +195,12 @@ export interface SfuCallMedia {
   readonly videoDeviceId?: string | null;
 }
 
+/** How often a device re-announces who it is to the call (ADR-0078 section
+ *  2). Chosen, not measured: an announcement sealed under a relay key a peer
+ *  did not hold yet (it had not applied the commit) is lost to that peer, and
+ *  the next one names the tile. */
+export const PEER_ANNOUNCE_INTERVAL_MS = 15_000;
+
 /** Configuration handed to a session at construction. */
 export interface SfuCallConfig {
   /** SFU origin, e.g. `wss://sfu.lakko.me` (no trailing path). */
@@ -222,9 +229,18 @@ export interface SfuCallConfig {
   /** Mic / camera request. */
   readonly media: SfuCallMedia;
   /**
-   * ICE servers (STUN / TURN). Defaults to public STUN; production
-   * supplies the self-hosted TURN credentials from
-   * `services/auth` `POST /call/turn-credential`.
+   * ADR-0078 section 2: composes this device's signed peer announcement and
+   * verifies everyone else's against the call's MLS roster. The session
+   * seals it under the call seed's relay key and broadcasts it (after the
+   * Welcome, after every rekey, when someone joins, and every
+   * {@link PEER_ANNOUNCE_INTERVAL_MS}); a verified one fires
+   * {@link SfuCallCallbacks.onPeerIdentified}. Absent: no device here is
+   * named (tests).
+   */
+  readonly peerAnnouncer?: PeerAnnouncer;
+  /**
+   * ICE servers (STUN / TURN). Defaults to public STUN; production adds the
+   * TURN credential minted beside the call token (`setTurnProvider`).
    */
   readonly iceServers?: readonly RTCIceServer[];
   /**
@@ -286,13 +302,13 @@ export interface SfuCallCallbacks {
   onStateChange?(state: SfuCallState): void;
   /** Initial roster (from the SFU `Welcome`). */
   onWelcome?(selfPeerId: string, roster: readonly SfuPeerSnapshot[]): void;
-  /** A participant joined the call. `peerTag` is the ADR-0021 per-call
-   *  tag (absent from a pre-ADR-0021 SFU). */
-  onPeerJoined?(
-    peerId: string,
-    accountPseudonym: string,
-    peerTag: string | undefined,
-  ): void;
+  /** A participant joined the call. The SFU says nothing about who it is;
+   *  {@link onPeerIdentified} does, once its announcement verifies. */
+  onPeerJoined?(peerId: string): void;
+  /** A peer's sealed announcement verified against the call's roster
+   *  (ADR-0078 section 2): `identity` is the person (and the leaf key)
+   *  behind `peerId`. Fired again on every re-announcement. */
+  onPeerIdentified?(peerId: string, identity: VerifiedPeerIdentity): void;
   /** A participant left. */
   onPeerLeft?(peerId: string): void;
   /**
@@ -323,9 +339,10 @@ export interface SfuCallCallbacks {
    * invariant #2). The multi-joiner orchestrator classifies these with
    * `dispatchIncomingEnvelope` (CallKeyPackage / CallWelcome / commit).
    *
-   * A `MediaState` relay (camera-off-cleanup) is NOT delivered here — the
-   * session classifies + consumes it internally and fires
-   * {@link onRemoteMediaState} instead. Every other kind falls through to
+   * A payload sealed under the call's relay key (ADR-0078 section 2: the
+   * camera media state and the peer announcements) is NOT delivered here -
+   * the session opens and consumes it and fires {@link onRemoteMediaState}
+   * or {@link onPeerIdentified}. Everything it cannot open falls through to
    * this callback unchanged.
    */
   onSignalRelay?(from: string, payload: Uint8Array): void;
@@ -399,6 +416,11 @@ export class SfuCallSession {
   private localStream: MediaStream | null = null;
   private signaling: SfuSignalingClient | null = null;
   private selfPeerId: string | null = null;
+  /** The relay keys of the current and previous call epoch (ADR-0078
+   *  section 2), built on first use; `null` before. */
+  private relay: CallRelay | null = null;
+  /** The periodic peer re-announcement. */
+  private announceTimer: ReturnType<typeof setInterval> | null = null;
 
   /** Serializes SFU-initiated offers so two `setRemoteDescription`
    *  calls never overlap. Each entry is the offer SDP. */
@@ -794,6 +816,9 @@ export class SfuCallSession {
     for (const id of this.transformIds) {
       rekeySFrame(id, newSeed);
     }
+    // The relay key follows the seed; announce under the new one.
+    this.relay?.setSeed(newSeed);
+    this.announceSelf();
   }
 
   /** Current lifecycle phase. */
@@ -896,6 +921,10 @@ export class SfuCallSession {
     // The socket is open and the Welcome has arrived: start the keepalive.
     this.lastInboundMs = this.lastPingMs = this.nowMs();
     this.keepaliveTimer = setInterval(() => this.onKeepaliveTick(), SFU_KEEPALIVE_TICK_MS);
+    // ADR-0078 section 2: say who this device is, now and periodically (an
+    // announcement sealed under a key a peer did not hold yet is lost to it).
+    this.announceSelf();
+    this.announceTimer = setInterval(() => this.announceSelf(), PEER_ANNOUNCE_INTERVAL_MS);
 
     // 2. Build the peer connection + capture + publish — UNLESS the caller
     //    asked to defer (ADR-0032 link joiner: stay signaling-only until it
@@ -980,7 +1009,11 @@ export class SfuCallSession {
     if (this.pc !== null || this.publishing) return;
     // A session that was hung up, or failed, opens no device.
     if (this.isOver()) return;
-    if (seed !== undefined) this.activeSeed = seed;
+    if (seed !== undefined) {
+      this.activeSeed = seed;
+      this.relay?.setSeed(seed);
+      this.announceSelf();
+    }
     if (localLeaf !== undefined) this.publishLeaf = localLeaf;
     if (this.activeSeed === null) {
       throw new Error(
@@ -1072,18 +1105,59 @@ export class SfuCallSession {
     if (this.signaling === null) return;
     const on = this.localCameraOn;
     void (async (): Promise<void> => {
-      let bytes: Uint8Array;
+      let sealed: Uint8Array | null;
       try {
         const wasm = await loadWasm();
-        bytes = wasm.composeMediaState(on);
+        // Sealed under the call's relay key (ADR-0078 section 2): the SFU
+        // relays ciphertext only. No key yet (a link joiner before its
+        // Welcome) means nothing is said.
+        sealed = this.relayFor(wasm).seal(wasm.composeMediaState(on));
       } catch {
         return;
       }
+      if (sealed === null) return;
       try {
         // Re-check after the await — the call may have torn down.
-        this.signaling?.sendSignalRelayToCall(bytes);
+        this.signaling?.sendSignalRelayToCall(sealed);
       } catch {
         // socket gone / not open — the signal is best-effort.
+      }
+    })();
+  }
+
+  /** The relay keys, built on first use and seeded from the current seed. */
+  private relayFor(wasm: Awaited<ReturnType<typeof loadWasm>>): CallRelay {
+    if (this.relay === null) {
+      this.relay = new CallRelay(wasm);
+      if (this.activeSeed !== null) this.relay.setSeed(this.activeSeed);
+    }
+    return this.relay;
+  }
+
+  /**
+   * Broadcast this device's sealed peer announcement (ADR-0078 section 2).
+   * Best-effort: without an announcer, a self peer id, a relay key or an
+   * open socket nothing is sent.
+   */
+  private announceSelf(): void {
+    const announcer = this.config.peerAnnouncer;
+    const self = this.selfPeerId;
+    if (announcer === undefined || self === null || this.signaling === null) return;
+    void (async (): Promise<void> => {
+      let sealed: Uint8Array | null = null;
+      try {
+        const wasm = await loadWasm();
+        if (this.isOver()) return;
+        const announcement = announcer.compose(self);
+        if (announcement !== null) sealed = this.relayFor(wasm).seal(announcement);
+      } catch {
+        return;
+      }
+      if (sealed === null) return;
+      try {
+        this.signaling?.sendSignalRelayToCall(sealed);
+      } catch {
+        // best-effort
       }
     })();
   }
@@ -1758,6 +1832,12 @@ export class SfuCallSession {
       clearInterval(this.keepaliveTimer);
       this.keepaliveTimer = null;
     }
+    if (this.announceTimer !== null) {
+      clearInterval(this.announceTimer);
+      this.announceTimer = null;
+    }
+    this.relay?.dispose();
+    this.relay = null;
     if (this.signaling !== null) {
       this.signaling.close();
       this.signaling = null;
@@ -2126,17 +2206,14 @@ export class SfuCallSession {
       this.wantsBook.addPeer(frame.peer_id);
       this.onRosterChanged(true);
     }
-    this.callbacks.onPeerJoined?.(
-      frame.peer_id,
-      frame.account_pseudonym,
-      frame.peer_tag,
-    );
+    this.callbacks.onPeerJoined?.(frame.peer_id);
     // Re-announce our own current camera state so the newcomer is shown the
     // right thing immediately (camera-off-cleanup) — deterministic initial
     // sync for a peer who toggled off/on before this peer arrived. The relay
     // is a broadcast; existing peers re-applying an unchanged state is a
-    // harmless no-op.
+    // harmless no-op. And say who this device is, for the newcomer.
     this.announceCameraState();
+    this.announceSelf();
   }
 
   /**
@@ -2191,7 +2268,7 @@ export class SfuCallSession {
   private onSignalRelayFrame(frame: SfuSignalRelay): void {
     const mediaCb = this.callbacks.onRemoteMediaState;
     const relayCb = this.callbacks.onSignalRelay;
-    if (mediaCb === undefined && relayCb === undefined) return;
+    const identifiedCb = this.callbacks.onPeerIdentified;
     void (async (): Promise<void> => {
       let wasm: Awaited<ReturnType<typeof loadWasm>>;
       let payload: Uint8Array;
@@ -2205,25 +2282,19 @@ export class SfuCallSession {
       // Hung up while the module resolved: a relay is not delivered to a
       // call that is over.
       if (this.isOver()) return;
-      // Classify: consume a MediaState signal (camera-off-cleanup); everything
-      // else passes through to onSignalRelay unchanged.
-      if (mediaCb !== undefined) {
-        let isMediaState = false;
-        let cameraOn: boolean | undefined;
-        try {
-          const env = wasm.dispatchIncomingEnvelope(payload);
-          isMediaState = env.kind === wasm.IncomingEnvelopeKind.MediaState;
-          cameraOn = env.cameraOn;
-          env.free();
-        } catch {
-          // A domain-separator match with a malformed body throws; treat the
-          // payload as opaque and fall through to onSignalRelay.
-          isMediaState = false;
+      // ADR-0078 section 2: a payload sealed under the call's relay key is
+      // consumed here (the camera media state, a peer announcement); an
+      // unsealed media state is not accepted. Everything else passes through
+      // to onSignalRelay unchanged.
+      const opened = this.relayFor(wasm).open(payload);
+      if (opened !== null) {
+        if (opened.kind === "media-state") {
+          mediaCb?.(frame.from, opened.cameraOn);
+        } else if (opened.kind === "announcement") {
+          const identity = this.config.peerAnnouncer?.verify(frame.from, opened.bytes) ?? null;
+          if (identity !== null) identifiedCb?.(frame.from, identity);
         }
-        if (isMediaState) {
-          if (cameraOn !== undefined) mediaCb(frame.from, cameraOn);
-          return; // consumed — never double-dispatch to onSignalRelay
-        }
+        return;
       }
       relayCb?.(frame.from, payload);
     })();

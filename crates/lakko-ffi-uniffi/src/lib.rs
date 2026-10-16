@@ -42,6 +42,7 @@ pub mod anon_token;
 pub mod attachments;
 pub mod auth;
 pub mod backup;
+pub mod call_relay;
 pub mod channels;
 pub mod contacts;
 pub mod device_link;
@@ -60,6 +61,7 @@ pub mod pairing;
 pub mod passkey_vault;
 pub mod phrase_check;
 pub mod pow;
+pub mod push_wake;
 pub mod release;
 pub mod scoped_discovery;
 pub mod sframe;
@@ -720,6 +722,32 @@ pub enum FfiError {
     /// `reachGrantMailboxPkVerified` means: do not write to that mailbox.
     #[error("{0}")]
     Mailbox(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0078 section 2 sealed call relay - appended, for the ordinal
+    // reason above.
+    // ------------------------------------------------------------------
+    /// A call relay operation was refused (`call_relay.rs`). The message is
+    /// `"<code>: <reason>"` with the frozen codes of
+    /// `lakko_calls::relay::RelayError` (`badLength`, `unknownVersion`,
+    /// `notOpened`, `wrongDomain`, `malformed`, `wrongCall`, `wrongPeer`,
+    /// `notAMember`, `noAccount`, `badSignature`, `identityKeyMismatch`,
+    /// `seal`) or `callIdLength` / `seedLength` for an argument of the wrong
+    /// length. Any refusal from `verifyCallPeerAnnouncement` means: do not
+    /// bind that peer to anyone.
+    #[error("{0}")]
+    CallRelay(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0078 section 3 sealed wakes and subscriptions — appended, for
+    // the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// A sealed wake or subscription could not be built (`push_wake.rs`).
+    /// The message is `"<code>: <reason>"` with the frozen codes of
+    /// `lakko_contacts::push_wake::PushWakeError` (`badTokens`, ...) or
+    /// `keyLength` / `subIdLength` for an argument of the wrong length.
+    #[error("{0}")]
+    PushWake(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {
@@ -2876,6 +2904,14 @@ impl PublisherGroup {
         Ok(g.group_id())
     }
 
+    /// The current MLS epoch. G-50: a PublisherGroup commit's durable record
+    /// names the epoch it moved the group to, and a restart compares it with
+    /// this.
+    pub fn epoch(&self) -> Result<u64, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.epoch())
+    }
+
     /// Process one row read from this journal's **knock** queue (ADR-0053).
     /// Anything that is not a stranger's external-join proposal for this group
     /// is refused BEFORE it is processed - a knock row is an unauthenticated
@@ -3026,15 +3062,44 @@ pub fn publisher_group_open_or_create(
     Ok(Arc::new(created))
 }
 
-/// ADR-0028 OQ3 — recover the 16-byte channel id from a PublisherGroup
-/// `group_id` (the inverse of the deterministic derivation). Returns `None` for
-/// bytes that do not carry the publisher-group prefix. A co-publisher uses this
-/// after joining via a `/g/` ticket — which conveys only the `group_id` — to
-/// reconstruct the channel + derive its content-key seed.
+/// ADR-0028 OQ3 / ADR-0078 section 6 — open a PublisherGroup this identity
+/// JOINED as a co-publisher. A co-publisher cannot compute the owner's id
+/// (it is derived from the owner's seed), so it passes the `group_id` its
+/// `/g/` capability conveyed and the `channel_id` that link's sealed preview
+/// carried, both kept since the join. Returns `null` when nothing is stored
+/// under `group_id`; never creates.
 #[uniffi::export]
-#[must_use]
-pub fn channel_id_from_publisher_group_id(group_id: Vec<u8>) -> Option<Vec<u8>> {
-    lakko_mls::channel_id_from_group_id(&group_id).map(|c| c.as_bytes().to_vec())
+pub fn publisher_group_load_joined(
+    identity: &Identity,
+    group_id: Vec<u8>,
+    channel_id: Vec<u8>,
+) -> Result<Option<Arc<PublisherGroup>>, FfiError> {
+    let cid = MlsChannelId::try_from_slice(&channel_id)?;
+    let loaded = MlsPublisherGroup::load_joined(&identity.inner, &group_id, &cid)?;
+    Ok(loaded.map(|inner| {
+        Arc::new(PublisherGroup {
+            inner: Mutex::new(inner),
+        })
+    }))
+}
+
+/// ADR-0078 section 6 — the PublisherGroup id the account whose identity is
+/// `owner_identity` derives for `channel_id`
+/// (`BLAKE3-derive-key("lakko/pubgrp/id/v3", owner_seed || channel_id)`).
+///
+/// # Errors
+///
+/// [`FfiError::Codec`] when `channel_id` is not 16 bytes.
+#[uniffi::export]
+pub fn publisher_group_id_for(
+    owner_identity: &Identity,
+    channel_id: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let cid = MlsChannelId::try_from_slice(&channel_id)?;
+    Ok(
+        lakko_mls::publisher_group_id_for(&owner_identity.inner.ed25519_seed_bytes(), &cid)
+            .to_vec(),
+    )
 }
 
 // ============================================================================
@@ -3143,7 +3208,9 @@ pub fn channel_rotation_state_after_post(state: ChannelRotationState) -> Channel
 ///
 /// Wraps `lakko_mls::DeviceGroup` for FFI use. The leaves are
 /// the user's own devices; the deterministic `group_id` is
-/// `BLAKE3("lakko-device-group/v1" || account_id)`.
+/// `BLAKE3-derive-key("lakko/device-group/id/v2", account_seed)` (ADR-0078
+/// section 6), `account_seed` being the Ed25519 seed of the account identity
+/// the conversation leaves are bound to.
 ///
 /// FFI subset of what `lakko_mls::DeviceGroup` exposes — just
 /// what 2a3b's add-device flow needs:
@@ -3168,19 +3235,23 @@ impl DeviceGroup {
     /// Bootstrap a fresh DeviceGroup with `identity` as the
     /// founding (and only) leaf.
     ///
-    /// `account_id` MUST be the raw 16-byte UUIDv7. The
-    /// resulting group's `group_id` is derived
-    /// deterministically — every device that knows the same
-    /// `account_id` agrees on the same `group_id` without
-    /// server coordination.
+    /// `account_id` MUST be the raw 16-byte UUIDv7 (removal attestations
+    /// bind to it). The `group_id` is derived from `account_identity`'s seed
+    /// ([`device_group_id_for`]) — every device of the account holds that
+    /// seed and agrees on the id without server coordination; a server that
+    /// knows only the account id cannot compute it.
     #[uniffi::constructor]
-    pub fn create_founder(identity: &Identity, account_id: Vec<u8>) -> Result<Self, FfiError> {
-        if account_id.len() != 16 {
-            return Err(FfiError::Codec("account_id must be 16 bytes".into()));
-        }
-        let mut acct = [0u8; 16];
-        acct.copy_from_slice(&account_id);
-        let inner = MlsDeviceGroup::create_founder(&identity.inner, &acct)?;
+    pub fn create_founder(
+        identity: &Identity,
+        account_id: Vec<u8>,
+        account_identity: &Identity,
+    ) -> Result<Self, FfiError> {
+        let acct = account_id_16(&account_id)?;
+        let inner = MlsDeviceGroup::create_founder(
+            &identity.inner,
+            &acct,
+            &account_identity.inner.ed25519_seed_bytes(),
+        )?;
         Ok(Self {
             inner: Mutex::new(inner),
         })
@@ -3189,21 +3260,18 @@ impl DeviceGroup {
     /// Join a DeviceGroup from a Welcome the scanner device
     /// produced via [`DeviceGroup::add_device_from_wire`].
     ///
-    /// Verifies that the embedded `group_id` matches
-    /// `BLAKE3("lakko-device-group/v1" || account_id)` — a
-    /// misrouted Welcome from a different user's DeviceGroup
-    /// is rejected before any state advance.
+    /// Binds nothing about the group id (ADR-0078 section 6): the joining
+    /// device does not hold the account seed yet. The group is bound to the
+    /// account by the recovery row the caller opens under this group's
+    /// exporter; afterwards it is loaded by its id
+    /// ([`load_device_group_by_id`]) until the device holds the seed.
     #[uniffi::constructor]
     pub fn join_from_welcome(
         welcome: Vec<u8>,
         identity: &Identity,
         account_id: Vec<u8>,
     ) -> Result<Self, FfiError> {
-        if account_id.len() != 16 {
-            return Err(FfiError::Codec("account_id must be 16 bytes".into()));
-        }
-        let mut acct = [0u8; 16];
-        acct.copy_from_slice(&account_id);
+        let acct = account_id_16(&account_id)?;
         let inner = MlsDeviceGroup::join_from_welcome(&welcome, &identity.inner, &acct)?;
         Ok(Self {
             inner: Mutex::new(inner),
@@ -3243,9 +3311,8 @@ impl DeviceGroup {
         ds_proof::group_signer(g.as_group(), &identity.inner)
     }
 
-    /// The deterministic `group_id` this DeviceGroup is bound
-    /// to. Same value `MlsDeviceGroup::group_id_for(account_id)`
-    /// computes for the same `account_id`.
+    /// The `group_id` of this DeviceGroup (its DS journal id): for a founded
+    /// group, what [`device_group_id_for`] computes from the account seed.
     pub fn group_id(&self) -> Result<Vec<u8>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.group_id())
@@ -4125,23 +4192,26 @@ mod history_placeholder_media_tests {
     }
 }
 
-/// Compute the deterministic DeviceGroup `group_id` from an
-/// account_id, without building a `DeviceGroup` instance.
-/// Useful on the joining-device side when polling the DS
-/// journal for catch-up Commits before any Welcome has been
-/// processed.
-#[uniffi::export]
-pub fn device_group_id_for(account_id: Vec<u8>) -> Result<Vec<u8>, FfiError> {
-    if account_id.len() != 16 {
-        return Err(FfiError::Codec("account_id must be 16 bytes".into()));
-    }
-    let mut acct = [0u8; 16];
-    acct.copy_from_slice(&account_id);
-    Ok(MlsDeviceGroup::group_id_for(&acct))
+fn account_id_16(account_id: &[u8]) -> Result<[u8; 16], FfiError> {
+    account_id
+        .try_into()
+        .map_err(|_| FfiError::Codec("account_id must be 16 bytes".into()))
 }
 
-/// Load an existing DeviceGroup for `account_id` from
-/// `identity`'s MLS provider storage. Returns `null` (on the
+/// The deterministic DeviceGroup `group_id` of the account whose identity is
+/// `account_identity` (ADR-0078 section 6):
+/// `BLAKE3-derive-key("lakko/device-group/id/v2", account_seed)`. Pass the
+/// account identity the conversation leaves are bound to (the oldest own
+/// predecessor after a rotation, else the current one), so a rotation does not
+/// move the id. Not computable from the account id.
+#[uniffi::export]
+#[must_use]
+pub fn device_group_id_for(account_identity: &Identity) -> Vec<u8> {
+    MlsDeviceGroup::group_id_for(&account_identity.inner.ed25519_seed_bytes())
+}
+
+/// Load the DeviceGroup of the account whose identity is `account_identity`
+/// from `identity`'s MLS provider storage. Returns `null` (on the
 /// Kotlin side; `None` on the Rust side) when no row is
 /// present.
 ///
@@ -4153,13 +4223,32 @@ pub fn device_group_id_for(account_id: Vec<u8>) -> Result<Vec<u8>, FfiError> {
 pub fn load_device_group(
     identity: &Identity,
     account_id: Vec<u8>,
+    account_identity: &Identity,
 ) -> Result<Option<Arc<DeviceGroup>>, FfiError> {
-    if account_id.len() != 16 {
-        return Err(FfiError::Codec("account_id must be 16 bytes".into()));
-    }
-    let mut acct = [0u8; 16];
-    acct.copy_from_slice(&account_id);
-    let loaded = MlsDeviceGroup::load(&identity.inner, &acct)?;
+    let acct = account_id_16(&account_id)?;
+    let loaded = MlsDeviceGroup::load(
+        &identity.inner,
+        &acct,
+        &account_identity.inner.ed25519_seed_bytes(),
+    )?;
+    Ok(loaded.map(|inner| {
+        Arc::new(DeviceGroup {
+            inner: Mutex::new(inner),
+        })
+    }))
+}
+
+/// Load the DeviceGroup stored under `group_id`: one this device joined from
+/// a Welcome before it held the account seed (the id read off the joined
+/// group). Returns `null` when nothing is stored there.
+#[uniffi::export]
+pub fn load_device_group_by_id(
+    identity: &Identity,
+    account_id: Vec<u8>,
+    group_id: Vec<u8>,
+) -> Result<Option<Arc<DeviceGroup>>, FfiError> {
+    let acct = account_id_16(&account_id)?;
+    let loaded = MlsDeviceGroup::load_by_group_id(&identity.inner, &acct, &group_id)?;
     Ok(loaded.map(|inner| {
         Arc::new(DeviceGroup {
             inner: Mutex::new(inner),
@@ -4622,10 +4711,12 @@ pub struct FfiCallJwtClaims {
     pub iss: String,
     /// Audience; always `"lakko-sfu"`.
     pub aud: String,
-    /// account_id, 32-char lower-case hex.
-    pub sub: String,
-    /// call_id, 32-char lower-case hex.
-    pub call_id: String,
+    /// The room the token admits to: 64-char lower-case hex
+    /// (ADR-0078 section 2; never the call id, never an account).
+    pub room: String,
+    /// The SFU peer id the token admits as: 32-char lower-case hex,
+    /// random per token.
+    pub peer_id: String,
     /// Participation role.
     pub role: FfiCallRole,
     /// `iat` — issued-at, unix seconds.
@@ -4641,8 +4732,8 @@ fn claims_to_ffi(claims: lakko_call_jwt::CallJwtClaims, kid: String) -> FfiCallJ
     FfiCallJwtClaims {
         iss: claims.iss,
         aud: claims.aud,
-        sub: claims.sub,
-        call_id: claims.call_id,
+        room: claims.room,
+        peer_id: claims.peer_id,
         role: FfiCallRole::from_inner(claims.role),
         iat: claims.iat,
         exp: claims.exp,

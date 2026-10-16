@@ -394,80 +394,31 @@ pub fn sign_revocation(
 // Owner-side invite-list query (Phase 1.18d2b-list)
 // ============================================================================
 
-/// Domain-separator prefix for the canonical bytes an owner
-/// signs to authenticate a "give me my live invites" query
-/// (Phase 1.18d2b-list). Distinct from
-/// [`REVOKE_DOMAIN_V1`] so a captured revoke-signature cannot
-/// be replayed as an owner-list signature (or vice versa).
-/// Trailing NUL keeps the prefix's byte length distinct from any
-/// incidental ASCII suffix the `lakko-invite-…/v1` namespace
-/// might grow.
+/// Retired domain separator of the owner-list query (Phase 1.18d2b-list).
+///
+/// ADR-0078 section 10 removed the owner from every invite ledger, and with
+/// it `POST /discovery/invite/by-owner`: a client lists its own links from
+/// the local record it keeps for each link it minted. The bytes stay
+/// reserved so no future signature domain reuses them, and the sibling
+/// envelopes' domain-isolation tests keep checking against them.
 pub const OWNER_LIST_DOMAIN_V1: &[u8] = b"lakko-invite-owner-list/v1\x00";
 
-/// Build the canonical bytes the owner signs to authenticate a
-/// "list my invites" query. The signature is verified server-
-/// side against the owner's published Ed25519 verifying key
-/// (from `identity_bundles`), proving ownership of the
-/// `account_id` without requiring a session token to carry that
-/// identity.
-///
-/// Layout (51 bytes total):
-///
-/// ```text
-/// OWNER_LIST_DOMAIN_V1 (27 bytes) ‖ owner_account_id (16 bytes) ‖ signed_at_ms (8 bytes BE)
-/// ```
-///
-/// Domain separator binds the signature to the owner-list-v1
-/// use case; `owner_account_id` binds it to the specific owner;
-/// `signed_at_ms` binds it to a freshness window so a captured
-/// signature cannot be replayed past
-/// [`REVOKE_REPLAY_WINDOW_MS`] (re-used — both endpoints share
-/// the same ±10 min skew tolerance to keep the operational
-/// story tight).
-///
-/// Pure deterministic helper — same inputs always produce the
-/// same bytes. Both the server (`services/discovery`) and every
-/// client drive verify / sign against the value this function
-/// returns; consolidating the layout here is what keeps the
-/// surfaces in sync.
-///
-/// **No nonce.** A list query is idempotent — server-side
-/// replay within the window just produces another SELECT
-/// returning the same rows. Anti-replay across the window
-/// boundary is covered by `signed_at_ms`.
-#[must_use]
-pub fn owner_list_canonical_bytes(
-    owner_account_id: &[u8; ACCOUNT_ID_LEN],
-    signed_at_ms: u64,
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(OWNER_LIST_DOMAIN_V1.len() + ACCOUNT_ID_LEN + 8);
-    out.extend_from_slice(OWNER_LIST_DOMAIN_V1);
-    out.extend_from_slice(owner_account_id);
-    out.extend_from_slice(&signed_at_ms.to_be_bytes());
-    out
-}
+/// Length of a link revocation seed and of its public key.
+pub const REVOCATION_KEY_LEN: usize = 32;
 
-/// Sign an owner-list query — convenience over
-/// [`owner_list_canonical_bytes`] + the Ed25519 sign primitive.
-/// Caller supplies the owner's identity signing key (same one
-/// they used to sign every `InviteCapability` they own) plus the
-/// request timestamp; the helper builds the canonical bytes,
-/// signs, and returns the 64-byte signature.
+/// The Ed25519 public key of a per-link revocation seed (ADR-0078
+/// section 10).
 ///
-/// Each client drives this through its FFI surface
-/// (`signOwnerListQuery` on UniFFI + wasm-bindgen, Phase
-/// 1.18d2b-list); the server-side
-/// `services/discovery::invite::list_by_owner` path verifies the
-/// same bytes against `identity_bundles.signature_pubkey` for
-/// the supplied `owner_account_id`.
+/// A ledger row (`/i/`, `/c/`, `/g/`) names no owner and no issuer: it
+/// stores this public key, minted fresh for the one link, and nothing
+/// else about who made it. The issuing device keeps the 32-byte seed beside
+/// the link secret it already keeps for the link, and signs a revocation
+/// (`sign_revocation`, `call_sign_revocation`, `group_sign_revocation`)
+/// with it. Two links of one person carry unrelated keys, so the ledger
+/// cannot group them by person.
 #[must_use]
-pub fn sign_owner_list(
-    signing: &SigningKey,
-    owner_account_id: &[u8; ACCOUNT_ID_LEN],
-    signed_at_ms: u64,
-) -> [u8; SIGNATURE_LEN] {
-    let canonical = owner_list_canonical_bytes(owner_account_id, signed_at_ms);
-    signing.sign(&canonical).to_bytes()
+pub fn revocation_public_key(seed: &[u8; REVOCATION_KEY_LEN]) -> [u8; REVOCATION_KEY_LEN] {
+    SigningKey::from_seed(seed).verifying_key().to_bytes()
 }
 
 // ============================================================================
@@ -1496,113 +1447,25 @@ mod tests {
         assert_eq!(REVOKE_REPLAY_WINDOW_MS, 600_000);
     }
 
-    // ----------------------------------------------------------------
-    // Owner-list canonical-bytes + signing helper (Phase 1.18d2b-list)
-    // ----------------------------------------------------------------
-
     #[test]
-    fn owner_list_canonical_bytes_layout() {
-        // Domain prefix is 27 bytes (26 chars + NUL); account_id
-        // 16; u64 BE 8 → 51 total. Pin so a future refactor that
-        // drifts the prefix surfaces here.
-        assert_eq!(OWNER_LIST_DOMAIN_V1.len(), 27);
+    fn owner_list_domain_stays_reserved_and_distinct_from_revoke() {
         assert_eq!(OWNER_LIST_DOMAIN_V1, b"lakko-invite-owner-list/v1\x00");
-        assert_eq!(ACCOUNT_ID_LEN, 16);
-
-        let acct = [0xA5u8; ACCOUNT_ID_LEN];
-        let signed_at_ms: u64 = 0x0123_4567_89AB_CDEF;
-        let canonical = owner_list_canonical_bytes(&acct, signed_at_ms);
-        assert_eq!(
-            canonical.len(),
-            OWNER_LIST_DOMAIN_V1.len() + ACCOUNT_ID_LEN + 8
-        );
-
-        // Order: prefix, account_id, signed_at_ms (big-endian).
-        assert_eq!(
-            &canonical[..OWNER_LIST_DOMAIN_V1.len()],
-            OWNER_LIST_DOMAIN_V1
-        );
-        let acct_off = OWNER_LIST_DOMAIN_V1.len();
-        assert_eq!(&canonical[acct_off..acct_off + ACCOUNT_ID_LEN], &acct[..]);
-        let ts_off = acct_off + ACCOUNT_ID_LEN;
-        assert_eq!(&canonical[ts_off..ts_off + 8], &signed_at_ms.to_be_bytes());
-    }
-
-    #[test]
-    fn owner_list_domain_distinct_from_revoke() {
-        // Distinct domain prefixes are the core anti-replay
-        // invariant: a captured revoke-sig must not authenticate
-        // a list-query, and vice versa. The two domains must
-        // produce non-overlapping byte streams under any
-        // common-suffix tail.
         assert_ne!(OWNER_LIST_DOMAIN_V1, REVOKE_DOMAIN_V1);
-        // Lengths differ too — even a pathological caller
-        // building a list-domain signed message against the
-        // revoke-domain verify (or vice versa) lands in different
-        // byte ranges, surfacing as a clean signature failure
-        // rather than a partial-match anomaly.
-        assert_ne!(OWNER_LIST_DOMAIN_V1.len(), REVOKE_DOMAIN_V1.len());
     }
 
     #[test]
-    fn sign_owner_list_round_trips() {
-        // Sign with one key, verify against the matching pubkey.
-        // The signing key + signed_at_ms pair fully determines
-        // the signature; this gates that `sign_owner_list` is a
-        // thin wrapper over Ed25519::sign that the
-        // canonical-bytes layer feeds.
-        let signing = SigningKey::from_seed(&[0xAAu8; 32]);
-        let verifying = signing.verifying_key();
-        let acct = [0x42u8; ACCOUNT_ID_LEN];
-        let signed_at_ms: u64 = 1_700_000_000_000;
-
-        let sig_bytes = sign_owner_list(&signing, &acct, signed_at_ms);
-        let sig =
-            lakko_crypto::signing::Signature::from_bytes(&sig_bytes).expect("signature decodes");
-        let canonical = owner_list_canonical_bytes(&acct, signed_at_ms);
-        verifying
-            .verify(&canonical, &sig)
-            .expect("signature verifies against canonical bytes");
-    }
-
-    #[test]
-    fn owner_list_signature_does_not_authenticate_revoke() {
-        // The whole point of distinct domain prefixes: a sig
-        // produced by `sign_owner_list` MUST NOT verify against
-        // `revoke_canonical_bytes` even when the timestamp + (a
-        // structurally-fitting fake) blob_id align.
-        let signing = SigningKey::from_seed(&[0xCCu8; 32]);
-        let verifying = signing.verifying_key();
-        let acct = [0x01u8; ACCOUNT_ID_LEN];
-        let signed_at_ms: u64 = 1_700_000_000_000;
-        let sig_bytes = sign_owner_list(&signing, &acct, signed_at_ms);
-        let sig = lakko_crypto::signing::Signature::from_bytes(&sig_bytes).unwrap();
-
-        // Try to verify the owner-list signature against a
-        // revoke-canonical-bytes message. Even if the attacker
-        // can pick any blob_id, the domain separator mismatch
-        // ensures the signature won't authenticate.
-        let fake_blob_id = [0xFFu8; BLOB_ID_LEN];
-        let revoke_canonical = revoke_canonical_bytes(&fake_blob_id, signed_at_ms);
-        assert!(
-            verifying.verify(&revoke_canonical, &sig).is_err(),
-            "owner-list signature must not authenticate revoke-domain message",
-        );
-    }
-
-    #[test]
-    fn owner_list_signed_at_binds_into_signature() {
-        // Two signatures over the same (key, account_id) but
-        // different `signed_at_ms` MUST differ — the timestamp
-        // is part of what gets hashed into the signature, not a
-        // detached side-channel field. Without this, a captured
-        // signature could be replayed past the freshness window
-        // by mutating `signed_at_ms` in the request body.
-        let signing = SigningKey::from_seed(&[0xBBu8; 32]);
-        let acct = [0x11u8; ACCOUNT_ID_LEN];
-        let sig_a = sign_owner_list(&signing, &acct, 1_000_000);
-        let sig_b = sign_owner_list(&signing, &acct, 2_000_000);
-        assert_ne!(sig_a, sig_b);
+    fn a_revocation_signed_by_the_link_seed_verifies_under_its_public_key() {
+        let seed = [0x5Au8; REVOCATION_KEY_LEN];
+        let pk = revocation_public_key(&seed);
+        let blob_id = [0x01u8; BLOB_ID_LEN];
+        let sig = sign_revocation(&SigningKey::from_seed(&seed), &blob_id, 7);
+        let vk = lakko_crypto::signing::VerifyingKey::from_bytes(&pk).unwrap();
+        let sig = lakko_crypto::signing::Signature::from_bytes(&sig).unwrap();
+        assert!(vk
+            .verify(&revoke_canonical_bytes(&blob_id, 7), &sig)
+            .is_ok());
+        // Another link's seed gives an unrelated key.
+        assert_ne!(pk, revocation_public_key(&[0x5Bu8; REVOCATION_KEY_LEN]));
     }
 
     // ----------------------------------------------------------------

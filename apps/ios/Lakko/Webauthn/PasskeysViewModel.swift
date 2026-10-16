@@ -370,6 +370,14 @@ public final class PasskeysViewModel: ObservableObject {
             if hasPasskey {
                 try await assertDeleteAction(actionHashB64)
             }
+            // ADR-0078 section 10: the invite ledgers name no owner, so the
+            // directory cannot delete this account's links. Revoke every live
+            // link this device keeps a record of first, while the session
+            // still works; one it has no record of lives until it expires.
+            await OwnLinks.revokeAll(
+                accountIdB64: base64Encode(secrets.accountId),
+                discovery: DiscoveryClient(
+                    sessionToken: authRepository.identitySecrets?.sessionToken ?? secrets.sessionToken))
             do {
                 try await client.deleteAccount(freshGrant: authRepository.liveFreshGrant())
             } catch let error as WebauthnClientError {

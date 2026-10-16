@@ -87,8 +87,6 @@ LAKKO_GIF_PROXY_BIND=127.0.0.1:8091
 LAKKO_PUSH_GW_INTERNAL_SECRET=${WAKE_SECRET}
 LAKKO_DS_PUSH_GW_SECRET=${WAKE_SECRET}
 LAKKO_DS_PUSH_GW_URL=http://127.0.0.1:8092
-# ADR-0057: the DS keys push bindings under this pepper (DS only).
-LAKKO_DS_BINDING_PEPPER=$(openssl rand -hex 32)
 EOF
   chown root:lakkotest $ENV_FILE
   chmod 640 $ENV_FILE
@@ -183,12 +181,11 @@ if ! grep -q '^LAKKO_PUSH_GW_INTERNAL_SECRET=' $ENV_FILE; then
   echo "wake forward secret added to the env file"
 fi
 
-# Push bindings (ADR-0057) arrived later: an older env file gains the DS
-# binding pepper here, generated once and then kept (regenerating it unbinds
-# every journal's push_gid, so no wake goes out until each group re-binds).
-if ! grep -q '^LAKKO_DS_BINDING_PEPPER=' $ENV_FILE; then
-  echo "LAKKO_DS_BINDING_PEPPER=$(openssl rand -hex 32)" >> $ENV_FILE
-  echo "DS push-binding pepper added to the env file"
+# ADR-0078 retired the DS push bindings: an older env file's pepper is unused
+# and removed here.
+if grep -q '^LAKKO_DS_BINDING_PEPPER=' $ENV_FILE; then
+  sed -i '/^LAKKO_DS_BINDING_PEPPER=/d' $ENV_FILE
+  echo "retired DS push-binding pepper removed from the env file"
 fi
 
 {

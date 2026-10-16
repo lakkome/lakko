@@ -64,8 +64,10 @@ final class NseCallAlertTests: XCTestCase {
             self.muted = muted
         }
 
-        func boundAccount(wakeDevicePseudonymHex: String?) -> String? { account.accountIdB64 }
-        func lookupRoute(accountIdB64: String, pushGidHex: String) -> String? { nil }
+        func boundAccount(wakeSubscriptionIdHex: String?) -> String? { account.accountIdB64 }
+        func lookupRoute(accountIdB64: String, pushGidHex: String, subscriptionIdHex: String?) -> String? {
+            account.accountIdB64 == accountIdB64 ? pushGidHex : nil
+        }
         func accountKnowsGroup(accountIdB64: String, groupHex: String) -> Bool {
             account.accountIdB64 == accountIdB64
         }

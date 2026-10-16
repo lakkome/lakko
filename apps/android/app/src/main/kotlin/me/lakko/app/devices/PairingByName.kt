@@ -142,25 +142,24 @@ public sealed interface JoinByNameResult {
 
     /** The redeem failed (expired, used, network): no account id, no session. */
     public data object RedeemFailed : JoinByNameResult
-
-    /** The redeem named an account whose DeviceGroup is not the one joined. */
-    public data object WrongGroup : JoinByNameResult
 }
 
 /**
  * The fresh device's last step before it knows its account: redeem the grant
- * (the request carries the grant only) and check that the group it joined is
- * the DeviceGroup of the account the redeem names. Nothing is persisted before
- * this returns [JoinByNameResult.Joined].
+ * (the request carries the grant only). Nothing is persisted before this
+ * returns [JoinByNameResult.Joined].
+ *
+ * ADR-0078 section 6: the DeviceGroup id is derived from the account seed,
+ * which this device does not hold yet, so the group it joined cannot be
+ * checked against the redeemed account by id. The binding is the recovery
+ * row sealed under the joined group's exporter, and the restore checks the
+ * row's phrase against the published identity before anything is persisted.
  *
  * @param redeem `POST /device/authorize/redeem` with the base64url grant.
- * @param groupIdFor `deviceGroupIdFor(accountId)`.
  */
 public suspend fun completeJoinByName(
-    joinedGroupId: ByteArray,
     grantToken: ByteArray,
     redeem: suspend (grantTokenB64: String) -> DeviceAuthorizeRedeemResult,
-    groupIdFor: (accountId: ByteArray) -> ByteArray,
 ): JoinByNameResult {
     val redeemed = try {
         redeem(base64UrlEncodeNoPad(grantToken))
@@ -169,14 +168,6 @@ public suspend fun completeJoinByName(
     } catch (_: Exception) {
         return JoinByNameResult.RedeemFailed
     }
-    val expected = try {
-        groupIdFor(redeemed.accountId)
-    } catch (e: CancellationException) {
-        throw e
-    } catch (_: Exception) {
-        return JoinByNameResult.WrongGroup
-    }
-    if (!expected.contentEquals(joinedGroupId)) return JoinByNameResult.WrongGroup
     return JoinByNameResult.Joined(
         accountId = redeemed.accountId,
         session = redeemed.session,
@@ -202,13 +193,12 @@ public interface JoinByNameSteps {
     /** `POST /device/authorize/redeem` with the base64url grant only. */
     public suspend fun redeem(grantTokenB64: String): DeviceAuthorizeRedeemResult
 
-    /** `deviceGroupIdFor(accountId)`. */
-    public fun groupIdFor(accountId: ByteArray): ByteArray
-
-    /** Bind the joined group to [accountId] and fetch the history and
-     *  state bundles, all in memory: NOTHING is written. Called only after
-     *  the redeem named the account and its DeviceGroup id matched. The
-     *  returned [PendingJoin] is the one place the join reaches the disk. */
+    /** Bind the joined group (under its own id, [joinedGroupId]) to
+     *  [accountId] and fetch the history and state bundles, all in memory:
+     *  NOTHING is written. Called only after the redeem named the account.
+     *  Throws [JoinWrongAccount] when the joined group is not in the
+     *  identity's storage. The returned [PendingJoin] is the one place the
+     *  join reaches the disk. */
     public suspend fun bindAs(accountId: ByteArray): PendingJoin
 }
 
@@ -226,9 +216,9 @@ public interface PendingJoin {
 
 /**
  * The ordering of a join by name (ADR-0056): open the recovery row, redeem the
- * grant, check that the DeviceGroup of the account the redeem named is the
- * group the Welcome joined, and bind to it in memory. A Welcome for another
- * account's group is refused after the redeem with the entropy zeroized.
+ * grant, and bind the joined group to the account the redeem named, in
+ * memory (ADR-0078 section 6: by the group's own id; nothing derives the
+ * DeviceGroup id from the account id any more).
  *
  * Nothing is persisted here (ADR-0056 security pass): the returned outcome
  * carries [PairingOrchestrator.JoinRecoveryOutcome.persistJoin], which the
@@ -239,7 +229,8 @@ public interface PendingJoin {
  *   session and no account id when the redeem failed (the caller refuses a
  *   keys-only restore); the full outcome, whose `persistJoin` writes what
  *   [JoinByNameSteps.bindAs] held.
- * @throws JoinWrongAccount on a group mismatch.
+ * @throws JoinWrongAccount when the joined group is not in the identity's
+ *   storage.
  */
 public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.JoinRecoveryOutcome? {
     val sealed = steps.pollRecoveryRow() ?: return null
@@ -247,17 +238,14 @@ public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.Jo
     var phraseEntropy: ByteArray? = parsed.phraseEntropy
     try {
         val result = completeJoinByName(
-            joinedGroupId = steps.joinedGroupId(),
             grantToken = parsed.grantToken,
             redeem = steps::redeem,
-            groupIdFor = steps::groupIdFor,
         )
         val outcome = when (result) {
             // No account id, so nothing can be persisted: the caller refuses
             // a keys-only outcome and the person retries with a fresh code.
             JoinByNameResult.RedeemFailed ->
                 PairingOrchestrator.JoinRecoveryOutcome(parsed.phraseEntropy, null, null)
-            JoinByNameResult.WrongGroup -> throw JoinWrongAccount()
             is JoinByNameResult.Joined -> {
                 val pending = steps.bindAs(result.accountId)
                 PairingOrchestrator.JoinRecoveryOutcome(
@@ -276,14 +264,14 @@ public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.Jo
     }
 }
 
-/** The fresh device's refusal when the redeemed account's DeviceGroup is not
- *  the group it joined. */
+/** The fresh device's refusal when the group it joined is not in its
+ *  storage to bind to the redeemed account. */
 public const val JOIN_WRONG_ACCOUNT_COPY: String =
     "Could not confirm the account on the other device. Try again."
 
 /**
- * The fresh device's refusal when the redeemed account's DeviceGroup is not
- * the group it joined. Its own kind so the screen renders it from the catalog
+ * The fresh device's refusal when the group it joined is not in its storage
+ * to bind to the redeemed account. Its own kind so the screen renders it from the catalog
  * (`device_link.error.wrong_account`, ADR-0061 section 6) rather than from
  * this English [message], which stays for logs only. Still an
  * [IllegalStateException] for callers that catch that.

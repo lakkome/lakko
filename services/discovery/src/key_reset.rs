@@ -180,12 +180,10 @@ pub(crate) fn verify_upload_attestation(
             CODE_KEY_RESET_DISABLED,
         ));
     };
-    let expected_journal = lakko_attest::device_group_journal_id(account_id);
     let claims = verify_key_reset_binding(
         &bytes,
         key,
         &key_reset_account_ref(account_id),
-        &expected_journal,
         signature_pubkey,
     )
     .map_err(|e| {
@@ -554,7 +552,7 @@ mod route_tests {
         );
 
         // After an attested reset the fetch returns exactly what was
-        // uploaded: standard base64 of the 177 stored bytes, which verify
+        // uploaded: standard base64 of the 145 stored bytes, which verify
         // for this account, generation and key under the attest key.
         let att2 = attestation(&acct, 2, K2);
         let (status, text) = c
@@ -580,7 +578,6 @@ mod route_tests {
                 bytes,
                 &attest_key().verifying_key(),
                 &key_reset_account_ref(&acct),
-                &lakko_attest::device_group_journal_id(&acct),
                 key,
             )
         };

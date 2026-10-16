@@ -137,7 +137,7 @@ export function useKeyRotation(): KeyRotationRuntime {
           await auth.republishKeyPackage();
           return "done";
         case "device-group-root":
-          await auth.keyRotation.transferDeviceGroupRoot(current.attestationB64Url ?? null);
+          await auth.keyRotation.transferDeviceGroupRoot();
           return "done";
         case "journals": {
           // The conversation journals this account owns: the takeover of an

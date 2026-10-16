@@ -100,11 +100,9 @@ export interface AcceptedContact {
   acceptedAtMs: number;
   /** The peer's 16-byte account_id as lower-case unseparated hex —
    *  captured at accept (the contact flow already learns it via
-   *  discovery). ADR-0021: the SFU group-call roster carries a
-   *  per-call tag derived from this account_id; re-deriving the tag
-   *  over this field resolves a roster entry to this contact's
-   *  `displayName`. Optional — pre-ADR-0021 contacts lack it and
-   *  fall back to the SFU pseudonym until re-resolved. */
+   *  discovery). Founding a one-to-one and the backup read it. (It once
+   *  resolved the ADR-0021 SFU peer tag; ADR-0078 section 2 removed
+   *  that.) Optional — older contacts lack it. */
   accountIdHex?: string;
   /** base64(group_id) of the 1×1 chat created with this contact at
    *  accept time (ADR-0021 follow-up). Links the chat back to this

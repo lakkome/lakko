@@ -37,28 +37,18 @@ impl From<lakko_sfu_proto::SfuProtoError> for FfiError {
     }
 }
 
-/// One peer in a [`SfuServerFrame::Welcome`] roster.
+/// One peer in a [`SfuServerFrame::Welcome`] roster: the peer id only.
+/// Who the peer is comes from its own sealed announcement
+/// (`verifyCallPeerAnnouncement`, ADR-0078 section 2).
 #[derive(uniffi::Record)]
 pub struct SfuPeerSnapshot {
-    /// Server-assigned peer id.
+    /// The peer's id (random per admission token).
     pub peer_id: String,
-    /// First 8 hex chars of the account id (the SFU never publishes
-    /// the full `sub`). Legacy display tag — superseded by `peer_tag`
-    /// (ADR-0021); kept during the rollout.
-    pub account_pseudonym: String,
-    /// Per-call peer tag (ADR-0021). Re-derive the same over a
-    /// contact's account id with [`sfu_peer_tag`] to resolve this entry
-    /// to a display name. Empty if the SFU predates ADR-0021.
-    pub peer_tag: String,
 }
 
 impl From<lakko_sfu_proto::PeerSnapshot> for SfuPeerSnapshot {
     fn from(p: lakko_sfu_proto::PeerSnapshot) -> Self {
-        Self {
-            peer_id: p.peer_id,
-            account_pseudonym: p.account_pseudonym,
-            peer_tag: p.peer_tag,
-        }
+        Self { peer_id: p.peer_id }
     }
 }
 
@@ -108,10 +98,11 @@ impl From<ErrorCode> for SfuErrorCode {
 pub enum SfuServerFrame {
     /// First frame after admission — seeds the client's view.
     Welcome {
-        /// Server-assigned id for this connection.
+        /// This connection's peer id (the token's random `peer_id`); the
+        /// value the device announces, signed, to the other members.
         peer_id: String,
-        /// Call this peer was admitted to (from the JWT).
-        call_id: String,
+        /// The room this peer was admitted to (the token's `room`).
+        room: String,
         /// Every other peer currently in the call.
         roster: Vec<SfuPeerSnapshot>,
         /// Server wall-clock unix-seconds at admission.
@@ -121,12 +112,6 @@ pub enum SfuServerFrame {
     PeerJoined {
         /// New peer's id.
         peer_id: String,
-        /// Pseudonymised account id (first 8 hex chars). Legacy —
-        /// superseded by `peer_tag` (ADR-0021).
-        account_pseudonym: String,
-        /// Per-call peer tag (ADR-0021). Re-derive with
-        /// [`sfu_peer_tag`] over a contact's account id to resolve.
-        peer_tag: String,
     },
     /// A peer disconnected.
     PeerLeft {
@@ -214,24 +199,16 @@ impl From<ServerFrame> for SfuServerFrame {
         match f {
             ServerFrame::Welcome {
                 peer_id,
-                call_id,
+                room,
                 roster,
                 server_ts,
             } => Self::Welcome {
                 peer_id,
-                call_id,
+                room,
                 roster: roster.into_iter().map(Into::into).collect(),
                 server_ts,
             },
-            ServerFrame::PeerJoined {
-                peer_id,
-                account_pseudonym,
-                peer_tag,
-            } => Self::PeerJoined {
-                peer_id,
-                account_pseudonym,
-                peer_tag,
-            },
+            ServerFrame::PeerJoined { peer_id } => Self::PeerJoined { peer_id },
             ServerFrame::PeerLeft { peer_id } => Self::PeerLeft { peer_id },
             ServerFrame::SignalRelay { from, payload_b64 } => {
                 Self::SignalRelay { from, payload_b64 }
@@ -272,19 +249,6 @@ impl From<ServerFrame> for SfuServerFrame {
 #[uniffi::export]
 pub fn parse_sfu_server_frame(json: String) -> Result<SfuServerFrame, FfiError> {
     Ok(decode_server_frame(&json)?.into())
-}
-
-/// Re-derive the per-call peer tag (ADR-0021) for a `(call_id,
-/// account_id)` pair — the same canonical derivation the SFU applies.
-///
-/// The client computes this over each of its contacts' account ids and
-/// matches the result against a roster entry's `peer_tag` to resolve it
-/// to a display name. The tag is one-way (reveals nothing about the
-/// account id) and per-call (keyed on `call_id`).
-#[uniffi::export]
-#[must_use]
-pub fn sfu_peer_tag(call_id: String, account_id: String) -> String {
-    lakko_sfu_proto::peer_tag(&call_id, &account_id)
 }
 
 /// Compose a `SignalRelay` to a single peer. `payload` is the raw
@@ -419,7 +383,7 @@ mod tests {
 
     #[test]
     fn welcome_parses_into_typed_frame() {
-        let json = r#"{"kind":"welcome","peer_id":"p1","call_id":"c1","roster":[{"peer_id":"p0","account_pseudonym":"deadbeef"}],"server_ts":1700000000}"#;
+        let json = r#"{"kind":"welcome","peer_id":"p1","room":"r1","roster":[{"peer_id":"p0"}],"server_ts":1700000000}"#;
         match parse_sfu_server_frame(json.into()).expect("parse") {
             SfuServerFrame::Welcome {
                 peer_id,
@@ -429,7 +393,7 @@ mod tests {
             } => {
                 assert_eq!(peer_id, "p1");
                 assert_eq!(roster.len(), 1);
-                assert_eq!(roster[0].account_pseudonym, "deadbeef");
+                assert_eq!(roster[0].peer_id, "p0");
                 assert_eq!(server_ts, 1_700_000_000);
             },
             _ => panic!("expected Welcome"),

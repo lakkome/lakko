@@ -22,6 +22,8 @@ path = "src/main.rs"
 [dependencies]
 tokio.workspace = true
 tracing.workspace = true
+# ADR-0078 section 11: the request span that records the route template.
+lakko-log-hygiene.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -50,6 +52,11 @@ dotenvy = "0.15"
 lakko-anon-token.workspace = true
 lakko-anon-token-server.workspace = true
 sha2 = "0.10"
+
+# ADR-0078 section 3 - open sealed wakes and sealed subscriptions; the wire
+# formats and the wake key live in the shared contacts crate so the clients
+# and this service read one definition.
+lakko-contacts.workspace = true
 
 base64 = "0.22"
 hex = "0.4"
@@ -115,3 +122,5 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # Mint spendable tokens in-process for the registration route tests.
 lakko-anon-token-server = { workspace = true, features = ["testing"] }
+# Sign wakes with a wrong key in the ADR-0078 refusal tests.
+lakko-crypto.workspace = true

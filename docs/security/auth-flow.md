@@ -212,10 +212,12 @@ key generation (`crates/lakko-auth-token`, `services/auth/src/session.rs`):
 - **Access token** `v2.<account_id_b64url>.<key_generation>.<expires_at_ms>.<tag>`,
   HMAC-SHA256 under the shared `LAKKO_SESSION_TOKEN_SECRET`, carried as
   `Authorization: Bearer <...>` to every protected route of `auth`
-  (WebAuthn management, `/call/jwt`, `/call/turn-credential`,
-  `/auth/genesis/attest`, `/auth/backup/head`, `/auth/tokens`,
+  (WebAuthn management, `/auth/genesis/attest`, `/auth/backup/head`, `/auth/tokens`,
   `/auth/login-handle`, the key reset), `discovery`, `storage` (`/backup`) and
-  `gif-proxy`. Default TTL **900 s** (`LAKKO_SESSION_TOKEN_TTL_SECS`; chosen,
+  `gif-proxy`. `/call/jwt` is not among them since ADR-0078 section 2
+  (2026-10-16): it spends an anonymous `call-join` token instead, and the
+  TURN credential rides its answer (`/call/turn-credential` is gone).
+  Default TTL **900 s** (`LAKKO_SESSION_TOKEN_TTL_SECS`; chosen,
   not measured). The pre-ADR-0073 four-part `v1` token is refused (flag day,
   no users).
 - **Refresh credential** `r1.<account_id_b64url>.<key_generation>.<expires_at_ms>.<tag>`,
