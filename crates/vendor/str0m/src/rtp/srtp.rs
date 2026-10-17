@@ -226,12 +226,14 @@ impl SrtpContext {
 
         match &mut self.rtp {
             Derived::Aes128CmSha1_80 { key, salt, enc, .. } => {
-                assert!(
-                    input.len() % SRTP_BLOCK_SIZE == 0,
-                    "RTP body should be padded to 16 byte block size, {header:?} with \
-                    body length {} was not",
-                    input.len()
-                );
+                // LAKKO FORK: no block-size assert. Upstream pads every packet
+                // it sends to the SRTP block size and asserted it here; the
+                // fork sends retransmissions without padding (the fourteenth
+                // change), and AES-CM is a counter-mode stream cipher that
+                // encrypts any length (the output buffer below already carries
+                // the counter padding). The assert aborted the whole SFU the
+                // first time a peer that negotiated AES_CM_128_HMAC_SHA1_80
+                // was sent a retransmission (test.lakko.me, 2026-10-16).
 
                 let iv = Aes128CmSha1_80::rtp_iv(*salt, *header.ssrc, srtp_index);
 
@@ -1068,6 +1070,39 @@ mod test {
             // Take us back to where we started.
             let encrypted = ctx_rx.protect_rtcp(&decrypted);
             assert_eq!(encrypted, SRTCP);
+        }
+
+        /// LAKKO FORK: a retransmission is sent without padding, so an
+        /// AES-CM RTP body need not be a multiple of the block size. It must
+        /// be protected (upstream asserted here and the SFU aborted) and
+        /// open again to the same bytes.
+        #[test]
+        fn protect_rtp_with_a_body_that_is_not_block_aligned() {
+            use crate::rtp_::ExtensionMap;
+            let key_mat = KeyingMaterial::new(&MAT);
+            let crypto = crate::crypto::test_default_provider();
+            let mut tx = SrtpContext::new(crypto, SrtpProfile::AES128_CM_SHA1_80, &key_mat, true);
+            // Both ends must derive from the same side of the keying material.
+            let mut rx = SrtpContext::new(crypto, SrtpProfile::AES128_CM_SHA1_80, &key_mat, true);
+
+            let mut packet = vec![
+                0x80, 0x6b, 0x61, 0xf5, // V=2, PT=107, seq
+                0x00, 0x00, 0x10, 0x00, // timestamp
+                0x3c, 0xd7, 0xcc, 0x13, // ssrc
+            ];
+            let body: Vec<u8> = (0_u8..21).collect();
+            packet.extend_from_slice(&body);
+            assert_ne!(body.len() % SRTP_BLOCK_SIZE, 0);
+
+            let header = RtpHeader::parse(&packet[..12], &ExtensionMap::empty())
+                .expect("header to parse");
+            let protected = tx.protect_rtp(&packet, &header, 0);
+            assert_eq!(protected.len(), packet.len() + Aes128CmSha1_80::HMAC_TAG_LEN);
+
+            let header = RtpHeader::parse(&protected[..12], &ExtensionMap::empty())
+                .expect("header to parse");
+            let opened = rx.unprotect_rtp(&protected, &header, 0).expect("decrypt rtp");
+            assert_eq!(opened, body);
         }
     }
 

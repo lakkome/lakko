@@ -223,9 +223,10 @@ final class AccountLocalDataWipeTests: XCTestCase {
     func testFoundingMarksOfTheAccountsOwnJournalsGoAndOthersStay() throws {
         try seed(accountId: accountIdA, channelId: channelA)
         try seed(accountId: accountIdB, channelId: channelB)
-        // ADR-0078 section 6 — both ids are derived from the account seed.
-        let ownerA = try Identity.fromSeed(seed: accountSeed(accountIdA))
-        let ownerB = try Identity.fromSeed(seed: accountSeed(accountIdB))
+        // ADR-0078 section 6 — both ids are derived from the lineage seed:
+        // the oldest own predecessor when one is held, as `seed` stores one.
+        let ownerA = try Identity.fromSeed(seed: predecessorSeed(accountIdA))
+        let ownerB = try Identity.fromSeed(seed: predecessorSeed(accountIdB))
         let deviceGroupA = DsClient.pseudonymHex(deviceGroupIdFor(accountIdentity: ownerA))
         let deviceGroupB = DsClient.pseudonymHex(deviceGroupIdFor(accountIdentity: ownerB))
         let channelGroupA = DsClient.pseudonymHex(try publisherGroupIdFor(ownerIdentity: ownerA, channelId: channelA))
@@ -334,8 +335,7 @@ final class AccountLocalDataWipeTests: XCTestCase {
         // ADR-0074 part 3 — the account's own predecessor seed (key material
         // a pairing state bundle may have brought) with its adoption time,
         // and the unanswered outgoing contact requests with their intro.
-        try KeychainOwnPredecessorStore().add(
-            Data(repeating: 0x0C, count: AccountIdentitySeedStore.seedLength), accountIdB64: x)
+        try KeychainOwnPredecessorStore().add(predecessorSeed(accountId), accountIdB64: x)
         PredecessorMailbox.AdoptionStore().recordIfAbsent(accountIdB64: x, keyB64: "old-key", nowMs: 1)
         try KeychainSentRequestsStore().save(
             [SentContactRequest(
@@ -436,6 +436,12 @@ final class AccountLocalDataWipeTests: XCTestCase {
 
     /// A distinct account seed per account, so the seed-derived ids of two
     /// accounts differ.
+    /// The account's own predecessor seed, distinct per account so two
+    /// seeded accounts never share a lineage.
+    private func predecessorSeed(_ accountId: Data) -> Data {
+        Data(accountSeed(accountId).map { $0 ^ 0x0C })
+    }
+
     private func accountSeed(_ accountId: Data) -> Data {
         let first = accountId.first ?? 0
         return Data((0..<AccountIdentitySeedStore.seedLength).map {

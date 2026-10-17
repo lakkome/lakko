@@ -72,6 +72,12 @@ burst"):
 |---|---|---|---|
 | 15 | `StreamRx::give_up_missing()`: the packets of a receive stream that are missing right now are not asked for again. They stay missing, one that still arrives is delivered, and a packet that goes missing later is asked for as usual | `streams/register_nack.rs`, `streams/register.rs`, `streams/receive.rs` | When a burst of loss on a publisher's stream has ended unrepaired the SFU asks the publisher for a key frame. Upstream would go on asking for the packets of the burst until their request count ran out (up to 1.5 s from the first request), and each answer is a retransmission the publisher sends ahead of the key frame on a path that has just recovered |
 
+The one added after the SFU aborted on a live call (2026-10-16):
+
+| # | Change | Files | Why |
+|---|---|---|---|
+| 16 | `SrtpContext::protect_rtp` under `AES_CM_128_HMAC_SHA1_80` no longer asserts that the RTP body is a multiple of 16 bytes | `rtp/srtp.rs` | Change 14 sends retransmissions unpadded; the leftover upstream assert then fired on the first retransmission to a peer that negotiated AES-CM, and under `panic = "abort"` the whole SFU process died (test.lakko.me, 2026-10-16). Counter mode needs no alignment; the AEAD-GCM profiles never asserted |
+
 ## Why we pin exactly
 
 `Cargo.toml` lists dependencies with **exact** versions

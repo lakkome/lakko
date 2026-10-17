@@ -419,6 +419,22 @@
 //! request would be a retransmission sent ahead of the key frame on a path
 //! that has just recovered. Three files, all already pinned.
 //!
+//! ## The sixteenth change: an unpadded packet under AES-CM (2026-10-16)
+//!
+//! The fourteenth change sends a retransmission without padding, but the
+//! `AES_CM_128_HMAC_SHA1_80` branch of `SrtpContext::protect_rtp` kept
+//! upstream's `assert!` that the body is a multiple of 16 bytes. With the
+//! release profile's `panic = "abort"` the first retransmission to a peer that
+//! negotiated that profile took the whole SFU down, and every call with it
+//! (seen on test.lakko.me, 2026-10-16, payload type 107). AES counter mode
+//! needs no block alignment, and the rust-crypto backend encrypts any length:
+//!
+//! - `src/rtp/srtp.rs` - the assert is removed; one test protects and
+//!   unprotects a 21-byte body.
+//!
+//! The AEAD-GCM profiles never asserted, which is why the fourteenth
+//! change's tests and the synthetic client, both on AEAD-GCM, passed.
+//!
 //! ## What this guard is for
 //!
 //! `crates/vendor/str0m` is ~40k lines of third-party code that nobody on
@@ -548,6 +564,10 @@ const PINNED: &[(&str, &str)] = &[
     (
         "src/change/sdp.rs",
         "12274a94b56b88b0c4893e482f9eff14b1ac7040dffb35288c79639bd7603ce5",
+    ),
+    (
+        "src/rtp/srtp.rs",
+        "b2cdd8f0433fdf7bf2484531f17a3640cbf47e1882672d40e59784b17eec3b94",
     ),
 ];
 
