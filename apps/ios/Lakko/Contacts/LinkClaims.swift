@@ -48,6 +48,89 @@ public enum LinkClaims {
         }
     }
 
+    /// One account a founded one-to-one's Welcome goes to.
+    public struct FoundedTarget: Equatable, Codable {
+        public let accountKeyB64: String
+        public let isRecipient: Bool
+
+        public init(accountKeyB64: String, isRecipient: Bool) {
+            self.accountKeyB64 = accountKeyB64
+            self.isRecipient = isRecipient
+        }
+    }
+
+    /// The one-to-one this device founded for a request it won, recorded
+    /// BEFORE any Welcome is posted, so a retry (a failed publish, a
+    /// relaunch) delivers the SAME group's Welcome instead of founding a
+    /// second one.
+    public struct Founded: Equatable, Codable {
+        public let groupIdB64: String
+        /// The Welcome (base64); emptied once every target was written.
+        public var welcomeB64: String
+        /// In delivery order: this account's own mailbox first.
+        public let targets: [FoundedTarget]
+        public var delivered: Bool
+
+        public init(groupIdB64: String, welcomeB64: String, targets: [FoundedTarget], delivered: Bool) {
+            self.groupIdB64 = groupIdB64
+            self.welcomeB64 = welcomeB64
+            self.targets = targets
+            self.delivered = delivered
+        }
+    }
+
+    /// The order a founded one-to-one's Welcome is written in: this
+    /// account's own mailbox (its other devices) FIRST, the requester's after
+    /// it. So whenever the requester holds the Welcome, every own device's
+    /// mailbox holds it too, and a device that takes the request over finds
+    /// the one-to-one before it could found a second. Stable within each half.
+    public static func welcomeOrder<T>(_ targets: [T], isRecipient: (T) -> Bool) -> [T] {
+        targets.filter { !isRecipient($0) } + targets.filter { isRecipient($0) }
+    }
+
+    /// What a device that won a request does before it builds anything.
+    public enum BuildStep: Equatable {
+        /// A one-to-one was founded for it already: deliver that one's Welcome.
+        case resume
+        /// The account mailbox could not be read past now: decide next pass.
+        case wait
+        /// A one-to-one with the requester is held already: answered, build
+        /// nothing.
+        case answered
+        /// Found the one-to-one.
+        case found
+    }
+
+    /// Before any device builds a one-to-one for a request (the first winner,
+    /// or a device that took it over because the winner left the roster), it
+    /// reads its account mailbox past now and looks for a one-to-one with the
+    /// requester.
+    public static func buildStep(hasFounded: Bool, mailboxCaughtUp: Bool, holdsOneToOne: Bool) -> BuildStep {
+        if hasFounded { return .resume }
+        if !mailboxCaughtUp { return .wait }
+        return holdsOneToOne ? .answered : .found
+    }
+
+    /// A held conversation as the one-to-one check reads it.
+    public struct HeldConversation: Equatable {
+        public let oneToOne: Bool
+        public let memberAccountKeysHex: [String]
+
+        public init(oneToOne: Bool, memberAccountKeysHex: [String]) {
+            self.oneToOne = oneToOne
+            self.memberAccountKeysHex = memberAccountKeysHex
+        }
+    }
+
+    /// Whether one of `conversations` is a one-to-one with the account whose
+    /// key is `requesterKeyHex`.
+    public static func holdsOneToOneWith(_ conversations: [HeldConversation], requesterKeyHex: String) -> Bool {
+        let want = requesterKeyHex.lowercased()
+        return conversations.contains { c in
+            c.oneToOne && c.memberAccountKeysHex.contains { $0.lowercased() == want }
+        }
+    }
+
     /// This device's own claims for one request.
     public struct Own: Equatable, Codable {
         /// Sealed claim messages (hex), recorded BEFORE their publish and not
@@ -62,12 +145,18 @@ public enum LinkClaims {
         /// known, so the next passes re-check against the current roster
         /// without reading the journal again.
         public var settled: Bool = false
+        /// The one-to-one founded for the request (won claims only).
+        public var founded: Founded?
 
-        public init(wires: [String] = [], ids: [Int64] = [], won: Int64? = nil, settled: Bool = false) {
+        public init(
+            wires: [String] = [], ids: [Int64] = [], won: Int64? = nil, settled: Bool = false,
+            founded: Founded? = nil
+        ) {
             self.wires = wires
             self.ids = ids
             self.won = won
             self.settled = settled
+            self.founded = founded
         }
 
         /// Whether this device holds any claim for the request.
@@ -186,11 +275,23 @@ public enum LinkClaims {
             var at: Int64
         }
 
+        private struct JoinedWelcome: Codable, Equatable {
+            var welcomeB64: String
+            var at: Int64
+        }
+
         private struct Body: Codable, Equatable {
             var v: Int = 2
             var seen: [String: Seen] = [:]
             var own: [String: Own] = [:]
+            /// The Welcome each recently joined one-to-one was joined from,
+            /// by group id: a device that takes a request over forwards it.
+            var joined: [String: JoinedWelcome]? = [:]
         }
+
+        /// How many joined one-to-one Welcomes are kept. Chosen, not
+        /// measured (the web value).
+        public static let maxJoinedWelcomes = 32
 
         static let prefix = "me.lakko.contacts.link-claims.v1."
         private static let lock = NSLock()
@@ -310,6 +411,42 @@ public enum LinkClaims {
                 body.own[keyHex] = own
                 return true
             }
+        }
+
+        /// Record the founded one-to-one (before any Welcome is posted), or
+        /// its delivery. `false` when the write failed: nothing may be posted
+        /// for a founding this device would not find again.
+        @discardableResult
+        public func setFounded(_ keyHex: String, _ founded: Founded) -> Bool {
+            update { body in
+                var own = body.own[keyHex] ?? Own()
+                own.founded = founded
+                body.own[keyHex] = own
+                return true
+            }
+        }
+
+        /// Keep the Welcome a one-to-one was joined from (the newest
+        /// ``maxJoinedWelcomes``).
+        @discardableResult
+        public func recordJoinedWelcome(_ groupIdHex: String, welcomeB64: String, nowMs: Int64) -> Bool {
+            update { body in
+                var joined = body.joined ?? [:]
+                joined[groupIdHex] = JoinedWelcome(welcomeB64: welcomeB64, at: nowMs)
+                if joined.count > Self.maxJoinedWelcomes {
+                    let oldest = joined.sorted { $0.value.at < $1.value.at }
+                    for (k, _) in oldest.prefix(joined.count - Self.maxJoinedWelcomes) { joined[k] = nil }
+                }
+                body.joined = joined
+                return true
+            }
+        }
+
+        /// The Welcome a held one-to-one was joined from, or `nil`.
+        public func joinedWelcome(_ groupIdHex: String) -> String? {
+            Self.lock.lock()
+            defer { Self.lock.unlock() }
+            return read().joined?[groupIdHex]?.welcomeB64
         }
 
         /// Decided lost: re-check later without reading the journal again.

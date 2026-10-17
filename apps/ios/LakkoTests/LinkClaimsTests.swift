@@ -89,6 +89,70 @@ final class LinkClaimsTests: XCTestCase {
         XCTAssertEqual(key, String(repeating: "01", count: 16) + String(repeating: "02", count: 32))
     }
 
+    // MARK: - The build of a won request (ADR-0079 ordering, 2026-10-17)
+
+    func testTheWelcomeGoesToTheOwnMailboxBeforeTheRequesters() {
+        let targets = [
+            LinkClaims.FoundedTarget(accountKeyB64: "requester", isRecipient: true),
+            LinkClaims.FoundedTarget(accountKeyB64: "own", isRecipient: false),
+        ]
+        XCTAssertEqual(
+            LinkClaims.welcomeOrder(targets, isRecipient: \.isRecipient).map(\.accountKeyB64),
+            ["own", "requester"])
+        XCTAssertEqual(LinkClaims.welcomeOrder([targets[0]], isRecipient: \.isRecipient).count, 1)
+    }
+
+    func testATakeoverDeviceThatAlreadyHoldsAOneToOneWithTheRequesterDoesNotBuild() {
+        let requester = String(repeating: "ab", count: 32)
+        let held = [
+            LinkClaims.HeldConversation(
+                oneToOne: false, memberAccountKeysHex: [requester, String(repeating: "cd", count: 32)]),
+            LinkClaims.HeldConversation(
+                oneToOne: true, memberAccountKeysHex: [String(repeating: "ef", count: 32), requester.uppercased()]),
+        ]
+        XCTAssertTrue(LinkClaims.holdsOneToOneWith(held, requesterKeyHex: requester))
+        XCTAssertEqual(LinkClaims.buildStep(hasFounded: false, mailboxCaughtUp: true, holdsOneToOne: true), .answered)
+        // A group (not a one-to-one) with the requester does not answer it.
+        XCTAssertFalse(LinkClaims.holdsOneToOneWith([held[0]], requesterKeyHex: requester))
+        XCTAssertEqual(LinkClaims.buildStep(hasFounded: false, mailboxCaughtUp: true, holdsOneToOne: false), .found)
+    }
+
+    func testATakeoverForwardsTheWelcomeItJoinedFromKeptPerOneToOneAndBounded() {
+        let record = LinkClaims.Record(accountIdB64: "acct", defaults: suite())
+        XCTAssertNil(record.joinedWelcome("g"))
+        XCTAssertTrue(record.recordJoinedWelcome("g", welcomeB64: "w", nowMs: 1))
+        XCTAssertEqual(record.joinedWelcome("g"), "w")
+        let max = LinkClaims.Record.maxJoinedWelcomes
+        for i in 0...max {
+            record.recordJoinedWelcome("g\(i)", welcomeB64: "w\(i)", nowMs: Int64(i + 2))
+        }
+        XCTAssertNil(record.joinedWelcome("g"))
+        XCTAssertEqual(record.joinedWelcome("g\(max)"), "w\(max)")
+    }
+
+    func testNeverBuildsBlindAndNeverFoundsTwice() {
+        XCTAssertEqual(LinkClaims.buildStep(hasFounded: false, mailboxCaughtUp: false, holdsOneToOne: false), .wait)
+        XCTAssertEqual(LinkClaims.buildStep(hasFounded: false, mailboxCaughtUp: false, holdsOneToOne: true), .wait)
+        XCTAssertEqual(LinkClaims.buildStep(hasFounded: true, mailboxCaughtUp: false, holdsOneToOne: true), .resume)
+        let defaults = suite()
+        let record = LinkClaims.Record(accountIdB64: "acct", defaults: defaults)
+        let founded = LinkClaims.Founded(
+            groupIdB64: "g", welcomeB64: "w",
+            targets: [
+                LinkClaims.FoundedTarget(accountKeyB64: "own", isRecipient: false),
+                LinkClaims.FoundedTarget(accountKeyB64: "requester", isRecipient: true),
+            ],
+            delivered: false)
+        record.setWon("k", messageId: 3)
+        XCTAssertTrue(record.setFounded("k", founded))
+        XCTAssertEqual(LinkClaims.Record(accountIdB64: "acct", defaults: defaults).own("k")?.founded, founded)
+        var done = founded
+        done.delivered = true
+        done.welcomeB64 = ""
+        record.setFounded("k", done)
+        XCTAssertEqual(record.own("k")?.founded?.delivered, true)
+    }
+
     func testTheRecordKeepsEverySeenClaimWithItsAuthorAcrossInstances() {
         let defaults = suite()
         let author = String(repeating: "bb", count: 32)

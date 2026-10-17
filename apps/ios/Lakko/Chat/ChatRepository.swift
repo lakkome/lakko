@@ -265,6 +265,10 @@ public final class ChatRepository: ObservableObject {
     /// memory; after a restart the group is loaded from the MLS snapshot the
     /// creation persisted.
     var preparedSuccessors: [String: Group] = [:]
+    /// ADR-0079 — one-to-ones founded for a won invite-link request and not
+    /// yet held, by group id (standard base64). In memory; after a restart
+    /// the group is loaded from the MLS snapshot the founding persisted.
+    var preparedLinkGroups: [String: Group] = [:]
     /// Old groups with a continuity pass in flight.
     var continuityInFlight: Set<String> = []
     /// When every held group was last offered a continuity pass, UNIX ms.
@@ -1272,6 +1276,10 @@ public final class ChatRepository: ObservableObject {
         var targets: [(accountKey: Data, plan: MailboxWritePlan?)] = [
             (recipientSignaturePubkey, recipientTarget)
         ]
+        // ADR-0079 (2026-10-17) — this account's own mailbox is written FIRST
+        // (inserted at the front below) and the recipient's only after it:
+        // whenever the recipient holds the Welcome, every own device's
+        // mailbox holds it too.
         // ADR-0074 section 3.5a rule 1 — each account key is resolved before
         // its mailbox is derived: a contact stored under a key they have
         // since rotated away by proof, and this account's own devices (whose
@@ -1280,7 +1288,7 @@ public final class ChatRepository: ObservableObject {
         if devices.count > recipientDevices.count,
            let own = ReachCenter.shared.ownAccountKey,
            !ReachCenter.shared.keyResolver.samePerson(own, recipientSignaturePubkey) {
-            targets.append((own, ReachCenter.shared.writePlan(toAccountKey: own)))
+            targets.insert((own, ReachCenter.shared.writePlan(toAccountKey: own)), at: 0)
         }
 
         let groupId = try group.groupId()

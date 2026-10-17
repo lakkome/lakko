@@ -1439,6 +1439,37 @@ public class ContactsRepository(
      *   `LaunchedEffect` uses `waitSecs = 30`.
      */
     public suspend fun refreshInbox(waitSecs: Int = 0) {
+        refreshInbox(waitSecs, catchUp = null)
+    }
+
+    /** A mailbox catch-up's mark on the pass it ran: whether its fetch
+     *  found no row past the cursor, and whether the pass failed. */
+    private class MailboxCatchUp {
+        @Volatile var drained: Boolean = false
+
+        @Volatile var failed: Boolean = false
+    }
+
+    /**
+     * ADR-0079 (2026-10-17) - read the account mailbox past NOW: zero-wait
+     * passes (each joins every pending Welcome) until one that started after
+     * this call found no row past the cursor. `false` when that did not
+     * happen within [timeoutMs] (offline, the session ended). The passes it
+     * runs start no decision pass of their own.
+     */
+    private suspend fun catchUpMailboxPastNow(timeoutMs: Long = 30_000L): Boolean {
+        val account = boundAccountB64 ?: return false
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            val marker = MailboxCatchUp()
+            refreshInbox(0, catchUp = marker)
+            if (boundAccountB64 != account || marker.failed) return false
+            if (marker.drained) return true
+        }
+        return false
+    }
+
+    private suspend fun refreshInbox(waitSecs: Int, catchUp: MailboxCatchUp?) {
         val secrets = authRepo.identitySecrets.value ?: run {
             mutableState.update { it.copy(requiresReauth = true) }
             return
@@ -1448,7 +1479,7 @@ public class ContactsRepository(
         bindAccount(secrets.accountId)
         val accountB64 = base64Encode(secrets.accountId)
         val bound = sessionBinding.capture()
-        val isManualRefresh = waitSecs == 0
+        val isManualRefresh = waitSecs == 0 && catchUp == null
         if (isManualRefresh) {
             mutableState.update { it.copy(refreshing = true, lastError = null) }
         }
@@ -1505,6 +1536,9 @@ public class ContactsRepository(
                     // name directory, which by now belong to nobody or to the
                     // next account.
                     if (!bound.isCurrent) return@useClientWith
+                    // A catch-up's fetch with no row past the cursor: the
+                    // mailbox is read past the moment the catch-up began.
+                    catchUp?.drained = result.events.isEmpty() && result.cursor <= read.after
                     val fetchedRequests = result.events.filterIsInstance<
                         IncomingMailboxEvent.ContactRequest>(
                     ).map { it.request }
@@ -1551,6 +1585,18 @@ public class ContactsRepository(
                         if (chatRepo != null) {
                             try {
                                 val joinedHex = chatRepo.joinGroupFromWelcome(welcome.welcomeBytes)
+                                // ADR-0079 - the Welcome of a one-to-one is kept
+                                // (bounded): if another device of this account
+                                // founded it for an invite-link request and left
+                                // before writing the requester's mailbox, this
+                                // device forwards it when it takes over.
+                                if (chatRepo.groupKind(joinedHex) == uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE) {
+                                    linkClaimRecord(accountB64).recordJoinedWelcome(
+                                        joinedHex,
+                                        java.util.Base64.getEncoder().encodeToString(welcome.welcomeBytes),
+                                        System.currentTimeMillis(),
+                                    )
+                                }
                                 // ADR-0060 §6 — the answer to a request of this
                                 // device's arrived: retire its reply key for
                                 // that person.
@@ -1685,8 +1731,9 @@ public class ContactsRepository(
                 // undecided link requests.
                 handOverJoinedPendingContacts()
                 revokeLinksRevokedElsewhere()
-                decideLinkRequests()
+                if (catchUp == null) decideLinkRequests()
             } catch (e: ContactsError) {
+                catchUp?.failed = true
                 // Background long-polls surface failures on the `lastError`
                 // slot too — the UI renders one plain sentence, never the
                 // transport's own message (endpoint paths and pseudonyms are
@@ -2355,7 +2402,7 @@ public class ContactsRepository(
                 }
                 if (step == LinkClaims.Step.BUILD) {
                     val answer = uniffi.lakko_ffi_uniffi.FfiLinkAnswer(row.linkId, row.linkSecret)
-                    if (acceptThroughLink(req, answer) && boundAccountB64 == accountB64) {
+                    if (acceptThroughLink(req, answer, key, claims) && boundAccountB64 == accountB64) {
                         inbox.remove(req.messageId)
                         claims.forgetOwn(key)
                     }
@@ -2390,6 +2437,8 @@ public class ContactsRepository(
     private suspend fun acceptThroughLink(
         request: IncomingContactRequest,
         answer: uniffi.lakko_ffi_uniffi.FfiLinkAnswer,
+        key: String,
+        claims: LinkClaimRecord,
     ): Boolean {
         val chat = chatRepo ?: return false
         val fromAccountId = request.fromAccountId ?: return false
@@ -2400,16 +2449,70 @@ public class ContactsRepository(
                 reach()?.keepHeld(request.fromPubkey, grant, scopeHex = "")
             }
         }
-        val groupIdHex = try {
-            chat.startGroupWith(
-                recipientAccountId = fromAccountId,
-                recipientSignaturePubkey = request.fromPubkey,
-                kind = uniffi.lakko_ffi_uniffi.GroupKind.ONE_TO_ONE,
+        // Ordering of 2026-10-17: a one-to-one founded for the request
+        // already (a failed publish, a restart) is held and its Welcome
+        // delivered again; otherwise the account mailbox is read past now
+        // first and a one-to-one with the requester held already answers the
+        // request with nothing built; otherwise it is founded in ONE commit
+        // with every other device of this account, the founding recorded
+        // BEFORE any Welcome leaves, and the Welcome written to this
+        // account's own mailbox first and to the requester's only after that
+        // write succeeded.
+        var founded = claims.own(key)?.founded
+        val caughtUp = if (founded == null) catchUpMailboxPastNow() else false
+        if (boundAccountB64 == null) return false
+        val heldHex = if (founded == null) chat.heldOneToOneHex(request.fromPubkey) else null
+        val groupIdHex: String? = when (
+            LinkClaims.buildStep(
+                hasFounded = founded != null,
+                mailboxCaughtUp = caughtUp,
+                holdsOneToOne = heldHex != null,
             )
-        } catch (e: Throwable) {
-            me.lakko.app.rethrowIfCancelled(e)
-            Log.w(TAG, "ADR-0079 invite-link accept did not complete; retried at the next pass")
-            return false
+        ) {
+            LinkClaims.BuildStep.WAIT -> return false
+            // Another device of this account founded it (its Welcome reached
+            // this device's mailbox before the requester's), or the two
+            // already had one: answered, nothing built. The requester may not
+            // hold its Welcome yet (the founder wrote this account's mailbox,
+            // then left before writing theirs): the Welcome this device
+            // joined from is the same bytes, so it is forwarded, and the
+            // requester ignores a duplicate. A failed write keeps the request.
+            LinkClaims.BuildStep.ANSWERED -> try {
+                val held = heldHex ?: return false
+                claims.joinedWelcome(held)?.let { welcomeB64 ->
+                    chat.forwardJoinedWelcome(
+                        groupIdHex = held,
+                        welcome = java.util.Base64.getDecoder().decode(welcomeB64),
+                        recipientAccountKey = request.fromPubkey,
+                        recipientAccountId = fromAccountId,
+                    )
+                }
+                held
+            } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e)
+                Log.w(TAG, "ADR-0079 forwarding the joined Welcome failed; retried at the next pass")
+                return false
+            }
+            LinkClaims.BuildStep.FOUND, LinkClaims.BuildStep.RESUME -> try {
+                if (founded == null) {
+                    val made = chat.prepareLinkOneToOne(fromAccountId, request.fromPubkey)
+                    // Recorded before any Welcome leaves; a refused write
+                    // stops here with nothing posted.
+                    if (!claims.setFounded(key, made)) return false
+                    founded = made
+                }
+                val current = founded ?: return false
+                if (!chat.holdLinkOneToOne(current.groupIdHex)) return false
+                if (!current.delivered) {
+                    chat.deliverLinkWelcome(current, fromAccountId)
+                    claims.setFounded(key, current.copy(welcomeB64 = "", delivered = true))
+                }
+                current.groupIdHex
+            } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e)
+                Log.w(TAG, "ADR-0079 invite-link accept did not complete; retried at the next pass")
+                return false
+            }
         }
         var added = false
         mutableState.update { state ->

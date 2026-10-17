@@ -101,6 +101,64 @@ class LinkClaimsTest {
     }
 
     @Test
+    fun `the Welcome goes to the own mailbox before the requester's`() {
+        val targets = listOf(
+            LinkClaims.FoundedTarget("requester", isRecipient = true),
+            LinkClaims.FoundedTarget("own", isRecipient = false),
+        )
+        assertEquals(listOf("own", "requester"), LinkClaims.welcomeOrder(targets) { it.isRecipient }.map { it.accountKeyB64 })
+        assertEquals(1, LinkClaims.welcomeOrder(listOf(targets[0])) { it.isRecipient }.size)
+    }
+
+    @Test
+    fun `a takeover device that already holds a one-to-one with the requester does not build`() {
+        val requester = "ab".repeat(32)
+        val held = listOf(
+            LinkClaims.HeldConversation(oneToOne = false, memberAccountKeysHex = listOf(requester, "cd".repeat(32))),
+            LinkClaims.HeldConversation(oneToOne = true, memberAccountKeysHex = listOf("ef".repeat(32), requester.uppercase())),
+        )
+        assertTrue(LinkClaims.holdsOneToOneWith(held, requester))
+        assertEquals(LinkClaims.BuildStep.ANSWERED, LinkClaims.buildStep(false, mailboxCaughtUp = true, holdsOneToOne = true))
+        // A group (not a one-to-one) with the requester does not answer it.
+        assertFalse(LinkClaims.holdsOneToOneWith(listOf(held[0]), requester))
+        assertEquals(LinkClaims.BuildStep.FOUND, LinkClaims.buildStep(false, mailboxCaughtUp = true, holdsOneToOne = false))
+    }
+
+    @Test
+    fun `a takeover forwards the Welcome it joined from, kept per one-to-one and bounded`() {
+        val record = LinkClaimRecord("acct", InMemoryLinkClaimStorage())
+        assertNull(record.joinedWelcome("g"))
+        assertTrue(record.recordJoinedWelcome("g", "w", 1))
+        assertEquals("w", record.joinedWelcome("g"))
+        for (i in 0..LinkClaimRecord.MAX_JOINED_WELCOMES) record.recordJoinedWelcome("g$i", "w$i", (i + 2).toLong())
+        assertNull(record.joinedWelcome("g"))
+        assertEquals("w${LinkClaimRecord.MAX_JOINED_WELCOMES}", record.joinedWelcome("g${LinkClaimRecord.MAX_JOINED_WELCOMES}"))
+    }
+
+    @Test
+    fun `never builds blind and never founds twice`() {
+        assertEquals(LinkClaims.BuildStep.WAIT, LinkClaims.buildStep(false, mailboxCaughtUp = false, holdsOneToOne = false))
+        assertEquals(LinkClaims.BuildStep.WAIT, LinkClaims.buildStep(false, mailboxCaughtUp = false, holdsOneToOne = true))
+        assertEquals(LinkClaims.BuildStep.RESUME, LinkClaims.buildStep(true, mailboxCaughtUp = false, holdsOneToOne = true))
+        val storage = InMemoryLinkClaimStorage()
+        val record = LinkClaimRecord("acct", storage)
+        val founded = LinkClaims.Founded(
+            groupIdHex = "aa",
+            welcomeB64 = "w",
+            targets = listOf(
+                LinkClaims.FoundedTarget("own", isRecipient = false),
+                LinkClaims.FoundedTarget("requester", isRecipient = true),
+            ),
+            delivered = false,
+        )
+        assertTrue(record.setWon("k", 3))
+        assertTrue(record.setFounded("k", founded))
+        assertEquals(founded, LinkClaimRecord("acct", storage).own("k")?.founded)
+        record.setFounded("k", founded.copy(welcomeB64 = "", delivered = true))
+        assertEquals(true, LinkClaimRecord("acct", storage).own("k")?.founded?.delivered)
+    }
+
+    @Test
     fun `the record keeps every seen claim with its author, per account`() {
         val storage = InMemoryLinkClaimStorage()
         val record = LinkClaimRecord("acct", storage)

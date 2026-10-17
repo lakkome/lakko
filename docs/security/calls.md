@@ -5337,6 +5337,21 @@ that lost, or that holds no claim and saw one from a roster device, keeps the
 request unshown until the link register says it was answered (or the link is
 dead), re-checking against the current roster at every pass, and the next
 earliest current claim's author builds when the winner is removed first.
+**The build is ordered so a removed winner is never followed by a second
+one-to-one (2026-10-17):** before any device builds (the first winner and any
+device that takes over) it reads its account mailbox past now, joining every
+pending Welcome, and a one-to-one with the requester it then holds answers the
+request with nothing built (a read that times out leaves the request
+undecided), and when it joined that one-to-one from a Welcome it still keeps it
+first forwards those bytes to the requester's mailbox with the request's reply
+grant (the founder may have written the own mailbox and left before the
+requester's; the Welcome is byte-identical for every added leaf, a duplicate
+is ignored, a failed write keeps the request); the one-to-one is founded in ONE commit with every other current
+device of the account; the founding is recorded durably before any Welcome
+leaves, so a retry resumes the same group; and the Welcome is written to the
+account's own mailbox first and to the requester's only after that write
+succeeded, so whenever the requester holds the Welcome every own device's
+mailbox holds it too.
 Journal order is the DS arrival order, which every device reads identically.
 The won claim is recorded durably before the build, so a winner that fails
 retries from it at its next pass; a device whose claim is not the winner
@@ -5396,11 +5411,13 @@ Unit-tested 2026-10-16 and, for the rework, 2026-10-17; not walked live.
 
 **What this does NOT do.** It does not authenticate the inviter's name on the
 invite page beyond the capability's signature: the name is the inviter's own
-claim, signed by their account key. It does not prevent a second answer in
-one case: a winner that built, failed to record the use in the register, and
-was removed before the record went out leaves the request unanswered in the
-register, and the next claim's author builds a second one-to-one with the
-requester (answered twice, never not at all). A request a device lost leaves
+claim, signed by their account key. A device of the account that is not in the
+founded one-to-one (paired after the founding, missing from the directory when
+the founder fetched the account's devices, or whose join of the own Welcome
+failed) and takes the request over founds a second one. A taking-over device
+that no longer keeps the Welcome it joined from (more than 32 one-to-ones
+joined since) answers without forwarding it, so a requester whose Welcome the
+founder never wrote gets none. A request a device lost leaves
 its store only when the register says it was answered or the link is dead;
 if that never comes (the winner's use never reaches the register while the
 winner stays in the roster) it stays stored, unshown. It does not stop a

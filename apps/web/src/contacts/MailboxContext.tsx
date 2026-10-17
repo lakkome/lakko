@@ -77,14 +77,14 @@ import {
   runOwedSpendRound,
   type SpentOutcome,
 } from "./rotation-spent";
-import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
+import type { Group as WasmGroupHandle, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import {
   createWakeLatch,
   LONG_POLL_WAIT_SECS,
   runLongPollLoop,
   sleepCancellable,
 } from "../ds/long-poll-loop";
-import { base64Encode } from "../auth/account-id";
+import { base64Decode, base64Encode } from "../auth/account-id";
 import {
   ContactsClient,
   ContactsError,
@@ -126,7 +126,8 @@ import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { personKeysOf } from "../chat/person-key";
 import { heldSends, persistHeldSends } from "../chat/held-send-queue";
-import { acceptContactRequest } from "./accept-request";
+import { DIRECT_CHAT_STAND_IN } from "../chat/group-title";
+import { upsertAccepted as upsertAcceptedContact, type AcceptedContact as AcceptedContactRow } from "./local-store";
 import {
   handOverPendingContact,
   loadPendingContacts,
@@ -134,8 +135,13 @@ import {
   pendingContacts,
 } from "./pending-contacts";
 import {
+  type LinkClaimRecord as LinkClaimRecordHandle,
+  type LinkFounded,
   type ObservedClaim,
   claimsToDecide,
+  holdsOneToOneWith,
+  linkBuildStep,
+  welcomeOrder,
   linkClaimRecord,
   linkRequestKeyHex,
   linkRequestStep,
@@ -537,22 +543,208 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
    * `false` when the accept did not complete; the won claim stays recorded
    * and the next pass tries again.
    */
-  async function acceptThroughLink(request: IncomingContactRequest): Promise<boolean> {
+  /** The marker of a zero-wait fetch a mailbox catch-up started: set by the
+   *  poller's fetch to whether that fetch found no row past its cursor. */
+  let catchUpFetch: { empty: boolean } | null = null;
+
+  /**
+   * ADR-0079 (2026-10-17) - read the account mailbox past NOW: zero-wait
+   * polls through the one poller (its dispatch joins every pending Welcome)
+   * until a fetch that started after this call found no row past the
+   * cursor. `false` when that did not happen within `timeoutMs` (offline, a
+   * dispatch that keeps failing, the session ended).
+   */
+  async function mailboxCatchUp(timeoutMs = 30_000): Promise<boolean> {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const signal = loopAbort?.signal;
+      if (signal === undefined || signal.aborted) return false;
+      const marker = { empty: false };
+      catchUpFetch = marker;
+      let outcome;
+      try {
+        const run = poller.poll(0, signal);
+        catchUpFetch = null;
+        outcome = await run;
+      } catch {
+        catchUpFetch = null;
+        return false;
+      }
+      if (outcome === "scope-changed") return false;
+      if (outcome === "dispatched" && marker.empty) return true;
+      // Rows were fetched (and dispatched), or another poll moved the
+      // cursor first: read again.
+    }
+    return false;
+  }
+
+  /** The member account keys (hex) of every held conversation, with its
+   *  kind: the input of `holdsOneToOneWith`. */
+  function heldConversationsByAccount(): { oneToOne: boolean; memberAccountKeysHex: string[] }[] {
+    return chats.groups().map((active) => {
+      let keys: string[] = [];
+      try {
+        const members = active.group.members() as { signaturePublicKey: Uint8Array; accountKey?: Uint8Array }[];
+        keys = members.map((m) =>
+          bytesToHex(m.accountKey !== undefined && m.accountKey.length === 32 ? m.accountKey : m.signaturePublicKey),
+        );
+      } catch {
+        keys = [];
+      }
+      return { oneToOne: conversationKindOf(active.group) === "chat", memberAccountKeysHex: keys };
+    });
+  }
+
+  /** Groups founded for a link request in this page and not yet held. */
+  const foundedLinkGroups = new Map<string, WasmGroupHandle>();
+
+  /**
+   * The winning device's accept of a request sent through one of this
+   * account's live invite links (ADR-0079 section 3, ordering of
+   * 2026-10-17). `false` when it did not complete; the won claim (and the
+   * founded record) stay, and the next pass takes it up where it stopped.
+   *
+   *   - a one-to-one founded for the request already (a failed publish, a
+   *     restart): the SAME group is made a held conversation and its
+   *     Welcome delivered again (duplicates are ignored by the receivers);
+   *   - otherwise the account mailbox is read past now first (pending
+   *     Welcomes joined) and a one-to-one with the requester held already
+   *     answers the request: nothing is built, the use is recorded;
+   *   - otherwise the one-to-one is founded in ONE commit adding the
+   *     requester's devices and every other device of this account, the
+   *     founding recorded BEFORE any Welcome leaves, then the Welcome
+   *     written to this account's own mailbox first and to the requester's
+   *     only after that write succeeded.
+   */
+  async function acceptThroughLink(
+    request: IncomingContactRequest,
+    key: string,
+    claims: LinkClaimRecordHandle,
+    accountIdB64: string,
+  ): Promise<boolean> {
     const identity = auth.identitySecrets();
     const answer = request.linkAnswer;
-    if (identity === null || answer === null) return false;
-    const outcome = await acceptContactRequest({ client, identity, chats, profiles }, request);
-    if (outcome.legacy || outcome.chatError !== null) {
+    const fromAccountId = request.fromAccountId;
+    if (identity === null || answer === null || fromAccountId === null) return false;
+    const keyB64 = base64Encode(request.fromPubkey);
+    const contact: AcceptedContactRow = {
+      signaturePubkeyB64: keyB64,
+      displayName: loadAccepted(accountIdB64).find((c) => c.signaturePubkeyB64 === keyB64)?.displayName ?? "",
+      acceptedAtMs: Date.now(),
+      accountIdHex: groupIdHex(fromAccountId),
+    };
+    const finish = async (groupIdB64: string | null): Promise<boolean> => {
+      upsertAcceptedContact(groupIdB64 === null ? contact : { ...contact, groupIdB64 }, accountIdB64);
+      try {
+        await client.sendContactAck(identity, request);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("sendContactAck failed", err instanceof Error ? err.name : "");
+      }
+      await sync.recordLinkUse(answer.linkId, request.fromPubkey);
+      setAcceptedVersion(acceptedVersion() + 1);
+      return true;
+    };
+    try {
+      let founded: LinkFounded | null = claims.own(key)?.founded ?? null;
+      const step = linkBuildStep({
+        hasFounded: founded !== null,
+        mailboxCaughtUp: founded !== null ? false : await mailboxCatchUp(),
+        holdsOneToOne: founded !== null ? false : holdsOneToOneWith(heldConversationsByAccount(), bytesToHex(request.fromPubkey)),
+      });
+      if (step === "wait") return false;
+      if (step === "answered") {
+        // Another device of this account founded it (its Welcome reached this
+        // device's mailbox before the requester's), or the two already had
+        // one: answered, nothing built.
+        const held = chats
+          .groups()
+          .find(
+            (g) =>
+              conversationKindOf(g.group) === "chat" &&
+              holdsOneToOneWith(
+                [{ oneToOne: true, memberAccountKeysHex: heldMemberKeys(g.group) }],
+                bytesToHex(request.fromPubkey),
+              ),
+          );
+        // The requester may not hold this one-to-one's Welcome yet (its
+        // founder wrote this account's mailbox, then left before writing
+        // theirs): the Welcome this device joined from is the same bytes, so
+        // it is forwarded to the requester, who ignores a duplicate. A failed
+        // write keeps the request for the next pass.
+        const joinedWelcome = held === undefined ? null : claims.joinedWelcome(held.groupIdB64);
+        if (held !== undefined && joinedWelcome !== null) {
+          await client.deliverPreparedWelcomes(
+            held.group.groupId,
+            base64Decode(joinedWelcome),
+            [{ accountKey: request.fromPubkey, isRecipient: true }],
+            { replyGrantB64: request.replyGrantB64 },
+          );
+        }
+        return await finish(held?.groupIdB64 ?? null);
+      }
+      if (founded === null) {
+        const prepared = await client.prepareGroupWith(identity, fromAccountId, "chat", request.fromPubkey);
+        founded = {
+          groupIdB64: base64Encode(prepared.group.groupId),
+          welcomeB64: base64Encode(prepared.welcome),
+          targets: welcomeOrder(
+            prepared.targets.map((t) => ({ accountKeyB64: base64Encode(t.accountKey), isRecipient: t.isRecipient })),
+          ),
+          delivered: false,
+        };
+        foundedLinkGroups.set(founded.groupIdB64, prepared.group);
+        // Recorded before any Welcome leaves; a refused write throws, and
+        // nothing was posted (the claimed journal id is never reused).
+        claims.setFounded(key, founded);
+      }
+      let held = chats.get(founded.groupIdB64);
+      if (held === undefined) {
+        let group = foundedLinkGroups.get(founded.groupIdB64);
+        if (group === undefined) {
+          const device = chats.identity();
+          if (device === null) return false;
+          const wasm = await loadWasm();
+          // A restart between the founding and the delivery: the group is in
+          // the MLS snapshot the creation persisted.
+          const loaded = wasm.Group.load(device, base64Decode(founded.groupIdB64));
+          if (loaded === undefined) return false;
+          group = loaded;
+        }
+        foundedLinkGroups.delete(founded.groupIdB64);
+        held = chats.add({ label: DIRECT_CHAT_STAND_IN, group });
+        profiles.groupJoined(held.groupIdB64);
+        await chats.persistSnapshotDurable(accountIdB64);
+      }
+      if (!founded.delivered) {
+        await client.deliverPreparedWelcomes(
+          held.group.groupId,
+          base64Decode(founded.welcomeB64),
+          founded.targets.map((t) => ({ accountKey: base64Decode(t.accountKeyB64), isRecipient: t.isRecipient })),
+          { replyGrantB64: request.replyGrantB64 },
+        );
+        claims.setFounded(key, { ...founded, welcomeB64: "", delivered: true });
+      }
+      return await finish(held.groupIdB64);
+    } catch (err) {
       // eslint-disable-next-line no-console
       console.warn(
         "invite-link accept did not complete; retried at the next pass",
-        outcome.chatError instanceof Error ? outcome.chatError.name : "legacy",
+        err instanceof Error ? err.name : "",
       );
       return false;
     }
-    await sync.recordLinkUse(answer.linkId, request.fromPubkey);
-    setAcceptedVersion(acceptedVersion() + 1);
-    return true;
+  }
+
+  function heldMemberKeys(group: WasmGroupHandle): string[] {
+    try {
+      const members = group.members() as { signaturePublicKey: Uint8Array; accountKey?: Uint8Array }[];
+      return members.map((m) =>
+        bytesToHex(m.accountKey !== undefined && m.accountKey.length === 32 ? m.accountKey : m.signaturePublicKey),
+      );
+    } catch {
+      return [];
+    }
   }
 
   /** One decision pass at a time (C-62 sub-invariant 5): the read of the
@@ -672,7 +864,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             step = "build";
           }
           if (step === "build") {
-            if (await acceptThroughLink(req)) {
+            if (await acceptThroughLink(req, key, claims, accountIdB64)) {
               if (!current()) return;
               target.remove(req.messageId);
               claims.forgetOwn(key);
@@ -809,6 +1001,21 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             joinedWelcomeIds.add(ev.welcome.messageId);
             joinedGroupIds.push(active.groupIdB64);
             joined = true;
+            // ADR-0079 - the Welcome of a one-to-one is kept (bounded): if
+            // another device of this account founded it for an invite-link
+            // request and left before writing the requester's mailbox, this
+            // device forwards it when it takes the request over.
+            if (conversationKindOf(group) === "chat") {
+              try {
+                linkClaimRecord(accountIdB64).recordJoinedWelcome(
+                  active.groupIdB64,
+                  base64Encode(ev.welcome.welcomeBytes),
+                  Date.now(),
+                );
+              } catch {
+                // Kept best-effort: without it a takeover only answers.
+              }
+            }
           } catch (err) {
             if (err instanceof StaleMailboxScope) throw err;
             // ADR-0060 — every device of the account reads the one account
@@ -897,8 +1104,13 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       if (polled === null) throw new Error("mailbox cursor write without an inbox");
       polled.inbox.advanceCursor(next);
     },
-    fetch: async (after, waitSecs, signal) =>
-      client.pollMailbox(auth.identitySecrets(), after, waitSecs, signal),
+    fetch: async (after, waitSecs, signal) => {
+      // A catch-up's zero-wait fetch: marked synchronously, before the await.
+      const marker = waitSecs === 0 ? catchUpFetch : null;
+      const batch = await client.pollMailbox(auth.identitySecrets(), after, waitSecs, signal);
+      if (marker !== null) marker.empty = batch.cursor <= after;
+      return batch;
+    },
     dispatch,
   });
 

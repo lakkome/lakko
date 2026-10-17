@@ -46,6 +46,26 @@ export interface ObservedClaim {
   readonly author: string;
 }
 
+/** One account a founded one-to-one's Welcome goes to. */
+export interface LinkFoundedTarget {
+  readonly accountKeyB64: string;
+  readonly isRecipient: boolean;
+}
+
+/**
+ * The one-to-one this device founded for a request it won, recorded BEFORE
+ * any Welcome is posted, so a retry (a failed publish, a restart) delivers
+ * the SAME group's Welcome instead of founding a second one.
+ */
+export interface LinkFounded {
+  readonly groupIdB64: string;
+  /** The Welcome (base64); emptied once every target was written. */
+  readonly welcomeB64: string;
+  /** In delivery order: this account's own mailbox first. */
+  readonly targets: readonly LinkFoundedTarget[];
+  readonly delivered: boolean;
+}
+
 /** This device's own claims for one request. */
 export interface OwnLinkClaims {
   /** Sealed claim messages (hex), recorded BEFORE their publish and not yet
@@ -60,6 +80,58 @@ export interface OwnLinkClaims {
    *  so the next passes re-check against the current roster without
    *  reading the journal again. */
   readonly settled: boolean;
+  /** The one-to-one founded for the request (won claims only). */
+  readonly founded: LinkFounded | null;
+}
+
+/**
+ * The order the Welcome of a founded one-to-one is written in: this
+ * account's own mailbox (its other devices) FIRST, the requester's after,
+ * and only once the own write succeeded. So whenever the requester holds
+ * the Welcome, every own device's mailbox holds it too, and a device that
+ * takes the request over finds the one-to-one before it could found a
+ * second. Stable within each half. Pure.
+ */
+export function welcomeOrder<T extends { readonly isRecipient: boolean }>(targets: readonly T[]): T[] {
+  return [...targets.filter((t) => !t.isRecipient), ...targets.filter((t) => t.isRecipient)];
+}
+
+/** What a device that won a request does before it builds anything. */
+export type LinkBuildStep =
+  /** A one-to-one was founded for it already: deliver that one's Welcome. */
+  | "resume"
+  /** The account mailbox could not be read past now: decide next pass. */
+  | "wait"
+  /** A one-to-one with the requester is held already: answered, build
+   *  nothing. */
+  | "answered"
+  /** Found the one-to-one. */
+  | "found";
+
+/**
+ * Before any device builds a one-to-one for a request (the first winner,
+ * or a device that took it over because the winner left the roster), it
+ * reads its account mailbox past now and looks for a one-to-one with the
+ * requester. Pure.
+ */
+export function linkBuildStep(input: {
+  readonly hasFounded: boolean;
+  readonly mailboxCaughtUp: boolean;
+  readonly holdsOneToOne: boolean;
+}): LinkBuildStep {
+  if (input.hasFounded) return "resume";
+  if (!input.mailboxCaughtUp) return "wait";
+  return input.holdsOneToOne ? "answered" : "found";
+}
+
+/** Whether one of `conversations` is a one-to-one with the account whose
+ *  key is `requesterKeyHex` (member account keys, lower-case hex). Pure. */
+export function holdsOneToOneWith(
+  conversations: readonly { readonly oneToOne: boolean; readonly memberAccountKeysHex: readonly string[] }[],
+  requesterKeyHex: string,
+): boolean {
+  const want = requesterKeyHex.toLowerCase();
+  return conversations.some((c) => c.oneToOne && c.memberAccountKeysHex.some((k) => k.toLowerCase() === want));
 }
 
 /** What the device does with a request carrying a link answer, now. */
@@ -165,11 +237,24 @@ interface SeenEntry {
   readonly at: number;
 }
 
+interface JoinedWelcome {
+  readonly welcomeB64: string;
+  readonly at: number;
+}
+
 interface Persisted {
   readonly v: 2;
   readonly seen: Record<string, SeenEntry>;
   readonly own: Record<string, OwnLinkClaims>;
+  /** The Welcome each recently joined one-to-one was joined from, by group
+   *  id: a device that takes a request over forwards it to the requester. */
+  readonly joined: Record<string, JoinedWelcome>;
 }
+
+/** How many joined one-to-one Welcomes are kept; past it the oldest go.
+ *  Chosen, not measured: a Welcome matters only while a request it answers
+ *  can still be taken over. */
+export const MAX_JOINED_WELCOMES = 32;
 
 type StorageLike = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
@@ -204,18 +289,42 @@ function parseClaims(v: unknown): ObservedClaim[] | null {
   return out;
 }
 
+function parseFounded(v: unknown): LinkFounded | null | undefined {
+  if (v === null) return null;
+  if (typeof v !== "object") return undefined;
+  const f = v as { groupIdB64?: unknown; welcomeB64?: unknown; targets?: unknown; delivered?: unknown };
+  if (typeof f.groupIdB64 !== "string" || typeof f.welcomeB64 !== "string") return undefined;
+  if (typeof f.delivered !== "boolean" || !Array.isArray(f.targets)) return undefined;
+  const targets: LinkFoundedTarget[] = [];
+  for (const t of f.targets) {
+    const key = (t as { accountKeyB64?: unknown }).accountKeyB64;
+    const rec = (t as { isRecipient?: unknown }).isRecipient;
+    if (typeof key !== "string" || typeof rec !== "boolean") return undefined;
+    targets.push({ accountKeyB64: key, isRecipient: rec });
+  }
+  return { groupIdB64: f.groupIdB64, welcomeB64: f.welcomeB64, targets, delivered: f.delivered };
+}
+
 function parseOwn(v: unknown): OwnLinkClaims | null {
   if (typeof v !== "object" || v === null) return null;
-  const o = v as { wires?: unknown; ids?: unknown; won?: unknown; settled?: unknown };
+  const o = v as { wires?: unknown; ids?: unknown; won?: unknown; settled?: unknown; founded?: unknown };
   if (!Array.isArray(o.wires) || !o.wires.every(isHex)) return null;
   if (!Array.isArray(o.ids) || !o.ids.every(isId)) return null;
   if (o.won !== null && !isId(o.won)) return null;
   if (typeof o.settled !== "boolean") return null;
-  return { wires: o.wires as string[], ids: o.ids as number[], won: o.won as number | null, settled: o.settled };
+  const founded = parseFounded(o.founded);
+  if (founded === undefined) return null;
+  return {
+    wires: o.wires as string[],
+    ids: o.ids as number[],
+    won: o.won as number | null,
+    settled: o.settled,
+    founded,
+  };
 }
 
 function read(accountIdB64: string, storage: StorageLike | null): Persisted {
-  const empty: Persisted = { v: 2, seen: {}, own: {} };
+  const empty: Persisted = { v: 2, seen: {}, own: {}, joined: {} };
   if (storage === null) return empty;
   let raw: string | null;
   try {
@@ -225,7 +334,7 @@ function read(accountIdB64: string, storage: StorageLike | null): Persisted {
   }
   if (raw === null) return empty;
   try {
-    const p = JSON.parse(raw) as { v?: unknown; seen?: unknown; own?: unknown };
+    const p = JSON.parse(raw) as { v?: unknown; seen?: unknown; own?: unknown; joined?: unknown };
     if (p.v !== 2 || typeof p.seen !== "object" || p.seen === null) return empty;
     const seen: Record<string, SeenEntry> = {};
     for (const [k, e] of Object.entries(p.seen as Record<string, unknown>)) {
@@ -240,7 +349,15 @@ function read(accountIdB64: string, storage: StorageLike | null): Persisted {
         if (parsed !== null) own[k] = parsed;
       }
     }
-    return { v: 2, seen, own };
+    const joined: Record<string, JoinedWelcome> = {};
+    if (typeof p.joined === "object" && p.joined !== null) {
+      for (const [k, e] of Object.entries(p.joined as Record<string, unknown>)) {
+        const w = (e as { welcomeB64?: unknown }).welcomeB64;
+        const at = (e as { at?: unknown }).at;
+        if (typeof w === "string" && typeof at === "number") joined[k] = { welcomeB64: w, at };
+      }
+    }
+    return { v: 2, seen, own, joined };
   } catch {
     return empty;
   }
@@ -251,7 +368,7 @@ function write(accountIdB64: string, value: Persisted, storage: StorageLike | nu
   storage.setItem(KEY_PREFIX + accountIdB64, JSON.stringify(value));
 }
 
-const NO_OWN: OwnLinkClaims = { wires: [], ids: [], won: null, settled: false };
+const NO_OWN: OwnLinkClaims = { wires: [], ids: [], won: null, settled: false, founded: null };
 
 /** One account's claim record. Every write is one synchronous `setItem`, so
  *  a read-decide-write in one JS turn cannot interleave with the receive
@@ -276,8 +393,16 @@ export interface LinkClaimRecord {
    *  matched to a row did not land; drop them. */
   dropUnlanded(keyHex: string): void;
   setWon(keyHex: string, messageId: number): void;
+  /** Keep the Welcome a one-to-one was joined from (bounded). */
+  recordJoinedWelcome(groupIdB64: string, welcomeB64: string, nowMs: number): void;
+  /** The Welcome a held one-to-one was joined from, or `null`. */
+  joinedWelcome(groupIdB64: string): string | null;
   /** Decided lost: re-check later without reading the journal again. */
   setSettled(keyHex: string): void;
+  /** Record the founded one-to-one (before any Welcome is posted), or its
+   *  delivery. Throws when the write fails: nothing may be posted for a
+   *  founding this device would not find again. */
+  setFounded(keyHex: string, founded: LinkFounded): void;
   forgetOwn(keyHex: string): void;
 }
 
@@ -340,8 +465,24 @@ export function linkClaimRecord(
     setWon(keyHex, messageId) {
       updateOwn(keyHex, (o) => ({ ...o, won: messageId }));
     },
+    recordJoinedWelcome(groupIdB64, welcomeB64, nowMs) {
+      const cur = read(accountIdB64, storage);
+      const joined: Record<string, JoinedWelcome> = { ...cur.joined, [groupIdB64]: { welcomeB64, at: nowMs } };
+      const keys = Object.keys(joined);
+      if (keys.length > MAX_JOINED_WELCOMES) {
+        keys.sort((a, b) => (joined[a]?.at ?? 0) - (joined[b]?.at ?? 0));
+        for (const k of keys.slice(0, keys.length - MAX_JOINED_WELCOMES)) delete joined[k];
+      }
+      write(accountIdB64, { ...cur, joined }, storage);
+    },
+    joinedWelcome(groupIdB64) {
+      return read(accountIdB64, storage).joined[groupIdB64]?.welcomeB64 ?? null;
+    },
     setSettled(keyHex) {
       updateOwn(keyHex, (o) => ({ ...o, settled: true }));
+    },
+    setFounded(keyHex, founded) {
+      updateOwn(keyHex, (o) => ({ ...o, founded }));
     },
     forgetOwn(keyHex) {
       const cur = read(accountIdB64, storage);

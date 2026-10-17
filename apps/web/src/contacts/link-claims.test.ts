@@ -4,7 +4,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type LinkFounded,
   MAX_CLAIMS_PER_REQUEST,
+  MAX_JOINED_WELCOMES,
+  holdsOneToOneWith,
+  linkBuildStep,
+  welcomeOrder,
   MAX_SEEN_LINK_CLAIMS,
   claimsToDecide,
   clearLinkClaims,
@@ -28,9 +33,9 @@ function memoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
 }
 
 const B = "bb".repeat(32);
-const posted = { wires: [], ids: [9], won: null, settled: false };
-const posting = { wires: ["aa"], ids: [], won: null, settled: false };
-const lost = { wires: [], ids: [9], won: null, settled: true };
+const posted = { wires: [], ids: [9], won: null, settled: false, founded: null };
+const posting = { wires: ["aa"], ids: [], won: null, settled: false, founded: null };
+const lost = { wires: [], ids: [9], won: null, settled: true, founded: null };
 
 describe("linkRequestStep (ADR-0079, reworked 2026-10-17)", () => {
   it("waits, with no timer, while the synced state is not loaded", () => {
@@ -48,7 +53,7 @@ describe("linkRequestStep (ADR-0079, reworked 2026-10-17)", () => {
     expect(linkRequestStep({ own: null, answeredElsewhere: true, verdict: null })).toBe("wait");
     expect(linkRequestStep({ own: null, answeredElsewhere: true, verdict: "answered" })).toBe("drop");
     expect(linkRequestStep({ own: null, answeredElsewhere: true, verdict: "dead" })).toBe("drop");
-    const none = { wires: [], ids: [], won: null, settled: false };
+    const none = { wires: [], ids: [], won: null, settled: false, founded: null };
     expect(linkRequestStep({ own: none, answeredElsewhere: true, verdict: "accept" })).toBe("wait");
   });
 
@@ -65,7 +70,7 @@ describe("linkRequestStep (ADR-0079, reworked 2026-10-17)", () => {
   });
 
   it("builds a won claim even after the link was used up or answered meanwhile", () => {
-    const won = { wires: [], ids: [9], won: 9, settled: false };
+    const won = { wires: [], ids: [9], won: 9, settled: false, founded: null };
     expect(linkRequestStep({ own: won, answeredElsewhere: true, verdict: "dead" })).toBe("build");
     expect(linkRequestStep({ own: won, answeredElsewhere: true, verdict: "answered" })).toBe("build");
   });
@@ -82,6 +87,65 @@ describe("linkRequestStep (ADR-0079, reworked 2026-10-17)", () => {
       { id: 4, author: B },
     ]);
     expect(claimsToDecide(null, [], "aa")).toEqual([]);
+  });
+});
+
+describe("the build of a won request (ADR-0079 ordering, 2026-10-17)", () => {
+  it("writes this account's own mailbox first and the requester's after", () => {
+    const targets = [
+      { accountKeyB64: "requester", isRecipient: true },
+      { accountKeyB64: "own", isRecipient: false },
+    ];
+    expect(welcomeOrder(targets).map((t) => t.accountKeyB64)).toEqual(["own", "requester"]);
+    expect(welcomeOrder([{ accountKeyB64: "requester", isRecipient: true }])).toHaveLength(1);
+  });
+
+  it("a takeover device that already holds a one-to-one with the requester does not build", () => {
+    const requester = "ab".repeat(32);
+    const held = [
+      { oneToOne: false, memberAccountKeysHex: [requester, "cd".repeat(32)] },
+      { oneToOne: true, memberAccountKeysHex: ["ef".repeat(32), requester.toUpperCase()] },
+    ];
+    expect(holdsOneToOneWith(held, requester)).toBe(true);
+    expect(linkBuildStep({ hasFounded: false, mailboxCaughtUp: true, holdsOneToOne: true })).toBe("answered");
+    // A group (not a one-to-one) with the requester does not answer it.
+    expect(holdsOneToOneWith([held[0]!], requester)).toBe(false);
+    expect(linkBuildStep({ hasFounded: false, mailboxCaughtUp: true, holdsOneToOne: false })).toBe("found");
+  });
+
+  it("a takeover forwards the Welcome it joined from, kept per one-to-one and bounded", () => {
+    const r = linkClaimRecord("acct", memoryStorage());
+    expect(r.joinedWelcome("g")).toBeNull();
+    r.recordJoinedWelcome("g", "w", 1);
+    expect(r.joinedWelcome("g")).toBe("w");
+    for (let i = 0; i <= MAX_JOINED_WELCOMES; i += 1) r.recordJoinedWelcome(`g${i}`, `w${i}`, i + 2);
+    expect(r.joinedWelcome("g")).toBeNull();
+    expect(r.joinedWelcome(`g${MAX_JOINED_WELCOMES}`)).toBe(`w${MAX_JOINED_WELCOMES}`);
+  });
+
+  it("never builds blind: an unread mailbox keeps the request for the next pass", () => {
+    expect(linkBuildStep({ hasFounded: false, mailboxCaughtUp: false, holdsOneToOne: false })).toBe("wait");
+    expect(linkBuildStep({ hasFounded: false, mailboxCaughtUp: false, holdsOneToOne: true })).toBe("wait");
+  });
+
+  it("a founding already recorded is resumed, never founded again", () => {
+    expect(linkBuildStep({ hasFounded: true, mailboxCaughtUp: false, holdsOneToOne: true })).toBe("resume");
+    const storage = memoryStorage();
+    const key = "k";
+    const founded: LinkFounded = {
+      groupIdB64: "g",
+      welcomeB64: "w",
+      targets: [
+        { accountKeyB64: "own", isRecipient: false },
+        { accountKeyB64: "requester", isRecipient: true },
+      ],
+      delivered: false,
+    };
+    linkClaimRecord("acct", storage).setWon(key, 3);
+    linkClaimRecord("acct", storage).setFounded(key, founded);
+    expect(linkClaimRecord("acct", storage).own(key)?.founded).toEqual(founded);
+    linkClaimRecord("acct", storage).setFounded(key, { ...founded, welcomeB64: "", delivered: true });
+    expect(linkClaimRecord("acct", storage).own(key)?.founded?.delivered).toBe(true);
   });
 });
 
@@ -120,7 +184,7 @@ describe("linkClaimRecord", () => {
     // A crash lost the publish answer; the receive loop meets the row later.
     expect(linkClaimRecord("acct", storage).recordOwnClaimRow("beef", 10)).toBe(false);
     expect(linkClaimRecord("acct", storage).recordOwnClaimRow("c0ffee", 10)).toBe(true);
-    expect(r.own(key)).toEqual({ wires: [], ids: [10], won: null, settled: false });
+    expect(r.own(key)).toEqual({ wires: [], ids: [10], won: null, settled: false, founded: null });
     expect(r.hasUnmatchedWires()).toBe(false);
     // A later duplicate claim lands as a second own id; the earlier stays.
     r.addOwnWire(key, "d00d");
@@ -132,7 +196,7 @@ describe("linkClaimRecord", () => {
     const storage = memoryStorage();
     linkClaimRecord("acct", storage).addOwnWire(key, "aa");
     linkClaimRecord("acct", storage).dropUnlanded(key);
-    expect(linkClaimRecord("acct", storage).own(key)).toEqual({ wires: [], ids: [], won: null, settled: false });
+    expect(linkClaimRecord("acct", storage).own(key)).toEqual({ wires: [], ids: [], won: null, settled: false, founded: null });
     linkClaimRecord("acct", storage).setSettled(key);
     expect(linkClaimRecord("acct", storage).own(key)?.settled).toBe(true);
     linkClaimRecord("acct", storage).setWon(key, 5);
@@ -165,7 +229,7 @@ describe("linkClaimRecord", () => {
     expect(linkClaimRecord("acct", storage).own(key)).toBeNull();
     storage.setItem(
       "lakko.link-claims.v1.acct",
-      JSON.stringify({ v: 2, seen: {}, own: { [key]: { wires: [], ids: [0], won: null, settled: false } } }),
+      JSON.stringify({ v: 2, seen: {}, own: { [key]: { wires: [], ids: [0], won: null, settled: false, founded: null } } }),
     );
     expect(linkClaimRecord("acct", storage).own(key)).toBeNull();
   });

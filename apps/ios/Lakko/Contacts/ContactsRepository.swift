@@ -508,6 +508,34 @@ public final class ContactsRepository: ObservableObject {
     ///   window (1.14e5's continuous-polling loop uses
     ///   `waitSecs = 30`).
     public func refreshInbox(waitSecs: Int = 0) async {
+        await refreshInbox(waitSecs: waitSecs, quiet: false)
+    }
+
+    /// While a link build reads the mailbox past now, the passes it runs do
+    /// not start another decision pass (it would only wait on this one).
+    private var linkMailboxCatchUp = false
+
+    /// ADR-0079 (2026-10-17) — read the account mailbox past NOW: zero-wait
+    /// passes (each joins every pending Welcome) until one that started after
+    /// this call found no row past the cursor. `false` when that did not
+    /// happen within `timeoutMs` (offline, the session ended).
+    func catchUpMailboxPastNow(timeoutMs: Int64 = 30_000) async -> Bool {
+        guard let account = boundAccountIdB64 else { return false }
+        let start = Int64(Date().timeIntervalSince1970 * 1000)
+        linkMailboxCatchUp = true
+        defer { linkMailboxCatchUp = false }
+        while Int64(Date().timeIntervalSince1970 * 1000) - start < timeoutMs {
+            let before = state.cursor
+            await refreshInbox(waitSecs: 0, quiet: true)
+            guard boundAccountIdB64 == account else { return false }
+            if state.lastError == Self.inboxFetchFailureMessage { return false }
+            if state.cursor == before { return true }
+            if Task.isCancelled { return false }
+        }
+        return false
+    }
+
+    private func refreshInbox(waitSecs: Int, quiet: Bool) async {
         guard let secrets = authRepository.identitySecrets else {
             state = state.with(requiresReauth: true)
             return
@@ -524,7 +552,7 @@ public final class ContactsRepository: ObservableObject {
         // under whoever signs in next.
         let pollAccountIdB64 = base64Encode(secrets.accountId)
         bind(accountIdB64: pollAccountIdB64)
-        let isManualRefresh = waitSecs == 0
+        let isManualRefresh = waitSecs == 0 && !quiet
         if isManualRefresh {
             state = state.with(refreshing: true, lastError: nil)
         }
@@ -616,8 +644,18 @@ public final class ContactsRepository: ObservableObject {
                     // here are Welcomes that were never this device's to open.
                     if let chatRepository = chatRepository {
                         do {
-                            _ = try await chatRepository
+                            let joinedHex = try await chatRepository
                                 .joinGroupFromWelcome(welcomeBytes: welcomeBytes)
+                            // ADR-0079 — the Welcome of a one-to-one is kept
+                            // (bounded): if another device of this account
+                            // founded it for an invite-link request and left
+                            // before writing the requester's mailbox, this
+                            // device forwards it when it takes over.
+                            if chatRepository.groupKind(groupIdHex: joinedHex) == .oneToOne {
+                                LinkClaims.Record(accountIdB64: pollAccountIdB64).recordJoinedWelcome(
+                                    joinedHex, welcomeB64: base64Encode(welcomeBytes),
+                                    nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+                            }
                             // ADR-0079 section 5 — a one-to-one with a person
                             // added through their link: what was written to
                             // them goes out now, in order.
@@ -729,7 +767,8 @@ public final class ContactsRepository: ObservableObject {
             // undecided link requests.
             handOverJoinedPendingContacts()
             await revokeLinksRevokedElsewhere()
-            if undecidedArrived || !LinkRequestInbox(accountIdB64: pollAccountIdB64).rows().isEmpty {
+            if !linkMailboxCatchUp,
+               undecidedArrived || !LinkRequestInbox(accountIdB64: pollAccountIdB64).rows().isEmpty {
                 await decideLinkRequests()
             }
         } catch {
@@ -1896,20 +1935,80 @@ public final class ContactsRepository: ObservableObject {
     /// contact recorded, then the ack), then one use of the link counted in
     /// the synced register. `false` when the accept did not complete; the
     /// won claim stays recorded and the next pass tries again.
-    func acceptThroughLink(_ request: IncomingContactRequest, linkAnswer: FfiLinkAnswer) async -> Bool {
+    ///
+    /// Ordering of 2026-10-17: a one-to-one founded for the request already
+    /// (a failed publish, a relaunch) is held and its Welcome delivered again;
+    /// otherwise the account mailbox is read past now first and a one-to-one
+    /// with the requester held already answers the request with nothing
+    /// built; otherwise it is founded in ONE commit with every other device
+    /// of this account, the founding recorded BEFORE any Welcome leaves, and
+    /// the Welcome written to this account's own mailbox first and to the
+    /// requester's only after that write succeeded.
+    func acceptThroughLink(
+        _ request: IncomingContactRequest, linkAnswer: FfiLinkAnswer,
+        key: String, claims: LinkClaims.Record
+    ) async -> Bool {
         guard let chatRepository, let fromAccountId = request.fromAccountId else { return false }
+        let bound = binding.capture()
+        var founded = claims.own(key)?.founded
+        let caughtUp = founded == nil ? await catchUpMailboxPastNow() : false
+        guard bound.isCurrent else { return false }
+        let heldHex = founded == nil ? chatRepository.heldOneToOneHex(withAccountKey: request.fromPubkey) : nil
         let groupIdHex: String
-        do {
-            groupIdHex = try await chatRepository.startGroupWith(
-                recipientAccountId: fromAccountId,
-                recipientSignaturePubkey: request.fromPubkey,
-                kind: .oneToOne)
-        } catch {
-            NSLog("ADR-0079: invite-link accept did not complete; retried at the next pass")
+        switch LinkClaims.buildStep(
+            hasFounded: founded != nil, mailboxCaughtUp: caughtUp, holdsOneToOne: heldHex != nil) {
+        case .wait:
             return false
+        case .answered:
+            // Another device of this account founded it (its Welcome reached
+            // this device's mailbox before the requester's), or the two
+            // already had one: answered, nothing built. The requester may not
+            // hold its Welcome yet (the founder wrote this account's mailbox,
+            // then left before writing theirs): the Welcome this device
+            // joined from is the same bytes, so it is forwarded, and the
+            // requester ignores a duplicate. A failed write keeps the request.
+            groupIdHex = heldHex ?? ""
+            if let heldHex, let joinedB64 = claims.joinedWelcome(heldHex),
+               let welcome = base64Decode(joinedB64) {
+                do {
+                    try await chatRepository.deliverWelcome(
+                        welcome: welcome, toAccountKey: request.fromPubkey,
+                        plan: ReachCenter.shared.writePlan(toAccountKey: request.fromPubkey))
+                } catch {
+                    NSLog("ADR-0079: forwarding the joined Welcome failed; retried at the next pass")
+                    return false
+                }
+            }
+        case .found, .resume:
+            do {
+                if founded == nil {
+                    let made = try await chatRepository.prepareLinkOneToOne(
+                        recipientAccountId: fromAccountId, recipientSignaturePubkey: request.fromPubkey)
+                    // Recorded before any Welcome leaves; a refused write
+                    // stops here with nothing posted.
+                    guard claims.setFounded(key, made) else { return false }
+                    founded = made
+                }
+                guard var current = founded,
+                      let held = chatRepository.holdLinkOneToOne(groupIdB64: current.groupIdB64)
+                else { return false }
+                if !current.delivered {
+                    try await chatRepository.deliverLinkWelcome(current)
+                    current.delivered = true
+                    current.welcomeB64 = ""
+                    claims.setFounded(key, current)
+                }
+                groupIdHex = held
+            } catch {
+                NSLog("ADR-0079: invite-link accept did not complete; retried at the next pass")
+                return false
+            }
         }
+        guard bound.isCurrent else { return false }
         if !state.accepted.contains(where: { $0.request.fromPubkey == request.fromPubkey }) {
-            state = state.with(accepted: state.accepted + [AcceptedContact(request: request, groupIdHex: groupIdHex)])
+            state = state.with(accepted: state.accepted + [
+                AcceptedContact(request: request, groupIdHex: groupIdHex.isEmpty ? nil : groupIdHex)
+            ])
         }
         do {
             _ = try await sendContactAck(request: request)
@@ -2054,7 +2153,7 @@ public final class ContactsRepository: ObservableObject {
             }
             if step == .build {
                 let answer = FfiLinkAnswer(linkId: row.linkId, linkSecret: row.linkSecret)
-                if await acceptThroughLink(req, linkAnswer: answer), bound.isCurrent {
+                if await acceptThroughLink(req, linkAnswer: answer, key: key, claims: claims), bound.isCurrent {
                     inbox.remove(messageId: req.messageId)
                     claims.forgetOwn(key)
                 }

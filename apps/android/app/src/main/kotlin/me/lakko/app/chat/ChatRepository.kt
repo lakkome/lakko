@@ -1239,7 +1239,14 @@ public class ChatRepository(
         // two keys of one person are one mailbox (written once).
         val recipientCurrent = mailboxAccountKeyOf(recipientSignaturePubkey)
         val writtenMailboxes = HashSet<String>()
-        for (account in created.recipientAccounts) {
+        // ADR-0079 (2026-10-17) - this account's own mailbox FIRST, the
+        // recipient's only after it was written (a failure throws out of the
+        // loop): whenever the recipient holds the Welcome, every own device's
+        // mailbox holds it too.
+        val ordered = me.lakko.app.contacts.LinkClaims.welcomeOrder(created.recipientAccounts) {
+            mailboxAccountKeyOf(it).contentEquals(recipientCurrent)
+        }
+        for (account in ordered) {
             val explicit =
                 if (mailboxAccountKeyOf(account).contentEquals(recipientCurrent)) recipientReach else null
             try {
@@ -1265,6 +1272,156 @@ public class ChatRepository(
             }
         }
         return registerFoundedGroup(identity, created.group, created.groupId)
+    }
+
+    /** ADR-0079 - one-to-ones founded for a won invite-link request and not
+     *  yet held, by hex id. In memory; after a restart the group is loaded
+     *  from the MLS snapshot the founding persisted. */
+    private val preparedLinkGroups = java.util.concurrent.ConcurrentHashMap<String, Group>()
+
+    /**
+     * ADR-0079 (ordering of 2026-10-17) - step 1 of the one-to-one a device
+     * founds for an invite-link request it won: ONE commit adding the
+     * requester's devices AND every other device of this account (ADR-0050
+     * section 2), the journal claimed, the founder's state persisted
+     * fail-closed; NOTHING is sent. The caller records the returned founding
+     * durably before [holdLinkOneToOne] and [deliverLinkWelcome]; a retry runs
+     * those two again on the recorded founding and nothing is founded twice.
+     */
+    public suspend fun prepareLinkOneToOne(
+        recipientAccountId: ByteArray,
+        recipientSignaturePubkey: ByteArray,
+    ): me.lakko.app.contacts.LinkClaims.Founded =
+        forSession {
+            val identity = canonicalIdentity.get()
+                ?: throw IllegalStateException("ChatRepository not bootstrapped — call bootstrap() first")
+            val created = prepareGroupOnMlsThread(
+                identity,
+                recipientAccountId,
+                GroupKind.ONE_TO_ONE,
+                expectedKeyB64 = outboxB64(recipientSignaturePubkey),
+            )
+            val hex = DsClient.pseudonymHex(created.groupId)
+            persistFoundedGroupBeforeWelcome(created.group, hex)
+            preparedLinkGroups[hex] = created.group
+            val recipientCurrent = mailboxAccountKeyOf(recipientSignaturePubkey)
+            val targets = created.recipientAccounts.map {
+                me.lakko.app.contacts.LinkClaims.FoundedTarget(
+                    accountKeyB64 = outboxB64(it),
+                    isRecipient = mailboxAccountKeyOf(it).contentEquals(recipientCurrent),
+                )
+            }
+            me.lakko.app.contacts.LinkClaims.Founded(
+                groupIdHex = hex,
+                welcomeB64 = outboxB64(created.welcomeEnvelope),
+                targets = me.lakko.app.contacts.LinkClaims.welcomeOrder(targets) { it.isRecipient },
+                delivered = false,
+            )
+        }
+
+    /** ADR-0079 - make the founded one-to-one a held conversation (after a
+     *  restart, from the MLS snapshot the founding persisted). `false` when
+     *  it cannot be brought up; the next pass tries again. */
+    public suspend fun holdLinkOneToOne(groupIdHex: String): Boolean =
+        forSession {
+            if (groups[groupIdHex] != null) {
+                preparedLinkGroups.remove(groupIdHex)
+                true
+            } else {
+                val identity = canonicalIdentity.get()
+                val bytes = hexToBytes(groupIdHex)
+                val group = if (identity == null || bytes == null) {
+                    null
+                } else {
+                    preparedLinkGroups[groupIdHex] ?: providerLock.withLock {
+                        try {
+                            uniffi.lakko_ffi_uniffi.loadGroup(identity, bytes)
+                        } catch (_: Throwable) {
+                            null
+                        }
+                    }
+                }
+                if (identity == null || bytes == null || group == null) {
+                    false
+                } else {
+                    registerFoundedGroup(identity, group, bytes)
+                    preparedLinkGroups.remove(groupIdHex)
+                    true
+                }
+            }
+        }
+
+    /**
+     * ADR-0079 - write the founded one-to-one's Welcome in the recorded order
+     * (this account's own mailbox first). A failure throws out of the loop:
+     * the requester is never written after a failed own write. One write per
+     * mailbox (two keys of one person are one mailbox).
+     */
+    public suspend fun deliverLinkWelcome(
+        founded: me.lakko.app.contacts.LinkClaims.Founded,
+        recipientAccountId: ByteArray,
+    ): Unit =
+        forSession {
+            val welcome = java.util.Base64.getDecoder().decode(founded.welcomeB64)
+            val written = HashSet<String>()
+            for (target in founded.targets) {
+                val account = java.util.Base64.getDecoder().decode(target.accountKeyB64)
+                val mailbox = welcomeMailboxFor(account)
+                if (!written.add(DsClient.pseudonymHex(mailbox))) continue
+                publishWelcomeToMailbox(
+                    mailbox,
+                    welcome,
+                    founded.groupIdHex,
+                    accountIdHint = recipientAccountId.takeIf { target.isRecipient },
+                )
+            }
+        }
+
+    /** ADR-0079 - write the Welcome this device joined [groupIdHex] from to
+     *  the requester's mailbox (the same bytes for every added leaf): the
+     *  founder may have left after writing this account's mailbox and before
+     *  writing theirs. The requester ignores a duplicate. */
+    public suspend fun forwardJoinedWelcome(
+        groupIdHex: String,
+        welcome: ByteArray,
+        recipientAccountKey: ByteArray,
+        recipientAccountId: ByteArray,
+    ): Unit =
+        forSession {
+            publishWelcomeToMailbox(
+                welcomeMailboxFor(recipientAccountKey),
+                welcome,
+                groupIdHex,
+                accountIdHint = recipientAccountId,
+            )
+            Unit
+        }
+
+    /** ADR-0079 - every held conversation with its kind and member account
+     *  keys (hex), the input of [me.lakko.app.contacts.LinkClaims.holdsOneToOneWith]. */
+    public fun heldConversationsByAccount(): List<me.lakko.app.contacts.LinkClaims.HeldConversation> =
+        groups.values.map { record ->
+            val oneToOne = runCatching { record.group.groupKind() }.getOrNull() == GroupKind.ONE_TO_ONE
+            val keys = runCatching { record.group.members() }.getOrNull().orEmpty().map {
+                me.lakko.app.contacts.LinkClaims.hex(personKeyOf(it))
+            }
+            me.lakko.app.contacts.LinkClaims.HeldConversation(oneToOne, keys)
+        }
+
+    /** ADR-0079 - the hex id of a held one-to-one with the account whose key
+     *  is [accountKey], or `null`. */
+    public fun heldOneToOneHex(accountKey: ByteArray): String? {
+        val want = me.lakko.app.contacts.LinkClaims.hex(accountKey)
+        return groups.entries.firstOrNull { (_, record) ->
+            val oneToOne = runCatching { record.group.groupKind() }.getOrNull() == GroupKind.ONE_TO_ONE
+            val keys = runCatching { record.group.members() }.getOrNull().orEmpty().map {
+                me.lakko.app.contacts.LinkClaims.hex(personKeyOf(it))
+            }
+            me.lakko.app.contacts.LinkClaims.holdsOneToOneWith(
+                listOf(me.lakko.app.contacts.LinkClaims.HeldConversation(oneToOne, keys)),
+                want,
+            )
+        }?.key
     }
 
     /**

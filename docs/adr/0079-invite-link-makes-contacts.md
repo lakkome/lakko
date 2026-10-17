@@ -322,9 +322,45 @@ change.
      a later claim cannot be earlier, only the roster can change), so if the
      device that beat it is removed before it builds, the next earliest
      current claim wins — this device's when it is next;
-  3. only the winner runs the ordinary accept path (one-to-one, contact row,
-     ack) and counts the use; a build that fails is retried at the next pass
-     from the won record, whatever the verdict reads by then.
+  3. only the winner builds, and in this order (2026-10-17, so that a
+     winner removed after building can never be followed by a second
+     one-to-one):
+     a. **before any device builds** — the first winner and any device that
+        took the request over because the winner left the roster — it reads
+        its account mailbox past now (zero-wait passes that join every
+        pending Welcome, until one that started after the call found no row
+        past the cursor: web `mailboxCatchUp`, iOS `catchUpMailboxPastNow`,
+        Android `catchUpMailboxPastNow`) and looks for a held one-to-one
+        with the requester's account; if one is held, the request is
+        answered (the use is recorded in the register, the contact row
+        written, the ack sent) and nothing is built. Before that, when this
+        device joined that one-to-one from a Welcome it still keeps (each
+        client keeps the Welcome of every one-to-one it joins, the newest 32,
+        in the claim record), it writes those same bytes to the requester's
+        mailbox with the request's reply grant: the founder may have written
+        this account's mailbox and left before writing the requester's, and
+        the Welcome is byte-identical for every added leaf, so the requester
+        joins (or ignores a duplicate). A failed write leaves the request for
+        the next pass. A catch-up that times out leaves the request
+        undecided for the next pass: never built blind, never dropped;
+     b. the one-to-one is founded in ONE commit adding the requester's
+        devices AND every other current device of this account (ADR-0050
+        section 2; it was already one commit on all three), the journal
+        claimed and the founder's state persisted, and the founding (group
+        id, the Welcome, its targets in delivery order) is recorded durably
+        in the won record BEFORE any Welcome leaves;
+     c. the Welcome is written to this account's own mailbox FIRST and to
+        the requester's only after that write succeeded (`welcomeOrder` on
+        all three; the ordinary `startGroupWith` / `deliverPreparedWelcomes`
+        follow the same order now). So whenever the requester holds the
+        Welcome, every own device's mailbox holds it too, and step a finds
+        the one-to-one on any device that takes over;
+     d. the contact row, the ack and the use count.
+     A retry (a failed publish, a restart) finds the founding in the won
+     record and resumes it: the same group is made a held conversation
+     (from the MLS snapshot after a restart) and its Welcome written again
+     in the same order (receivers ignore a duplicate); nothing is founded
+     twice.
   A claim from another device is honoured only from a sender leaf the
   DeviceGroup roster resolves at receipt (C-68) and recorded with that
   leaf's key (at most 16 per request, the lowest ids) before the batch
@@ -356,12 +392,16 @@ change.
 
 **Residuals.**
 
-- A device that won and built, then failed to record the use in the
-  register, and was then removed from the account before the record went
-  out: the other devices see the winner gone with the request still
-  unanswered in the register, and the next claim's author builds a second
-  one-to-one with the requester. The request is answered twice, never not
-  at all.
+- A device of the account that is not in the founded one-to-one (paired
+  after the founding, or whose KeyPackage the founder did not find in the
+  directory when it founded) does not hold it after step a; if it then takes
+  the request over because the founder left the roster, it founds a second
+  one-to-one. The same happens when such a device's join of the own Welcome
+  fails.
+- The forward in step a needs the joined Welcome to be kept: a device that
+  joined more than 32 other one-to-ones since, or whose kept copy was lost,
+  answers without forwarding; if the founder had left between its two
+  writes, the requester then gets no Welcome.
 - A request a device lost (or saw another device claim) leaves the store
   only when the register says it was answered or the link is dead. If the
   winner's use never reaches the register while the winner stays in the

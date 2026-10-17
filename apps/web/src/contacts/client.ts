@@ -181,6 +181,7 @@ import { ROLE_CHANGE_ALREADY_PENDING_KEY } from "../chat/ownership-transfer";
 import { KeyedError } from "../l10n/keyed-error";
 import { recordOwnRequest, type OwnRequest } from "../chat/membership-retry";
 import { ownPersonKeyB64, personKeyOf } from "../chat/person-key";
+import { welcomeOrder } from "./link-claims";
 
 /** Optional wires the route layer hands to ContactsClient
  *  (Phase 1.16e6c2). See `ChatClientOptions` in
@@ -3230,7 +3231,11 @@ export class ContactsClient {
     options: { readonly replyGrantB64?: string | null } = {},
   ): Promise<{ welcomeMessageId: number }> {
     let firstWelcomeMessageId = 0;
-    for (const target of targets) {
+    // ADR-0079 (2026-10-17) - this account's own mailbox FIRST, the
+    // recipient's only after it was written: whenever the recipient holds the
+    // Welcome, every own device's mailbox holds it too. A failure stops the
+    // loop, so the recipient is never written after a failed own write.
+    for (const target of welcomeOrder(targets)) {
       let publish;
       try {
         publish = await this.sendWelcome(target.accountKey, welcome, {
@@ -3240,7 +3245,8 @@ export class ContactsClient {
       } catch (err) {
         throw ContactsError.wrap(err);
       }
-      if (firstWelcomeMessageId === 0) firstWelcomeMessageId = publish.messageId;
+      // The recipient's write names the Welcome (it used to be the first).
+      if (firstWelcomeMessageId === 0 || target.isRecipient) firstWelcomeMessageId = publish.messageId;
     }
     return { welcomeMessageId: firstWelcomeMessageId };
   }

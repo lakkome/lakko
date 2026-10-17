@@ -56,6 +56,67 @@ public object LinkClaims {
     @Serializable
     public data class Observed(val id: Long, val author: String)
 
+    /** One account a founded one-to-one's Welcome goes to. */
+    @Serializable
+    public data class FoundedTarget(val accountKeyB64: String, val isRecipient: Boolean)
+
+    /** The one-to-one this device founded for a request it won, recorded
+     *  BEFORE any Welcome is posted, so a retry (a failed publish, a restart)
+     *  delivers the SAME group's Welcome instead of founding a second one. */
+    @Serializable
+    public data class Founded(
+        val groupIdHex: String,
+        /** The Welcome (base64); emptied once every target was written. */
+        val welcomeB64: String,
+        /** In delivery order: this account's own mailbox first. */
+        val targets: List<FoundedTarget>,
+        val delivered: Boolean,
+    )
+
+    /**
+     * The order a founded one-to-one's Welcome is written in: this account's
+     * own mailbox (its other devices) FIRST, the requester's after it. So
+     * whenever the requester holds the Welcome, every own device's mailbox
+     * holds it too, and a device that takes the request over finds the
+     * one-to-one before it could found a second. Stable within each half.
+     */
+    public fun <T> welcomeOrder(targets: List<T>, isRecipient: (T) -> Boolean): List<T> =
+        targets.filterNot(isRecipient) + targets.filter(isRecipient)
+
+    /** What a device that won a request does before it builds anything. */
+    public enum class BuildStep {
+        /** A one-to-one was founded for it already: deliver that one's Welcome. */
+        RESUME,
+        /** The account mailbox could not be read past now: decide next pass. */
+        WAIT,
+        /** A one-to-one with the requester is held already: answered, build nothing. */
+        ANSWERED,
+        /** Found the one-to-one. */
+        FOUND,
+    }
+
+    /** Before any device builds a one-to-one for a request (the first winner,
+     *  or a device that took it over because the winner left the roster), it
+     *  reads its account mailbox past now and looks for a one-to-one with the
+     *  requester. */
+    public fun buildStep(hasFounded: Boolean, mailboxCaughtUp: Boolean, holdsOneToOne: Boolean): BuildStep =
+        when {
+            hasFounded -> BuildStep.RESUME
+            !mailboxCaughtUp -> BuildStep.WAIT
+            holdsOneToOne -> BuildStep.ANSWERED
+            else -> BuildStep.FOUND
+        }
+
+    /** A held conversation as the one-to-one check reads it. */
+    public data class HeldConversation(val oneToOne: Boolean, val memberAccountKeysHex: List<String>)
+
+    /** Whether one of [conversations] is a one-to-one with the account whose
+     *  key is [requesterKeyHex]. */
+    public fun holdsOneToOneWith(conversations: List<HeldConversation>, requesterKeyHex: String): Boolean {
+        val want = requesterKeyHex.lowercase()
+        return conversations.any { c -> c.oneToOne && c.memberAccountKeysHex.any { it.lowercase() == want } }
+    }
+
     /** This device's own claims for one request. */
     @Serializable
     public data class Own(
@@ -71,6 +132,8 @@ public object LinkClaims {
          *  known, so the next passes re-check against the current roster
          *  without reading the journal again. */
         val settled: Boolean = false,
+        /** The one-to-one founded for the request (won claims only). */
+        val founded: Founded? = null,
     ) {
         /** Whether this device holds any claim for the request. */
         public val holdsClaim: Boolean get() = won != null || ids.isNotEmpty() || wires.isNotEmpty()
@@ -212,10 +275,16 @@ public class InMemoryLinkClaimStorage : LinkClaimStorage {
 private data class SeenClaims(val claims: List<LinkClaims.Observed>, val at: Long)
 
 @Serializable
+private data class JoinedWelcome(val welcomeB64: String, val at: Long)
+
+@Serializable
 private data class ClaimBody(
     val v: Int = 2,
     val seen: Map<String, SeenClaims> = emptyMap(),
     val own: Map<String, LinkClaims.Own> = emptyMap(),
+    /** The Welcome each recently joined one-to-one was joined from, by
+     *  group id: a device that takes a request over forwards it. */
+    val joined: Map<String, JoinedWelcome> = emptyMap(),
 )
 
 private val claimJson = Json { ignoreUnknownKeys = true }
@@ -301,6 +370,28 @@ public class LinkClaimRecord(private val accountIdB64: String, private val stora
         updateOwn(keyHex) { it.copy(wires = emptyList()) }
     }
 
+    /** Record the founded one-to-one (before any Welcome is posted), or its
+     *  delivery. `false` when the write failed: nothing may be posted for a
+     *  founding this device would not find again. */
+    public fun setFounded(keyHex: String, founded: LinkClaims.Founded): Boolean = synchronized(LOCK) {
+        updateOwn(keyHex) { it.copy(founded = founded) }
+    }
+
+    /** Keep the Welcome a one-to-one was joined from (the newest
+     *  [MAX_JOINED_WELCOMES]). */
+    public fun recordJoinedWelcome(groupIdHex: String, welcomeB64: String, nowMs: Long): Boolean = synchronized(LOCK) {
+        val body = read()
+        var joined = body.joined + (groupIdHex to JoinedWelcome(welcomeB64, nowMs))
+        if (joined.size > MAX_JOINED_WELCOMES) {
+            val drop = joined.entries.sortedBy { it.value.at }.take(joined.size - MAX_JOINED_WELCOMES).map { it.key }
+            joined = joined - drop.toSet()
+        }
+        write(body.copy(joined = joined))
+    }
+
+    /** The Welcome a held one-to-one was joined from, or `null`. */
+    public fun joinedWelcome(groupIdHex: String): String? = synchronized(LOCK) { read().joined[groupIdHex]?.welcomeB64 }
+
     /** Decided lost: re-check later without reading the journal again. */
     public fun setSettled(keyHex: String): Boolean = synchronized(LOCK) {
         updateOwn(keyHex) { it.copy(settled = true) }
@@ -318,6 +409,10 @@ public class LinkClaimRecord(private val accountIdB64: String, private val stora
 
     public companion object {
         private val LOCK = Any()
+
+        /** How many joined one-to-one Welcomes are kept. Chosen, not
+         *  measured (the web value). */
+        public const val MAX_JOINED_WELCOMES: Int = 32
 
         public fun onDevice(context: Context, accountIdB64: String): LinkClaimRecord =
             LinkClaimRecord(accountIdB64, PrefsLinkClaimStorage(context))
