@@ -388,6 +388,9 @@ private data class StoredPendingRequest(
     val validAfterMs: Long,
     val intro: String?,
     val createdAt: String,
+    /** ADR-0079 - the dead-link note, kept with the request. */
+    val viaDeadLink: Boolean = false,
+    val deadLinkIdB64: String? = null,
 )
 
 /** JSON for [pending]; `java.util.Base64` for the byte fields so the codec
@@ -403,6 +406,8 @@ internal fun encodePendingRequests(pending: List<IncomingContactRequest>): Strin
                 validAfterMs = r.validAfterMs.toLong(),
                 intro = r.intro,
                 createdAt = r.createdAt,
+                viaDeadLink = r.viaDeadLink,
+                deadLinkIdB64 = r.deadLinkId?.let { base64Encode(it) },
             )
         },
     )
@@ -419,6 +424,8 @@ internal fun decodePendingRequests(raw: String): List<IncomingContactRequest>? =
                 validAfterMs = s.validAfterMs.toULong(),
                 intro = s.intro,
                 createdAt = s.createdAt,
+                viaDeadLink = s.viaDeadLink,
+                deadLinkId = s.deadLinkIdB64?.let { base64Decode(it) },
             )
         }
     } catch (_: Exception) {

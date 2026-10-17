@@ -26,6 +26,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -42,8 +43,9 @@ import me.lakko.app.ui.components.LakkoAvatar
  *
  * The inviter's name and username as the link states them, the label, **Add**
  * and **Not now**. No fingerprint, no safety number: those stay on the
- * contact's info screen. A signed-out person never reaches this screen: the
- * deep link is parked until a session lands.
+ * contact's info screen. A signed-out person sees [SignedOutInviteScreen]
+ * instead (UX section 3, "Signed out"); the deep link stays parked, and once
+ * a session lands the page opens here in its default state.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -119,6 +121,101 @@ public fun InviteLandingScreen(
                     body = t("common.error.session_ended"),
                     onDone = onDone,
                 )
+            }
+        }
+    }
+}
+
+/**
+ * The invite page for a person who is not signed in
+ * (`docs/ux/contact-invite-link.md` section 3, "Signed out"; ADR-0079
+ * reworked 2026-10-17): the same page, with **Sign in to add Anna** and
+ * **Create an account**. Mirror of the web `Invite.tsx` signed-out state and
+ * the iOS `SignedOutInviteScreen`. Opening it spends nothing and sends
+ * nothing; the link stays parked, so after either choice the person returns
+ * to the invite page in its default state, not to the chat list.
+ */
+@Composable
+public fun SignedOutInviteScreen(
+    slug: String,
+    preview: suspend (String) -> me.lakko.app.contacts.InvitePreviewResult,
+    onSignIn: () -> Unit,
+    onCreateAccount: () -> Unit,
+    onDone: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var attempt by androidx.compose.runtime.remember(slug) { androidx.compose.runtime.mutableIntStateOf(0) }
+    val result by androidx.compose.runtime.produceState<me.lakko.app.contacts.InvitePreviewResult?>(
+        initialValue = null,
+        slug,
+        attempt,
+    ) {
+        value = null
+        value = preview(slug)
+    }
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        when (val r = result) {
+            null -> CircularProgressIndicator(modifier = Modifier.size(48.dp))
+            is me.lakko.app.contacts.InvitePreviewResult.Preview -> {
+                val name = nameOf(r.statedName)
+                LakkoAvatar(
+                    name = r.statedName.orEmpty(),
+                    seed = me.lakko.app.ds.hexOf(r.ownerSignaturePubkey),
+                    size = 72.dp,
+                )
+                Spacer(Modifier.height(16.dp))
+                Title(t("invite.contact.page.title", mapOf("name" to name)))
+                val username = r.username
+                if (!username.isNullOrEmpty() && r.statedName != "@$username") {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "@$username",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (r.label.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = r.label,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+                Spacer(Modifier.height(24.dp))
+                Button(onClick = onSignIn, modifier = Modifier.fillMaxWidth()) {
+                    Text(t("invite.contact.page.sign_in", mapOf("name" to name)))
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = onCreateAccount, modifier = Modifier.fillMaxWidth()) {
+                    Text(t("invite.contact.page.create_account"))
+                }
+            }
+            me.lakko.app.contacts.InvitePreviewResult.Dead -> MessagePanel(
+                title = t("invite.contact.page.dead_title"),
+                body = t("invite.contact.page.dead_body"),
+                onDone = onDone,
+            )
+            me.lakko.app.contacts.InvitePreviewResult.RateLimited -> {
+                Text(
+                    text = me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT.text(),
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(24.dp))
+                Button(onClick = { attempt += 1 }) { Text(t("common.try_again")) }
+            }
+            me.lakko.app.contacts.InvitePreviewResult.Failed -> {
+                Title(t("invite.contact.result.failed_title"))
+                Spacer(Modifier.height(24.dp))
+                Button(onClick = { attempt += 1 }) { Text(t("common.try_again")) }
             }
         }
     }

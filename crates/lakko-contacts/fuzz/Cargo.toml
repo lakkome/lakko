@@ -243,3 +243,10 @@ path = "fuzz_targets/push_wake_open.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "link_claim_decode"
+path = "fuzz_targets/link_claim_decode.rs"
+test = false
+doc = false
+bench = false

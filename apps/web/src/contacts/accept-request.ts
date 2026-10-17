@@ -92,24 +92,3 @@ export async function acceptContactRequest(
   await sendAck();
   return { accepted, groupIdB64, legacy: false, chatError };
 }
-
-/**
- * ADR-0079 section 3 — what the mailbox does with a request, by its link
- * answer and the link register's verdict on it. Pure.
- *
- * | link answer | verdict    | action                                   |
- * |-------------|------------|------------------------------------------|
- * | none        | -          | `card`: an ordinary request card          |
- * | present     | `accept`   | `accept`: accept now, no card             |
- * | present     | `answered` | `drop`: already accepted, show nothing    |
- * | present     | `dead`     | `card-dead-link`: the card with the note  |
- */
-export function linkAnswerAction(
-  hasLinkAnswer: boolean,
-  verdict: "accept" | "answered" | "dead" | null,
-): "card" | "accept" | "drop" | "card-dead-link" {
-  if (!hasLinkAnswer) return "card";
-  if (verdict === "accept") return "accept";
-  if (verdict === "answered") return "drop";
-  return "card-dead-link";
-}

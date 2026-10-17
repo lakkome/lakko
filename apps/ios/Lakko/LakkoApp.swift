@@ -715,6 +715,12 @@ struct AppRoot: View, Equatable {
     /// before the app. The phrase is not shown at sign-up.
     @State private var pendingSignupProtect = false
 
+    /// The choice made on the signed-out invite page (UX contact-invite-link
+    /// section 3, "Signed out"): the sign-in or sign-up screen it opened.
+    /// `nil` while that page is shown. The link stays parked either way, so
+    /// the session that lands opens the invite page in its default state.
+    @State private var signedOutInviteChoice: AnonRoute?
+
     /// Mirror of ``DeviceGroupSyncRepository/deviceRemoved`` (UX spec
     /// second-device section 3.1). Received rather than observed: observing
     /// the sync repository would re-run this body on every draft and read
@@ -867,15 +873,32 @@ struct AppRoot: View, Equatable {
                         ),
                         onDone: {}
                     )
+                } else if let inviteSlug = inviteIntake.pendingSlug, signedOutInviteChoice == nil {
+                    // ADR-0079 (reworked 2026-10-17) — a tapped `/i/` link
+                    // from a person who is not signed in: the invite page
+                    // with Sign in / Create an account. The slug stays
+                    // parked; the session that lands opens the default page.
+                    SignedOutInviteScreen(
+                        slug: inviteSlug,
+                        preview: { [contacts = services.contactsRepository] in
+                            await contacts.previewInviteLink(slug: $0)
+                        },
+                        onSignIn: { signedOutInviteChoice = .login },
+                        onCreateAccount: { signedOutInviteChoice = .signup },
+                        onDone: { inviteIntake.clear() }
+                    )
+                    .id(inviteSlug)
                 } else {
                     AnonRoot(
                         repository: authRepository,
                         cachedUsername: cachedUsername,
                         accountProtection: services.accountProtection,
-                        onSignedUp: { pendingSignupProtect = true }
+                        onSignedUp: { pendingSignupProtect = true },
+                        initialRoute: signedOutInviteChoice
                     )
                 }
             }
+            .onChange(of: inviteIntake.pendingSlug) { _, _ in signedOutInviteChoice = nil }
             // Pending contact / group invites land in
             // `InviteIntake` but cannot consume in the anon state —
             // those flows need `identitySecrets`. We leave the slug
@@ -2245,7 +2268,8 @@ private struct AnonRoot: View {
         repository: AuthRepository,
         cachedUsername: String?,
         accountProtection: AccountProtectionCenter,
-        onSignedUp: @escaping () -> Void
+        onSignedUp: @escaping () -> Void,
+        initialRoute: AnonRoute? = nil
     ) {
         // The step after a sign-up ("Protect your account") is the app
         // root's, shown over the session; the view model only tells it.
@@ -2266,8 +2290,13 @@ private struct AnonRoot: View {
                 keepAddress: { [weak accountProtection] in accountProtection?.keepAddress($0) }
             )
         )
-        // A returning user lands on Log in; a fresh device on Welcome.
-        self._path = State(initialValue: cachedUsername == nil ? [] : [.login])
+        // A returning user lands on Log in; a fresh device on Welcome. The
+        // signed-out invite page opens the screen the person chose there.
+        if let initialRoute {
+            self._path = State(initialValue: [initialRoute])
+        } else {
+            self._path = State(initialValue: cachedUsername == nil ? [] : [.login])
+        }
     }
 
     var body: some View {
@@ -2311,7 +2340,7 @@ private struct AnonRoot: View {
 }
 
 /// The screens the anonymous stack can push over Welcome.
-private enum AnonRoute: Hashable {
+enum AnonRoute: Hashable {
     case signup
     case login
     case recover

@@ -185,7 +185,7 @@ final class BackupApplyTests: XCTestCase {
             contacts: [contactRecord(0x01, "Alice")],
             groupIds: [g1],
             syncedState: try syncedStateBytes(pinning: g1))
-        XCTAssertEqual(parsed.syncedState.first, 0x03)
+        XCTAssertEqual(parsed.syncedState.first, 0x04)
         parsed.syncedState[parsed.syncedState.startIndex] = 0x01
 
         let announced = expectation(forNotification: .lakkoSyncedStateRestored, object: nil)

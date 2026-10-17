@@ -58,12 +58,17 @@ extension ChatRepository {
         guard let queue = pendingInvitedQueue else { return false }
         let entries = queue.list(conversationHex: queueKey)
         let conversationHex = conversationIdHex(ofGroup: groupIdHex)
+        // Their give-up clock starts now: they could not be sent before the
+        // conversation existed (the web and Android hand-over do the same).
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         for entry in entries {
             // Already moved by an earlier pass that stopped half way.
             if queue.list(conversationHex: conversationHex).contains(where: { $0.localId == entry.localId }) {
                 continue
             }
-            guard queue.enqueue(conversationHex: conversationHex, entry: entry) else { return false }
+            guard queue.enqueue(conversationHex: conversationHex, entry: entry.requeued(atMs: nowMs)) else {
+                return false
+            }
         }
         _ = queue.clear(conversationHex: queueKey)
         restoreHeldRows()

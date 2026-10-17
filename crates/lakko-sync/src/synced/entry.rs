@@ -221,6 +221,9 @@ pub enum BoundsError {
     /// A link record named more than 16 requesters, or one twice.
     #[error("link record requester list is out of bounds")]
     LinkRecordAnswered,
+    /// A link record's revocation seed was neither empty nor 32 bytes.
+    #[error("link record revocation seed length is out of bounds")]
+    LinkRecordRevocationSeedLength,
 }
 
 /// Which kind of conversation a [`ConversationRef`] names.

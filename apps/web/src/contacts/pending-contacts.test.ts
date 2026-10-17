@@ -3,17 +3,18 @@
 
 import { describe, expect, it } from "vitest";
 
+import { HeldSendStore } from "../chat/held-send";
 import {
-  MAX_PENDING_MESSAGES,
   PENDING_STALE_MS,
   decodePendingContacts,
   encodePendingContacts,
+  moveHeldToConversation,
   pendingContactForConversation,
   pendingLine,
   pendingNameOf,
+  pendingQueueKey,
   shownPendingContacts,
   withPendingContact,
-  withQueuedMessage,
   withoutPendingContact,
   type PendingContact,
 } from "./pending-contacts";
@@ -32,41 +33,43 @@ function withAnna(): PendingContact[] {
 }
 
 describe("pending contacts (ADR-0079 section 5)", () => {
-  it("queues messages in the order written", () => {
-    let list = withAnna();
-    for (const [i, text] of ["one", "two", "three"].entries()) {
-      const next = withQueuedMessage(list, anna.accountIdHex, { id: `m${i}`, text, createdAtMs: 2_000 + i });
-      expect(next).not.toBeNull();
-      list = next as PendingContact[];
-    }
-    expect(list[0]?.queue.map((m) => m.text)).toEqual(["one", "two", "three"]);
-    // The order survives the store's encoding.
-    const back = decodePendingContacts(encodePendingContacts(list));
-    expect(back[0]?.queue.map((m) => m.text)).toEqual(["one", "two", "three"]);
+  it("keeps the record without messages and round-trips it through the store encoding", () => {
+    const back = decodePendingContacts(encodePendingContacts(withAnna()));
+    expect(back).toEqual([anna]);
+    expect(Object.keys(back[0] ?? {})).not.toContain("queue");
   });
 
-  it("refuses an empty message, an unknown contact and a full queue", () => {
-    const list = withAnna();
-    expect(withQueuedMessage(list, anna.accountIdHex, { id: "x", text: "", createdAtMs: 1 })).toBeNull();
-    expect(withQueuedMessage(list, "b".repeat(32), { id: "x", text: "hi", createdAtMs: 1 })).toBeNull();
-    let full: PendingContact[] = list;
-    for (let i = 0; i < MAX_PENDING_MESSAGES; i += 1) {
-      full = withQueuedMessage(full, anna.accountIdHex, { id: `${i}`, text: "x", createdAtMs: i }) as PendingContact[];
-    }
-    expect(withQueuedMessage(full, anna.accountIdHex, { id: "z", text: "x", createdAtMs: 0 })).toBeNull();
+  it("refuses the version-1 layout that kept messages inside the record", () => {
+    const v1 = JSON.stringify({ v: 1, contacts: [{ ...anna, queue: [{ id: "m", text: "hi", createdAtMs: 1 }] }] });
+    expect(decodePendingContacts(v1)).toEqual([]);
   });
 
-  it("keeps the first Add time and the queue when the same person is added again", () => {
-    const queued = withQueuedMessage(withAnna(), anna.accountIdHex, {
-      id: "m",
-      text: "hi",
-      createdAtMs: 5,
-    }) as PendingContact[];
-    const again = withPendingContact(queued, { ...anna, addedAtMs: 9_999, displayName: "Anna B." });
+  it("keys what is written on the inviter's account id, never a conversation id", () => {
+    expect(pendingQueueKey(anna)).toBe(anna.accountIdHex);
+    expect(pendingQueueKey(anna)).toHaveLength(32);
+  });
+
+  it("hands the messages over to the joined conversation in the order written", () => {
+    const store = new HeldSendStore<{ text: string }>();
+    const conversationHex = "c".repeat(64);
+    store.hold(pendingQueueKey(anna), { text: "one" }, 10);
+    store.hold(pendingQueueKey(anna), { text: "two" }, 20);
+    store.hold(conversationHex, { text: "earlier" }, 5);
+    expect(moveHeldToConversation(store, anna, conversationHex, 99)).toBe(2);
+    expect(store.count(pendingQueueKey(anna))).toBe(0);
+    const moved = store.take(conversationHex);
+    expect(moved.map((h) => h.payload.text)).toEqual(["earlier", "one", "two"]);
+    // The give-up clock starts at the hand-over.
+    expect(moved.map((h) => h.heldAtMs)).toEqual([5, 99, 99]);
+    // Nothing left: a second hand-over moves nothing.
+    expect(moveHeldToConversation(store, anna, conversationHex, 100)).toBe(0);
+  });
+
+  it("keeps the first Add time when the same person is added again", () => {
+    const again = withPendingContact(withAnna(), { ...anna, addedAtMs: 9_999, displayName: "Anna B." });
     expect(again).toHaveLength(1);
     expect(again[0]?.addedAtMs).toBe(1_000);
     expect(again[0]?.displayName).toBe("Anna B.");
-    expect(again[0]?.queue).toHaveLength(1);
     expect(withoutPendingContact(again, anna.accountIdHex)).toEqual([]);
   });
 
@@ -100,6 +103,6 @@ describe("pending contacts (ADR-0079 section 5)", () => {
 
   it("reads junk as no pending contacts", () => {
     expect(decodePendingContacts("not json")).toEqual([]);
-    expect(decodePendingContacts(JSON.stringify({ contacts: [{ accountIdHex: "x" }] }))).toEqual([]);
+    expect(decodePendingContacts(JSON.stringify({ v: 2, contacts: [{ accountIdHex: "x" }] }))).toEqual([]);
   });
 });

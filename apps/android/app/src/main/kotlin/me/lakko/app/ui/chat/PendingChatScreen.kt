@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -32,6 +32,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -52,9 +53,11 @@ import me.lakko.app.l10n.t
  *
  * One line at the top says the person gets the messages when their app is
  * next online (after 7 days: that they have not answered yet). What is
- * written is kept on this device with the clock mark of any unsent message
- * and sent in order once the inviter's Welcome lands; the screen then hands
- * over to the real chat. The call buttons are disabled.
+ * written is kept on this device in the one held-send queue under the
+ * contact's queue key (reworked 2026-10-17, as on web and iOS), shown with
+ * the clock mark of any unsent message, and sent in order once the
+ * inviter's Welcome lands; the screen then hands over to the real chat. The
+ * call buttons are disabled.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -71,6 +74,10 @@ public fun PendingChatScreen(
     val name = contact?.let(PendingContacts::name) ?: t("invite.contact.page.unnamed")
     var draft by remember { mutableStateOf("") }
     var callHintShown by remember { mutableStateOf(false) }
+    /** Bumped after every message this screen keeps (the queue is not a
+     *  flow). */
+    var queueVersion by remember { mutableIntStateOf(0) }
+    val messages = remember(queueVersion, contact) { contacts.pendingInvitedMessages(accountIdHex) }
 
     LaunchedEffect(handedOver) { handedOver[accountIdHex]?.let(onConnected) }
 
@@ -134,7 +141,7 @@ public fun PendingChatScreen(
                                 .padding(vertical = 12.dp),
                         )
                     }
-                    items(contact.messages, key = { it.localId }) { message ->
+                    itemsIndexed(messages, key = { i, m -> "${m.heldAtMs}-$i" }) { _, message ->
                         Row(verticalAlignment = Alignment.Bottom) {
                             Surface(
                                 shape = RoundedCornerShape(16.dp),
@@ -182,7 +189,10 @@ public fun PendingChatScreen(
                     enabled = draft.isNotBlank() && contact != null,
                     onClick = {
                         val text = draft.trim()
-                        if (contacts.queuePendingInvitedMessage(accountIdHex, text)) draft = ""
+                        if (contacts.queuePendingInvitedMessage(accountIdHex, text)) {
+                            draft = ""
+                            queueVersion += 1
+                        }
                     },
                 ) {
                     Icon(Icons.AutoMirrored.Filled.Send, contentDescription = t("chat.composer.send"))

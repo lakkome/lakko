@@ -13,8 +13,9 @@ import SwiftUI
 /// closes into the chat with the inviter. No fingerprint, no safety number:
 /// those stay on the contact's info screen.
 ///
-/// A signed-out person never reaches this screen: the deep link is parked
-/// until a session lands, and the page then opens in its default state.
+/// A signed-out person sees ``SignedOutInviteScreen`` instead (UX section 3,
+/// "Signed out"); the deep link stays parked, and once a session lands the
+/// page opens here in its default state.
 public struct InviteLandingScreen: View {
 
     @ObservedObject public var viewModel: InviteLandingViewModel
@@ -169,6 +170,154 @@ public struct InviteLandingScreen: View {
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
+    }
+}
+
+/// The invite page for a person who is not signed in
+/// (`docs/ux/contact-invite-link.md` section 3, "Signed out"; ADR-0079
+/// reworked 2026-10-17): the same page, with **Sign in to add Anna** and
+/// **Create an account**. Mirror of the web `Invite.tsx` signed-out state and
+/// the Android `SignedOutInviteScreen`. Opening it spends nothing and sends
+/// nothing; the link stays parked, so after either choice the person returns
+/// to the invite page in its default state, not to the chat list.
+public struct SignedOutInviteScreen: View {
+
+    @StateObject private var viewModel: SignedOutInviteViewModel
+    public var onSignIn: () -> Void
+    public var onCreateAccount: () -> Void
+    public var onDone: () -> Void
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
+
+    public init(
+        slug: String,
+        preview: @escaping (String) async -> InvitePreviewResult,
+        onSignIn: @escaping () -> Void,
+        onCreateAccount: @escaping () -> Void,
+        onDone: @escaping () -> Void
+    ) {
+        self._viewModel = StateObject(wrappedValue: SignedOutInviteViewModel(slug: slug, preview: preview))
+        self.onSignIn = onSignIn
+        self.onCreateAccount = onCreateAccount
+        self.onDone = onDone
+    }
+
+    public var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) { content }
+                    .frame(maxWidth: .infinity)
+                    .padding(24)
+            }
+            .navigationTitle(l10n.t("invite.contact.page_title"))
+            .navigationBarTitleDisplayMode(.inline)
+            .task { await viewModel.open() }
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch viewModel.state {
+        case .loading:
+            ProgressView().controlSize(.large).padding(.top, 40)
+        case .preview(let preview):
+            let name = preview.statedName ?? l10n.t("invite.contact.page.unnamed")
+            InitialsAvatar(
+                name: preview.statedName ?? "",
+                identity: base64Encode(preview.ownerSignaturePubkey),
+                size: 72,
+                placeholderSymbol: "person.fill")
+            Text(l10n.t("invite.contact.page.title", texts: ["name": name]))
+                .font(.title2.weight(.semibold))
+                .multilineTextAlignment(.center)
+            if let username = preview.username, !username.isEmpty, preview.statedName != "@\(username)" {
+                Text("@\(username)")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+            if !preview.label.isEmpty {
+                Text(preview.label)
+                    .font(.body)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .multilineTextAlignment(.center)
+            }
+            Button(action: onSignIn) {
+                Text(l10n.t("invite.contact.page.sign_in", texts: ["name": name])).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            Button(action: onCreateAccount) {
+                Text(l10n.t("invite.contact.page.create_account")).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+        case .dead:
+            Text(l10n.t("invite.contact.page.dead_title"))
+                .font(.title2.weight(.semibold))
+                .multilineTextAlignment(.center)
+            Text(l10n.t("invite.contact.page.dead_body"))
+                .font(.body)
+                .foregroundStyle(Color.lakkoTextMuted)
+                .multilineTextAlignment(.center)
+            Button(action: onDone) {
+                Text(l10n.t("invite.contact.page.done")).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+        case .rateLimited, .failed:
+            Text(viewModel.state == .rateLimited
+                 ? inviteRateLimitedMessage
+                 : l10n.t("invite.contact.result.failed_title"))
+                .font(.body)
+                .multilineTextAlignment(.center)
+            Button(l10n.t("common.try_again")) {
+                Task { await viewModel.retry() }
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+}
+
+/// State of ``SignedOutInviteScreen``.
+@MainActor
+final class SignedOutInviteViewModel: ObservableObject {
+    enum State: Equatable {
+        case loading
+        case preview(InvitePreview)
+        case dead
+        case rateLimited
+        case failed
+    }
+
+    @Published private(set) var state: State = .loading
+    private let slug: String
+    private let preview: (String) async -> InvitePreviewResult
+    private var didOpen = false
+
+    init(slug: String, preview: @escaping (String) async -> InvitePreviewResult) {
+        self.slug = slug
+        self.preview = preview
+    }
+
+    /// What the page shows for each result of opening the link.
+    nonisolated static func state(for result: InvitePreviewResult) -> State {
+        switch result {
+        case .preview(let p): return .preview(p)
+        case .dead: return .dead
+        case .rateLimited: return .rateLimited
+        case .failed: return .failed
+        }
+    }
+
+    func open() async {
+        guard !didOpen else { return }
+        didOpen = true
+        state = Self.state(for: await preview(slug))
+    }
+
+    func retry() async {
+        state = .loading
+        state = Self.state(for: await preview(slug))
     }
 }
 

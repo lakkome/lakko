@@ -1301,10 +1301,20 @@ public func nseIsServiceEnvelope(
     // like every service envelope, never stored. A yes / no from the slim
     // FFI (`isDeviceCardEnvelope`). Defaulted for the reason above.
     isDeviceCard: (Data) -> Bool = { _ in false },
-    deviceCardEnvelopeLens: ClosedRange<Int> = 0...0
+    deviceCardEnvelopeLens: ClosedRange<Int> = 0...0,
+    // ADR-0079 (reworked 2026-10-17) — the twelfth, a link-request claim. It
+    // rides the account's own DeviceGroup, which this process never reads;
+    // recognised and suppressed like every service envelope, never acted
+    // on. A yes / no from the slim FFI (`isLinkClaimEnvelope`). Defaulted for
+    // the reason above.
+    isLinkClaim: (Data) -> Bool = { _ in false },
+    linkClaimEnvelopeLen: Int = 0
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
     if nseLooksLikeDeviceCard(bytes, envelopeLens: deviceCardEnvelopeLens), isDeviceCard(bytes) {
+        return true
+    }
+    if nseLooksLikeLinkClaim(bytes, envelopeLen: linkClaimEnvelopeLen), isLinkClaim(bytes) {
         return true
     }
     if nseLooksLikeKeyRotation(bytes, envelopeLen: keyRotationEnvelopeLen), isKeyRotation(bytes) {
@@ -1358,6 +1368,19 @@ private let deviceCardEnvelopeFirstByte: UInt8 = 0x6C
 public func nseLooksLikeDeviceCard(_ bytes: Data, envelopeLens: ClosedRange<Int>) -> Bool {
     envelopeLens.lowerBound > 0 && envelopeLens.contains(bytes.count)
         && bytes.first == deviceCardEnvelopeFirstByte
+}
+
+/// First byte of the ADR-0079 link-claim domain separator
+/// (`"lakko/link-claim/v1\0"`): the same ASCII `l` as every other envelope
+/// domain, its own constant for the same reason as the others.
+private let linkClaimEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for an ADR-0079 link-request claim: the exact length
+/// injected from the slim FFI (`linkClaimEnvelopeLen()`, never a hand-copied
+/// number) plus the first domain byte. The peek decides nothing;
+/// `isLinkClaimEnvelope` is the verdict.
+public func nseLooksLikeLinkClaim(_ bytes: Data, envelopeLen: Int) -> Bool {
+    envelopeLen > 0 && bytes.count == envelopeLen && bytes.first == linkClaimEnvelopeFirstByte
 }
 
 /// First byte of the ADR-0057 registrar-seed domain separator — the same ASCII

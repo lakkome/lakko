@@ -15,7 +15,14 @@
  *
  * One `localStorage` row per account, key `lakko.contacts.inbox.v1.<account>`:
  *
- *   `{ v: 1, cursor, pending: [{ messageId, payloadB64, createdAt }] }`
+ *   `{ v: 1, cursor, pending: [{ messageId, payloadB64, createdAt, link? }] }`
+ *
+ * `link` (ADR-0079, reworked 2026-10-17) is present only for a request that
+ * answers one of this account's invite links: `"undecided"` while the device
+ * cannot decide it yet (the synced link records are not loaded, or its claim
+ * is in progress or won but not yet built) - the row is kept, not listed;
+ * `"dead"` once the link was found no longer working - listed as a card with
+ * the note, which therefore survives a reload.
  *
  * `pending` holds the mailbox rows' request bodies, not decoded requests.
  * ADR-0078: a mailbox row is sealed to the account's mailbox key; the payload
@@ -54,11 +61,17 @@ import type { IncomingContactRequest, MailboxRow } from "./client";
 
 const KEY_PREFIX = "lakko.contacts.inbox.v1.";
 
+/** ADR-0079 - where a request answering one of this account's invite links
+ *  stands. */
+export type LinkRowState = "undecided" | "dead";
+
 /** One mailbox row as stored. */
 export interface StoredMailboxRow {
   readonly messageId: number;
   readonly payloadB64: string;
   readonly createdAt: string;
+  /** ADR-0079: absent for every request that answers no link. */
+  readonly link?: LinkRowState;
 }
 
 /** What the store holds for one account. */
@@ -107,13 +120,15 @@ function storageKey(accountIdB64: string): string {
 }
 
 function isStoredRow(r: unknown): r is StoredMailboxRow {
+  const link = (r as StoredMailboxRow | null)?.link;
   return (
     typeof r === "object" &&
     r !== null &&
     typeof (r as StoredMailboxRow).messageId === "number" &&
     Number.isFinite((r as StoredMailboxRow).messageId) &&
     typeof (r as StoredMailboxRow).payloadB64 === "string" &&
-    typeof (r as StoredMailboxRow).createdAt === "string"
+    typeof (r as StoredMailboxRow).createdAt === "string" &&
+    (link === undefined || link === "undecided" || link === "dead")
   );
 }
 
@@ -206,8 +221,13 @@ export function clearAllInboxes(storage: StorageLike | null = defaultStorage()):
   }
 }
 
-export function toStoredRow(row: MailboxRow): StoredMailboxRow {
-  return { messageId: row.messageId, payloadB64: base64Encode(row.payload), createdAt: row.createdAt };
+export function toStoredRow(row: MailboxRow, link?: LinkRowState): StoredMailboxRow {
+  return {
+    messageId: row.messageId,
+    payloadB64: base64Encode(row.payload),
+    createdAt: row.createdAt,
+    ...(link !== undefined ? { link } : {}),
+  };
 }
 
 export function fromStoredRow(row: StoredMailboxRow): MailboxRow {
@@ -223,6 +243,9 @@ export interface FetchedRequest {
    *  superseded. Removed in the same write, so the list shows one request
    *  per person and never a second row. */
   readonly replaces?: readonly number[];
+  /** ADR-0079 - the request answers one of this account's invite links and
+   *  is kept undecided (not listed) until the device decides it. */
+  readonly undecidedLink?: boolean;
 }
 
 /** One pending request as the one-per-person rule reads it. */
@@ -271,8 +294,18 @@ export interface PendingInboxDeps {
 export interface PendingInbox {
   cursor(): number;
   /** Pending requests in arrival order. A kept row whose decode has not
-   *  finished yet (just after a reload) is not listed until it has. */
+   *  finished yet (just after a reload) is not listed until it has, nor is
+   *  an undecided link request (ADR-0079). A dead-link row is listed with
+   *  `deadLink` set. */
   pending(): readonly IncomingContactRequest[];
+  /** ADR-0079 - the decoded requests that answer one of this account's
+   *  invite links and are not decided yet, in arrival order. */
+  undecidedLinkRequests(): readonly IncomingContactRequest[];
+  /** ADR-0079 - the decoded requests shown with the dead-link note. */
+  deadLinkRequests(): readonly IncomingContactRequest[];
+  /** ADR-0079 - mark a kept request dead (listed with the note). Throws when
+   *  the write fails. */
+  markDeadLink(messageId: number): void;
   /** Add freshly polled requests (deduped by `messageId` and against the
    *  accepted list) and persist them with the CURRENT cursor. Throws when the
    *  write fails, leaving memory unchanged, so the dispatch holds the cursor. */
@@ -318,6 +351,19 @@ export function createPendingInbox(deps: PendingInboxDeps): PendingInbox {
   function pending(): readonly IncomingContactRequest[] {
     const out: IncomingContactRequest[] = [];
     for (const r of rows) {
+      if (r.link === "undecided") continue;
+      const req = decoded.get(r.messageId);
+      if (req === undefined) continue;
+      if (r.link === "dead") req.deadLink = true;
+      out.push(req);
+    }
+    return out;
+  }
+
+  function withLink(link: LinkRowState): readonly IncomingContactRequest[] {
+    const out: IncomingContactRequest[] = [];
+    for (const r of rows) {
+      if (r.link !== link) continue;
       const req = decoded.get(r.messageId);
       if (req !== undefined) out.push(req);
     }
@@ -327,6 +373,20 @@ export function createPendingInbox(deps: PendingInboxDeps): PendingInbox {
   return {
     cursor: () => cursor,
     pending,
+    undecidedLinkRequests: () => withLink("undecided"),
+    deadLinkRequests: () => withLink("dead"),
+    markDeadLink(messageId) {
+      const at = rows.findIndex((r) => r.messageId === messageId);
+      const row = rows[at];
+      if (row === undefined || row.link === "dead") return;
+      const nextRows = [...rows];
+      nextRows[at] = { ...row, link: "dead" };
+      write(cursor, nextRows);
+      rows = nextRows;
+      const req = decoded.get(messageId);
+      if (req !== undefined) req.deadLink = true;
+      deps.onChange();
+    },
     addFetched(fetched) {
       const ids = new Set(rows.map((r) => r.messageId));
       const added: FetchedRequest[] = [];
@@ -344,7 +404,7 @@ export function createPendingInbox(deps: PendingInboxDeps): PendingInbox {
       for (const f of added) replaced.delete(f.request.messageId);
       const nextRows = [
         ...rows.filter((r) => !replaced.has(r.messageId)),
-        ...added.map((f) => toStoredRow(f.row)),
+        ...added.map((f) => toStoredRow(f.row, f.undecidedLink === true ? "undecided" : undefined)),
       ];
       write(cursor, nextRows);
       rows = nextRows;

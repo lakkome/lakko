@@ -335,7 +335,11 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             keyRotationEnvelopeLen: Int(keyRotationEnvelopeLen()),
             // ADR-0080 — a device card: a yes / no from the slim FFI.
             isDeviceCard: { isDeviceCardEnvelope(plaintext: $0) },
-            deviceCardEnvelopeLens: Int(deviceCardEnvelopeMinLen())...Int(deviceCardEnvelopeMaxLen())
+            deviceCardEnvelopeLens: Int(deviceCardEnvelopeMinLen())...Int(deviceCardEnvelopeMaxLen()),
+            // ADR-0079 (reworked 2026-10-17) — a link-request claim: a yes /
+            // no from the slim FFI.
+            isLinkClaim: { isLinkClaimEnvelope(plaintext: $0) },
+            linkClaimEnvelopeLen: Int(linkClaimEnvelopeLen())
         ) {
             return nil
         }

@@ -2372,6 +2372,15 @@ pub enum FfiIncomingEnvelopeKind {
     /// [`crate::device_card::device_card_is_newer`], drop it when the leaf
     /// leaves.
     DeviceCard,
+    /// Another device of this account claims a contact request sent through
+    /// one of the account's invite links (ADR-0079, reworked 2026-10-17).
+    /// The decoded claim rides the `link_claim` field; `payload` is empty.
+    /// Never render it. Appended last so every earlier variant keeps its
+    /// ordinal.
+    ///
+    /// Meaningful ONLY in the account's own DeviceGroup: met anywhere else,
+    /// drop it.
+    LinkClaim,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2444,6 +2453,10 @@ pub struct FfiIncomingEnvelope {
     /// every other kind. Defaults to `None` so existing initialisers compile.
     #[uniffi(default = None)]
     pub device_card: Option<crate::device_card::FfiDeviceCard>,
+    /// Set only for `LinkClaim` (ADR-0079): the decoded claim. `None` for
+    /// every other kind. Defaults to `None` so existing initialisers compile.
+    #[uniffi(default = None)]
+    pub link_claim: Option<crate::link_claim::FfiLinkClaim>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -2543,6 +2556,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             device_card: Some(card.into()),
             ..FfiIncomingEnvelope::of(K::DeviceCard)
         },
+        IncomingEnvelope::LinkClaim(claim) => FfiIncomingEnvelope {
+            link_claim: Some(claim.into()),
+            ..FfiIncomingEnvelope::of(K::LinkClaim)
+        },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),
             ..FfiIncomingEnvelope::of(K::IntroMessage)
@@ -2571,6 +2588,7 @@ impl FfiIncomingEnvelope {
             group_closed: None,
             key_rotation: None,
             device_card: None,
+            link_claim: None,
         }
     }
 }

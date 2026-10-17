@@ -391,6 +391,7 @@ mod fuzz_api_tests {
                     link_secret: [5; 12],
                     kind: crate::synced::LinkRecordKind::Contact,
                     ledger_id: vec![6; 6],
+                    revocation_seed: vec![8; 32],
                     expiry_ms: 0,
                     max_uses: 0,
                     uses: 0,

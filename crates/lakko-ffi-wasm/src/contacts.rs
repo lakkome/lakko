@@ -2356,6 +2356,11 @@ pub enum WasmIncomingEnvelopeKind {
     /// store it under the sender's leaf signature key resolved at receipt,
     /// keep it only when `deviceCardIsNewer`, drop it when the leaf leaves.
     DeviceCard = 19,
+    /// Another device of this account claims a contact request sent through
+    /// one of the account's invite links (ADR-0079, reworked 2026-10-17).
+    /// The decoded claim rides the `linkClaim` getter; `payload` is empty.
+    /// Never render it. Meaningful ONLY in the account's own DeviceGroup.
+    LinkClaim = 20,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2380,6 +2385,7 @@ pub struct WasmIncomingEnvelope {
     group_closed: Option<WasmGroupClosed>,
     key_rotation: Option<crate::key_rotation::WasmKeyRotation>,
     device_card: Option<crate::device_card::WasmDeviceCard>,
+    link_claim: Option<crate::link_claim::WasmLinkClaim>,
 }
 
 impl WasmIncomingEnvelope {
@@ -2403,6 +2409,7 @@ impl WasmIncomingEnvelope {
             group_closed: None,
             key_rotation: None,
             device_card: None,
+            link_claim: None,
         }
     }
 }
@@ -2532,6 +2539,13 @@ impl WasmIncomingEnvelope {
     pub fn device_card(&self) -> Option<crate::device_card::WasmDeviceCard> {
         self.device_card.clone()
     }
+
+    /// Set only for `LinkClaim` (ADR-0079): the decoded claim. `undefined`
+    /// for every other kind.
+    #[wasm_bindgen(getter, js_name = linkClaim)]
+    pub fn link_claim(&self) -> Option<crate::link_claim::WasmLinkClaim> {
+        self.link_claim
+    }
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts
@@ -2652,6 +2666,10 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::DeviceCard(card) => WasmIncomingEnvelope {
             device_card: Some(card.into()),
             ..WasmIncomingEnvelope::of(K::DeviceCard)
+        },
+        IncomingEnvelope::LinkClaim(claim) => WasmIncomingEnvelope {
+            link_claim: Some(claim.into()),
+            ..WasmIncomingEnvelope::of(K::LinkClaim)
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             payload: p.to_vec(),

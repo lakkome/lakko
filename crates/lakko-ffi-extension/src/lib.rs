@@ -110,6 +110,7 @@ pub mod ds_proof;
 pub mod group_closed;
 pub mod group_name;
 pub mod key_rotation;
+pub mod link_claim;
 pub mod pin;
 pub mod profile;
 pub mod profile_request;

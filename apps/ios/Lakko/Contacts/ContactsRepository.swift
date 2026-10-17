@@ -131,9 +131,25 @@ public final class ContactsRepository: ObservableObject {
     public weak var chatRepository: ChatRepository?
 
     /// ADR-0079 section 4 — the synced link-record register: the verdict on
-    /// a request's link answer, the use count, the revocations made on other
-    /// devices. Wired once at app start.
-    public weak var deviceGroupSync: DeviceGroupSyncRepository?
+    /// a request's link answer, the use count, the revocations, and (reworked
+    /// 2026-10-17) the claims of link requests. Wired once at app start; the
+    /// undecided link requests are decided when its state loads, when a
+    /// claim from another device arrives, and when the register moves.
+    public weak var deviceGroupSync: DeviceGroupSyncRepository? {
+        didSet { observeLinkDecisionTriggers() }
+    }
+    private var linkDecisionTriggers: Set<AnyCancellable> = []
+
+    private func observeLinkDecisionTriggers() {
+        linkDecisionTriggers.removeAll()
+        guard let sync = deviceGroupSync else { return }
+        sync.$ready.removeDuplicates().sink { [weak self] _ in
+            Task { @MainActor [weak self] in await self?.decideLinkRequests() }
+        }.store(in: &linkDecisionTriggers)
+        sync.$linkClaimsVersion.removeDuplicates().sink { [weak self] _ in
+            Task { @MainActor [weak self] in await self?.decideLinkRequests() }
+        }.store(in: &linkDecisionTriggers)
+    }
 
     /// ADR-0079 section 5 — the inviters added through their link whose app
     /// has not answered yet, for the bound account.
@@ -534,6 +550,7 @@ public final class ContactsRepository: ObservableObject {
             // identity verdict are judged again first; one whose sender is no
             // longer an established contact is an ordinary request.
             var newPending: [IncomingContactRequest] = await retryWaitingKnownRequests(client: client)
+            var undecidedArrived = false
             for event in pollResult.events {
                 // The session ended (or changed account) while this batch
                 // was in flight, or while a Welcome of it was being joined:
@@ -541,7 +558,7 @@ public final class ContactsRepository: ObservableObject {
                 // and Welcomes are not filed under whoever is bound now.
                 guard boundAccountIdB64 == pollAccountIdB64 else { break }
                 switch event {
-                case .contactRequest(var req, let replyGrant, let linkAnswer):
+                case .contactRequest(let req, let replyGrant, let linkAnswer):
                     // ADR-0060 section 6 — the requester's `reply` grant, filed
                     // under the key the request signature authenticated; the
                     // accept (Welcome) and the ack are written with it.
@@ -565,24 +582,17 @@ public final class ContactsRepository: ObservableObject {
                     // answered silently, dropped, or kept waiting for a
                     // verdict. Nothing is shown either way.
                     if await handleKnownContactRequest(req, client: client) { continue }
-                    // ADR-0079 section 3 — a request sent through one of this
-                    // account's live invite links is accepted here, with no
-                    // card; one already accepted (by this device or another)
-                    // is answered; one whose link no longer works is an
-                    // ordinary card with a note.
+                    // ADR-0079 section 3 (reworked 2026-10-17) — a request
+                    // sent through one of this account's invite links is kept
+                    // undecided (sealed on the device, not shown) and decided
+                    // after this batch by ``decideLinkRequests()``: accepted
+                    // with no card by the one device whose claim wins,
+                    // answered, or a card with the dead-link note.
                     if let linkAnswer {
-                        let verdict = await deviceGroupSync?.linkAnswerVerdict(
-                            linkId: linkAnswer.linkId, linkSecret: linkAnswer.linkSecret,
-                            requesterKey: req.fromPubkey) ?? .dead
-                        guard boundAccountIdB64 == pollAccountIdB64 else { break }
-                        switch verdict {
-                        case .answered:
-                            continue
-                        case .accept:
-                            if await acceptThroughLink(req, linkAnswer: linkAnswer) { continue }
-                        case .dead:
-                            req = req.sentThroughDeadLink()
-                        }
+                        LinkRequestInbox(accountIdB64: pollAccountIdB64).add(LinkRequestInbox.Row(
+                            request: req, linkId: linkAnswer.linkId, linkSecret: linkAnswer.linkSecret))
+                        undecidedArrived = true
+                        continue
                     }
                     newPending.append(req)
                 case .welcome(_, let welcomeBytes, _):
@@ -715,9 +725,13 @@ public final class ContactsRepository: ObservableObject {
             // after this device adopted, then left.
             await pollPredecessorMailboxes(accountIdB64: pollAccountIdB64)
             // ADR-0079 — a pending contact whose one-to-one exists already,
-            // and a link revoked on another device of the account.
+            // a link revoked on another device of the account, and the
+            // undecided link requests.
             handOverJoinedPendingContacts()
             await revokeLinksRevokedElsewhere()
+            if undecidedArrived || !LinkRequestInbox(accountIdB64: pollAccountIdB64).rows().isEmpty {
+                await decideLinkRequests()
+            }
         } catch {
             // A cancelled poll (the screen was left, the session ended, the
             // long-poll was superseded) is not a failure: keep whatever the
@@ -1354,9 +1368,11 @@ public final class ContactsRepository: ObservableObject {
             mintedAtMs: nowMs))
         // ADR-0079 section 4 — the link's record goes to the synced register,
         // so every device of the account auto-accepts a request through it,
-        // lists it and can revoke it. The revocation seed stays here.
+        // lists it and can revoke it. Since the 2026-10-17 rework it carries
+        // the revocation seed, so a revoke on any device deletes the row.
         await deviceGroupSync?.setLinkRecord(LinkRecord(
             hlc: 0, linkId: linkId, linkSecret: mint.linkSecret, kind: .contact, ledgerId: blobId,
+            revocationSeed: revocation.seed,
             expiryMs: UInt64(max(0, expiryMs)), maxUses: maxUses, uses: 0, revoked: false,
             mintedAtMs: UInt64(max(0, nowMs)), label: label, answered: []))
         let invite = GeneratedInvite(
@@ -1389,21 +1405,22 @@ public final class ContactsRepository: ObservableObject {
         let accountIdB64 = base64Encode(secrets.accountId)
         // ADR-0079 section 4 — the revocation is marked in the synced register
         // first, from whichever device: every device stops accepting through
-        // the link at once, and the device that minted it (the one holding
-        // the revocation seed) deletes the ledger row when it sees the mark.
+        // the link at once. Since the 2026-10-17 rework the register carries
+        // the revocation seed, so THIS device deletes the ledger row now,
+        // whichever device minted the link; the seed of this device's own
+        // record is the fallback for a record written before that.
         let record = deviceGroupSync?.linkRecords.first { $0.kind == .contact && $0.ledgerId == blobId }
         if let record { await deviceGroupSync?.revokeLinkRecord(linkId: record.linkId) }
-        guard let own = OwnLinkStore.shared.link(
-            accountIdB64: accountIdB64, kind: .contact, slug: base64UrlEncodeNoPad(blobId)),
-              let seed = own.seed else {
-            guard record != nil else {
-                throw ContactsError.wrap(ContactsError.simple(
-                    "this device keeps no revocation key for that link"))
-            }
-            // Minted on another device: that device revokes the ledger row.
-            ReachCenter.shared.removeLink(blobId: blobId)
-            InviteLinkSecretStore.shared.remove(accountIdB64: accountIdB64, slug: base64UrlEncodeNoPad(blobId))
-            return .revoked
+        let own = OwnLinkStore.shared.link(
+            accountIdB64: accountIdB64, kind: .contact, slug: base64UrlEncodeNoPad(blobId))
+        let seed: Data
+        if let recordSeed = record?.revocationSeed, recordSeed.count == 32 {
+            seed = recordSeed
+        } else if let ownSeed = own?.seed {
+            seed = ownSeed
+        } else {
+            throw ContactsError.wrap(ContactsError.simple(
+                "this device keeps no revocation key for that link"))
         }
         let discovery = authenticatedDiscoveryClient()
         let bound = binding.capture()
@@ -1737,6 +1754,30 @@ public final class ContactsRepository: ObservableObject {
             bootstrapReferral: capability.bootstrapReferral()))
     }
 
+    /// The signed-out invite page (`docs/ux/contact-invite-link.md` section
+    /// 3, "Signed out"; ADR-0079 reworked 2026-10-17): open the link with no
+    /// session, only to say who invites. Fetching a ledger row needs no
+    /// session; nothing is spent and nothing is sent. Signing in or creating
+    /// an account then lands on the default page through the parked link.
+    public func previewInviteLink(slug token: String) async -> InvitePreviewResult {
+        let parts = InviteLinkSecret.split(token)
+        guard let blobId = Self.parseInviteSlug(parts.base),
+              let linkSecret = InviteLinkSecret.read(parts.fragment) else { return .dead }
+        let sealed: Data?
+        do {
+            sealed = try await discoveryClientFactory().fetchInvite(blobId: blobId)
+        } catch {
+            if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
+            return .failed
+        }
+        guard let sealed,
+              let capability = try? InviteCapability.openLink(sealed: sealed, linkSecret: linkSecret),
+              capability.isValidNow(nowMs: UInt64(Date().timeIntervalSince1970 * 1000)) else { return .dead }
+        return .preview(InvitePreview(
+            displayName: capability.inviterDisplayName(), username: capability.inviterUsername(),
+            label: capability.label(), ownerSignaturePubkey: capability.ownerSignaturePubkey()))
+    }
+
     /// **Add** on the invite page (ADR-0079 sections 2 and 5): the link's
     /// ledger use is spent, the inviter is recorded as a pending contact, and
     /// the contact request goes out carrying the link answer, so the
@@ -1814,6 +1855,18 @@ public final class ContactsRepository: ObservableObject {
         invited.first { $0.accountIdHex == accountIdHex }
     }
 
+    /// B deletes a pending contact (UX section 7 item 4): the record goes,
+    /// and so do the messages kept for it in the held-send queue. `false`
+    /// when no such contact is held.
+    @discardableResult
+    public func removePendingContact(accountIdHex: String) -> Bool {
+        guard let accountIdB64 = boundAccountIdB64,
+              let contact = invited.first(where: { $0.accountIdHex == accountIdHex }) else { return false }
+        chatRepository?.clearPendingInvitedMessages(queueKey: contact.queueKey)
+        setInvited(invited.filter { $0.accountIdHex != accountIdHex }, accountIdB64: accountIdB64)
+        return true
+    }
+
     /// ADR-0079 section 5 — the pending contacts whose one-to-one now exists
     /// on this device (the Welcome joined in this poll, or before the record
     /// was read): their messages move to the conversation's held-send queue
@@ -1837,12 +1890,12 @@ public final class ContactsRepository: ObservableObject {
 
     // MARK: - ADR-0079: the inviter's device (A)
 
-    /// The device's own accept of a request sent through one of this
+    /// The winning device's accept of a request sent through one of this
     /// account's live invite links (ADR-0079 section 3): the ordinary accept
     /// path (the one-to-one founded with the requester's `reply` grant, the
     /// contact recorded, then the ack), then one use of the link counted in
     /// the synced register. `false` when the accept did not complete; the
-    /// request is then shown as an ordinary card.
+    /// won claim stays recorded and the next pass tries again.
     func acceptThroughLink(_ request: IncomingContactRequest, linkAnswer: FfiLinkAnswer) async -> Bool {
         guard let chatRepository, let fromAccountId = request.fromAccountId else { return false }
         let groupIdHex: String
@@ -1852,7 +1905,7 @@ public final class ContactsRepository: ObservableObject {
                 recipientSignaturePubkey: request.fromPubkey,
                 kind: .oneToOne)
         } catch {
-            NSLog("ADR-0079: invite-link accept did not complete; shown as a request")
+            NSLog("ADR-0079: invite-link accept did not complete; retried at the next pass")
             return false
         }
         if !state.accepted.contains(where: { $0.request.fromPubkey == request.fromPubkey }) {
@@ -1867,11 +1920,164 @@ public final class ContactsRepository: ObservableObject {
         return true
     }
 
-    /// ADR-0079 section 4 — a link this device minted that another device of
-    /// the account revoked: only this device holds the seed that deletes the
-    /// ledger row (``OwnLinkStore``), so it does so when the register's mark
-    /// arrives. Run after every poll; a link already revoked here has no
-    /// record left.
+    /// One decision pass at a time; a trigger during a pass runs one more.
+    private var linkPassRunning = false
+    private var linkPassAgain = false
+
+    /// ADR-0079 (reworked 2026-10-17) — decide every undecided request that
+    /// answers one of the account's invite links (``LinkClaims/step``): no
+    /// timer; a request waits, kept and unshown, until the synced state is
+    /// loaded, and only the device whose claim is first in the DeviceGroup
+    /// journal builds the one-to-one. The claim record is read and written
+    /// on the main actor between the awaits, so one decision never
+    /// interleaves with another (C-62 sub-invariant 5).
+    public func decideLinkRequests() async {
+        if linkPassRunning {
+            linkPassAgain = true
+            return
+        }
+        linkPassRunning = true
+        defer { linkPassRunning = false }
+        repeat {
+            linkPassAgain = false
+            await decideLinkRequestsOnce()
+        } while linkPassAgain
+    }
+
+    private func decideLinkRequestsOnce() async {
+        guard let accountIdB64 = boundAccountIdB64 else { return }
+        let bound = binding.capture()
+        let claims = LinkClaims.Record(accountIdB64: accountIdB64)
+        let inbox = LinkRequestInbox(accountIdB64: accountIdB64)
+        // Whether a device in the CURRENT roster claimed the request (a claim
+        // only from a device since removed answers nothing). `false` while
+        // the roster is not known.
+        let answeredElsewhere: (String) -> Bool = { [weak self] key in
+            let seen = claims.seen(key)
+            guard !seen.isEmpty, let roster = self?.deviceGroupSync?.linkClaimRoster() else { return false }
+            return (try? linkClaimAnsweredElsewhere(
+                claims: Self.ffiClaims(seen), rosterKeys: roster.roster)) ?? false
+        }
+        // A card already shown (dead link here) for a request a roster device
+        // claimed: answered, the card goes.
+        let answeredCards = state.pending.filter { req in
+            guard let linkId = req.deadLinkId else { return false }
+            let key = LinkClaims.requestKeyHex(linkId: linkId, requesterKey: req.fromPubkey)
+            return LinkClaims.shownCardAnswered(own: claims.own(key), answeredElsewhere: answeredElsewhere(key))
+        }
+        if !answeredCards.isEmpty {
+            let ids = Set(answeredCards.map(\.messageId))
+            state = state.with(pending: state.pending.filter { !ids.contains($0.messageId) })
+        }
+        for row in inbox.rows() {
+            guard bound.isCurrent else { return }
+            let req = row.request
+            let key = LinkClaims.requestKeyHex(linkId: row.linkId, requesterKey: req.fromPubkey)
+            let verdict: LinkClaims.LinkAnswerVerdictValue? = deviceGroupSync.flatMap { sync in
+                sync.linkAnswerVerdictNow(
+                    linkId: row.linkId, linkSecret: row.linkSecret, requesterKey: req.fromPubkey)
+            }.map {
+                switch $0 {
+                case .accept: return .accept
+                case .answered: return .answered
+                case .dead: return .dead
+                }
+            }
+            var step = LinkClaims.step(own: claims.own(key), answeredElsewhere: answeredElsewhere(key), verdict: verdict)
+            switch step {
+            case .wait:
+                continue
+            case .drop:
+                claims.forgetOwn(key)
+                inbox.remove(messageId: req.messageId)
+                continue
+            case .cardDead:
+                let card = req.sentThroughDeadLink(linkId: row.linkId)
+                if !state.pending.contains(where: { $0.messageId == card.messageId }) {
+                    state = state.with(pending: state.pending + [card])
+                }
+                inbox.remove(messageId: req.messageId)
+                continue
+            case .postClaim, .decide, .recheck, .build:
+                break
+            }
+            guard let sync = deviceGroupSync else { continue }
+            if step == .postClaim {
+                // The sealed claim is recorded before the publish: whether or
+                // not the publish answers, the receive loop recognises its
+                // row by those bytes and files its id as this device's.
+                do {
+                    _ = try await sync.postLinkClaim(
+                        linkId: row.linkId,
+                        requesterKey: req.fromPubkey,
+                        beforePublish: { claims.addOwnWire(key, wireHex: $0) },
+                        onPublished: { claims.recordOwnClaimRow(wireHex: $0, messageId: $1) })
+                    step = .decide
+                } catch {
+                    NSLog("ADR-0079: link claim not posted this pass")
+                    continue
+                }
+            }
+            if step == .decide || step == .recheck {
+                // Every row up to (and past) this device's claims is applied
+                // once a fetch that started after them found the journal
+                // drained. A wait that times out keeps the request undecided
+                // for the next pass. A re-check reads no journal: every claim
+                // of this device is known and only the roster can change.
+                if step == .decide {
+                    guard await sync.waitForJournalReadPastNow(), bound.isCurrent else { continue }
+                }
+                guard let roster = sync.linkClaimRoster() else { continue }
+                // A sealed claim no row carried did not land.
+                claims.dropUnlanded(key)
+                let decide = LinkClaims.claimsToDecide(
+                    own: claims.own(key), seen: claims.seen(key), ownKeyHex: LinkClaims.hex(roster.ownKey))
+                guard let outcome = try? linkClaimOutcome(
+                    ownKey: roster.ownKey, claims: Self.ffiClaims(decide), rosterKeys: roster.roster)
+                else { continue }
+                switch outcome {
+                case .lost:
+                    // Another device's claim is first: it answers the request.
+                    // Kept, unshown, until the register says it was
+                    // answered; if that device is removed first, a re-check
+                    // hands it on.
+                    claims.setSettled(key)
+                    continue
+                case .noWinner:
+                    // No claim from the roster landed: post again next pass.
+                    claims.forgetOwn(key)
+                    continue
+                case .won(let messageId):
+                    claims.setWon(key, messageId: Int64(messageId))
+                    step = .build
+                }
+            }
+            if step == .build {
+                let answer = FfiLinkAnswer(linkId: row.linkId, linkSecret: row.linkSecret)
+                if await acceptThroughLink(req, linkAnswer: answer), bound.isCurrent {
+                    inbox.remove(messageId: req.messageId)
+                    claims.forgetOwn(key)
+                }
+            }
+        }
+    }
+
+    /// The claim decision's inputs in the binding's shape; an author whose
+    /// hex does not decode is left out.
+    nonisolated static func ffiClaims(_ claims: [LinkClaims.Observed]) -> [FfiObservedLinkClaim] {
+        claims.compactMap { claim in
+            guard claim.id > 0, let author = LinkClaims.bytes(hex: claim.author) else { return nil }
+            return FfiObservedLinkClaim(messageId: UInt64(claim.id), authorKey: author)
+        }
+    }
+
+    /// ADR-0079 section 4 (reworked 2026-10-17) — a link this device minted
+    /// that another device of the account revoked: that device already
+    /// deleted the ledger row with the seed the register carries; this drops
+    /// this device's own record of it (deleting the row again, which the
+    /// ledger answers as gone, or deleting it when the revoking device could
+    /// not reach the ledger). Run after every poll; a link already revoked
+    /// here has no record left.
     public func revokeLinksRevokedElsewhere() async {
         guard let sync = deviceGroupSync, let accountIdB64 = boundAccountIdB64 else { return }
         let revokedSlugs = Set(sync.linkRecords.filter { $0.revoked && !$0.ledgerId.isEmpty }
@@ -1900,6 +2106,28 @@ public enum InviteOpenResult: Equatable {
     case rateLimited
     case requiresReauth
     case failed(message: String)
+}
+
+/// What the signed-out invite page shows of a link.
+public struct InvitePreview: Equatable {
+    public let displayName: String?
+    public let username: String?
+    public let label: String
+    public let ownerSignaturePubkey: Data
+
+    /// The name the link states (``OpenedInvite/statedName(displayName:username:)``).
+    public var statedName: String? {
+        OpenedInvite.statedName(displayName: displayName, username: username)
+    }
+}
+
+/// What opening a link with no session gave the signed-out invite page.
+public enum InvitePreviewResult: Equatable {
+    case preview(InvitePreview)
+    /// Revoked, expired, used up, unknown or damaged: one state.
+    case dead
+    case rateLimited
+    case failed
 }
 
 /// What **Add** did.

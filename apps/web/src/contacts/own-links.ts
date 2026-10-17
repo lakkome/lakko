@@ -95,11 +95,82 @@ export async function revokeMintedLink(
   return outcome;
 }
 
+/** What {@link deleteLedgerRowOfRecord} needs from a link record. */
+export interface LedgerRowRef {
+  readonly kind: "contact" | "call";
+  /** The 6-byte ledger id; empty for an inline link (no row). */
+  readonly ledgerId: Uint8Array;
+  /** The seed the row was created under; empty when none is held. */
+  readonly revocationSeed: Uint8Array;
+}
+
+/**
+ * ADR-0079 (reworked 2026-10-17) - delete a link's ledger row with the
+ * revocation seed its synced record carries. Any device of the account holds
+ * the seed, so the device that revokes deletes the row itself, at once.
+ * `"done"` also when there is no row (an inline link) or the ledger has no
+ * row any more. Never throws for the ledger's answer.
+ */
+export async function deleteLedgerRowOfRecord(
+  discovery: Pick<DiscoveryClient, "revokeInvite" | "revokeCallInvite">,
+  record: LedgerRowRef,
+): Promise<OwnLinkRevokeOutcome> {
+  if (record.ledgerId.length === 0) return "done";
+  if (record.revocationSeed.length === 0) return "no-key";
+  try {
+    if (record.kind === "contact") await discovery.revokeInvite(record.ledgerId, record.revocationSeed);
+    else await discovery.revokeCallInvite(record.ledgerId, record.revocationSeed);
+  } catch (err) {
+    if (err instanceof Error && err.name === "DiscoveryNetworkError") return "unreachable";
+    throw err;
+  }
+  return "done";
+}
+
+const OWED_PREFIX = "lakko.link-row-deletions-owed.v1.";
+
+/** The links (hex ids) whose ledger row this device revoked but could not
+ *  delete yet; retried at every change of the register and at start. */
+export function owedRowDeletions(accountIdB64: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(OWED_PREFIX + accountIdB64);
+    const parsed: unknown = raw === null ? [] : JSON.parse(raw);
+    return new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/** Record (or clear, `owed = false`) an owed row deletion. Best-effort. */
+export function setOwedRowDeletion(accountIdB64: string, linkIdHex: string, owed: boolean): void {
+  const set = owedRowDeletions(accountIdB64);
+  if (owed === set.has(linkIdHex)) return;
+  if (owed) set.add(linkIdHex);
+  else set.delete(linkIdHex);
+  try {
+    if (set.size === 0) localStorage.removeItem(OWED_PREFIX + accountIdB64);
+    else localStorage.setItem(OWED_PREFIX + accountIdB64, JSON.stringify([...set]));
+  } catch {
+    // The minting device's own cleanup still deletes the row.
+  }
+}
+
+/** Forget device: drop the owed list. */
+export function clearOwedRowDeletions(accountIdB64: string): void {
+  try {
+    localStorage.removeItem(OWED_PREFIX + accountIdB64);
+  } catch {
+    // best-effort
+  }
+}
+
 /**
  * ADR-0079 section 4 — a link another device of the account revoked: the
- * register says so, and only this device (which minted it) holds the seed
- * that deletes its ledger row. For every record of this device whose link
- * the register holds as revoked, revoke it now. Returns how many could not
+ * minting device still holds a local record of it (`minted-links.ts`).
+ * The device that revoked it has already deleted the ledger row with the
+ * seed the synced record carries; this drops the local record (and deletes
+ * the row again, which the ledger answers as gone, or deletes it when the
+ * revoking device could not reach the ledger). Returns how many could not
  * be reached (tried again at the next change). Never throws.
  */
 export async function revokeLinksRevokedElsewhere(
@@ -121,6 +192,17 @@ export async function revokeLinksRevokedElsewhere(
     }
   }
   return unreachable;
+}
+
+/** Drop this device's local record of a link (ADR-0078 phase 8) once its
+ *  ledger row was dealt with through the synced record. Never throws. */
+export async function forgetMintedLinkRecord(accountIdB64: string, link: MintedLinkRow): Promise<void> {
+  try {
+    await forgetMintedLink(accountIdB64, link.kind, link.blobIdSlug);
+  } catch {
+    // best-effort: a record left behind is revoked again at account deletion,
+    // which the ledger answers as gone
+  }
 }
 
 /** Revoke every live link this device keeps a record of (account deletion,

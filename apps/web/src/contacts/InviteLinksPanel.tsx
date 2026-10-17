@@ -19,11 +19,11 @@
  * query. ADR-0079 section 4 replaced "the links made on this device": the
  * list is the account's link-record register (`devices/sync/link-records.ts`),
  * which every device of the account holds, so a link made on another device
- * is listed, copied and revoked here too. The revocation seed stays on the
- * device that minted the link (`minted-links.ts`): revoking there deletes the
- * ledger row at once; revoking anywhere else marks the register revoked
- * (final) and the minting device deletes the row when it sees the mark
- * (`own-links.ts` `revokeLinksRevokedElsewhere`). Either way no device of the
+ * is listed, copied and revoked here too. Since the 2026-10-17 rework the
+ * register also carries the ledger row's revocation seed, so revoking on any
+ * device marks the register revoked (final) and deletes the ledger row at
+ * once with that seed (`own-links.ts` `deleteLedgerRowOfRecord`); a deletion
+ * the ledger could not be reached for is owed and retried. No device of the
  * account takes a request through the link from that moment.
  */
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
@@ -44,7 +44,13 @@ import {
   rememberMintedLink,
   type MintedLinkRow,
 } from "./minted-links";
-import { newRevocationKey, revokeMintedLink } from "./own-links";
+import {
+  deleteLedgerRowOfRecord,
+  forgetMintedLinkRecord,
+  newRevocationKey,
+  setOwedRowDeletion,
+} from "./own-links";
+import { hexOf } from "../devices/sync/link-records";
 import {
   appendInviteLinkSecret,
   composeSealedInviteLink,
@@ -274,6 +280,7 @@ export function InviteLinksPanel(): JSX.Element {
           linkSecret,
           kind: "contact",
           ledgerId: blobId,
+          revocationSeed: revocation.seed,
           expiryMs: Number(expiryMs),
           maxUses: maxUsesValue,
           mintedAtMs: Date.now(),
@@ -298,6 +305,7 @@ export function InviteLinksPanel(): JSX.Element {
           linkSecret,
           kind: "contact",
           ledgerId: new Uint8Array(0),
+          revocationSeed: new Uint8Array(0),
           expiryMs: Number(expiryMs),
           maxUses: maxUsesValue,
           mintedAtMs: Date.now(),
@@ -354,19 +362,24 @@ export function InviteLinksPanel(): JSX.Element {
       // of the account takes a request through it from now on, whatever the
       // ledger answers.
       await sync.revokeLinkRecord(record.linkId);
-      // ADR-0078 section 10: the ledger row is deleted with the link's own
-      // revocation seed, which only the minting device holds; elsewhere the
-      // minting device deletes it when it sees the mark. The reach key
-      // (ADR-0060 section 6) goes now on any device.
+      // ADR-0079 (reworked 2026-10-17): the ledger row is deleted here, now,
+      // with the revocation seed the synced record carries - on whichever
+      // device revokes. A ledger that cannot be reached leaves the deletion
+      // owed (retried by `MailboxContext`); the register already refuses the
+      // link on every device. The reach key (ADR-0060 section 6) goes too.
+      const account = base64Encode(secrets.accountId);
+      const linkIdHex = hexOf(record.linkId);
+      setOwedRowDeletion(account, linkIdHex, true);
+      const outcome = await deleteLedgerRowOfRecord(discovery, record);
+      if (outcome !== "unreachable") setOwedRowDeletion(account, linkIdHex, false);
+      await reachSession()?.revokeLink(record.linkId).catch(() => undefined);
       const local = links().find((l) => l.kind === "contact" && bytesEqual(l.linkId, record.linkId));
       if (local !== undefined) {
-        const outcome = await revokeMintedLink(discovery, base64Encode(secrets.accountId), local);
-        if (outcome === "unreachable") throw new KeyedError("chat.error.revoke_link");
+        await forgetMintedLinkRecord(account, local);
         forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), local.blobIdSlug);
         setLinks(links().filter((l) => l.blobIdSlug !== local.blobIdSlug));
-      } else {
-        await reachSession()?.revokeLink(record.linkId).catch(() => undefined);
       }
+      if (outcome === "unreachable") throw new KeyedError("chat.error.revoke_link");
       setNotice(() => t("invite.links.revoked"));
     } catch (err) {
       setError(contactsErrorText(err, "chat.error.revoke_link"));

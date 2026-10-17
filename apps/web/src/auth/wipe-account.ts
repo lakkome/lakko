@@ -340,10 +340,18 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       run: () => removeLocal(`lakko.own-username.unsent.v1.${accountIdB64}`),
     },
     { name: "username-change", run: () => clearRenameStores(storage, accountIdB64) },
-    // ADR-0079: the "link-record register is not confirmed sent" marker.
+    // ADR-0079: the "link-record register is not confirmed sent" marker,
+    // the claims of link requests (seen from the account's other devices and
+    // this device's own, reworked 2026-10-17), and the ledger-row deletions
+    // this device still owes.
     {
       name: "link-records-unsent",
       run: () => removeLocal(`lakko.link-records.unsent.v1.${accountIdB64}`),
+    },
+    { name: "link-claims", run: () => removeLocal(`lakko.link-claims.v1.${accountIdB64}`) },
+    {
+      name: "link-row-deletions-owed",
+      run: () => removeLocal(`lakko.link-row-deletions-owed.v1.${accountIdB64}`),
     },
     // ADR-0073 R.5 / R.7: when a conversation moved, and that a re-send ran.
     { name: "reset-continuity-state", run: () => clearContinuityStateForAccount(accountIdB64) },

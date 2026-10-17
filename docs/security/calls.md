@@ -5312,6 +5312,39 @@ up or unknown link is shown as an ordinary request card with a note; one
 already answered is dropped. A revocation in the register is final: no later
 write, from any device and at any stamp, makes the link live again.
 
+**Only one device answers (reworked 2026-10-17).** A device that decides to
+accept builds nothing until it has CLAIMED the request on the account's own
+DeviceGroup journal: it seals a `lakko/link-claim/v1\0` envelope naming
+`link_id(16) ‖ requester_account_key(32)`, records the sealed bytes durably,
+publishes them, reads the journal until a fetch that started after the
+publish has read it to its head, and asks the core
+(`lakko_contacts::link_claim::link_claim_outcome`): **the earliest claim for
+the request from a device in the CURRENT DeviceGroup roster wins, and the
+device whose leaf posted it builds** (one-to-one, Welcome, contact, use
+count). The core decides over claims the client feeds it, each a DS message
+id and an author leaf key: another device's author is the leaf key resolved
+from the MLS-authenticated sender at receipt (C-68), never read from the
+envelope; this device's own claims carry its own leaf key. A device cannot
+decrypt its own MLS application messages, so it recognises its own claim rows
+by the sealed bytes it recorded before the publish: the publish answer files
+the row's id at once, and the receive loop matches every row against the
+recorded bytes before processing it and before the batch persists. A crash
+between the publish and the recording of the id therefore loses nothing: the
+earlier own claim is still recognised and still wins, and the later
+duplicate changes nothing. A claim from a device no longer in the roster is
+passed over, so a removed device cannot leave a request unanswered: a device
+that lost, or that holds no claim and saw one from a roster device, keeps the
+request unshown until the link register says it was answered (or the link is
+dead), re-checking against the current roster at every pass, and the next
+earliest current claim's author builds when the winner is removed first.
+Journal order is the DS arrival order, which every device reads identically.
+The won claim is recorded durably before the build, so a winner that fails
+retries from it at its next pass; a device whose claim is not the winner
+never builds. A request is decided only once the device holds its synced
+state (no timer, no fallback to a card while it loads): until then it is
+kept, unshown, in the device's stored inbox, and a journal read that times
+out or finds the device offline leaves it so for the next pass.
+
 **Why it holds.** The verdict is one function in `lakko-sync`
 (`SyncedState::link_answer_verdict` over `LinkRecordEntry::verdict`), on both
 FFI surfaces, and no client re-derives it. The secret compare goes through
@@ -5327,29 +5360,56 @@ that never held the link cannot produce an answer.
 **Where it is enforced.** `crates/lakko-contacts/src/request.rs` (the
 `link_answer_len(u8) ‖ link_id(16) ‖ link_secret(12)` field, 0 or 28 bytes,
 fail-closed), `crates/lakko-sync/src/synced/link_record.rs` (the register,
-its envelope `lakko/sync/link-record/v1\0`, the verdict),
-`crates/lakko-sync/src/synced/state.rs` (`beats`, persisted state version 3).
-Clients: web `contacts/MailboxContext.tsx` + `contacts/accept-request.ts`,
-iOS `Contacts/ContactsRepository.swift` (`refreshInbox`,
-`acceptThroughLink`), Android `contacts/ContactsRepository.kt`
-(`triageLinkAnswers`, `acceptThroughLink`). Pinned by the proptests
-`a_mismatched_secret_is_never_accepted`,
-`the_matching_secret_accepts_exactly_a_live_contact_link` and
-`a_revocation_is_final_in_any_order`, the request codec's round-trip and
-refusal tests, and the extended fuzz targets
-`contact_request_decode_and_verify` and `synced_state_decode`.
-Unit-tested on 2026-10-16; not walked live.
+its envelope `lakko/sync/link-record/v1\0` at version byte `0x02`, the
+verdict, the record's revocation seed), `crates/lakko-sync/src/synced/state.rs`
+(`beats`, persisted state version 4), `crates/lakko-contacts/src/link_claim.rs`
+(the 69-byte claim envelope, fail-closed, its own `IncomingEnvelope::LinkClaim`
+kind, `link_claim_outcome` / `link_claim_winner` /
+`link_claim_answered_elsewhere` over `ObservedLinkClaim { message_id,
+author_key }` and the roster keys). Clients: web
+`contacts/MailboxContext.tsx` (`decideLinkRequests`) + `contacts/link-claims.ts`
++ `contacts/inbox-store.ts` (the `undecided` / `dead` row state) +
+`devices/sync/DeviceGroupSyncContext.tsx` (`postLinkClaim`,
+`linkClaimRoster`, the own-row byte match and the claim intake in the apply
+loop); iOS `Contacts/ContactsRepository.swift`
+(`decideLinkRequests`), `Contacts/LinkClaims.swift`,
+`Contacts/LinkRequestInbox.swift`, `Devices/Sync/DeviceGroupSyncRepository.swift`
+(`postLinkClaim`, `linkClaimRoster`, `matchOwnLinkClaim`, `receiveLinkClaim`,
+`waitForJournalReadPastNow`); Android
+`contacts/ContactsRepository.kt` (`decideLinkRequests`),
+`contacts/LinkClaims.kt`, `devices/sync/DeviceGroupSyncRepository.kt`
+(`postLinkClaim`, `linkClaimRoster`, `matchOwnLinkClaim`, `receiveLinkClaim`,
+`awaitJournalReadPastNow`). The NSE
+suppresses a claim (`lakko-ffi-extension/src/link_claim.rs`, golden). Pinned by
+the proptests `a_mismatched_secret_is_never_accepted`,
+`the_matching_secret_accepts_exactly_a_live_contact_link`,
+`a_revocation_is_final_in_any_order`,
+`exactly_one_device_wins_across_any_interleaving`,
+`an_unrecorded_earlier_own_claim_still_wins`,
+`a_removed_devices_claim_hands_the_request_to_the_next_current_claim` and
+`a_use_and_an_envelope_keep_the_revocation_seed`, the request and claim
+codecs' round-trip and refusal tests, the fuzz targets
+`contact_request_decode_and_verify`, `synced_state_decode` and
+`link_claim_decode`, and the client unit tests of the step rule (web
+`link-claims.test.ts`, iOS `LinkClaimsTests`, Android `LinkClaimsTest`).
+Unit-tested 2026-10-16 and, for the rework, 2026-10-17; not walked live.
 
-**What this does NOT do.** It does not stop two devices of the inviter, each
-seeing the same request before either device's use count reached the other,
-from both founding a one-to-one (the second is a duplicate conversation, not
-an extra member). It does not make a ledger row disappear at once when a link
-is revoked on a device that did not mint it: the minting device holds the
-revocation seed and deletes the row when it sees the register's mark, so
-until then the ledger still serves the sealed blob (the inviter's devices
-already refuse requests through it). It does not authenticate the inviter's
-name on the invite page beyond the capability's signature: the name is the
-inviter's own claim, signed by their account key.
+**What this does NOT do.** It does not authenticate the inviter's name on the
+invite page beyond the capability's signature: the name is the inviter's own
+claim, signed by their account key. It does not prevent a second answer in
+one case: a winner that built, failed to record the use in the register, and
+was removed before the record went out leaves the request unanswered in the
+register, and the next claim's author builds a second one-to-one with the
+requester (answered twice, never not at all). A request a device lost leaves
+its store only when the register says it was answered or the link is dead;
+if that never comes (the winner's use never reaches the register while the
+winner stays in the roster) it stays stored, unshown. It does not stop a
+device of the account from claiming a request nobody sent
+(that only keeps its own account's devices from answering a request that does
+not exist). The revocation seed travels in the synced record, so any device of
+the account can delete the ledger row: that is the point of the rework, and it
+means a device of the account that is compromised can delete any of the
+account's link rows (it could already revoke them in the register).
 
 ### C-84: A device card names nothing about its sender, travels only in the account's DeviceGroup, and the city behind it is looked up without a record
 

@@ -1705,8 +1705,13 @@ public data class IncomingContactRequest(
      *  request arrives and never persisted with the pending row. */
     val linkAnswer: FfiLinkAnswer? = null,
     /** ADR-0079 section 3 — the request named a link this account no longer
-     *  holds as live: shown as an ordinary card with a note. */
+     *  holds as live: shown as an ordinary card with a note. Persisted with
+     *  the pending row, so the note survives a restart. */
     val viaDeadLink: Boolean = false,
+    /** The 16-byte id of that dead link (not its secret): what the card is
+     *  matched by when another device of the account claims the same request
+     *  (ADR-0079, reworked 2026-10-17). `null` for every other request. */
+    val deadLinkId: ByteArray? = null,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -1719,7 +1724,8 @@ public data class IncomingContactRequest(
             intro == other.intro &&
             createdAt == other.createdAt &&
             profile == other.profile &&
-            viaDeadLink == other.viaDeadLink
+            viaDeadLink == other.viaDeadLink &&
+            (deadLinkId?.contentEquals(other.deadLinkId) ?: (other.deadLinkId == null))
     }
 
     override fun hashCode(): Int {

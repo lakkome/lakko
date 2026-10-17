@@ -6236,6 +6236,77 @@ public class ChatRepository(
     /** The durable copy of [heldSends] (sealed under the Keystore key). */
     private val heldSendStore: HeldSendBackend = SealedHeldSendBackend(applicationContext)
 
+    /**
+     * ADR-0079 section 5 (reworked 2026-10-17) - what was written to a person
+     * added through their invite link before their app answered, in the ONE
+     * held-send queue: keyed by the pending contact's queue key (the
+     * inviter's account id, 32 hex characters, never a conversation id), in
+     * the order written. Stored with [heldSends] in [heldSendStore]; never
+     * flushed from here: [handOverPendingInvitedMessages] moves it into the
+     * queue of the one-to-one once that exists. Mirror of the web
+     * `pendingQueueKey` slot and the iOS `ChatRepository+PendingInvited`.
+     */
+    private val pendingInvitedHeld = java.util.concurrent.ConcurrentHashMap<String, MutableList<PersistedHeldSend>>()
+
+    /** Keep one message written to a pending contact. `false` when it is
+     *  empty (the caller keeps the words). */
+    public fun queuePendingInvitedMessage(queueKey: String, text: String): Boolean {
+        if (text.isEmpty() || !PendingInvitedQueue.isQueueKey(queueKey)) return false
+        val row = PersistedHeldSend(
+            conversationHex = queueKey,
+            groupIdHex = queueKey,
+            heldAtMs = System.currentTimeMillis(),
+            text = text,
+        )
+        pendingInvitedHeld.getOrPut(queueKey) { java.util.Collections.synchronizedList(ArrayList()) }.add(row)
+        persistHeldSends()
+        return true
+    }
+
+    /** What was written to the pending contact [queueKey], in order. */
+    public fun pendingInvitedMessages(queueKey: String): List<PersistedHeldSend> =
+        pendingInvitedHeld[queueKey]?.let { synchronized(it) { it.toList() } }.orEmpty()
+
+    /** B deletes a pending contact, or the account is wiped: what was
+     *  written to them goes. */
+    public fun clearPendingInvitedMessages(queueKey: String) {
+        if (pendingInvitedHeld.remove(queueKey) != null) persistHeldSends()
+    }
+
+    /**
+     * Move what was written to the pending contact [queueKey] into the
+     * held-send queue of the one-to-one [toGroupIdHex] just joined, in order,
+     * each shown as a sending row there, then flush it. The give-up clock
+     * starts now (they could not be sent before the conversation existed).
+     * The flush sends them in order; a send that fails keeps that message and
+     * the rest for the next attempt (the next poll of the conversation).
+     */
+    public fun handOverPendingInvitedMessages(queueKey: String, toGroupIdHex: String): Boolean {
+        val record = groups[toGroupIdHex] ?: return false
+        val rows = pendingInvitedHeld.remove(queueKey)?.let { synchronized(it) { it.toList() } }.orEmpty()
+        val now = System.currentTimeMillis()
+        for (row in rows) {
+            val localId = record.nextLocalId()
+            record.appendPending(
+                localId = localId,
+                text = row.text,
+                attachments = emptyList(),
+                createdAt = java.time.Instant.ofEpochMilli(now).toString(),
+                authorKey = null,
+                reply = null,
+                forward = null,
+            )
+            enqueueHeld(HeldMessage(toGroupIdHex, localId, now, row.text, emptyList(), null, null), persist = false)
+        }
+        persistHeldSends()
+        if (rows.isNotEmpty()) {
+            publishThreadList()
+            val conversation = lineageNow().conversationOf(toGroupIdHex.lowercase())
+            pushScope.launch { withContext(mlsDispatcher) { settleHeld(conversation) } }
+        }
+        return true
+    }
+
     /** Write the held queue as it stands. Best-effort: a queue that cannot
      *  be written is still sent in this process. */
     private fun persistHeldSends() {
@@ -6261,6 +6332,8 @@ public class ChatRepository(
                 )
             }
         }
+        // ADR-0079 - the messages to pending contacts ride the same store.
+        for ((_, queue) in pendingInvitedHeld) rows += synchronized(queue) { queue.toList() }
         rows.sortBy { it.heldAtMs }
         try {
             if (!heldSendStore.save(account, rows)) {
@@ -6287,6 +6360,14 @@ public class ChatRepository(
         }
         if (stored.isEmpty()) return
         for (row in stored) {
+            // ADR-0079 - a message to a pending contact waits under its
+            // queue key for the hand-over; it is never flushed from there.
+            if (PendingInvitedQueue.isQueueKey(row.conversationHex) && groups[row.groupIdHex] == null) {
+                pendingInvitedHeld.getOrPut(row.conversationHex) {
+                    java.util.Collections.synchronizedList(ArrayList())
+                }.add(row)
+                continue
+            }
             val attachments = row.attachments.mapNotNull { it.toAttachmentRef() }
             if (row.text.isEmpty() && attachments.isEmpty()) continue
             val reply = row.reply?.let { ReplyRef(target = it.target, author = it.author, excerpt = it.excerpt) }
@@ -6457,9 +6538,13 @@ public class ChatRepository(
                     } catch (cause: kotlinx.coroutines.CancellationException) {
                         throw cause
                     } catch (cause: Throwable) {
-                        android.util.Log.w("ChatRepository", "ADR-0073 held message not sent", cause)
-                        groups[held.groupIdHex]?.markFailed(held.localId)
-                        publishThreadList()
+                        // Not sent: this one and everything after it stay
+                        // held, in order, for the next attempt (the next poll
+                        // of the conversation), as on web and iOS. The give-up
+                        // check still fails one that waits too long.
+                        android.util.Log.w("ChatRepository", "ADR-0073 held message not sent yet (${cause.javaClass.simpleName})")
+                        synchronized(queue) { if (!queue.contains(held)) queue.add(0, held) }
+                        break
                     }
                 }
             }
@@ -8069,7 +8154,13 @@ public class ChatRepository(
         waitSecs: Int = 0,
         joinInFlight: Boolean = false,
     ): GroupPollOutcome = forSession {
-        pollGroupOnMlsThread(groupIdHex, waitSecs, joinInFlight)
+        val outcome = pollGroupOnMlsThread(groupIdHex, waitSecs, joinInFlight)
+        // A held message whose send failed is tried again at the next poll of
+        // its conversation (ADR-0079 reworked: the hand-over to a person
+        // added through their link keeps the rest after a failure).
+        val conversation = lineageNow().conversationOf(groupIdHex.lowercase())
+        if (heldSends.containsKey(conversation)) withContext(mlsDispatcher) { settleHeld(conversation) }
+        outcome
     }
 
     private suspend fun pollGroupOnMlsThread(
@@ -9445,6 +9536,7 @@ public class ChatRepository(
             for (g in preparedGroups.values) runCatching { g.close() }
             preparedGroups.clear()
             heldSends.clear()
+            pendingInvitedHeld.clear()
         }
         // An unsent text belongs to the session that typed it.
         composerCarry.clear()

@@ -20,6 +20,7 @@ function model(over: Partial<LinkRecordModel>): LinkRecordModel {
     linkSecret: new Uint8Array(12).fill(2),
     kind: "contact",
     ledgerId: new Uint8Array(6).fill(3),
+    revocationSeed: new Uint8Array(32).fill(4),
     expiryMs: 0,
     maxUses: 0,
     uses: 0,
@@ -61,6 +62,7 @@ describe("link records (ADR-0079 section 4)", () => {
       new Uint8Array(12).fill(8),
       LinkRecordKind.Contact,
       new Uint8Array(6).fill(9),
+      new Uint8Array(32).fill(0x42),
       0n,
       0,
       1n,
@@ -89,6 +91,9 @@ describe("link records (ADR-0079 section 4)", () => {
     expect(s.recordLinkUse(100n, id, new Uint8Array(32).fill(2))).toBe(true);
     expect(other.applyLinkRecordEnvelope(s.linkRecordEnvelopeFor(id) as Uint8Array)).toBe(false);
     expect(readLinkRecords(other, LinkRecordKind.Contact)[0]?.revoked).toBe(true);
+    // The device that revoked it holds the seed that deletes the ledger row
+    // (reworked 2026-10-17): the record carried it there.
+    expect(readLinkRecords(other, LinkRecordKind.Contact)[0]?.revocationSeed).toEqual(new Uint8Array(32).fill(0x42));
     record.free();
     s.free();
     other.free();

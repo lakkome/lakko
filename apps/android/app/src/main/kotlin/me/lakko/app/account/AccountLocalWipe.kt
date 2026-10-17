@@ -294,6 +294,12 @@ public object AccountLocalWipe {
         Step("pending-contacts") { ctx, acct ->
             me.lakko.app.contacts.PendingContactsFiles.deleteAccount(ctx, acct)
         },
+        // ADR-0079 (reworked 2026-10-17) - the link requests not decided yet
+        // (sealed, they carry link secrets) and the claims of link requests.
+        Step("link-requests") { ctx, acct ->
+            me.lakko.app.contacts.LinkRequestInboxFiles.deleteAccount(ctx, acct)
+        },
+        Step("link-claims") { ctx, acct -> me.lakko.app.contacts.LinkClaimRecord.clear(ctx, acct) },
         Step("identity-pins") { ctx, acct -> me.lakko.app.contacts.PeerPinStore.deleteForOwner(ctx, acct) },
         Step("invite-link-secrets") { ctx, acct ->
             me.lakko.app.contacts.EncryptedInviteLinkSecretStore(ctx).clearForAccount(acct)

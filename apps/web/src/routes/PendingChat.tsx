@@ -11,7 +11,8 @@
  * timeline ("Anna will get your messages when their app is next online.",
  * after 7 days "Anna has not answered yet. You can ask them for a new
  * link."), the messages written so far in the sending state, a composer that
- * keeps what is written on this device (`contacts/pending-contacts.ts`), and
+ * keeps what is written on this device in the one held-send queue under the
+ * inviter's account id (`chat/held-send-queue.ts`, `pendingQueueKey`), and
  * the call buttons disabled with the hint "Available once Anna is
  * connected." Text only: an attachment needs the conversation to exist.
  *
@@ -27,13 +28,13 @@ import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { personKeysOf } from "../chat/person-key";
+import { heldSends, persistHeldSends, restoreHeldSends } from "../chat/held-send-queue";
 import {
   loadPendingContacts,
   pendingContacts,
   pendingLine,
   pendingNameOf,
-  updatePendingContacts,
-  withQueuedMessage,
+  pendingQueueKey,
   type PendingContact,
 } from "../contacts/pending-contacts";
 import { t } from "../l10n";
@@ -48,6 +49,9 @@ export default function PendingChat(): JSX.Element {
   const navigate = useNavigate();
   const [input, setInput] = createSignal("");
   const [loaded, setLoaded] = createSignal(false);
+  /** Bumped after every change of the queue this view makes (the held-send
+   *  store is not reactive). */
+  const [queueVersion, setQueueVersion] = createSignal(0);
 
   const accountIdB64 = (): string | null => {
     const s = auth.state();
@@ -57,6 +61,17 @@ export default function PendingChat(): JSX.Element {
     const account = accountIdB64();
     if (account === null) return;
     void loadPendingContacts(account).then(() => setLoaded(true));
+    // The held messages survive a reload in the message log.
+    void restoreHeldSends(account).then(() => setQueueVersion((v) => v + 1));
+  });
+
+  /** What was written to this person so far, in order. */
+  const queued = createMemo(() => {
+    queueVersion();
+    const c = contact();
+    if (c === undefined) return [];
+    const key = pendingQueueKey(c);
+    return heldSends.all().find(([k]) => k === key)?.[1] ?? [];
   });
 
   const contact = createMemo((): PendingContact | undefined =>
@@ -95,12 +110,9 @@ export default function PendingChat(): JSX.Element {
     const c = contact();
     if (text.trim().length === 0 || account === null || c === undefined) return;
     setInput("");
-    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const next = await updatePendingContacts(account, (list) =>
-      withQueuedMessage(list, c.accountIdHex, { id, text, createdAtMs: Date.now() }),
-    );
-    // Not kept (the store refused it): the words go back to the field.
-    if (next === null) setInput(text);
+    heldSends.hold(pendingQueueKey(c), { text, attached: [], reply: undefined }, Date.now());
+    setQueueVersion((v) => v + 1);
+    await persistHeldSends(account);
   }
 
   const callHint = (): string => t("chat.pending.call_disabled", { name: name() });
@@ -146,11 +158,11 @@ export default function PendingChat(): JSX.Element {
                   : t("chat.pending.waiting", { name: name() })}
               </span>
             </li>
-            <For each={c().queue}>
+            <For each={queued()}>
               {(m) => (
                 <li class="lk-bubble-row outgoing run-start run-end">
                   <div class="lk-bubble outgoing run-start run-end">
-                    <div class="lk-bubble-text">{m.text}</div>
+                    <div class="lk-bubble-text">{m.payload.text}</div>
                     <div class="lk-bubble-meta">
                       <span>{t("chat.message.sending")}</span>
                     </div>

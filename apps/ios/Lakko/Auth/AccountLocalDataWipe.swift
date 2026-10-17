@@ -309,6 +309,10 @@ enum AccountLocalDataWipe {
                 forKey: DeviceGroupSyncRepository.linkRecordsUnsentKey(accountIdB64: accountIdB64))
         }
         step("pending-contacts") { PendingContactStore.clear(accountIdB64: accountIdB64) }
+        // ADR-0079 (reworked 2026-10-17) — the link requests not decided yet
+        // (sealed, they carry link secrets) and the claims of link requests.
+        step("link-requests") { LinkRequestInbox.clear(accountIdB64: accountIdB64) }
+        step("link-claims") { LinkClaims.Record.clear(accountIdB64: accountIdB64) }
         step("profiles") { ProfileDirectory.shared.forget(accountIdB64: accountIdB64) }
         step("contacts-inbox") { ContactsInboxStore().clear(accountIdB64: accountIdB64) }
         // ADR-0073 R.3 — the requests kept waiting for an identity verdict.

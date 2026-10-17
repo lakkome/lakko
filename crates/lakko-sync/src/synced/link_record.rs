@@ -10,9 +10,16 @@
 //!
 //! Keyed by the link's 16-byte id. The value is what a device needs to decide
 //! about a request ([`LinkRecordEntry::verdict`]) and to show the link again:
-//! the link secret, the kind, the ledger id, the expiry, the use limit, the
-//! uses so far, the revoked flag, the label, when it was minted, and the keys
-//! of the requesters already accepted through it.
+//! the link secret, the kind, the ledger id, the ledger row's revocation seed,
+//! the expiry, the use limit, the uses so far, the revoked flag, the label,
+//! when it was minted, and the keys of the requesters already accepted
+//! through it.
+//!
+//! The revocation seed (ADR-0078 section 10) travels with the record so that
+//! any device of the account that revokes the link deletes its ledger row at
+//! once, not only the device that minted it (ADR-0079 as reworked
+//! 2026-10-17). Like the link secret it is SECRET and travels end to end
+//! encrypted to the account's own devices only.
 //!
 //! It is last-writer-wins per entry on the stamp, with one exception that
 //! makes a revocation final: **a revoked entry beats a live one whatever the
@@ -34,7 +41,7 @@
 //!
 //! ```text
 //! domain(26) "lakko/sync/link-record/v1\0"
-//! version(1) = 0x01
+//! version(1) = 0x02
 //! count(2, BE)              1..=LINK_RECORD_ENVELOPE_MAX_ENTRIES
 //! count × {
 //!     hlc(8, BE)            the register's ORIGINAL stamp
@@ -63,8 +70,11 @@ use super::entry::{take_n, take_u32, take_u64, take_u8, BoundsError, CodecError,
 /// Frozen.
 pub const LINK_RECORD_ENVELOPE_DOMAIN_V1: &[u8] = b"lakko/sync/link-record/v1\0";
 
-/// The version byte this build writes and accepts.
-pub const LINK_RECORD_ENVELOPE_VERSION_V1: u8 = 0x01;
+/// The version byte this build writes and accepts. `0x02` since the record
+/// carries the ledger row's revocation seed; `0x01` is refused (no dual
+/// format, nothing is deployed). The constant keeps its name: it is the
+/// version of the `v1` domain.
+pub const LINK_RECORD_ENVELOPE_VERSION_V1: u8 = 0x02;
 
 /// The most registers one envelope carries. A state holding more is sent as
 /// several envelopes.
@@ -78,6 +88,10 @@ pub const LINK_RECORD_SECRET_LEN: usize = LINK_SECRET_LEN;
 
 /// Length of a discovery-ledger id (`lakko_contacts::invite::BLOB_ID_LEN`).
 pub const LINK_RECORD_LEDGER_ID_LEN: usize = lakko_contacts::invite::BLOB_ID_LEN;
+
+/// Length of a ledger row's revocation seed
+/// (`lakko_contacts::invite::REVOCATION_KEY_LEN`).
+pub const LINK_RECORD_REVOCATION_SEED_LEN: usize = lakko_contacts::invite::REVOCATION_KEY_LEN;
 
 /// Longest label (`lakko_contacts::invite::MAX_LABEL_LEN`).
 pub const LINK_RECORD_LABEL_MAX_BYTES: usize = lakko_contacts::invite::MAX_LABEL_LEN;
@@ -100,6 +114,8 @@ pub const LINK_RECORD_BODY_MAX_LEN: usize = LINK_RECORD_ID_LEN
     + 1
     + 1
     + LINK_RECORD_LEDGER_ID_LEN
+    + 1
+    + LINK_RECORD_REVOCATION_SEED_LEN
     + 8
     + 4
     + 4
@@ -110,10 +126,11 @@ pub const LINK_RECORD_BODY_MAX_LEN: usize = LINK_RECORD_ID_LEN
     + LINK_RECORD_ANSWERED_MAX * LINK_RECORD_REQUESTER_KEY_LEN;
 
 /// Shortest valid envelope: the header and one entry with no ledger id, no
-/// label and no requester.
+/// revocation seed, no label and no requester.
 pub const LINK_RECORD_ENVELOPE_MIN_LEN: usize =
     LINK_RECORD_ENVELOPE_DOMAIN_V1.len() + 1 + 2 + 8 + LINK_RECORD_BODY_MAX_LEN
         - LINK_RECORD_LEDGER_ID_LEN
+        - LINK_RECORD_REVOCATION_SEED_LEN
         - LINK_RECORD_LABEL_MAX_BYTES
         - LINK_RECORD_ANSWERED_MAX * LINK_RECORD_REQUESTER_KEY_LEN;
 
@@ -196,6 +213,10 @@ pub struct LinkRecordEntry {
     /// The ledger id, empty for a link that has no ledger row (an inline
     /// link).
     pub ledger_id: Vec<u8>,
+    /// The seed whose Ed25519 key the ledger row was created under
+    /// (ADR-0078 section 10): any device holding it can delete the row.
+    /// Empty when the link has no ledger row. SECRET.
+    pub revocation_seed: Vec<u8>,
     /// UNIX millis after which the link no longer works; 0 = never.
     pub expiry_ms: u64,
     /// The use limit as the capability carries it: 0 = single use,
@@ -216,13 +237,15 @@ pub struct LinkRecordEntry {
 
 impl core::fmt::Debug for LinkRecordEntry {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // The link id and the secret are left out: either opens the link.
+        // The link id, the secret and the revocation seed are left out:
+        // the first two open the link, the third deletes its ledger row.
         f.debug_struct("LinkRecordEntry")
             .field("kind", &self.kind)
             .field("expiry_ms", &self.expiry_ms)
             .field("max_uses", &self.max_uses)
             .field("uses", &self.uses)
             .field("revoked", &self.revoked)
+            .field("has_revocation_seed", &!self.revocation_seed.is_empty())
             .field("answered", &self.answered.len())
             .finish_non_exhaustive()
     }
@@ -234,10 +257,16 @@ impl LinkRecordEntry {
     /// # Errors
     ///
     /// [`BoundsError::LinkRecordLedgerIdLength`],
+    /// [`BoundsError::LinkRecordRevocationSeedLength`],
     /// [`BoundsError::LinkRecordLabel`] or [`BoundsError::LinkRecordAnswered`].
     pub fn validate(&self) -> Result<(), BoundsError> {
         if !self.ledger_id.is_empty() && self.ledger_id.len() != LINK_RECORD_LEDGER_ID_LEN {
             return Err(BoundsError::LinkRecordLedgerIdLength);
+        }
+        if !self.revocation_seed.is_empty()
+            && self.revocation_seed.len() != LINK_RECORD_REVOCATION_SEED_LEN
+        {
+            return Err(BoundsError::LinkRecordRevocationSeedLength);
         }
         if self.label.len() > LINK_RECORD_LABEL_MAX_BYTES {
             return Err(BoundsError::LinkRecordLabel);
@@ -328,9 +357,11 @@ impl LinkRecordEntry {
         out.push(u8::from(self.revoked));
         out.extend_from_slice(&self.link_secret);
         out.push(self.kind.to_wire());
-        // Validated: 0 or 6 bytes, a label of at most 64, at most 16 keys.
+        // Validated: 0 or 6 bytes, a seed of 0 or 32, a label of at most 64, at most 16 keys.
         out.push(u8::try_from(self.ledger_id.len()).unwrap_or(u8::MAX));
         out.extend_from_slice(&self.ledger_id);
+        out.push(u8::try_from(self.revocation_seed.len()).unwrap_or(u8::MAX));
+        out.extend_from_slice(&self.revocation_seed);
         out.extend_from_slice(&self.expiry_ms.to_be_bytes());
         out.extend_from_slice(&self.max_uses.to_be_bytes());
         out.extend_from_slice(&self.uses.to_be_bytes());
@@ -361,6 +392,11 @@ impl LinkRecordEntry {
             return Err(BoundsError::LinkRecordLedgerIdLength.into());
         }
         let ledger_id = take_n(cur, ledger_len)?.to_vec();
+        let seed_len = usize::from(take_u8(cur)?);
+        if seed_len != 0 && seed_len != LINK_RECORD_REVOCATION_SEED_LEN {
+            return Err(BoundsError::LinkRecordRevocationSeedLength.into());
+        }
+        let revocation_seed = take_n(cur, seed_len)?.to_vec();
         let expiry_ms = take_u64(cur)?;
         let max_uses = take_u32(cur)?;
         let uses = take_u32(cur)?;
@@ -386,6 +422,7 @@ impl LinkRecordEntry {
             link_secret,
             kind,
             ledger_id,
+            revocation_seed,
             expiry_ms,
             max_uses,
             uses,
@@ -539,6 +576,7 @@ mod tests {
             link_secret: [0x5C; LINK_RECORD_SECRET_LEN],
             kind: LinkRecordKind::Contact,
             ledger_id: vec![7; LINK_RECORD_LEDGER_ID_LEN],
+            revocation_seed: vec![0x92; LINK_RECORD_REVOCATION_SEED_LEN],
             expiry_ms: 1_000,
             max_uses: 0,
             uses: 0,
@@ -571,6 +609,7 @@ mod tests {
         full.revoked = true;
         let mut inline = record(3);
         inline.ledger_id.clear();
+        inline.revocation_seed.clear();
         inline.kind = LinkRecordKind::Call;
         let entries = [st(5, full.clone()), st(2, inline.clone())];
         let wire = compose_link_record_envelope(&entries).unwrap();
@@ -593,6 +632,12 @@ mod tests {
         bad.ledger_id = vec![1; 5];
         assert_eq!(
             compose_link_record_envelope(&[st(1, bad)]),
+            Err(LinkRecordEnvelopeError::Entry)
+        );
+        let mut seed = record(1);
+        seed.revocation_seed = vec![1; 31];
+        assert_eq!(
+            compose_link_record_envelope(&[st(1, seed)]),
             Err(LinkRecordEnvelopeError::Entry)
         );
         let mut dup = record(1);
@@ -627,7 +672,7 @@ mod tests {
         );
         let header = LINK_RECORD_ENVELOPE_DOMAIN_V1.len();
         let mut version = good.clone();
-        version[header] = 2;
+        version[header] = 1;
         assert_eq!(
             decode_link_record_envelope(&version),
             Err(LinkRecordEnvelopeError::UnknownVersion)
@@ -741,14 +786,26 @@ mod tests {
             0u32..5,
             any::<bool>(),
             prop::collection::btree_set(any::<[u8; 32]>(), 0..4),
+            prop::option::of(any::<[u8; LINK_RECORD_REVOCATION_SEED_LEN]>()),
         )
             .prop_map(
-                |(link_id, link_secret, kind, expiry_ms, max_uses, uses, revoked, answered)| {
+                |(
+                    link_id,
+                    link_secret,
+                    kind,
+                    expiry_ms,
+                    max_uses,
+                    uses,
+                    revoked,
+                    answered,
+                    seed,
+                )| {
                     LinkRecordEntry {
                         link_id,
                         link_secret,
                         kind,
                         ledger_id: vec![],
+                        revocation_seed: seed.map(|s| s.to_vec()).unwrap_or_default(),
                         expiry_ms,
                         max_uses,
                         uses,
@@ -791,6 +848,24 @@ mod tests {
                 && !r.answered.contains(&key)
                 && r.is_live(now);
             prop_assert_eq!(v == LinkAnswerVerdict::Accept, expect_accept);
+        }
+
+        /// A use and a revocation keep everything a revoking device needs
+        /// to delete the ledger row: the ledger id and the revocation seed
+        /// are carried through unchanged, and an envelope round trip keeps
+        /// them byte for byte.
+        #[test]
+        fn a_use_and_an_envelope_keep_the_revocation_seed(
+            r in arb_record(),
+            key in any::<[u8; 32]>(),
+            hlc in any::<u64>(),
+        ) {
+            let used = r.with_use(&key);
+            prop_assert_eq!(&used.revocation_seed, &r.revocation_seed);
+            prop_assert_eq!(&used.ledger_id, &r.ledger_id);
+            let wire = compose_link_record_envelope(&[Stamped { hlc, value: used.clone() }]).unwrap();
+            let back = decode_link_record_envelope(&wire).unwrap();
+            prop_assert_eq!(&back[0].value.revocation_seed, &used.revocation_seed);
         }
 
         /// Any byte string decodes or is refused, never panics, and what

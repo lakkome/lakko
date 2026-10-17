@@ -43,6 +43,20 @@ public data class PersistedHeldSend(
     val forward: PersistedForward? = null,
 )
 
+/**
+ * ADR-0079 section 5 (reworked 2026-10-17) - the held-send slot of a person
+ * added through their invite link: keyed by the inviter's account id (32 hex
+ * characters). A conversation id is a group id (64 hex characters), so the
+ * two never meet, and nothing flushes a pending slot.
+ */
+public object PendingInvitedQueue {
+    /** Length of a pending contact's queue key (16-byte account id, hex). */
+    public const val KEY_LEN: Int = 32
+
+    /** Whether [key] is a pending contact's slot rather than a conversation. */
+    public fun isQueueKey(key: String): Boolean = key.length == KEY_LEN && HEX_ID.matches(key)
+}
+
 /** At most this many held messages are stored per account: the queue is
  *  bounded like every other local store. Chosen, not measured. */
 public const val MAX_STORED_HELD_SENDS: Int = 500

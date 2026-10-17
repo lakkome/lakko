@@ -107,7 +107,8 @@ import {
   scheduleOwnCardResend,
   unbindDeviceCards,
 } from "../device-card-runtime";
-import { receiveDeviceCardEnvelope } from "../device-card-intake";
+import { receiveDeviceCardEnvelope, senderKeyAtReceipt } from "../device-card-intake";
+import { linkClaimRecord, linkRequestKeyHex } from "../../contacts/link-claims";
 import { sealKeyRotationAfterRemoval } from "../key-rotation";
 import { installKeyRotationPort, type JournalCatchUp } from "./key-rotation-port";
 import {
@@ -289,19 +290,38 @@ export interface DeviceGroupSyncApi {
    *  account key, fold and send. */
   recordLinkUse(linkId: Uint8Array, requesterKey: Uint8Array): Promise<boolean>;
   /** The one rule for a request's link answer (ADR-0079 section 3), asked
-   *  of the fold once it is loaded (waits up to a short bound for it); a
-   *  fold that never loads reads as `"dead"`, so the request is shown as a
-   *  card rather than lost. */
-  linkAnswerVerdict(
+   *  of the fold. `null` while the fold is not loaded: the request stays
+   *  undecided (no timer) and is decided once {@link ready} turns `true`. */
+  linkAnswerVerdictNow(
     linkId: Uint8Array,
     linkSecret: Uint8Array,
     requesterKey: Uint8Array,
-  ): Promise<LinkAnswerVerdict>;
+  ): LinkAnswerVerdict | null;
+  /** ADR-0079 (reworked 2026-10-17) - seal and post this device's claim of
+   *  a link request into the account's DeviceGroup. `beforePublish` gets
+   *  the sealed bytes (hex) and must record them durably (throwing aborts
+   *  the publish); `onPublished` gets them with the DS message id the
+   *  instant the publish answers, before the receive loop could skip the
+   *  row as an echo. Throws when the runtime is not ready or the publish
+   *  fails; a failed publish may still have landed, which the receive loop
+   *  then recognises by the recorded bytes. */
+  postLinkClaim(
+    linkId: Uint8Array,
+    requesterKey: Uint8Array,
+    beforePublish: (wireHex: string) => void,
+    onPublished: (wireHex: string, messageId: number) => void,
+  ): Promise<number>;
+  /** ADR-0079: this device's DeviceGroup leaf key and the current roster's
+   *  leaf keys, the inputs of the claim decision. `null` while not ready. */
+  linkClaimRoster(): { readonly ownKey: Uint8Array; readonly roster: readonly Uint8Array[] } | null;
+  /** Wait until the DeviceGroup journal has been read to its head by a pass
+   *  that started after this call (so every row up to a claim just posted is
+   *  applied). `"read"` when it was. */
+  catchUpJournal(): Promise<JournalCatchUp>;
+  /** Reactive: bumped whenever a claim from another device of the account
+   *  is recorded. */
+  readonly linkClaimsVersion: Accessor<number>;
 }
-
-/** How long a link-answer verdict waits for the fold to load. Chosen, not
- *  measured. */
-const LINK_VERDICT_WAIT_MS = 15_000;
 
 /** How long a catch-up waits for the journal's head before it reports no
  *  answer. Chosen, not measured. */
@@ -342,6 +362,7 @@ export function DeviceGroupSyncProvider(props: {
   const [folders, setFolders] = createSignal<readonly FolderModel[]>([]);
   const [lineage, setLineageEntries] = createSignal<readonly LineageEntry[]>([]);
   const [linkRecords, setLinkRecords] = createSignal<readonly LinkRecordModel[]>([]);
+  const [linkClaimsVersion, setLinkClaimsVersion] = createSignal(0);
   const [outbox, setOutbox] = createSignal<readonly OutboxBatch[]>([]);
   const [ready, setReady] = createSignal(false);
   const [deviceRemoved, setDeviceRemoved] = createSignal(false);
@@ -1173,6 +1194,7 @@ export function DeviceGroupSyncProvider(props: {
         record.linkSecret,
         record.kind === "contact" ? wasmSync.LinkRecordKind.Contact : wasmSync.LinkRecordKind.Call,
         record.ledgerId,
+        record.revocationSeed,
         BigInt(Math.max(0, Math.floor(record.expiryMs))),
         record.maxUses >>> 0,
         BigInt(Math.max(0, Math.floor(record.mintedAtMs))),
@@ -1215,16 +1237,12 @@ export function DeviceGroupSyncProvider(props: {
     return written;
   }
 
-  async function linkAnswerVerdictImpl(
+  function linkAnswerVerdictNowImpl(
     linkId: Uint8Array,
     linkSecret: Uint8Array,
     requesterKey: Uint8Array,
-  ): Promise<LinkAnswerVerdict> {
-    const deadline = Date.now() + LINK_VERDICT_WAIT_MS;
-    while (synced === null && Date.now() < deadline) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 200));
-    }
-    if (synced === null) return "dead";
+  ): LinkAnswerVerdict | null {
+    if (synced === null || !ready()) return null;
     try {
       const v = synced.linkAnswerVerdict(linkId, linkSecret, requesterKey, BigInt(Date.now()));
       return v === "accept" || v === "answered" ? v : "dead";
@@ -1351,7 +1369,9 @@ export function DeviceGroupSyncProvider(props: {
         // never sealed into any other group.
         return group.createServiceEnvelopeMessage(identity, envelope, mintHlc());
       },
-      publish: (wire) => publishGroupMessage(wire),
+      publish: async (wire) => {
+        await publishGroupMessage(wire);
+      },
     });
   }
 
@@ -1466,6 +1486,21 @@ export function DeviceGroupSyncProvider(props: {
           // Unwrap the DeviceGroup journal envelope (the commit / message plus
           // any removal attestation that travelled with it).
           const entry = decodeJournalEntry(message.payload);
+          // ADR-0079: this device's own claim, recognised by the sealed
+          // bytes it recorded before the publish (its own application
+          // message cannot be decrypted here). Filed before the batch is
+          // persisted, so a crash that lost the publish answer loses
+          // nothing.
+          try {
+            const own = linkClaimRecord(accountIdB64);
+            if (own.hasUnmatchedWires() && own.recordOwnClaimRow(bytesToHex(entry.message), message.id)) {
+              setLinkClaimsVersion((v) => v + 1);
+              return;
+            }
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("own link claim row not recorded", err instanceof Error ? err.name : "");
+          }
           const attestation = entry.attestation ?? new Uint8Array(0);
           // Refuse-to-apply an unattested removal under the policy. A throw —
           // bad frame / wrong epoch / a removal refused for want of a valid
@@ -1504,6 +1539,40 @@ export function DeviceGroupSyncProvider(props: {
                   parsed.kind === "serviceEnvelope" &&
                   receiveDeviceCardEnvelope(wasm, parsed.serviceEnvelope, processed.senderLeaf, membersOf(g))
                 ) {
+                  return;
+                }
+                // ADR-0079 (reworked 2026-10-17): another device's claim of
+                // a link request. Honoured only from a sender leaf the
+                // roster resolves at receipt (C-68); its DS id is recorded
+                // with that leaf key before the batch is persisted (one
+                // synchronous write, so a decision in progress reads it
+                // whole).
+                if (parsed.kind === "serviceEnvelope" && wasm.isLinkClaimEnvelope(parsed.serviceEnvelope)) {
+                  let claim;
+                  try {
+                    claim = wasm.decodeLinkClaimEnvelope(parsed.serviceEnvelope);
+                  } catch {
+                    return;
+                  }
+                  try {
+                    const author = senderKeyAtReceipt(processed.senderLeaf, membersOf(g));
+                    if (author === null) return;
+                    let changed = false;
+                    try {
+                      changed = linkClaimRecord(accountIdB64).recordSeen(
+                        linkRequestKeyHex(claim.linkId, claim.requesterAccountKey),
+                        message.id,
+                        author,
+                        Date.now(),
+                      );
+                    } catch (err) {
+                      // eslint-disable-next-line no-console
+                      console.warn("link claim not recorded", err instanceof Error ? err.name : "");
+                    }
+                    if (changed) setLinkClaimsVersion((v) => v + 1);
+                  } finally {
+                    claim.free();
+                  }
                   return;
                 }
                 applyParsed(parsed);
@@ -1850,7 +1919,10 @@ export function DeviceGroupSyncProvider(props: {
 
   // ----- Outbound send paths -------------------------------------
 
-  async function publishGroupMessage(wireBytes: Uint8Array): Promise<void> {
+  async function publishGroupMessage(
+    wireBytes: Uint8Array,
+    onPublished?: (messageId: number) => void,
+  ): Promise<number> {
     if (group === null || identity === null || activeAccountIdB64 === null || reloading) {
       throw new Error("DeviceGroupSyncProvider is not ready");
     }
@@ -1871,6 +1943,16 @@ export function DeviceGroupSyncProvider(props: {
       group.groupId(),
       encodeJournalEntry(wireBytes, null),
     );
+    // Before anything can await: the receive loop skips an id in the
+    // own-echo set, so whoever needs the id records it first.
+    if (onPublished !== undefined) {
+      try {
+        onPublished(published.id);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("published row not recorded", err instanceof Error ? err.name : "");
+      }
+    }
     // The session ended while the publish was out: its handles are freed and
     // its own-echo set was cleared. The row is on the journal; the snapshot
     // that sealed it went with the sign-out.
@@ -1885,6 +1967,43 @@ export function DeviceGroupSyncProvider(props: {
     if (deviceKey !== null && identity === id) {
       await persistDeviceGroupSnapshot(id, account, deviceKey);
       if (!current()) throw new StaleBindingError();
+    }
+    return published.id;
+  }
+
+  /** ADR-0079 (reworked 2026-10-17): seal and publish this device's claim
+   *  of a link request on the DeviceGroup's own `ServiceEnvelope` carrier. */
+  async function postLinkClaimImpl(
+    linkId: Uint8Array,
+    requesterKey: Uint8Array,
+    beforePublish: (wireHex: string) => void,
+    onPublished: (wireHex: string, messageId: number) => void,
+  ): Promise<number> {
+    if (group === null || identity === null || reloading || deviceRemoved()) {
+      throw new Error("DeviceGroupSyncProvider is not ready");
+    }
+    const wasm = await loadWasm();
+    const envelope = wasm.composeLinkClaimEnvelope(linkId, requesterKey);
+    if (group === null || identity === null || reloading || deviceRemoved()) {
+      throw new Error("DeviceGroupSyncProvider is not ready");
+    }
+    const wire = group.createServiceEnvelopeMessage(identity, envelope, mintHlc());
+    const wireHex = bytesToHex(wire);
+    beforePublish(wireHex);
+    return publishGroupMessage(wire, (id) => onPublished(wireHex, id));
+  }
+
+  function linkClaimRosterImpl(): { ownKey: Uint8Array; roster: Uint8Array[] } | null {
+    const g = group;
+    if (g === null || identity === null || reloading || deviceRemoved()) return null;
+    try {
+      const own = g.ownLeafIndex();
+      const devices = g.devices() as { leafIndex: number; signaturePublicKey: Uint8Array }[];
+      const ownKey = devices.find((d) => d.leafIndex === own)?.signaturePublicKey;
+      if (ownKey === undefined) return null;
+      return { ownKey, roster: devices.map((d) => d.signaturePublicKey) };
+    } catch {
+      return null;
     }
   }
 
@@ -2062,7 +2181,11 @@ export function DeviceGroupSyncProvider(props: {
     setLinkRecord: setLinkRecordImpl,
     revokeLinkRecord: revokeLinkRecordImpl,
     recordLinkUse: recordLinkUseImpl,
-    linkAnswerVerdict: linkAnswerVerdictImpl,
+    linkAnswerVerdictNow: linkAnswerVerdictNowImpl,
+    postLinkClaim: postLinkClaimImpl,
+    linkClaimRoster: linkClaimRosterImpl,
+    catchUpJournal: catchUp,
+    linkClaimsVersion,
     deviceRemoved,
     deviceRoster,
     getDraft(groupId) {

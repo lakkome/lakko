@@ -44,26 +44,25 @@ class PendingContactsTest {
             addedAtMs = at,
         )
 
-    private fun message(id: String, text: String) = PendingInvitedMessage(localId = id, queuedAtMs = 1L, text = text)
-
     @Test
-    fun `a second Add keeps the first Add time and the messages`() {
-        val first = PendingContacts.queueing(listOf(contact("aa", 1, at = 1_000)), "aa", message("m1", "hi"))
-        val list = PendingContacts.adding(contact("aa", 1, at = 9_000, name = "Anna B"), first)
+    fun `a second Add keeps the first Add time`() {
+        val list = PendingContacts.adding(
+            contact("aa", 1, at = 9_000, name = "Anna B"),
+            listOf(contact("aa", 1, at = 1_000)),
+        )
         assertEquals(1, list.size)
         assertEquals(1_000L, list[0].addedAtMs)
         assertEquals("Anna B", list[0].displayName)
-        assertEquals(listOf("hi"), list[0].messages.map { it.text })
     }
 
     @Test
-    fun `messages are kept in the order written`() {
-        var list = listOf(contact("aa", 1), contact("bb", 2))
-        for ((i, text) in listOf("one", "two", "three").withIndex()) {
-            list = PendingContacts.queueing(list, "aa", message("m$i", text))
-        }
-        assertEquals(listOf("one", "two", "three"), list.first { it.accountIdHex == "aa" }.messages.map { it.text })
-        assertTrue(list.first { it.accountIdHex == "bb" }.messages.isEmpty())
+    fun `what is written is keyed on the inviter's account id, a slot no conversation shares`() {
+        val hex = "a".repeat(32)
+        assertEquals(hex, contact(hex, 1).queueKey)
+        assertTrue(me.lakko.app.chat.PendingInvitedQueue.isQueueKey(hex))
+        // A conversation id is a 32-byte group id: 64 hex characters.
+        assertTrue(!me.lakko.app.chat.PendingInvitedQueue.isQueueKey("b".repeat(64)))
+        assertTrue(!me.lakko.app.chat.PendingInvitedQueue.isQueueKey("Z".repeat(32)))
     }
 
     @Test
@@ -94,7 +93,7 @@ class PendingContactsTest {
         val blobs = MapBlobs()
         val store = SealedPendingContactsStore(blobs)
         val account = base64Encode(ByteArray(16) { 1 })
-        val list = PendingContacts.queueing(listOf(contact("aa", 1)), "aa", message("m1", "hello"))
+        val list = listOf(contact("aa", 1))
         assertTrue(store.save(account, list))
         assertEquals(list, store.load(account))
         assertTrue(store.save(account, emptyList()))
@@ -116,6 +115,7 @@ class PendingContactsTest {
         linkSecret = ByteArray(12) { 7 },
         kind = LinkRecordKind.CONTACT,
         ledgerId = if (ledger) ByteArray(6) { id } else ByteArray(0),
+        revocationSeed = if (ledger) ByteArray(32) { 9 } else ByteArray(0),
         expiryMs = expiry,
         maxUses = maxUses,
         uses = uses,

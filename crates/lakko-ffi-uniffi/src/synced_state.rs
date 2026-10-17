@@ -651,7 +651,8 @@ impl From<core::LinkAnswerVerdict> for LinkAnswerVerdict {
 }
 
 /// One of the account's invite links (ADR-0079 section 4). `link_secret`
-/// is SECRET: store it only inside the synced state, never log it.
+/// and `revocation_seed` are SECRET: store them only inside the synced
+/// state, never log them.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct LinkRecord {
     /// HLC stamp the register was written at (ignored on write).
@@ -664,6 +665,10 @@ pub struct LinkRecord {
     pub kind: LinkRecordKind,
     /// The 6-byte ledger id, or empty for an inline link.
     pub ledger_id: Vec<u8>,
+    /// The 32-byte seed that deletes the ledger row (ADR-0078 section 10),
+    /// or empty when the link has no ledger row. Any device of the account
+    /// that revokes the link deletes the row with it.
+    pub revocation_seed: Vec<u8>,
     /// UNIX millis after which the link no longer works; 0 = never.
     pub expiry_ms: u64,
     /// The use limit as the capability carries it (0 = single use,
@@ -688,6 +693,7 @@ fn link_record(s: Stamped<core::LinkRecordEntry>) -> LinkRecord {
         link_secret: s.value.link_secret.to_vec(),
         kind: s.value.kind.into(),
         ledger_id: s.value.ledger_id,
+        revocation_seed: s.value.revocation_seed,
         expiry_ms: s.value.expiry_ms,
         max_uses: s.value.max_uses,
         uses: s.value.uses,
@@ -709,6 +715,7 @@ fn link_record_entry(r: LinkRecord) -> Result<core::LinkRecordEntry, FfiError> {
         link_secret: fixed(&r.link_secret, "link secret")?,
         kind: r.kind.into(),
         ledger_id: r.ledger_id,
+        revocation_seed: r.revocation_seed,
         expiry_ms: r.expiry_ms,
         max_uses: r.max_uses,
         uses: r.uses,
@@ -1732,6 +1739,7 @@ mod tests {
             link_secret: vec![2; 12],
             kind: LinkRecordKind::Contact,
             ledger_id: vec![3; 6],
+            revocation_seed: vec![4; 32],
             expiry_ms: 0,
             max_uses: 0,
             uses: 0,
@@ -1772,7 +1780,11 @@ mod tests {
         assert!(b.revoke_link_record(7, vec![1; 16]).unwrap());
         let env = b.link_record_envelope_for(vec![1; 16]).unwrap().unwrap();
         assert!(a.apply_link_record_envelope(env).unwrap());
-        assert!(a.link_record(vec![1; 16]).unwrap().unwrap().revoked);
+        let revoked = a.link_record(vec![1; 16]).unwrap().unwrap();
+        assert!(revoked.revoked);
+        // The seed that deletes the ledger row reached the other device and
+        // survived its revocation.
+        assert_eq!(revoked.revocation_seed, vec![4; 32]);
         let restored = SyncedState::from_bytes(a.to_bytes().unwrap()).unwrap();
         assert_eq!(
             restored.all_link_records().unwrap(),

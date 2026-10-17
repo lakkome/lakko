@@ -8,20 +8,22 @@
  * After **Add** on an invite page, the inviter is a contact at once on this
  * side (UX section 4): they appear in the contact list and the chat list
  * under the name the link states, and this account may write to them. The
- * messages are kept here until the inviter's app takes the request and its
- * Welcome lands; then they move to the held-send queue of the new
- * one-to-one (`chat/held-send-queue.ts`), which sends them in order, and
- * the record goes.
+ * messages are NOT kept here: they go into the ONE held-send queue
+ * (`chat/held-send-queue.ts`, ADR-0073 R.13b, sealed under the device key in
+ * the message log) under {@link pendingQueueKey}, the inviter's account id,
+ * which names no conversation so nothing flushes it. When the inviter's
+ * Welcome lands they move, in order, to the queue slot of the new
+ * one-to-one, which sends them, and the record goes. iOS and Android keep
+ * them the same way (reworked 2026-10-17).
  *
- * One row per account, AES-256-GCM under the device key (the posture of
- * `sent-request-intros.ts`: the messages are plaintext the person wrote),
- * every write behind the account store gate (ADR-0077).
+ * One row per account, AES-256-GCM under the device key, every write behind
+ * the account store gate (ADR-0077).
  *
  * ```text
- *   db   "lakko-pending-contacts"  v1
+ *   db   "lakko-pending-contacts"  v2
  *   └── store "rows"  keyPath: "accountId"
  *         row { accountId, ciphertext: Uint8Array  // [12-byte IV | ct+tag] }
- *         plaintext: JSON { v: 1, contacts: PendingContact[] }
+ *         plaintext: JSON { v: 2, contacts: PendingContact[] }
  * ```
  *
  * The rules (what is shown, which line the chat shows, which record a
@@ -33,23 +35,12 @@ import { createSignal, type Accessor } from "solid-js";
 import { registerAccountMemory } from "../auth/account-memory";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
+import { heldSends, persistHeldSends } from "../chat/held-send-queue";
 
 /** After this long without an answer the chat line changes (UX section 4). */
 export const PENDING_STALE_MS = 7 * 24 * 60 * 60 * 1000;
-/** The most messages kept for one pending contact. */
-export const MAX_PENDING_MESSAGES = 200;
-/** The longest message kept, in UTF-16 units. */
-export const MAX_PENDING_MESSAGE_CHARS = 16_384;
 
-/** One message written before the chat exists. */
-export interface PendingMessage {
-  /** A local id, unique within the contact's queue. */
-  readonly id: string;
-  readonly text: string;
-  readonly createdAtMs: number;
-}
-
-/** The inviter, as the link named them, and what was written to them. */
+/** The inviter, as the link named them. */
 export interface PendingContact {
   /** The inviter's 16-byte account id, lower-case hex. */
   readonly accountIdHex: string;
@@ -64,20 +55,45 @@ export interface PendingContact {
   readonly username: string;
   /** When **Add** was pressed: the 7-day line counts from here. */
   readonly addedAtMs: number;
-  /** In the order written. */
-  readonly queue: readonly PendingMessage[];
 }
 
-function isMessage(v: unknown): v is PendingMessage {
-  if (typeof v !== "object" || v === null) return false;
-  const m = v as Record<string, unknown>;
-  return (
-    typeof m["id"] === "string" &&
-    typeof m["text"] === "string" &&
-    (m["text"] as string).length > 0 &&
-    (m["text"] as string).length <= MAX_PENDING_MESSAGE_CHARS &&
-    typeof m["createdAtMs"] === "number"
-  );
+/** The held-send queue key of what is written to a pending contact before
+ *  the chat exists: the inviter's account id (32 hex characters), never a
+ *  conversation id (64), so the held-send flush never sends from it. */
+export function pendingQueueKey(contact: Pick<PendingContact, "accountIdHex">): string {
+  return contact.accountIdHex;
+}
+
+/** The last message written to a pending contact (the chat list's preview
+ *  line), or `""`. */
+export function lastPendingMessageText(contact: Pick<PendingContact, "accountIdHex">): string {
+  const key = pendingQueueKey(contact);
+  const held = heldSends.all().find(([k]) => k === key)?.[1] ?? [];
+  return held[held.length - 1]?.payload.text ?? "";
+}
+
+/** The part of the held-send store the hand-over uses. */
+export interface HeldQueue<T> {
+  take(key: string): { readonly heldAtMs: number; readonly payload: T }[];
+  hold(key: string, payload: T, heldAtMs: number): void;
+}
+
+/**
+ * The hand-over (ADR-0079 section 5): move what was written to `contact`
+ * from its pending key to the held-send slot of the joined one-to-one, in
+ * the order written. Their give-up clock starts at `nowMs`: they could not
+ * be sent before the conversation existed. Returns how many moved. Pure over
+ * the store it is given.
+ */
+export function moveHeldToConversation<T>(
+  store: HeldQueue<T>,
+  contact: Pick<PendingContact, "accountIdHex">,
+  conversationHex: string,
+  nowMs: number,
+): number {
+  const items = store.take(pendingQueueKey(contact));
+  for (const item of items) store.hold(conversationHex, item.payload, nowMs);
+  return items.length;
 }
 
 function isContact(v: unknown): v is PendingContact {
@@ -90,8 +106,7 @@ function isContact(v: unknown): v is PendingContact {
     typeof c["x25519PubkeyB64"] === "string" &&
     typeof c["displayName"] === "string" &&
     typeof c["username"] === "string" &&
-    typeof c["addedAtMs"] === "number" &&
-    Array.isArray(c["queue"])
+    typeof c["addedAtMs"] === "number"
   );
 }
 
@@ -103,36 +118,42 @@ export function decodePendingContacts(json: string): PendingContact[] {
   } catch {
     return [];
   }
-  const list = (parsed as { contacts?: unknown } | null)?.contacts;
+  const p = parsed as { v?: unknown; contacts?: unknown } | null;
+  // Version 1 kept the messages inside the record; it is not read (nothing
+  // is deployed, no migration).
+  if (p?.v !== 2) return [];
+  const list = p.contacts;
   if (!Array.isArray(list)) return [];
   const out: PendingContact[] = [];
   for (const c of list) {
     if (!isContact(c)) continue;
-    out.push({ ...c, queue: c.queue.filter(isMessage).slice(0, MAX_PENDING_MESSAGES) });
+    out.push({
+      accountIdHex: c.accountIdHex,
+      signaturePubkeyB64: c.signaturePubkeyB64,
+      x25519PubkeyB64: c.x25519PubkeyB64,
+      displayName: c.displayName,
+      username: c.username,
+      addedAtMs: c.addedAtMs,
+    });
   }
   return out;
 }
 
 export function encodePendingContacts(list: readonly PendingContact[]): string {
-  return JSON.stringify({ v: 1, contacts: list });
+  return JSON.stringify({ v: 2, contacts: list });
 }
 
 /** `list` with `contact` added, or the existing record for the same person
- *  kept with its queue and its first `addedAtMs` (a second Add through a
- *  fresh link does not reset the 7-day line or drop what was written).
- *  Pure. */
+ *  kept with its first `addedAtMs` (a second Add through a fresh link does
+ *  not reset the 7-day line). Pure. */
 export function withPendingContact(
   list: readonly PendingContact[],
-  contact: Omit<PendingContact, "queue">,
+  contact: PendingContact,
 ): PendingContact[] {
   const at = list.findIndex((c) => c.accountIdHex === contact.accountIdHex);
-  if (at === -1) return [...list, { ...contact, queue: [] }];
+  if (at === -1) return [...list, contact];
   const held = list[at] as PendingContact;
-  const next: PendingContact = {
-    ...contact,
-    addedAtMs: Math.min(held.addedAtMs, contact.addedAtMs),
-    queue: held.queue,
-  };
+  const next: PendingContact = { ...contact, addedAtMs: Math.min(held.addedAtMs, contact.addedAtMs) };
   return list.map((c, i) => (i === at ? next : c));
 }
 
@@ -144,21 +165,6 @@ export function withoutPendingContact(
   return list.filter((c) => c.accountIdHex !== accountIdHex);
 }
 
-/** `list` with one message appended to a contact's queue, in order; a
- *  message that is empty, too long, or past the queue bound is refused
- *  (`null`). Pure. */
-export function withQueuedMessage(
-  list: readonly PendingContact[],
-  accountIdHex: string,
-  message: PendingMessage,
-): PendingContact[] | null {
-  if (message.text.length === 0 || message.text.length > MAX_PENDING_MESSAGE_CHARS) return null;
-  const at = list.findIndex((c) => c.accountIdHex === accountIdHex);
-  if (at === -1) return null;
-  const held = list[at] as PendingContact;
-  if (held.queue.length >= MAX_PENDING_MESSAGES) return null;
-  return list.map((c, i) => (i === at ? { ...c, queue: [...c.queue, message] } : c));
-}
 
 /** The line the pending chat shows (UX section 4). Pure. */
 export function pendingLine(contact: PendingContact, nowMs: number): "waiting" | "stale" {
@@ -204,6 +210,7 @@ export function pendingNameOf(contact: Pick<PendingContact, "displayName" | "use
 // ---------------------------------------------------------------------------
 
 const DB_NAME = "lakko-pending-contacts";
+// The store layout is unchanged; the plaintext's own `v` moved to 2.
 const DB_VERSION = 1;
 const STORE = "rows";
 const IV_LEN = 12;
@@ -376,12 +383,26 @@ export async function deletePendingContactsForAccount(accountIdB64: string): Pro
 }
 
 /**
+ * B deletes a pending contact: the record goes and so do the messages kept
+ * for it in the held-send queue (UX section 7 item 4). Resolves to whether
+ * the record was removed. Never throws.
+ */
+export async function removePendingContact(accountIdB64: string, accountIdHex: string): Promise<boolean> {
+  const next = await updatePendingContacts(accountIdB64, (list) =>
+    list.some((c) => c.accountIdHex === accountIdHex) ? withoutPendingContact(list, accountIdHex) : null,
+  );
+  if (heldSends.take(pendingQueueKey({ accountIdHex })).length > 0) await persistHeldSends(accountIdB64);
+  return next !== null;
+}
+
+/**
  * Hand the messages of the pending contact a joined conversation belongs to
- * over to `deliver` (the held-send queue of the new one-to-one), then drop
- * the record, inside the account's write queue. The record is dropped only
- * when `deliver` reports the messages safely kept; otherwise it stays, and
- * the next join or reload tries again. Resolves to the contact that was
- * handed over, or `null`. Never throws.
+ * over to `deliver` (it moves them from {@link pendingQueueKey} to the
+ * held-send slot of the new one-to-one), then drop the record, inside the
+ * account's write queue. The record is dropped only when `deliver` reports
+ * the messages safely kept; otherwise it stays, and the next join or reload
+ * tries again. Resolves to the contact that was handed over, or `null`.
+ * Never throws.
  */
 export function handOverPendingContact(
   accountIdB64: string,

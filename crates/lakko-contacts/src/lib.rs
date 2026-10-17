@@ -114,6 +114,7 @@ pub mod incoming_envelope;
 pub mod introduction;
 pub mod invite;
 pub mod key_rotation;
+pub mod link_claim;
 pub mod link_seal;
 pub mod mailbox;
 pub mod media_state;
@@ -216,6 +217,13 @@ pub use key_rotation::{
     KeyRotationError, KEY_ROTATION_ENTROPY_LEN, KEY_ROTATION_ENVELOPE_DOMAIN_V1,
     KEY_ROTATION_ENVELOPE_LEN, KEY_ROTATION_PENDING_MAX_AGE_MS, KEY_ROTATION_PROOF_LEN,
     KEY_ROTATION_VERSION_V1,
+};
+pub use link_claim::{
+    compose_link_claim, decode_link_claim, link_claim_answered_elsewhere, link_claim_outcome,
+    link_claim_winner, try_unwrap_link_claim, LinkClaim, LinkClaimError, LinkClaimOutcome,
+    ObservedLinkClaim, LINK_CLAIM_AUTHOR_KEY_LEN, LINK_CLAIM_ENVELOPE_DOMAIN_V1,
+    LINK_CLAIM_ENVELOPE_LEN, LINK_CLAIM_REQUESTER_KEY_LEN, LINK_CLAIM_REQUEST_KEY_LEN,
+    LINK_CLAIM_VERSION_V1,
 };
 pub use mailbox::{
     bucket_for as mailbox_bucket_for, is_well_formed_row as is_well_formed_mailbox_row,
@@ -393,5 +401,21 @@ pub mod fuzz_api {
     #[must_use]
     pub fn push_subscription_plaintext(plain: &[u8]) -> Option<bool> {
         crate::push_wake::fuzz_subscription_plaintext(plain)
+    }
+
+    /// Decode `bytes` as a link-request claim (ADR-0079) and check that the
+    /// dispatcher agrees. `None` when the decoder refuses; `Some(true)` when
+    /// the accepted claim re-composes to the identical bytes and the
+    /// dispatcher classifies them as the same claim, `Some(false)` on a
+    /// disagreement (a bug).
+    #[must_use]
+    pub fn link_claim_decode(bytes: &[u8]) -> Option<bool> {
+        let claim = crate::link_claim::decode_link_claim(bytes).ok()?;
+        let recomposed = crate::link_claim::compose_link_claim(&claim) == bytes;
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::LinkClaim(c)) if c == claim
+        );
+        Some(recomposed && dispatched)
     }
 }

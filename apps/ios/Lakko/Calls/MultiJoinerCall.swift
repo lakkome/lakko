@@ -760,6 +760,10 @@ final class MultiJoinerCall {
             // ADR-0080 — a device card is meaningful ONLY in the account's
             // own DeviceGroup. A relay payload names no device; dropped.
             break
+        case .linkClaim:
+            // ADR-0079 (reworked 2026-10-17) — a link-request claim is
+            // meaningful ONLY in the account's own DeviceGroup; dropped.
+            break
         }
     }
 

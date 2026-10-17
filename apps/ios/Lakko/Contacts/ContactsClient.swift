@@ -1415,8 +1415,13 @@ public struct IncomingContactRequest: Equatable, Codable {
     /// ADR-0079 section 3 — the request was sent through an invite link of
     /// this account that no longer works (revoked, expired, used up,
     /// unknown): the card shows "Sent with an invite link that no longer
-    /// works." `nil` for every other request.
+    /// works." `nil` for every other request. Persisted with the request, so
+    /// the note survives a relaunch.
     public let viaDeadLink: Bool?
+    /// The 16-byte id of the dead link (not its secret): what the card is
+    /// matched by when another device of the account claims the same request
+    /// (ADR-0079, reworked 2026-10-17). `nil` for every other request.
+    public let deadLinkId: Data?
 
     public init(
         messageId: Int64,
@@ -1427,7 +1432,8 @@ public struct IncomingContactRequest: Equatable, Codable {
         intro: String?,
         profile: ProfileClaim? = nil,
         createdAt: String,
-        viaDeadLink: Bool? = nil
+        viaDeadLink: Bool? = nil,
+        deadLinkId: Data? = nil
     ) {
         self.messageId = messageId
         self.fromPubkey = fromPubkey
@@ -1438,14 +1444,16 @@ public struct IncomingContactRequest: Equatable, Codable {
         self.profile = profile
         self.createdAt = createdAt
         self.viaDeadLink = viaDeadLink
+        self.deadLinkId = deadLinkId
     }
 
-    /// The same request, marked as sent through a link that no longer works.
-    public func sentThroughDeadLink() -> IncomingContactRequest {
+    /// The same request, marked as sent through the link `linkId`, which no
+    /// longer works.
+    public func sentThroughDeadLink(linkId: Data) -> IncomingContactRequest {
         IncomingContactRequest(
             messageId: messageId, fromPubkey: fromPubkey, fromAccountId: fromAccountId,
             fromPseudonym: fromPseudonym, validAfterMs: validAfterMs, intro: intro,
-            profile: profile, createdAt: createdAt, viaDeadLink: true)
+            profile: profile, createdAt: createdAt, viaDeadLink: true, deadLinkId: linkId)
     }
 }
 

@@ -58,7 +58,14 @@ import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { waitingSentRequests } from "./contact-list-model";
 import { forgetInviteLinkSecret } from "./invite-link-secrets";
 import { listMintedLinks } from "./minted-links";
-import { revokeLinksRevokedElsewhere, revokeMintedLink, type OwnLinkRevokeOutcome } from "./own-links";
+import {
+  deleteLedgerRowOfRecord,
+  owedRowDeletions,
+  revokeLinksRevokedElsewhere,
+  revokeMintedLink,
+  setOwedRowDeletion,
+  type OwnLinkRevokeOutcome,
+} from "./own-links";
 import { forgetSentRequest, loadSentRequests, recordSentRequest } from "./sent-requests";
 import { forgetSentIntro, sentIntroFor } from "./sent-request-intros";
 import {
@@ -119,8 +126,22 @@ import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { personKeysOf } from "../chat/person-key";
 import { heldSends, persistHeldSends } from "../chat/held-send-queue";
-import { acceptContactRequest, linkAnswerAction } from "./accept-request";
-import { handOverPendingContact, loadPendingContacts, pendingContacts } from "./pending-contacts";
+import { acceptContactRequest } from "./accept-request";
+import {
+  handOverPendingContact,
+  loadPendingContacts,
+  moveHeldToConversation,
+  pendingContacts,
+} from "./pending-contacts";
+import {
+  type ObservedClaim,
+  claimsToDecide,
+  linkClaimRecord,
+  linkRequestKeyHex,
+  linkRequestStep,
+  shownCardAnswered,
+} from "./link-claims";
+import { loadWasm } from "../wasm";
 
 /** Copy for a Welcome this device could not open. */
 export const JOIN_FAILURE_MESSAGE = (): string => t("contacts.mailbox.join_failed");
@@ -152,6 +173,31 @@ function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   return out;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+function concatBytes(parts: readonly Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
+
+/** The claim decision's flat inputs: ids, and the authors' leaf keys
+ *  concatenated in the same order. */
+function claimInputs(claims: readonly ObservedClaim[]): { ids: BigUint64Array; authors: Uint8Array } {
+  return {
+    ids: BigUint64Array.from(claims.map((c) => BigInt(c.id))),
+    authors: concatBytes(claims.map((c) => hexToBytes(c.author))),
+  };
 }
 
 function readPredecessorMailboxCursor(accountIdB64: string, keyHex: string): number {
@@ -302,17 +348,37 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const [acceptedVersion, setAcceptedVersion] = createSignal(0);
   const [joinFailure, setJoinFailure] = createLiveText();
 
-  // ADR-0079 section 4 - a link this device minted that another device of
-  // the account revoked: only this device holds the seed that deletes the
-  // ledger row, so it does so when the register's mark arrives. Re-run on
-  // every change of the register; a link already revoked here has no record
-  // left and is skipped.
+  // ADR-0079 section 4 (reworked 2026-10-17) - the device that revokes a
+  // link deletes its ledger row itself with the seed the synced record
+  // carries (`InviteLinksPanel`). Re-run on every change of the register:
+  // a deletion this device owes (the ledger was unreachable) is tried again,
+  // and the minting device drops its own local record of a link revoked
+  // elsewhere (deleting the row again, which the ledger answers as gone).
   createEffect(() => {
     const s = auth.state();
     if (s.kind !== "session") return;
-    const revoked = new Set(sync.linkRecords().filter((r) => r.revoked).map((r) => r.linkIdHex));
-    if (revoked.size === 0) return;
-    void revokeLinksRevokedElsewhere(spentDiscovery, s.account.accountId, revoked);
+    const account = s.account.accountId;
+    const revokedRecords = sync.linkRecords().filter((r) => r.revoked);
+    if (revokedRecords.length === 0) return;
+    const owed = owedRowDeletions(account);
+    void (async () => {
+      for (const r of revokedRecords) {
+        if (!owed.has(r.linkIdHex)) continue;
+        try {
+          if ((await deleteLedgerRowOfRecord(spentDiscovery, r)) !== "unreachable") {
+            setOwedRowDeletion(account, r.linkIdHex, false);
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("owed ledger row deletion failed", err instanceof Error ? err.name : "");
+        }
+      }
+      await revokeLinksRevokedElsewhere(
+        spentDiscovery,
+        account,
+        new Set(revokedRecords.map((r) => r.linkIdHex)),
+      );
+    })();
   });
 
   // ADR-0079 section 5 - a pending contact whose one-to-one already exists
@@ -464,11 +530,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   onCleanup(unsubscribeResetAccepted);
 
   /**
-   * ADR-0079 section 3 - the device's own accept of a request sent through
-   * a live invite link: the ordinary accept path, then one use of the link
-   * counted in the synced register (with the requester's key, so another
-   * device of the account treats the same request as answered). `false`
-   * when the accept did not complete.
+   * ADR-0079 section 3 - the winning device's accept of a request sent
+   * through a live invite link: the ordinary accept path, then one use of
+   * the link counted in the synced register (with the requester's key, so
+   * another device of the account treats the same request as answered).
+   * `false` when the accept did not complete; the won claim stays recorded
+   * and the next pass tries again.
    */
   async function acceptThroughLink(request: IncomingContactRequest): Promise<boolean> {
     const identity = auth.identitySecrets();
@@ -478,7 +545,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     if (outcome.legacy || outcome.chatError !== null) {
       // eslint-disable-next-line no-console
       console.warn(
-        "invite-link accept did not complete; shown as a request",
+        "invite-link accept did not complete; retried at the next pass",
         outcome.chatError instanceof Error ? outcome.chatError.name : "legacy",
       );
       return false;
@@ -487,6 +554,150 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     setAcceptedVersion(acceptedVersion() + 1);
     return true;
   }
+
+  /** One decision pass at a time (C-62 sub-invariant 5): the read of the
+   *  claim record, the decision and the write of the outcome never
+   *  interleave with another pass on this page. */
+  let linkPass: Promise<void> = Promise.resolve();
+
+  /**
+   * ADR-0079 (reworked 2026-10-17) - decide every request this inbox holds
+   * that answers one of the account's invite links ({@link linkRequestStep}):
+   * no timer; a request waits, kept and unshown, until the synced state is
+   * loaded, and only the device whose claim is first in the DeviceGroup
+   * journal builds the one-to-one. Run after every mailbox pass, when the
+   * synced state loads, and when a claim from another device arrives.
+   */
+  function decideLinkRequests(): Promise<void> {
+    const run = async (): Promise<void> => {
+      const polled = scope;
+      if (polled === null) return;
+      const target = polled.inbox;
+      const accountIdB64 = polled.accountIdB64;
+      const claims = linkClaimRecord(accountIdB64);
+      const current = (): boolean => scope === polled;
+      const wasm = await loadWasm();
+      // Whether a device in the CURRENT roster claimed the request (a claim
+      // only from a device since removed answers nothing). `false` while
+      // the roster is not known.
+      const answeredElsewhere = (key: string): boolean => {
+        const seen = claims.seen(key);
+        const roster = sync.linkClaimRoster();
+        if (seen.length === 0 || roster === null) return false;
+        const { ids, authors } = claimInputs(seen);
+        return wasm.linkClaimAnsweredElsewhere(ids, authors, concatBytes(roster.roster));
+      };
+      // A card already shown (dead link here) for a request a roster device
+      // claimed: answered, the card goes.
+      for (const req of target.deadLinkRequests()) {
+        const answer = req.linkAnswer;
+        if (answer === null) continue;
+        const key = linkRequestKeyHex(answer.linkId, req.fromPubkey);
+        if (shownCardAnswered(claims.own(key), answeredElsewhere(key))) target.remove(req.messageId);
+      }
+      for (const req of target.undecidedLinkRequests()) {
+        if (!current()) return;
+        const answer = req.linkAnswer;
+        if (answer === null) {
+          target.remove(req.messageId);
+          continue;
+        }
+        const key = linkRequestKeyHex(answer.linkId, req.fromPubkey);
+        let step = linkRequestStep({
+          own: claims.own(key),
+          answeredElsewhere: answeredElsewhere(key),
+          verdict: sync.linkAnswerVerdictNow(answer.linkId, answer.linkSecret, req.fromPubkey),
+        });
+        try {
+          if (step === "wait") continue;
+          if (step === "drop") {
+            claims.forgetOwn(key);
+            target.remove(req.messageId);
+            continue;
+          }
+          if (step === "card-dead") {
+            target.markDeadLink(req.messageId);
+            continue;
+          }
+          if (step === "post-claim") {
+            // The sealed claim is recorded before the publish: whether or
+            // not the publish answers, the receive loop recognises its row
+            // by those bytes and files its id as this device's.
+            await sync.postLinkClaim(
+              answer.linkId,
+              req.fromPubkey,
+              (wireHex) => claims.addOwnWire(key, wireHex),
+              (wireHex, messageId) => {
+                claims.recordOwnClaimRow(wireHex, messageId);
+              },
+            );
+            step = "decide";
+          }
+          if (step === "decide" || step === "recheck") {
+            if (step === "decide") {
+              // Every row up to (and past) this device's claims is applied
+              // once a pass that started after them has read the journal to
+              // its head. A wait that times out or finds the device offline
+              // keeps the request undecided for the next pass.
+              if ((await sync.catchUpJournal()) !== "read" || !current()) continue;
+            }
+            // A re-check reads no journal: every claim of this device is
+            // known, a later claim cannot be earlier, and only the roster
+            // can have changed.
+            const roster = sync.linkClaimRoster();
+            if (roster === null) continue;
+            // A sealed claim no row carried did not land.
+            claims.dropUnlanded(key);
+            const { ids, authors } = claimInputs(
+              claimsToDecide(claims.own(key), claims.seen(key), bytesToHex(roster.ownKey)),
+            );
+            const decision = wasm.linkClaimOutcome(roster.ownKey, ids, authors, concatBytes(roster.roster));
+            const won = decision.won;
+            const lost = decision.lost;
+            const winnerId = Number(decision.messageId);
+            decision.free();
+            if (lost) {
+              // Another device's claim is first: it answers the request.
+              // Kept, unshown, until the register says it was answered; if
+              // that device is removed first, a re-check hands it on.
+              claims.setSettled(key);
+              continue;
+            }
+            if (!won) {
+              // No claim from the roster landed: post again next pass.
+              claims.forgetOwn(key);
+              continue;
+            }
+            claims.setWon(key, winnerId);
+            step = "build";
+          }
+          if (step === "build") {
+            if (await acceptThroughLink(req)) {
+              if (!current()) return;
+              target.remove(req.messageId);
+              claims.forgetOwn(key);
+            }
+          }
+        } catch (err) {
+          // A publish or a write that failed: the request stays undecided
+          // and the next pass picks it up where its record says.
+          // eslint-disable-next-line no-console
+          console.warn("link request not decided this pass", err instanceof Error ? err.name : "");
+        }
+      }
+    };
+    linkPass = linkPass.then(run, run);
+    return linkPass;
+  }
+
+  // Decide the waiting link requests when the synced state loads, when a
+  // claim from another device arrives, and when the link register moves.
+  createEffect(() => {
+    sync.ready();
+    sync.linkClaimsVersion();
+    sync.linkRecords();
+    void untrack(() => decideLinkRequests());
+  });
 
   /**
    * ADR-0079 section 5 - move the messages written to a pending contact into
@@ -505,9 +716,11 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           personKeysB64: personKeysOf(active.group),
         },
         async (contact) => {
-          for (const m of contact.queue) {
-            heldSends.hold(conversationHex, { text: m.text, attached: [], reply: undefined }, m.createdAtMs);
-          }
+          // The ONE held-send queue (ADR-0073 R.13b): what was written is
+          // kept under the inviter's account id until now; moved, in order,
+          // to the conversation's slot, from which the ordinary flush sends
+          // it (a failed send keeps the rest for the next attempt).
+          moveHeldToConversation(heldSends, contact, conversationHex, Date.now());
           await persistHeldSends(accountIdB64);
           return true;
         },
@@ -552,28 +765,14 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           // the sender's account, and the request is answered silently (the
           // conversation continues by itself) or dropped.
           if (await handleKnownContactRequest(ev.request, accountIdB64, ev.row)) continue;
-          // ADR-0079 section 3 - a request sent through one of this
-          // account's live invite links is accepted here, with no card; one
-          // already accepted (by this device or another) is answered; one
-          // whose link no longer works is an ordinary card with a note.
+          // ADR-0079 section 3 (reworked 2026-10-17) - a request sent
+          // through one of this account's invite links is kept undecided
+          // (stored, not listed) and decided after this batch by
+          // `decideLinkRequests`: accepted with no card by the one device
+          // whose claim wins, answered, or a card with the dead-link note.
           if (ev.request.linkAnswer !== null) {
-            const verdict = await sync.linkAnswerVerdict(
-              ev.request.linkAnswer.linkId,
-              ev.request.linkAnswer.linkSecret,
-              ev.request.fromPubkey,
-            );
-            requireCurrent();
-            const action = linkAnswerAction(true, verdict);
-            if (action === "drop") continue;
-            if (action === "accept") {
-              if (await acceptThroughLink(ev.request)) continue;
-              // The accept did not complete (a network failure while the
-              // conversation was founded): the person sees the request and
-              // can accept it, with no note, since the link was live.
-              ev.request.deadLink = false;
-            } else {
-              ev.request.deadLink = true;
-            }
+            fresh.push({ request: ev.request, row: ev.row, undecidedLink: true });
+            continue;
           }
           // ADR-0074 section 3.5a rule 5 - one request per person: a request
           // from the proven successor of a pending request's key replaces
@@ -673,6 +872,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         // answered goes out now, in order, through the held-send queue.
         for (const groupIdB64 of joinedGroupIds) await handOverToConversation(accountIdB64, groupIdB64);
       }
+      if (fresh.some((f) => f.undecidedLink === true)) void decideLinkRequests();
     } finally {
       // `stop()` cleared the banner when the session ended; a late failure of
       // the ended session must not put it back on the login screen or in the
@@ -794,6 +994,9 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     // verify-and-open path before they are listed.
     void opened
       .restore((rows) => client.decodePendingRequestRows(auth.identitySecrets(), rows))
+      // ADR-0079: a link request kept undecided before the reload is
+      // decided now (or once the synced state loads).
+      .then(() => decideLinkRequests())
       .catch((err: unknown) => {
         // eslint-disable-next-line no-console
         console.warn("contacts inbox: restoring pending requests failed", err);
@@ -817,6 +1020,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         // then left. Nothing is registered or written there.
         await pollPredecessorMailboxes(accountIdB64, signal);
         await poller.poll(LONG_POLL_WAIT_SECS, signal);
+        // ADR-0079 (reworked 2026-10-17): a claim whose journal read did not
+        // finish, or a won claim whose build failed, is taken up again after
+        // every pass; a pass with nothing undecided costs nothing.
+        void decideLinkRequests();
         return 0;
       },
       classifyFailure: (err) => (isDsNetworkFailure(err) ? "network" : "other"),

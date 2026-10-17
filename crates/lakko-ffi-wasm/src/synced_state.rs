@@ -740,6 +740,8 @@ pub struct LinkRecord {
 impl LinkRecord {
     /// A record for a link just minted: no use yet, not revoked. `linkId`
     /// 16 bytes, `linkSecret` 12, `ledgerId` 6 or empty (an inline link),
+    /// `revocationSeed` 32 or empty (no ledger row; ADR-0078 section 10, it
+    /// lets any device of the account that revokes the link delete the row),
     /// `maxUses` as the capability carries it (0 = single use,
     /// `0xFFFFFFFF` = no limit), `expiryMs` 0 = never.
     ///
@@ -753,6 +755,7 @@ impl LinkRecord {
         link_secret: &[u8],
         kind: LinkRecordKind,
         ledger_id: &[u8],
+        revocation_seed: &[u8],
         expiry_ms: u64,
         max_uses: u32,
         minted_at_ms: u64,
@@ -768,6 +771,7 @@ impl LinkRecord {
                 LinkRecordKind::Call => core::LinkRecordKind::Call,
             },
             ledger_id: ledger_id.to_vec(),
+            revocation_seed: revocation_seed.to_vec(),
             expiry_ms,
             max_uses,
             uses: 0,
@@ -812,6 +816,11 @@ impl LinkRecord {
     #[wasm_bindgen(getter, js_name = ledgerId)]
     pub fn ledger_id(&self) -> Vec<u8> {
         self.inner.value.ledger_id.clone()
+    }
+    /// The 32-byte seed that deletes the ledger row, or empty. SECRET.
+    #[wasm_bindgen(getter, js_name = revocationSeed)]
+    pub fn revocation_seed(&self) -> Vec<u8> {
+        self.inner.value.revocation_seed.clone()
     }
     /// UNIX millis after which the link no longer works; 0 = never.
     #[wasm_bindgen(getter, js_name = expiryMs)]

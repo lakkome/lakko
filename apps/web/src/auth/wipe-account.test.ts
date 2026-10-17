@@ -251,6 +251,8 @@ function seedAccount(acct: string, acctUrl: string): void {
   markFirstPasswordOwed(local, acct);
   put(`lakko.own-username.unsent.v1.${acct}`, "1");
   put(`lakko.link-records.unsent.v1.${acct}`, "1");
+  put(`lakko.link-claims.v1.${acct}`, JSON.stringify({ v: 1, seen: {}, own: {} }));
+  put(`lakko.link-row-deletions-owed.v1.${acct}`, JSON.stringify(["00"]));
   writeRenamedAt(local, acct, 5);
   writeRenameOwed(local, acct, { v: 1, oldUsername: "alice", newUsername: "alicia", phase: "binding" });
   put(
@@ -612,6 +614,8 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko:first-password-owed:": "account",
   "lakko.own-username.unsent.v1.": "account",
   "lakko.link-records.unsent.v1.": "account",
+  "lakko.link-claims.v1.": "account",
+  "lakko.link-row-deletions-owed.v1.": "account",
   "lakko:username-changed-at:": "account",
   "lakko:username-change-owed:": "account",
   "lakko.contacts.verified-bindings.v1.": "account",

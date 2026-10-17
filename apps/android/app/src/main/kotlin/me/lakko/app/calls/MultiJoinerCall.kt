@@ -730,6 +730,9 @@ class MultiJoinerCall private constructor(
             // ADR-0080 - a device card means something ONLY in the account's
             // own DeviceGroup. A relay payload names no device; dropped.
             FfiIncomingEnvelopeKind.DEVICE_CARD -> Unit
+            // ADR-0079 (reworked 2026-10-17) - a link-request claim means
+            // something ONLY in the account's own DeviceGroup; dropped.
+            FfiIncomingEnvelopeKind.LINK_CLAIM -> Unit
         }
     }
 

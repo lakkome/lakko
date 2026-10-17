@@ -87,6 +87,13 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// ADR-0079 section 4 — the account's own invite links, every device's,
     /// revoked ones included.
     @Published public private(set) var linkRecords: [LinkRecord] = []
+    /// ADR-0079 (reworked 2026-10-17) — bumped whenever a claim of a link
+    /// request from another device of the account is recorded.
+    @Published public private(set) var linkClaimsVersion: Int = 0
+    /// When the last fetch that found the journal drained had STARTED (unix
+    /// ms): a fetch that started after a claim was published read every row
+    /// up to it.
+    private var lastDrainedFetchStartedAtMs: Int64 = 0
 
     /// The synced state of the bound account was loaded from disk: a write
     /// that waited for it can run. Wired by the composition root.
@@ -710,10 +717,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     }
 
     /// Encrypt with `compose` under the DeviceGroup's current epoch and
-    /// publish it on the DeviceGroup journal.
+    /// publish it on the DeviceGroup journal. Returns the DS message id.
+    @discardableResult
     private func publish(
         _ compose: (DeviceGroup, Identity) throws -> Data
-    ) async throws {
+    ) async throws -> Int64 {
         if deviceRemoved {
             throw NSError(
                 domain: "DeviceGroupSync",
@@ -744,7 +752,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             message: wireBytes,
             attestation: nil
         )
-        _ = try await ds.publishGroup(
+        let published = try await ds.publishGroup(
             groupId: groupId,
             payload: envelope,
             auth: DeviceGroupDsAccess.auth(
@@ -754,6 +762,98 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             identity: identity,
             accountIdB64: accountIdB64
         )
+        return published.id
+    }
+
+    /// ADR-0079 (reworked 2026-10-17) — seal and post this device's claim of
+    /// a link request into the account's DeviceGroup, on its own
+    /// `ServiceEnvelope` carrier. `beforePublish` gets the sealed bytes (hex)
+    /// and must record them durably (`false` aborts the publish);
+    /// `onPublished` gets them with the DS message id once the publish
+    /// answers. A publish that throws may still have landed: the receive
+    /// loop then recognises the row by the recorded bytes
+    /// (``matchOwnLinkClaim``). Returns the DS message id.
+    public func postLinkClaim(
+        linkId: Data,
+        requesterKey: Data,
+        beforePublish: (String) -> Bool,
+        onPublished: (String, Int64) -> Void
+    ) async throws -> Int64 {
+        let envelope = try composeLinkClaimEnvelope(linkId: linkId, requesterAccountKey: requesterKey)
+        var wireHex = ""
+        let id = try await publish { group, identity in
+            let wire = try group.createServiceEnvelopeMessage(identity: identity, envelope: envelope, hlc: Hlc.mint())
+            wireHex = LinkClaims.hex(wire)
+            guard beforePublish(wireHex) else {
+                throw NSError(
+                    domain: "DeviceGroupSync",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Link claim not recorded"]
+                )
+            }
+            return wire
+        }
+        onPublished(wireHex, id)
+        return id
+    }
+
+    /// ADR-0079 — this device's DeviceGroup leaf key and the current
+    /// roster's leaf keys, the inputs of the claim decision. `nil` while no
+    /// handle is held or this device was removed.
+    public func linkClaimRoster() -> (ownKey: Data, roster: [Data])? {
+        guard !deviceRemoved, let g = group, let devices = try? g.devices(), !devices.isEmpty,
+              let ownLeaf = try? g.ownLeafIndex(),
+              let ownKey = devices.first(where: { $0.leafIndex == ownLeaf })?.signaturePublicKey
+        else { return nil }
+        return (ownKey, devices.map(\.signaturePublicKey))
+    }
+
+    /// ADR-0079 — a journal row carrying one of this device's recorded
+    /// sealed claims is this device's own claim (its own application message
+    /// cannot be decrypted here): file its id. `true` when it was.
+    func matchOwnLinkClaim(_ mlsMessage: Data, messageId: Int64) -> Bool {
+        guard let account = activeAccountIdB64 else { return false }
+        let record = LinkClaims.Record(accountIdB64: account)
+        guard record.hasUnmatchedWires(),
+              record.recordOwnClaimRow(wireHex: LinkClaims.hex(mlsMessage), messageId: messageId)
+        else { return false }
+        linkClaimsVersion += 1
+        return true
+    }
+
+    /// Wait until a fetch that STARTED after this call has found the
+    /// DeviceGroup journal drained, so every row up to a claim just published
+    /// has been applied. `false` when that did not happen in time.
+    public func waitForJournalReadPastNow(
+        timeoutMs: Int64 = DeviceGroupSyncRepository.journalHeadTimeoutMs
+    ) async -> Bool {
+        guard ready, group != nil, !deviceRemoved else { return false }
+        let start = Int64(Date().timeIntervalSince1970 * 1000)
+        while Int64(Date().timeIntervalSince1970 * 1000) - start < timeoutMs {
+            if lastDrainedFetchStartedAtMs > start { return true }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if Task.isCancelled { return false }
+        }
+        return lastDrainedFetchStartedAtMs > start
+    }
+
+    /// ADR-0079 (reworked 2026-10-17) — another device's claim of a link
+    /// request, taken in. Honoured only from a sender leaf the roster this
+    /// row was sealed under resolves (C-68); its DS id is kept with that
+    /// leaf's key. `true` when the envelope was a claim (kept or dropped).
+    func receiveLinkClaim(_ envelope: Data, senderLeaf: UInt32?, group g: DeviceGroup, messageId: Int64) -> Bool {
+        guard isLinkClaimEnvelope(bytes: envelope) else { return false }
+        guard let claim = try? decodeLinkClaimEnvelope(plaintext: envelope) else { return true }
+        guard let senderLeaf, let roster = try? g.devices(),
+              let sender = roster.first(where: { $0.leafIndex == senderLeaf }),
+              let account = activeAccountIdB64 else { return true }
+        let changed = LinkClaims.Record(accountIdB64: account).recordSeen(
+            LinkClaims.requestKeyHex(linkId: claim.linkId, requesterKey: claim.requesterAccountKey),
+            messageId: messageId,
+            authorHex: LinkClaims.hex(sender.signaturePublicKey),
+            nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        if changed { linkClaimsVersion += 1 }
+        return true
     }
 
     // MARK: - Inbound poll loop
@@ -796,6 +896,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 guard bound.isCurrent else { return }
             }
             let result: FetchResult
+            let fetchStartedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
             // ADR-0053 point 1 — the read is signed under the DeviceGroup's
             // current epoch.
             let auth = group.flatMap { g in
@@ -878,6 +979,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     NSLog("DeviceGroupSync envelope decode failed: %@", error.localizedDescription)
                     continue
                 }
+                // ADR-0079 — this device's own claim, recognised by the
+                // sealed bytes it recorded before the publish; filed before
+                // the cursor moves past it.
+                if matchOwnLinkClaim(entry.message, messageId: message.id) { continue }
                 let attestations: [Data] = entry.attestation.map { [$0] } ?? []
                 // ADR-0058 section 5.1 — the members before this row, to tell
                 // whether a commit grew the group.
@@ -908,6 +1013,12 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                         let parsed = try parseDevicegroupPayload(plaintext: data)
                         if case .serviceEnvelope(let envelope) = parsed.body,
                            receiveDeviceCard(envelope, senderLeaf: senderLeaf, group: g) {
+                            break
+                        }
+                        // ADR-0079 (reworked 2026-10-17) — another device's
+                        // claim of a link request, resolved the same way.
+                        if case .serviceEnvelope(let envelope) = parsed.body,
+                           receiveLinkClaim(envelope, senderLeaf: senderLeaf, group: g, messageId: message.id) {
                             break
                         }
                         applyParsed(parsed)
@@ -945,7 +1056,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             // Live walk 2026-09-30 — a DeviceGroup that forked from the one
             // on the DS (``DeviceGroupFork``) repairs itself, once.
             let drained = result.messages.isEmpty && !result.hasMore
-            if drained { lastDrainedFetchAtMs = Int64(Date().timeIntervalSince1970 * 1000) }
+            if drained {
+                lastDrainedFetchAtMs = Int64(Date().timeIntervalSince1970 * 1000)
+                lastDrainedFetchStartedAtMs = fetchStartedAtMs
+            }
             var localEpoch: UInt64?
             if let g = group, let id = identity {
                 localEpoch = try? g.dsAccessSigner(identity: id).epoch()
@@ -1378,22 +1492,14 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     }
 
     /// The one rule for a request's link answer (ADR-0079 section 3), asked
-    /// of the fold once it is loaded (waits a short bound for it). A fold that
-    /// never loads reads as `.dead`, so the request is shown as a card rather
-    /// than lost.
-    public func linkAnswerVerdict(linkId: Data, linkSecret: Data, requesterKey: Data) async -> LinkAnswerVerdict {
-        let deadline = Date().addingTimeInterval(Self.linkVerdictWaitSeconds)
-        while !ready, Date() < deadline {
-            try? await Task.sleep(nanoseconds: 200_000_000)
-        }
-        guard ready else { return .dead }
+    /// of the fold. `nil` while the fold is not loaded: the request stays
+    /// undecided (no timer) and is decided once ``ready`` turns `true`.
+    public func linkAnswerVerdictNow(linkId: Data, linkSecret: Data, requesterKey: Data) -> LinkAnswerVerdict? {
+        guard ready else { return nil }
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         return (try? syncedState.linkAnswerVerdict(
             linkId: linkId, linkSecret: linkSecret, requesterKey: requesterKey, nowMs: nowMs)) ?? .dead
     }
-
-    /// How long a link-answer verdict waits for the fold. Chosen, not measured.
-    static let linkVerdictWaitSeconds: TimeInterval = 15
 
     // MARK: - ADR-0076: the own-username register
 

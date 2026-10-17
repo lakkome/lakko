@@ -22,21 +22,15 @@ import uniffi.lakko_ffi_uniffi.LinkRecordKind
  *
  * After Add on the invite page the inviter is a contact at once on this side
  * (`docs/ux/contact-invite-link.md` section 4): listed in Contacts and Chats
- * under the name the link states, and written to. What is written is kept
- * with the record, in order; when the inviter's Welcome lands, the messages
- * are sent into the new one-to-one in that order and the record goes. The
+ * under the name the link states, and written to. What is written is NOT
+ * kept with the record (reworked 2026-10-17): it goes into the ONE held-send
+ * queue (`chat/HeldSendQueue.kt`, sealed under the device key) under the
+ * contact's [PendingContact.queueKey], the same mechanism web and iOS use;
+ * when the inviter's Welcome lands, the messages move, in order, into the
+ * queue of the new one-to-one, which sends them, and the record goes. The
  * records live in one file per account under `noBackupFilesDir`, sealed with
- * the device key (they hold the person's own unsent words).
+ * the device key.
  */
-
-/** One message written to a pending contact. */
-@Serializable
-public data class PendingInvitedMessage(
-    /** A local id, unique within the contact. */
-    val localId: String,
-    val queuedAtMs: Long,
-    val text: String,
-)
 
 /** A person added through their invite link whose app has not answered. */
 @Serializable
@@ -53,9 +47,12 @@ public data class PendingContact(
     val username: String,
     /** When Add was pressed (Unix ms): the 7-day line counts from here. */
     val addedAtMs: Long,
-    /** What was written before the chat existed, in the order written. */
-    val messages: List<PendingInvitedMessage> = emptyList(),
-)
+) {
+    /** The held-send queue key of what is written before the chat exists:
+     *  the inviter's account id hex (32 characters, never a conversation id,
+     *  which is a 64-character group id). */
+    val queueKey: String get() = accountIdHex
+}
 
 /** The pure rules of the pending contacts (one definition each, tested). */
 public object PendingContacts {
@@ -63,14 +60,14 @@ public object PendingContacts {
     public const val STALE_MS: Long = 7L * 24 * 60 * 60 * 1000
 
     /** [list] with [contact] added, or the existing record for the same
-     *  person kept with its first Add time and its messages (a second Add
-     *  through a fresh link does not reset the 7-day line). */
+     *  person kept with its first Add time (a second Add through a fresh link
+     *  does not reset the 7-day line). */
     public fun adding(contact: PendingContact, list: List<PendingContact>): List<PendingContact> {
         val at = list.indexOfFirst { it.accountIdHex == contact.accountIdHex }
         if (at < 0) return list + contact
         val held = list[at]
         return list.toMutableList().also {
-            it[at] = contact.copy(addedAtMs = minOf(held.addedAtMs, contact.addedAtMs), messages = held.messages)
+            it[at] = contact.copy(addedAtMs = minOf(held.addedAtMs, contact.addedAtMs))
         }
     }
 
@@ -92,14 +89,6 @@ public object PendingContacts {
         return list.firstOrNull { it.signaturePubkeyB64 in people }
     }
 
-    /** [list] with [text] appended to [accountIdHex]'s messages. */
-    public fun queueing(
-        list: List<PendingContact>,
-        accountIdHex: String,
-        message: PendingInvitedMessage,
-    ): List<PendingContact> = list.map {
-        if (it.accountIdHex == accountIdHex) it.copy(messages = it.messages + message) else it
-    }
 
     /** The name shown: the stated display name, else `@username`, else
      *  `null` (the caller's catalog fallback). */

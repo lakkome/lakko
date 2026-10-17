@@ -78,6 +78,7 @@ import { conversationKindOf } from "./conversation-kind";
 import {
   loadPendingContacts,
   pendingContacts,
+  lastPendingMessageText,
   pendingNameOf,
   shownPendingContacts,
   type PendingContact,
@@ -544,7 +545,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                       </span>
                     </div>
                     <div class="lk-row-line">
-                      <span class="lk-row-sub">{p.queue[p.queue.length - 1]?.text ?? ""}</span>
+                      <span class="lk-row-sub">{lastPendingMessageText(p)}</span>
                     </div>
                   </div>
                 </A>

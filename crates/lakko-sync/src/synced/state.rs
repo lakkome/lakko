@@ -106,11 +106,13 @@ use super::recovery_email::{
 /// The persistence format's version byte.
 ///
 /// `2` since the saved-message register (ADR-0065 section 4) joined the
-/// state, `3` since the link-record register (ADR-0079 section 4). Older
+/// state, `3` since the link-record register (ADR-0079 section 4), `4` since
+/// a link record carries its ledger row's revocation seed (ADR-0079 as
+/// reworked 2026-10-17). Older
 /// versions are refused rather than read: nothing is deployed, and a build
 /// that silently accepted an older layout would be a second decoder nobody
 /// tests.
-const STATE_VERSION: u8 = 3;
+const STATE_VERSION: u8 = 4;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1199,6 +1201,7 @@ mod tests {
             link_secret: [0x5C; 12],
             kind: crate::synced::LinkRecordKind::Contact,
             ledger_id: vec![],
+            revocation_seed: vec![],
             expiry_ms: 0,
             max_uses: 3,
             uses,
@@ -1263,6 +1266,47 @@ mod tests {
         assert_eq!(SyncedState::from_bytes(&a.to_bytes()).unwrap(), a);
         assert!(a.snapshot().stamped_entries().is_empty());
         assert_eq!(held.value.kind, LinkRecordKind::Contact);
+    }
+
+    /// ADR-0079 as reworked 2026-10-17: the ledger row's revocation seed
+    /// rides the record, so a device that did not mint the link holds it,
+    /// keeps it through a use and through its own revocation, and can delete
+    /// the ledger row itself.
+    #[test]
+    fn the_revocation_seed_reaches_every_device_and_survives_a_revocation() {
+        let SyncEntry::LinkRecord(mut record) = link(1, 0, false, 1) else {
+            unreachable!()
+        };
+        record.ledger_id = vec![6; 6];
+        record.revocation_seed = vec![0xA7; 32];
+        let id = record.link_id;
+        let mut minting = SyncedState::new();
+        assert_eq!(minting.set_link_record(5, record), Ok(true));
+        let mut other = SyncedState::new();
+        for e in minting.link_record_envelopes() {
+            assert_eq!(other.apply_link_record_envelope(&e), Ok(true));
+        }
+        assert_eq!(
+            other.link_record(&id).unwrap().value.revocation_seed,
+            vec![0xA7; 32]
+        );
+        assert_eq!(other.record_link_use(6, &id, &[1; 32]), Ok(true));
+        assert_eq!(other.revoke_link_record(7, &id), Ok(true));
+        let revoked = other.link_record(&id).unwrap().value;
+        assert!(revoked.revoked);
+        assert_eq!(revoked.revocation_seed, vec![0xA7; 32]);
+        let back = SyncedState::from_bytes(&other.to_bytes()).unwrap();
+        assert_eq!(
+            back.link_record(&id).unwrap().value.revocation_seed,
+            vec![0xA7; 32]
+        );
+        // The revocation reaches the minting device with the seed intact.
+        let env = other.link_record_envelope_for(&id).unwrap();
+        assert_eq!(minting.apply_link_record_envelope(&env), Ok(true));
+        assert_eq!(
+            minting.link_record(&id).unwrap().value.revocation_seed,
+            vec![0xA7; 32]
+        );
     }
 
     fn member(f: u8, c: u8, state: MemberState) -> SyncEntry {
@@ -1474,15 +1518,15 @@ mod tests {
         let mut s = SyncedState::new();
         s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
         let mut old = s.to_bytes();
-        assert_eq!(old[0], 3);
-        for version in [1u8, 2] {
+        assert_eq!(old[0], 4);
+        for version in [1u8, 2, 3] {
             old[0] = version;
             assert_eq!(
                 SyncedState::from_bytes(&old),
                 Err(CodecError::UnknownVersion)
             );
         }
-        assert_eq!(SyncedState::new().to_bytes(), vec![3, 0, 0, 0, 0]);
+        assert_eq!(SyncedState::new().to_bytes(), vec![4, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -2017,7 +2061,7 @@ mod tests {
         assert_eq!(SyncedState::from_bytes(&bytes), Ok(s));
         assert_eq!(SyncedState::from_bytes(&[]), Err(CodecError::Truncated));
         assert_eq!(
-            SyncedState::from_bytes(&[4, 0, 0, 0, 0]),
+            SyncedState::from_bytes(&[5, 0, 0, 0, 0]),
             Err(CodecError::UnknownVersion)
         );
         let mut trailing = bytes;

@@ -60,6 +60,7 @@ final class PendingContactsTests: XCTestCase {
         LinkRecord(
             hlc: 0, linkId: Data(repeating: id, count: 16), linkSecret: Data(repeating: 7, count: 12),
             kind: .contact, ledgerId: ledger ? Data(repeating: id, count: 6) : Data(),
+            revocationSeed: ledger ? Data(repeating: 9, count: 32) : Data(),
             expiryMs: expiry, maxUses: maxUses, uses: uses, revoked: revoked,
             mintedAtMs: minted, label: "", answered: [])
     }

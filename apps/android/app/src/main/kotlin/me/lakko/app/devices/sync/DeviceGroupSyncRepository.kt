@@ -923,22 +923,119 @@ public class DeviceGroupSyncRepository(
 
     /**
      * The one rule for a request's link answer (ADR-0079 section 3), asked
-     * of the fold once it is loaded (waits [LINK_VERDICT_WAIT_MS] for it). A
-     * fold that never loads reads as DEAD, so the request is shown as a card
-     * rather than lost.
+     * of the fold. `null` while the fold is not loaded: the request stays
+     * undecided (no timer) and is decided once [ready] turns `true`.
      */
-    public suspend fun linkAnswerVerdict(
+    public fun linkAnswerVerdictNow(
         linkId: ByteArray,
         linkSecret: ByteArray,
         requesterKey: ByteArray,
-    ): LinkAnswerVerdict {
-        withTimeoutOrNull(LINK_VERDICT_WAIT_MS) { ready.first { it } }
+    ): LinkAnswerVerdict? {
+        if (!ready.value) return null
         return synchronized(stateLock) {
-            val state = syncedState ?: return LinkAnswerVerdict.DEAD
+            val state = syncedState ?: return null
             runCatching {
                 state.linkAnswerVerdict(linkId, linkSecret, requesterKey, System.currentTimeMillis().toULong())
             }.getOrDefault(LinkAnswerVerdict.DEAD)
         }
+    }
+
+    private val mutableLinkClaimsVersion: MutableStateFlow<Long> = MutableStateFlow(0L)
+
+    /** ADR-0079 (reworked 2026-10-17) - bumped whenever a claim of a link
+     *  request is recorded (another device's, or this device's own row
+     *  recognised by its bytes). */
+    public val linkClaimsVersion: StateFlow<Long> = mutableLinkClaimsVersion.asStateFlow()
+
+    /**
+     * ADR-0079 (reworked 2026-10-17) - seal and post this device's claim of
+     * a link request into the account's DeviceGroup, on its own
+     * `ServiceEnvelope` carrier. [beforePublish] gets the sealed bytes (hex)
+     * and must record them durably (`false` aborts the publish);
+     * [onPublished] gets them with the DS message id once the publish
+     * answers. A publish that throws may still have landed: the receive loop
+     * then recognises the row by the recorded bytes ([matchOwnLinkClaim]).
+     * The snapshot is persisted before the publish, as for every service
+     * envelope. Returns the DS message id.
+     */
+    public suspend fun postLinkClaim(
+        linkId: ByteArray,
+        requesterKey: ByteArray,
+        beforePublish: (String) -> Boolean,
+        onPublished: (String, Long) -> Unit,
+    ): Long {
+        check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
+        val envelope = uniffi.lakko_ffi_uniffi.composeLinkClaimEnvelope(linkId, requesterKey)
+        val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
+        val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
+        val accountIdB64 = activeAccountIdB64.get() ?: error("DeviceGroupSync not bootstrapped")
+        val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
+        val wireHex = me.lakko.app.contacts.LinkClaims.hex(wireBytes)
+        check(beforePublish(wireHex)) { "link claim not recorded" }
+        DeviceGroupLifecycle.persistSnapshot(context = applicationContext, identity = id, accountIdB64 = accountIdB64)
+        val messageId = DsClient().use { ds ->
+            ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null)).id
+        }
+        onPublished(wireHex, messageId)
+        return messageId
+    }
+
+    /** ADR-0079 - this device's DeviceGroup leaf key and the current
+     *  roster's leaf keys, the inputs of the claim decision. `null` while no
+     *  handle is held or this device was removed. */
+    public fun linkClaimRoster(): Pair<ByteArray, List<ByteArray>>? {
+        if (mutableDeviceRemoved.value) return null
+        val g = group.get() ?: return null
+        val devices = runCatching { g.devices() }.getOrNull()?.takeIf { it.isNotEmpty() } ?: return null
+        val ownLeaf = runCatching { g.ownLeafIndex() }.getOrNull() ?: return null
+        val ownKey = devices.firstOrNull { it.leafIndex == ownLeaf }?.signaturePublicKey ?: return null
+        return ownKey to devices.map { it.signaturePublicKey }
+    }
+
+    /** ADR-0079 - a journal row carrying one of this device's recorded
+     *  sealed claims is this device's own claim (its own application message
+     *  cannot be decrypted here): file its id. `true` when it was. */
+    private fun matchOwnLinkClaim(mlsMessage: ByteArray, messageId: Long): Boolean {
+        val accountIdB64 = activeAccountIdB64.get() ?: return false
+        val record = me.lakko.app.contacts.LinkClaimRecord.onDevice(applicationContext, accountIdB64)
+        if (!record.hasUnmatchedWires()) return false
+        if (!record.recordOwnClaimRow(me.lakko.app.contacts.LinkClaims.hex(mlsMessage), messageId)) return false
+        mutableLinkClaimsVersion.value = mutableLinkClaimsVersion.value + 1
+        return true
+    }
+
+    /** Wait until a poll that started after this call read the DeviceGroup
+     *  journal to its head, so every row up to a claim just published has
+     *  been applied. `false` when that did not happen in time. */
+    public suspend fun awaitJournalReadPastNow(timeoutMs: Long = CLAIM_HEAD_TIMEOUT_MS): Boolean =
+        awaitHead(timeoutMs)
+
+    /**
+     * ADR-0079 (reworked 2026-10-17) - another device's claim of a link
+     * request, taken in. Honoured only from a sender leaf the roster this
+     * row was sealed under resolves (C-68); its DS id is kept with that
+     * leaf's key. `true` when the envelope was a claim (kept or dropped).
+     */
+    private fun receiveLinkClaim(envelope: ByteArray, senderLeaf: UInt?, g: DeviceGroup, messageId: Long): Boolean {
+        if (!uniffi.lakko_ffi_uniffi.isLinkClaimEnvelope(envelope)) return false
+        val claim = try {
+            uniffi.lakko_ffi_uniffi.decodeLinkClaimEnvelope(envelope)
+        } catch (_: Throwable) {
+            return true
+        }
+        val leaf = senderLeaf ?: return true
+        val roster = runCatching { g.devices() }.getOrNull() ?: return true
+        val sender = roster.firstOrNull { it.leafIndex == leaf } ?: return true
+        val accountIdB64 = activeAccountIdB64.get() ?: return true
+        val changed = me.lakko.app.contacts.LinkClaimRecord.onDevice(applicationContext, accountIdB64)
+            .recordSeen(
+                me.lakko.app.contacts.LinkClaims.requestKeyHex(claim.linkId, claim.requesterAccountKey),
+                messageId,
+                me.lakko.app.contacts.LinkClaims.hex(sender.signaturePublicKey),
+                System.currentTimeMillis(),
+            )
+        if (changed) mutableLinkClaimsVersion.value = mutableLinkClaimsVersion.value + 1
+        return true
     }
 
     /** A received link-record envelope, folded by its original stamp. */
@@ -1372,6 +1469,10 @@ public class DeviceGroupSyncRepository(
                         Log.w(LOG_TAG, "journal envelope decode failed at ${message.id}", cause)
                         continue
                     }
+                    // ADR-0079 - this device's own claim, recognised by the
+                    // sealed bytes it recorded before the publish; filed
+                    // before the cursor moves past it.
+                    if (matchOwnLinkClaim(entry.first, message.id)) continue
                     val attestations: List<ByteArray> =
                         entry.second?.let { listOf(it) } ?: emptyList()
                     val processed: ProcessedMessage = try {
@@ -1434,6 +1535,12 @@ public class DeviceGroupSyncRepository(
                                 // ADR-0080 - a device card, kept under the
                                 // sender's leaf key resolved here, against the
                                 // roster this row was sealed under (C-68).
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                receiveLinkClaim(body.envelope, processed.senderLeaf, g, message.id)
+                            ) {
+                                // ADR-0079 (reworked 2026-10-17) - another
+                                // device's claim of a link request, resolved
+                                // the same way.
                             } else if (body is DeviceGroupBody.ServiceEnvelope) {
                                 // ADR-0060 section 7 — the Visibility setting and
                                 // the ReachState counters from another of this
@@ -1825,7 +1932,9 @@ public class DeviceGroupSyncRepository(
 
         /** How long a link-answer verdict waits for the fold (ADR-0079). Chosen,
          *  not measured. */
-        internal const val LINK_VERDICT_WAIT_MS: Long = 15_000L
+        /** How long a claim waits for the journal to be read past it: one
+         *  long poll (25 s) twice over and a margin. Chosen, not measured. */
+        internal const val CLAIM_HEAD_TIMEOUT_MS: Long = 60_000L
 
         /** Per-account "a write is waiting" flag. Not secret: a boolean. */
         internal const val PENDING_PREFS = "lakko-device-sync-pending"

@@ -13,9 +13,11 @@
  * rule that decides a request's link answer, are in Rust (`lakko-sync`
  * `LinkRecordEntry::verdict`), so the three clients cannot disagree.
  *
- * The link secret is SECRET: it lives in the synced state (sealed under the
- * device key on disk, end-to-end encrypted between the account's devices)
- * and is never logged.
+ * The link secret and the revocation seed are SECRET: they live in the
+ * synced state (sealed under the device key on disk, end-to-end encrypted
+ * between the account's devices) and are never logged. The revocation seed
+ * travels with the record (ADR-0079 as reworked 2026-10-17) so that any
+ * device that revokes a link deletes its ledger row at once.
  */
 import type { SyncedState as WasmSyncedState } from "../../../wasm/lakko_ffi_wasm";
 
@@ -32,6 +34,9 @@ export interface LinkRecordModel {
   readonly kind: LinkRecordKind;
   /** The 6-byte ledger id, empty for an inline link. */
   readonly ledgerId: Uint8Array;
+  /** The 32-byte seed that deletes the ledger row (ADR-0078 section 10),
+   *  empty when there is no row. SECRET. */
+  readonly revocationSeed: Uint8Array;
   /** UNIX millis after which the link no longer works; 0 = never. */
   readonly expiryMs: number;
   /** The use limit as the capability carries it (0 = single use,
@@ -53,6 +58,8 @@ export interface NewLinkRecord {
   readonly linkSecret: Uint8Array;
   readonly kind: LinkRecordKind;
   readonly ledgerId: Uint8Array;
+  /** The seed the ledger row was created under; empty for an inline link. */
+  readonly revocationSeed: Uint8Array;
   readonly expiryMs: number;
   readonly maxUses: number;
   readonly mintedAtMs: number;
@@ -84,6 +91,7 @@ export function readLinkRecords(synced: WasmSyncedState, contactKind: number): L
         linkSecret: r.linkSecret.slice(),
         kind: r.kind === contactKind ? "contact" : "call",
         ledgerId: r.ledgerId.slice(),
+        revocationSeed: r.revocationSeed.slice(),
         expiryMs: Number(r.expiryMs),
         maxUses: r.maxUses,
         uses: r.uses,

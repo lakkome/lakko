@@ -117,3 +117,54 @@ describe("an unshown request waiting for a verdict survives the page (UX 16.6)",
     expect(open(st).waitingRows()).toEqual([]);
   });
 });
+
+describe("a request answering an invite link (ADR-0079, reworked 2026-10-17)", () => {
+  const open = (st: ReturnType<typeof memory>) =>
+    createPendingInbox({ accountIdB64: CARA, isAccepted: () => false, onChange: () => undefined, storage: st });
+  const request = (messageId: number) =>
+    ({
+      messageId,
+      fromPubkey: new Uint8Array(32).fill(messageId),
+      linkAnswer: { linkId: new Uint8Array(16), linkSecret: new Uint8Array(12) },
+    }) as unknown as Parameters<ReturnType<typeof open>["addFetched"]>[0][number]["request"];
+  const fetched = (messageId: number, undecidedLink: boolean) => ({
+    request: request(messageId),
+    row: { messageId, payload: new Uint8Array([messageId]), createdAt: "2026-10-17T00:00:00Z" },
+    undecidedLink,
+  });
+  const decodeAll = (rows: readonly { messageId: number }[]) => Promise.resolve(rows.map((r) => request(r.messageId)));
+
+  it("is kept undecided and unshown, and survives a reload undecided", async () => {
+    const st = memory();
+    const inbox = open(st);
+    inbox.addFetched([fetched(5, true), fetched(6, false)]);
+    expect(inbox.pending().map((r) => r.messageId)).toEqual([6]);
+    expect(inbox.undecidedLinkRequests().map((r) => r.messageId)).toEqual([5]);
+    const reloaded = open(st);
+    await reloaded.restore(decodeAll);
+    expect(reloaded.pending().map((r) => r.messageId)).toEqual([6]);
+    expect(reloaded.undecidedLinkRequests().map((r) => r.messageId)).toEqual([5]);
+  });
+
+  it("keeps the dead-link note across a reload", async () => {
+    const st = memory();
+    const inbox = open(st);
+    inbox.addFetched([fetched(5, true)]);
+    inbox.markDeadLink(5);
+    expect(inbox.pending()[0]?.deadLink).toBe(true);
+    const reloaded = open(st);
+    await reloaded.restore(decodeAll);
+    expect(reloaded.undecidedLinkRequests()).toEqual([]);
+    expect(reloaded.deadLinkRequests().map((r) => r.messageId)).toEqual([5]);
+    expect(reloaded.pending()[0]?.deadLink).toBe(true);
+  });
+
+  it("is gone for good once answered", () => {
+    const st = memory();
+    const inbox = open(st);
+    inbox.addFetched([fetched(5, true)]);
+    inbox.remove(5);
+    expect(open(st).undecidedLinkRequests()).toEqual([]);
+    expect(loadInbox(CARA, st).pending).toEqual([]);
+  });
+});

@@ -72,9 +72,10 @@
 //!     setting and reach-key versions, from another of their devices
 //!     (ADR-0060 §7).
 //!     (The device card of ADR-0080,
-//!     [`crate::device_card::try_unwrap_device_card`], is checked earlier,
-//!     right after the key-rotation envelope; its separator prefixes no
-//!     other, so the position changes nothing.)
+//!     [`crate::device_card::try_unwrap_device_card`], and the link-request
+//!     claim of ADR-0079, [`crate::link_claim::try_unwrap_link_claim`], are
+//!     checked earlier, right after the key-rotation envelope; neither
+//!     separator prefixes another, so the position changes nothing.)
 //! 11. **Intro-message fallthrough** — plain free-text
 //!     `ContactRequest` (ADR-0005 scenario A; "add me as a
 //!     contact"). Caller renders the bytes as a UTF-8 intro
@@ -121,6 +122,7 @@ use crate::introduction::{
     IntroductionsBundle,
 };
 use crate::key_rotation::{try_unwrap_key_rotation, KeyRotation, KeyRotationError};
+use crate::link_claim::{try_unwrap_link_claim, LinkClaim, LinkClaimError};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
 use crate::pin::{try_unwrap_pin, PinError, PinOp};
 use crate::profile::{try_unwrap_profile, Profile, ProfileError};
@@ -323,6 +325,16 @@ pub enum IncomingEnvelope<'a> {
     /// keeps it only when [`crate::device_card::device_card_is_newer`] than
     /// the stored card for that key, and drops it when the leaf leaves.
     DeviceCard(DeviceCard),
+    /// Another device of this account claims a contact request sent through
+    /// one of the account's invite links (ADR-0079, as reworked 2026-10-17).
+    /// Never a chat bubble, and meaningful ONLY in the account's own
+    /// DeviceGroup: a client that meets one in any other group drops it. The
+    /// caller honours it only from a resolvable DeviceGroup member (C-68),
+    /// keeps the earliest DS message id per request
+    /// ([`LinkClaim::request_key`]) and decides its own claim with
+    /// [`crate::link_claim::link_claim_outcome`] under its per-group lock
+    /// (C-62 sub-invariant 5).
+    LinkClaim(LinkClaim),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -400,6 +412,9 @@ pub enum DispatchError {
     /// The device-card domain (ADR-0080) with a malformed payload.
     #[error(transparent)]
     DeviceCard(#[from] DeviceCardError),
+    /// The link-claim domain (ADR-0079) with a malformed payload.
+    #[error(transparent)]
+    LinkClaim(#[from] LinkClaimError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -488,6 +503,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7i. Device card — ADR-0080.
     if let Some(card) = try_unwrap_device_card(plaintext)? {
         return Ok(IncomingEnvelope::DeviceCard(card));
+    }
+    // 7j. Link-request claim — ADR-0079 (reworked 2026-10-17).
+    if let Some(claim) = try_unwrap_link_claim(plaintext)? {
+        return Ok(IncomingEnvelope::LinkClaim(claim));
     }
     // 8. Plain intro message — ADR-0005 scenario A.
     if let Some(record) = try_unwrap_introduction_offer(plaintext)? {
@@ -596,6 +615,32 @@ mod tests {
             dispatch_incoming_envelope(&wire[..wire.len() - 1]),
             Err(DispatchError::CommitterDelegation(_))
         ));
+    }
+
+    #[test]
+    fn dispatches_a_link_claim_and_never_renders_it() {
+        use crate::link_claim::{compose_link_claim, LINK_CLAIM_ENVELOPE_DOMAIN_V1};
+        let claim = LinkClaim {
+            link_id: [5; 16],
+            requester_account_key: [6; 32],
+        };
+        let wire = compose_link_claim(&claim);
+        assert_eq!(
+            dispatch_incoming_envelope(&wire).unwrap(),
+            IncomingEnvelope::LinkClaim(claim)
+        );
+        assert!(matches!(
+            dispatch_incoming_envelope(&wire[..wire.len() - 1]),
+            Err(DispatchError::LinkClaim(_))
+        ));
+        let mut bad = LINK_CLAIM_ENVELOPE_DOMAIN_V1.to_vec();
+        bad.push(0x7F);
+        assert_eq!(
+            dispatch_incoming_envelope(&bad),
+            Err(DispatchError::LinkClaim(LinkClaimError::UnknownVersion(
+                0x7F
+            )))
+        );
     }
 
     #[test]
