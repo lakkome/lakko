@@ -61,7 +61,7 @@ import { recoveryHalfFor } from "../devices/recovery-sender";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 import { paths } from "./paths";
-import { t } from "../l10n";
+import { currentLanguage, t } from "../l10n";
 import { screenText } from "../auth/auth-error-copy";
 import { FreshAuthRequiredError, PROOF_COPY } from "../auth/fresh-auth";
 import { createProofGate } from "../auth/proof-gate";
@@ -69,6 +69,17 @@ import { ProofBlock } from "../auth/ProofBlock";
 import { addedNotice, noteDeviceLetIn } from "../devices/added-notice";
 import { DeviceAddedBanner } from "../devices/DeviceAddedNotice";
 import { bytesToHex } from "../chat/folders/folder-model";
+import { deviceCards } from "../devices/device-card-runtime";
+import {
+  countryNameOf,
+  deviceRowView,
+  orderDeviceRows,
+  type DeviceIconKind,
+  type DeviceRowInput,
+  type DeviceRowView,
+  type RowWords,
+} from "../devices/device-cards";
+import type { IconName } from "../ui/icons";
 
 /**
  * The text a failure shows (ADR-0061 section 6): a sentence written for a
@@ -236,14 +247,32 @@ export default function Devices(): JSX.Element {
   );
 }
 
-/**
- * The label for a device row. The store carries no name, platform or added
- * date for a device (only its position and key), so the rule is: "This
- * device" for the one you are on, otherwise "Device N" by order in the list.
- * Never a key prefix or an internal index (docs/ux section 6).
- */
-export function deviceRowLabel(index: number, isSelf: boolean): string {
-  return isSelf ? t("settings.devices.this_device") : t("settings.devices.device_n", { number: index + 1 });
+/** The words a device row needs, in the current language (ADR-0080). */
+export function deviceRowWords(): RowWords {
+  const locale = currentLanguage();
+  return {
+    device: t("devices.row.device"),
+    online: t("devices.row.online"),
+    app: (version) => (version === "" ? t("devices.row.app_name") : t("devices.row.app", { version })),
+    place: (city, country) => t("devices.row.place", { city, country }),
+    countryName: (code) => countryNameOf(code, locale),
+  };
+}
+
+/** The icon of a row, by platform (docs/ux/second-device.md section 3). */
+export function deviceIconName(kind: DeviceIconKind): IconName {
+  switch (kind) {
+    case "phone":
+      return "smartphone";
+    case "tablet":
+      return "tablet";
+    case "computer":
+      return "monitor";
+    case "browser":
+      return "globe";
+    default:
+      return "devices";
+  }
 }
 
 // ---- Your devices (list + remove) -------------------------------
@@ -266,6 +295,39 @@ function DevicesListView(props: {
     | { kind: "ready"; devices: readonly DeviceListItem[] }
     | { kind: "error"; message: () => string };
   const [state, setState] = createSignal<State>({ kind: "loading" });
+  /** The rows of the two sections, from the roster and the cards. */
+  const sections = (): { self: DeviceRowInput | null; others: DeviceRowInput[] } => {
+    const s = state();
+    if (s.kind !== "ready") return { self: null, others: [] };
+    const cards = deviceCards();
+    return orderDeviceRows(
+      s.devices.map((d) => {
+        const keyHex = bytesToHex(d.signaturePublicKey);
+        return { keyHex, leafIndex: d.leafIndex, isSelf: d.isSelf, card: cards[keyHex] ?? null };
+      }),
+    );
+  };
+  const deviceOf = (row: DeviceRowInput): DeviceListItem | null => {
+    const s = state();
+    if (s.kind !== "ready") return null;
+    return s.devices.find((d) => bytesToHex(d.signaturePublicKey) === row.keyHex) ?? null;
+  };
+  // The minute ticks so "14:05" becomes "Sun" without a reload.
+  const [nowMs, setNowMs] = createSignal(Date.now());
+  const tick = setInterval(() => setNowMs(Date.now()), 60_000);
+  onCleanup(() => clearInterval(tick));
+  const viewOf = (row: DeviceRowInput): DeviceRowView =>
+    deviceRowView(row, deviceRowWords(), nowMs(), currentLanguage());
+  // "Remove all other devices" (UX section 3): its sheet, and each row's own
+  // progress while it runs; a row that failed keeps "Could not remove".
+  const [removeAllOpen, setRemoveAllOpen] = createSignal(false);
+  const [rowRun, setRowRun] = createSignal<Readonly<Record<string, "removing" | "failed">>>({});
+  const setRowRunOf = (keyHex: string, value: "removing" | "failed" | null): void => {
+    const next = { ...rowRun() };
+    if (value === null) delete next[keyHex];
+    else next[keyHex] = value;
+    setRowRun(next);
+  };
   // The remove sheet (UX 18.1): the device it is about and its label.
   const [sheet, setSheet] = createSignal<{ device: DeviceListItem; label: string } | null>(null);
   const [working, setWorking] = createSignal(false);
@@ -306,7 +368,9 @@ function DevicesListView(props: {
     copy: PROOF_COPY.removeDevice,
     busy: working,
     sessionToken: () =>
-      sheet() !== null || retryOpen() ? (auth.identitySecrets()?.sessionToken ?? null) : null,
+      sheet() !== null || retryOpen() || removeAllOpen()
+        ? (auth.identitySecrets()?.sessionToken ?? null)
+        : null,
     usernameKnown: () => username().trim().length > 0,
   });
 
@@ -581,6 +645,65 @@ function DevicesListView(props: {
     }
   }
 
+  function openRemoveAll(): void {
+    gate.clear();
+    setSheetLine(null);
+    setDoneLine(false);
+    setRemoveAllOpen(true);
+  }
+
+  function closeRemoveAll(): void {
+    if (working()) return;
+    gate.clear();
+    setSheetLine(null);
+    setRemoveAllOpen(false);
+  }
+
+  /** `Remove all`: one proof for all of them, then each device's own
+   *  removal (ADR-0074), one after another. A device that could not be
+   *  removed keeps its row with its own `Remove`. */
+  async function onConfirmRemoveAll(): Promise<void> {
+    if (working()) return;
+    setSheetLine(null);
+    setWorking(true);
+    try {
+      if (removal.blocked()) {
+        setSheetLine(() => REMOVE_DEVICE_COPY.blocked);
+        return;
+      }
+      const grant = await gate.ensure();
+      if (grant === null) return;
+      const targets = sections()
+        .others.map((row) => deviceOf(row))
+        .filter((d): d is DeviceListItem => d !== null && !finishing(d));
+      setRemoveAllOpen(false);
+      gate.clear();
+      let anyNew = false;
+      for (const target of targets) {
+        const keyHex = bytesToHex(target.signaturePublicKey);
+        setRowRunOf(keyHex, "removing");
+        try {
+          const attestation = await removalAttestation(target);
+          const result = await removal.remove(target.signaturePublicKey, grant, attestation);
+          if (result.kind === "ran" && result.outcome.kind !== "not-revoked") {
+            setRowRunOf(keyHex, null);
+            if (isNew(target)) anyNew = true;
+          } else {
+            setRowRunOf(keyHex, "failed");
+          }
+        } catch {
+          setRowRunOf(keyHex, "failed");
+        }
+      }
+      if (anyNew) props.onRemovedNew();
+      await load();
+    } catch (err) {
+      setSheetLine(() => failureText(err, "settings.devices.error.remove"));
+    } finally {
+      setWorking(false);
+    }
+  }
+
   createEffect(() => {
     void load();
   });
@@ -637,76 +760,131 @@ function DevicesListView(props: {
         </Match>
         <Match when={state().kind === "ready"}>
           {(_) => {
-            const devices = (): readonly DeviceListItem[] => {
-              const s = state();
-              return s.kind === "ready" ? s.devices : [];
+            const row = (input: DeviceRowInput): JSX.Element => {
+              const device = deviceOf(input);
+              const view = (): DeviceRowView => viewOf(input);
+              const run = (): "removing" | "failed" | undefined => rowRun()[input.keyHex];
+              return (
+                <li
+                  class="lk-card-row"
+                  ref={(el) => {
+                    // The new device's row is scrolled into view.
+                    if (device !== null && isNew(device)) {
+                      queueMicrotask(() => el.scrollIntoView({ block: "nearest" }));
+                    }
+                  }}
+                >
+                  <span class="lk-card-row-icon">
+                    <Icon name={deviceIconName(view().icon)} size={18} />
+                  </span>
+                  <div class="lk-card-row-body">
+                    <span class="lk-card-row-title">
+                      {view().title}
+                      <Show when={device !== null && isNew(device)}>
+                        {" "}
+                        <span class="lk-badge">{t("settings.devices.new_badge")}</span>
+                      </Show>
+                    </span>
+                    <Show when={view().detail !== ""}>
+                      <span class="lk-card-row-sub">{view().detail}</span>
+                    </Show>
+                    <Show when={view().place !== ""}>
+                      <span class="lk-card-row-sub">{view().place}</span>
+                    </Show>
+                    {/* UX 18.1: signed out, the removal still finishing.
+                        No Remove control and no error. */}
+                    <Show when={device !== null && finishing(device)}>
+                      <span class="lk-card-row-sub" role="status">
+                        {REMOVE_DEVICE_COPY.pending()}
+                      </span>
+                    </Show>
+                    <Show when={run() === "removing"}>
+                      <span class="lk-card-row-sub" role="status">
+                        {REMOVE_DEVICE_COPY.working()}
+                      </span>
+                    </Show>
+                    <Show when={run() === "failed"}>
+                      <span class="lk-card-row-sub" role="alert" style={{ color: "var(--danger)" }}>
+                        {t("devices.remove_all.row_failed")}
+                      </span>
+                    </Show>
+                  </div>
+                  <div class="lk-stack" style={{ gap: "4px", "align-items": "flex-end" }}>
+                    <Show when={view().activity !== ""}>
+                      <span class="lk-meta">{view().activity}</span>
+                    </Show>
+                    <Show when={!input.isSelf && device !== null && run() !== "removing"}>
+                      <Show
+                        when={device !== null && !finishing(device)}
+                        fallback={
+                          // Only when the owed step is waiting on the
+                          // person: the passkey again, then the rest.
+                          <Show when={device !== null && needsPerson(device)}>
+                            <button
+                              type="button"
+                              class="ghost small"
+                              disabled={retrying() !== null || removal.blocked()}
+                              onClick={() => {
+                                if (device !== null) void onRetryRow(device);
+                              }}
+                            >
+                              {REMOVE_DEVICE_COPY.finish()}
+                            </button>
+                          </Show>
+                        }
+                      >
+                        <button
+                          type="button"
+                          class="ghost small"
+                          style={{ color: "var(--danger)" }}
+                          disabled={removal.blocked() || working()}
+                          onClick={() => {
+                            if (device === null) return;
+                            setRowRunOf(input.keyHex, null);
+                            openSheet(device, view().title);
+                          }}
+                        >
+                          {t("common.remove")}
+                        </button>
+                      </Show>
+                    </Show>
+                  </div>
+                </li>
+              );
             };
             return (
-              <ul class="lk-list tight" aria-label={t("settings.devices.title")}>
-                <For each={devices()}>
-                  {(device, i) => (
-                    <li
-                      class="lk-card-row"
-                      ref={(el) => {
-                        // The new device's row is scrolled into view.
-                        if (isNew(device)) queueMicrotask(() => el.scrollIntoView({ block: "nearest" }));
-                      }}
-                    >
-                      <span class="lk-card-row-icon">
-                        <Icon name={device.isSelf ? "monitor" : "devices"} size={18} />
-                      </span>
-                      <div class="lk-card-row-body">
-                        <span class="lk-card-row-title">
-                          {deviceRowLabel(i(), device.isSelf)}
-                          <Show when={isNew(device)}>
-                            {" "}
-                            <span class="lk-badge">{t("settings.devices.new_badge")}</span>
-                          </Show>
-                        </span>
-                        <Show when={device.isSelf}>
-                          <span class="lk-card-row-sub">{t("settings.devices.this_device.sub")}</span>
-                        </Show>
-                        {/* UX 18.1: signed out, the removal still finishing.
-                            No Remove control and no error. */}
-                        <Show when={finishing(device)}>
-                          <span class="lk-card-row-sub" role="status">
-                            {REMOVE_DEVICE_COPY.pending()}
-                          </span>
-                        </Show>
-                      </div>
-                      <Show when={!device.isSelf} fallback={<span />}>
-                        <Show
-                          when={!finishing(device)}
-                          fallback={
-                            // Only when the owed step is waiting on the
-                            // person: the passkey again, then the rest.
-                            <Show when={needsPerson(device)} fallback={<span />}>
-                              <button
-                                type="button"
-                                class="ghost small"
-                                disabled={retrying() !== null || removal.blocked()}
-                                onClick={() => void onRetryRow(device)}
-                              >
-                                {REMOVE_DEVICE_COPY.finish()}
-                              </button>
-                            </Show>
-                          }
-                        >
+              <div class="lk-stack" style={{ gap: "12px" }}>
+                <Show when={sections().self}>
+                  {(self) => (
+                    <section class="lk-stack" style={{ gap: "6px" }} aria-label={t("devices.section.this_device")}>
+                      <h3>{t("devices.section.this_device")}</h3>
+                      <ul class="lk-list tight">{row(self())}</ul>
+                      <Show when={sections().others.length > 0}>
+                        <div class="lk-stack" style={{ gap: "2px" }}>
                           <button
                             type="button"
-                            class="ghost small"
-                            style={{ color: "var(--danger)" }}
-                            disabled={removal.blocked()}
-                            onClick={() => openSheet(device, deviceRowLabel(i(), false))}
+                            class="ghost"
+                            style={{ color: "var(--danger)", "align-self": "flex-start" }}
+                            disabled={removal.blocked() || working()}
+                            onClick={openRemoveAll}
                           >
-                            {t("common.remove")}
+                            {t("devices.remove_all")}
                           </button>
-                        </Show>
+                          <span class="lk-meta">{t("devices.remove_all.sub")}</span>
+                        </div>
                       </Show>
-                    </li>
+                    </section>
                   )}
-                </For>
-              </ul>
+                </Show>
+                <Show when={sections().others.length > 0}>
+                  <section class="lk-stack" style={{ gap: "6px" }} aria-label={t("devices.section.other_devices")}>
+                    <h3>{t("devices.section.other_devices")}</h3>
+                    <ul class="lk-list tight">
+                      <For each={sections().others}>{(input) => row(input)}</For>
+                    </ul>
+                  </section>
+                </Show>
+              </div>
             );
           }}
         </Match>
@@ -832,11 +1010,39 @@ function DevicesListView(props: {
           </div>
         </div>
       </ModalLayer>
+      {/* UX section 3: Remove all other devices. One proof covers all. */}
+      <ModalLayer open={removeAllOpen()} title={t("devices.remove_all.title")} onClose={closeRemoveAll}>
+        <div class="lk-stack" style={{ gap: "12px" }}>
+          <p>{t("devices.remove_all.body")}</p>
+          <ProofBlock gate={gate} />
+          <Show when={sheetLine()}>
+            {(line) => (
+              <div class="form-error" role="alert">
+                {line()()}
+              </div>
+            )}
+          </Show>
+          <div class="lk-actions">
+            <button type="button" disabled={working()} onClick={closeRemoveAll}>
+              {REMOVE_DEVICE_COPY.cancel()}
+            </button>
+            <button
+              type="button"
+              class="primary danger"
+              disabled={working() || !gate.view().ready}
+              onClick={() => void onConfirmRemoveAll()}
+            >
+              {working() ? REMOVE_DEVICE_COPY.working() : t("devices.remove_all.confirm")}
+            </button>
+          </div>
+        </div>
+      </ModalLayer>
     </div>
   );
 }
 
 // ---- Show a code (this device joins) ----------------------------
+
 
 function PairView(props: {
   readonly accountIdB64: string;

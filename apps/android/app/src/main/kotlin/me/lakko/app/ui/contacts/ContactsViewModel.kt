@@ -63,6 +63,10 @@ public class ContactsViewModel(
      */
     public val state: StateFlow<ContactsUiState> = combineState()
 
+    /** ADR-0079 section 4 — the people added through their invite link whose
+     *  app has not answered yet. */
+    public val invited: StateFlow<List<me.lakko.app.contacts.PendingContact>> = repo.invited
+
     private fun combineState(): StateFlow<ContactsUiState> {
         // Compose two flows by hand into a single derived
         // StateFlow. kotlinx-coroutines has `combine(...)` for

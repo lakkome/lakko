@@ -27,6 +27,7 @@ import {
   type SentRequestRecord,
 } from "./contact-list-model";
 import type { AcceptedContact } from "./local-store";
+import { pendingNameOf, type PendingContact } from "./pending-contacts";
 
 /** What the add menu offers. Web has no contact QR flow, so there is no
  *  "Show my QR code" / "Scan QR code" here. */
@@ -58,6 +59,11 @@ export interface ContactListPaneProps {
   readonly onDecline: (request: IncomingContactRequest) => void;
   readonly sent: () => readonly SentRequestRecord[];
   readonly onDismissSent: (record: SentRequestRecord) => void;
+  /** ADR-0079 — inviters added through their link whose app has not
+   *  answered yet. Listed among the contacts under their name, with no
+   *  badge (UX section 4); a tap opens the chat with them. */
+  readonly invited: () => readonly PendingContact[];
+  readonly onOpenInvited: (contact: PendingContact) => void;
   readonly contacts: () => readonly AcceptedContact[];
   readonly selectedKey: () => string | null;
   readonly onSelect: (signaturePubkeyB64: string) => void;
@@ -73,13 +79,36 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
   const usernameOf = (c: AcceptedContact): string | null =>
     profiles.resolve(c.signaturePubkeyB64).username;
 
-  const matching = (): AcceptedContact[] =>
-    props.contacts().filter((c) => matchesContactQuery(props.filter(), nameOf(c), usernameOf(c)));
-  const groups = (): ReturnType<typeof groupByLetter<AcceptedContact>> =>
-    groupByLetter(matching(), nameOf);
+  /** One row of the alphabetical list: a contact, or an inviter added
+   *  through their link (ADR-0079) who is shown exactly like one. */
+  type ListRow =
+    | { readonly kind: "contact"; readonly c: AcceptedContact; readonly name: string; readonly username: string | null }
+    | { readonly kind: "invited"; readonly p: PendingContact; readonly name: string; readonly username: string | null };
+  const invitedName = (p: PendingContact): string =>
+    pendingNameOf(p) ?? t("invite.contact.page.unnamed");
+  const rows = (): ListRow[] => [
+    ...props.contacts().map(
+      (c): ListRow => ({ kind: "contact", c, name: nameOf(c), username: usernameOf(c) }),
+    ),
+    ...props.invited().map(
+      (p): ListRow => ({
+        kind: "invited",
+        p,
+        name: invitedName(p),
+        username: p.username.length > 0 ? p.username : null,
+      }),
+    ),
+  ];
+  const matching = (): ListRow[] =>
+    rows().filter((r) => matchesContactQuery(props.filter(), r.name, r.username));
+  const groups = (): ReturnType<typeof groupByLetter<ListRow>> =>
+    groupByLetter(matching(), (r) => r.name);
   const requests = (): IncomingContactRequest[] => sortIncomingRequests(props.pending());
   const nothingAtAll = (): boolean =>
-    props.contacts().length === 0 && props.pending().length === 0 && props.sent().length === 0;
+    props.contacts().length === 0 &&
+    props.invited().length === 0 &&
+    props.pending().length === 0 &&
+    props.sent().length === 0;
 
   function select(key: string): void {
     props.onSelect(key);
@@ -154,6 +183,11 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                   <div class="lk-row-body">
                     <span class="lk-row-title">{memberNameOf(r())}</span>
                     <Show when={r().username}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
+                    {/* ADR-0079 section 3: sent through a link that no
+                        longer works. A decides. */}
+                    <Show when={req.deadLink === true}>
+                      <span class="lk-row-sub">{t("contacts.request.dead_link_note")}</span>
+                    </Show>
                     <span class="lk-request-intro">
                       {req.intro !== null && req.intro !== "" ? req.intro : t("contacts.request.no_intro")}
                     </span>
@@ -225,7 +259,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
           <Show
             when={groups().length > 0}
             fallback={
-              <Show when={props.contacts().length > 0}>
+              <Show when={rows().length > 0}>
                 <p class="lk-pane-nomatch">{t("contacts.list.no_match")}</p>
               </Show>
             }
@@ -237,29 +271,36 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                     {group.letter}
                   </div>
                   <For each={group.items}>
-                    {(c) => (
-                      <div
-                        class="lk-row"
-                        role="button"
-                        tabIndex={0}
-                        classList={{ selected: props.selectedKey() === c.signaturePubkeyB64 }}
-                        onClick={() => select(c.signaturePubkeyB64)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            select(c.signaturePubkeyB64);
-                          }
-                        }}
-                      >
-                        <Avatar label={nameOf(c)} id={c.signaturePubkeyB64} />
-                        <div class="lk-row-body">
-                          <span class="lk-row-title">{nameOf(c)}</span>
-                          <Show when={usernameOf(c)}>
-                            {(u) => <span class="lk-row-sub">{u()}</span>}
-                          </Show>
+                    {(row) => {
+                      const key = row.kind === "contact" ? row.c.signaturePubkeyB64 : row.p.signaturePubkeyB64;
+                      const open = (): void => {
+                        if (row.kind === "contact") select(row.c.signaturePubkeyB64);
+                        else props.onOpenInvited(row.p);
+                      };
+                      return (
+                        <div
+                          class="lk-row"
+                          role="button"
+                          tabIndex={0}
+                          classList={{ selected: props.selectedKey() === key }}
+                          onClick={open}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              open();
+                            }
+                          }}
+                        >
+                          <Avatar label={row.name} id={key} />
+                          <div class="lk-row-body">
+                            <span class="lk-row-title">{row.name}</span>
+                            <Show when={row.username}>
+                              {(u) => <span class="lk-row-sub">{u()}</span>}
+                            </Show>
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      );
+                    }}
                   </For>
                 </>
               )}

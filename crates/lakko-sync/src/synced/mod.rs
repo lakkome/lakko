@@ -34,6 +34,8 @@
 //!   (ADR-0073 R.5) travels in between the account's devices.
 //! - [`recovery_email`] — the envelope the account's recovery email register
 //!   (ADR-0075) travels in between the account's devices.
+//! - [`link_record`] — the account's own invite links (ADR-0079), their
+//!   verdict on a contact request's link answer, and their envelope.
 //! - [`own_username`] — the envelope the account's own username register
 //!   (ADR-0076) travels in between the account's devices.
 //! - [`state`] — the fold ([`SyncedState`]), its queries, its persistence
@@ -41,6 +43,7 @@
 
 pub mod entry;
 pub mod lineage;
+pub mod link_record;
 pub mod own_username;
 pub mod recovery_email;
 pub mod state;
@@ -67,6 +70,14 @@ pub use lineage::{
     compose_lineage_envelope, decode_lineage_envelope, is_lineage_envelope, LineageEnvelopeError,
     LINEAGE_ENVELOPE_DOMAIN_V1, LINEAGE_ENVELOPE_MAX_ENTRIES, LINEAGE_ENVELOPE_MAX_LEN,
     LINEAGE_ENVELOPE_MIN_LEN, LINEAGE_ENVELOPE_VERSION_V1,
+};
+pub use link_record::{
+    compose_link_record_envelope, decode_link_record_envelope, is_link_record_envelope,
+    LinkAnswerVerdict, LinkRecordEntry, LinkRecordEnvelopeError, LinkRecordKind,
+    LINK_RECORD_ANSWERED_MAX, LINK_RECORD_ENVELOPE_DOMAIN_V1, LINK_RECORD_ENVELOPE_MAX_ENTRIES,
+    LINK_RECORD_ENVELOPE_MAX_LEN, LINK_RECORD_ENVELOPE_MIN_LEN, LINK_RECORD_ENVELOPE_VERSION_V1,
+    LINK_RECORD_ID_LEN, LINK_RECORD_LABEL_MAX_BYTES, LINK_RECORD_LEDGER_ID_LEN,
+    LINK_RECORD_REQUESTER_KEY_LEN, LINK_RECORD_SECRET_LEN, LINK_RECORD_UNLIMITED,
 };
 pub use own_username::{
     compose_own_username_envelope, decode_own_username_envelope, is_own_username_envelope,

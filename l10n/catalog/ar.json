@@ -7614,14 +7614,6 @@
       "text": "جديد",
       "status": "machine"
     },
-    "settings.devices.remove.body": {
-      "text": "سُجّل خروجه الآن. عند اتصاله في المرة القادمة، سيُحذف كل ما احتفظ به هذا الحساب عليه: الدردشات وجهات الاتصال والمفاتيح وعبارة الاسترداد.",
-      "status": "machine"
-    },
-    "settings.devices.remove.confirm": {
-      "text": "إزالة الجهاز",
-      "status": "machine"
-    },
     "settings.devices.remove.confirm_named": {
       "text": "إزالة {device}",
       "status": "machine"
@@ -7632,10 +7624,6 @@
     },
     "settings.devices.remove.reason_unused": {
       "text": "لم أعد أستخدمه",
-      "status": "machine"
-    },
-    "settings.devices.remove.title": {
-      "text": "هل تريد إزالة {device}؟",
       "status": "machine"
     },
     "settings.devices.remove.working": {
@@ -8408,6 +8396,78 @@
     },
     "who_can_find_me.title": {
       "text": "من يمكنه العثور عليّ",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "هل تريد إضافة {name} إلى جهات اتصالك؟",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "إضافة",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "ليس الآن",
+      "status": "machine"
+    },
+    "invite.contact.page.sign_in": {
+      "text": "سجّل الدخول لإضافة {name}",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "إنشاء حساب",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} موجود بالفعل في جهات اتصالك",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "فتح المحادثة",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "هذا رابط الدعوة الخاص بك",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "شاركه مع الشخص الذي تريد إضافته.",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "تم",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "رابط الدعوة هذا لم يعد يعمل",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "اطلب رابطًا جديدًا من الشخص الذي أرسله.",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "تعذّرت إضافة {name}. تحقّق من اتصالك وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "هذا الشخص",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "سيتلقى {name} رسائلك عندما يتصل تطبيقه بالإنترنت مجددًا.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "لم يردّ {name} بعد. يمكنك أن تطلب منه رابطًا جديدًا.",
+      "status": "machine"
+    },
+    "chat.pending.call_disabled": {
+      "text": "متاح بمجرد اتصال {name}.",
+      "status": "machine"
+    },
+    "contacts.request.dead_link_note": {
+      "text": "أُرسل عبر رابط دعوة لم يعد يعمل.",
       "status": "machine"
     }
   }

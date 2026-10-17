@@ -31,7 +31,7 @@ import { A, useNavigate } from "@solidjs/router";
 import { useCallHost } from "../calls/CallHostContext";
 import { quietCallKindLabel, quietCallOfferFor } from "../calls/quiet-call-offer";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
-import { personKeysOf } from "./person-key";
+import { ownPersonKeyB64, personKeysOf } from "./person-key";
 import { PeopleSearch } from "../search/PeopleSearch";
 import { rowHasUnread, type ConversationRow } from "./conversation-list";
 import { createConversationRows } from "./conversation-rows";
@@ -74,6 +74,14 @@ import {
   rowIsInFolder,
 } from "./folders/folder-view";
 import { ALL_CHATS, loadSelectedTab, resolveTab, selectTab, selectedTab } from "./folders/selected-tab";
+import { conversationKindOf } from "./conversation-kind";
+import {
+  loadPendingContacts,
+  pendingContacts,
+  pendingNameOf,
+  shownPendingContacts,
+  type PendingContact,
+} from "../contacts/pending-contacts";
 
 type Flag = "pinned" | "muted" | "archived";
 
@@ -232,6 +240,28 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   // The search field in the pane head filters by name and preview.
   const [query, setQuery] = createSignal("");
   const searching = (): boolean => query().trim().length > 0;
+
+  // ADR-0079 — a person added through their invite link is in the list at
+  // once, under the name the link states (UX section 4), until their app
+  // answers and the one-to-one takes over the row. Shown in All chats only:
+  // a folder is a view of conversations, and this one does not exist yet.
+  createEffect(() => {
+    const account = accountId();
+    if (account !== null) void loadPendingContacts(account);
+  });
+  const invitedName = (p: PendingContact): string =>
+    pendingNameOf(p) ?? t("invite.contact.page.unnamed");
+  const invitedRows = createMemo((): PendingContact[] => {
+    const own = ownPersonKeyB64(chats.identity());
+    const peers = new Set<string>();
+    for (const g of chats.groups()) {
+      if (conversationKindOf(g.group) !== "chat") continue;
+      for (const k of personKeysOf(g.group)) if (k !== own) peers.add(k);
+    }
+    const shown = shownPendingContacts(pendingContacts(), peers);
+    const q = query();
+    return searching() ? shown.filter((p) => rowMatchesQuery(q, invitedName(p), "")) : shown;
+  });
 
   /** The rows of the open tab: All chats, or the folder's own view. */
   const tabRows = createMemo((): readonly ConversationRow[] => {
@@ -466,7 +496,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           is, it gives way to what the search finds, the people half
           included (`docs/ux/who-can-find-me.md` section 6.1). */}
       <Show
-        when={!showsEmptyState(orderedRows().length, query())}
+        when={!showsEmptyState(orderedRows().length + invitedRows().length, query())}
         fallback={
           <div class="lk-empty">
             <Icon name="chat" size={40} strokeWidth={1.4} />
@@ -501,6 +531,25 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                 {t("folders.edit")}
               </button>
             </div>
+          </Show>
+          <Show when={currentFolder() === null || searching()}>
+            <For each={invitedRows()}>
+              {(p) => (
+                <A href={paths.pendingChat(p.accountIdHex)} class="lk-row" activeClass="" inactiveClass="">
+                  <Avatar label={invitedName(p)} id={p.signaturePubkeyB64} />
+                  <div class="lk-row-body">
+                    <div class="lk-row-line">
+                      <span class="lk-row-title">
+                        <span class="lk-ellipsis">{invitedName(p)}</span>
+                      </span>
+                    </div>
+                    <div class="lk-row-line">
+                      <span class="lk-row-sub">{p.queue[p.queue.length - 1]?.text ?? ""}</span>
+                    </div>
+                  </div>
+                </A>
+              )}
+            </For>
           </Show>
           <For each={visibleRows()}>
             {(row) => {

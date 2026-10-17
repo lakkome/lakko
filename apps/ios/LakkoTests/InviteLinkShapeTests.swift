@@ -423,6 +423,31 @@ final class InviteLinkShapeTests: XCTestCase {
         XCTAssertNil(group?["capability"], "the plaintext capability never reaches the ledger")
     }
 
+    /// ADR-0079 section 1 — the longest link the core mints (the longest
+    /// label, display name and username) fits the client's `/i/` ceiling,
+    /// and the page reads the stated name back.
+    func testTheLongestContactLinkFitsTheCeilingAndCarriesItsInviter() throws {
+        let owner = try Identity.fromSeed(seed: issuerSeed)
+        // 63 four-byte letters and one three-byte letter: 255 bytes in 64
+        // scalars, the longest name the display-name rule admits.
+        let name = String(repeating: "\u{20000}", count: 63) + "\u{4E2D}"
+        let username = String(repeating: "z", count: 32)
+        let mint = try composeInviteCapability(
+            ownerSigningSeed: owner.ed25519Seed(), ownerAccountId: Data(repeating: 4, count: 16),
+            ownerX25519Pubkey: owner.x25519PublicKey(), expiryMs: 0, maxUses: 0,
+            bootstrapReferral: false, label: String(repeating: "l", count: 64),
+            linkId: Self.testLinkId,
+            linkGrant: try deriveReachGrant(
+                accountSeed: owner.ed25519Seed(), class: .link, scopeId: Self.testLinkId, version: 1),
+            inviterDisplayName: name, inviterUsername: username)
+        XCTAssertLessThanOrEqual(mint.sealed.count, DiscoveryClient.maxCapabilityBytes)
+        let cap = try InviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret)
+        XCTAssertEqual(cap.inviterDisplayName(), name)
+        XCTAssertEqual(cap.inviterUsername(), username)
+        XCTAssertEqual(OpenedInvite.statedName(displayName: nil, username: username), "@" + username)
+        XCTAssertNil(OpenedInvite.statedName(displayName: "  ", username: ""))
+    }
+
     func testAContactLinkOpensUnderItsSecretOnly() throws {
         let owner = try Identity.fromSeed(seed: issuerSeed)
         let mint = try composeInviteCapability(
@@ -433,7 +458,8 @@ final class InviteLinkShapeTests: XCTestCase {
             // binding, which the core checks against the owner key.
             linkId: Self.testLinkId,
             linkGrant: try deriveReachGrant(
-                accountSeed: owner.ed25519Seed(), class: .link, scopeId: Self.testLinkId, version: 1))
+                accountSeed: owner.ed25519Seed(), class: .link, scopeId: Self.testLinkId, version: 1),
+            inviterDisplayName: nil, inviterUsername: nil)
         XCTAssertEqual(mint.issuerPubkey, owner.signaturePublicKey())
         let cap = try InviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret)
         XCTAssertEqual(cap.ownerAccountId(), Data(repeating: 4, count: 16))

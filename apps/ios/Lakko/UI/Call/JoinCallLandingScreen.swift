@@ -88,8 +88,9 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// malformed, or the blob does not open under it.
     @Published public private(set) var damaged = false
     /// ADR-0048 / UX spec §4 — a guest (no session) is asked for a name here,
-    /// prefilled `Guest`. It becomes the new account's own profile.
-    @Published public var guestName: String = Localization.text("call.guest.default_name")
+    /// prefilled with "<adjective> <animal>" from the shared rule
+    /// (`lakko_ui_rules::guest_name`). It becomes the new account's own profile.
+    @Published public var guestName: String = LakkoCore.guestName(random: UInt64.random(in: .min ... .max))
     /// ADR-0054 S4 — the guest account is being created (the one heavy proof
     /// of work): `Getting you into the call...` with the signup line below.
     @Published public private(set) var creatingGuest = false

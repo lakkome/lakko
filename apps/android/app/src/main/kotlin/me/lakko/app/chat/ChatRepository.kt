@@ -2606,6 +2606,24 @@ public class ChatRepository(
      * unknown group or an unreadable roster. The
      * chat list names a 1x1 chat after this person.
      */
+    /**
+     * ADR-0079 section 5 — the account keys (base64) of the people in
+     * [groupIdHex] when it is a one-to-one, else `null`: what a joined
+     * conversation is matched to a person added through their invite link by.
+     */
+    public fun oneToOnePersonKeys(groupIdHex: String): List<String>? {
+        if (groupKind(groupIdHex) != GroupKind.ONE_TO_ONE) return null
+        val record = groups[groupIdHex] ?: return null
+        return try {
+            personKeysOf(record.group.members())
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** The groups this device holds (hex ids). */
+    public fun heldGroupIds(): Set<String> = groups.keys.toSet()
+
     public fun oneToOnePeerKey(groupIdHex: String): ByteArray? {
         // ADR-0062 — a two-person GROUP is not a one-to-one: its title, its
         // header and "the chat with this person" never name one member.

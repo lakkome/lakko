@@ -677,7 +677,7 @@
     },
     "call.guest.default_name": {
       "text": "Guest",
-      "comment": "Name prefilled for a visitor without an account who joins a call from a link; it becomes the new account's profile name."
+      "comment": "Fallback name prefilled for a visitor without an account who joins a call from a link, used only when the generated adjective-and-animal name is unavailable; it becomes the new account's profile name."
     },
     "call.guest.note": {
       "text": "You join as a guest. No account is needed.",
@@ -2778,6 +2778,18 @@
       "text": "Peer",
       "comment": "Name shown for the other person in a one-to-one chat when nothing better is known."
     },
+    "chat.pending.call_disabled": {
+      "text": "Available once {name} is connected.",
+      "comment": "Tooltip or long-press hint of the disabled call buttons in a chat whose other side has not answered yet."
+    },
+    "chat.pending.stale": {
+      "text": "{name} has not answered yet. You can ask them for a new link.",
+      "comment": "The same line after 7 days without an answer from the inviter's app."
+    },
+    "chat.pending.waiting": {
+      "text": "{name} will get your messages when their app is next online.",
+      "comment": "One line at the top of a chat opened from an invite link, before the inviter's app has answered (ADR-0079). Messages written now are kept and sent later."
+    },
     "chat.photo.load_failed": {
       "text": "Couldn't load photo",
       "comment": "Shown over a photo that failed to load."
@@ -4122,6 +4134,10 @@
       "comment": "Button that accepts an incoming contact request (the person becomes a trusted contact).",
       "security_critical": true
     },
+    "contacts.request.dead_link_note": {
+      "text": "Sent with an invite link that no longer works.",
+      "comment": "One line under the name on a contact request card whose invite link was revoked, expired or used up."
+    },
     "contacts.request.decline": {
       "text": "Decline",
       "comment": "Button that declines an incoming contact request."
@@ -4613,6 +4629,34 @@
       "text": "Removing...",
       "comment": "Line on a device row whose removal was accepted by the server and is still finishing."
     },
+    "devices.remove_all": {
+      "text": "Remove all other devices",
+      "comment": "Destructive button on Settings > Devices under the This device row; shown when the account has other devices."
+    },
+    "devices.remove_all.body": {
+      "text": "They will be signed out and lose access to your messages. This device stays signed in.",
+      "comment": "Body of the confirmation before removing every other device of the account.",
+      "security_critical": true
+    },
+    "devices.remove_all.confirm": {
+      "text": "Remove all",
+      "comment": "Destructive button of the Remove all other devices confirmation."
+    },
+    "devices.remove_all.row_failed": {
+      "text": "Could not remove. Try again.",
+      "comment": "Line on a device row when Remove all other devices could not remove that device; the row keeps its own Remove button.",
+      "security_critical": true
+    },
+    "devices.remove_all.sub": {
+      "text": "Signs out every device except this one.",
+      "comment": "Line under the Remove all other devices button.",
+      "security_critical": true
+    },
+    "devices.remove_all.title": {
+      "text": "Remove all other devices?",
+      "comment": "Title of the confirmation before removing every device of the account except this one.",
+      "security_critical": true
+    },
     "devices.removed.body": {
       "text": "It was removed from your account on another device. New messages no longer reach it. Sign out, then sign in again if you want to use it.",
       "comment": "Body of the This device was removed screen.",
@@ -4720,6 +4764,26 @@
       "text": "Updating keys...",
       "comment": "Shown on the account's other devices after the account keys were changed (UX identity-recovery 18.3)."
     },
+    "devices.row.app": {
+      "text": "Lakko {version}",
+      "comment": "First half of the second line of a device row: the app and its version. {version} is a version number like 1.4, or the word web for the web app; keep Lakko untranslated."
+    },
+    "devices.row.app_name": {
+      "text": "Lakko",
+      "comment": "Second line of a device row when the app version is not known. The app name; keep it untranslated."
+    },
+    "devices.row.device": {
+      "text": "Device",
+      "comment": "Title of a device row before that device has said what it is (no model known yet)."
+    },
+    "devices.row.online": {
+      "text": "online",
+      "comment": "Right side of the row of the device the person is using: it is active now. Lower case, like a status."
+    },
+    "devices.row.place": {
+      "text": "{city}, {country}",
+      "comment": "Third line of a device row: the city and country the device's internet address belongs to, e.g. Almere, Netherlands. {city} is a city name, {country} a country name, both already in the right language."
+    },
     "devices.scan.confirm.body": {
       "text": "This gives the scanned device full access to your account: your messages, your contacts and your identity. Continue only if the code is on your own new device.",
       "comment": "Warning before the scanned device is let into the account.",
@@ -4762,6 +4826,14 @@
     "devices.scan.open_camera": {
       "text": "Open camera",
       "comment": "Button that starts the camera to scan a pairing code."
+    },
+    "devices.section.other_devices": {
+      "text": "Other devices",
+      "comment": "Section heading on Settings > Devices above the account's other devices, newest activity first."
+    },
+    "devices.section.this_device": {
+      "text": "This device",
+      "comment": "Section heading on Settings > Devices above the one row of the device the person is using (docs/ux/second-device.md section 3)."
     },
     "devices.signed_out.body_mismatch": {
       "text": "This device's keys do not match the account's published identity.",
@@ -6071,6 +6143,62 @@
     "invite.contact.no_longer_valid": {
       "text": "This link is no longer valid. Ask the person for a new one.",
       "comment": "Contact invite page: the link was revoked or expired since the page loaded."
+    },
+    "invite.contact.page.add": {
+      "text": "Add",
+      "comment": "Primary button on the contact invite page: makes the inviter a contact."
+    },
+    "invite.contact.page.add_failed": {
+      "text": "Could not add {name}. Check your connection and try again.",
+      "comment": "Line under the Add button when adding through an invite link failed for a network reason. {name} as in the heading."
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} is already in your contacts",
+      "comment": "Contact invite page when the inviter is already a contact. Nothing is sent."
+    },
+    "invite.contact.page.create_account": {
+      "text": "Create an account",
+      "comment": "Secondary button on the contact invite page for a visitor who is not signed in."
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Ask the person who sent it for a new one.",
+      "comment": "Line under 'This invite link no longer works'."
+    },
+    "invite.contact.page.dead_title": {
+      "text": "This invite link no longer works",
+      "comment": "Contact invite page when the link was revoked, expired, used up, is unknown, or is damaged. The inviter's name is not shown."
+    },
+    "invite.contact.page.done": {
+      "text": "Done",
+      "comment": "Button that closes the contact invite page."
+    },
+    "invite.contact.page.not_now": {
+      "text": "Not now",
+      "comment": "Secondary button on the contact invite page: closes it, nothing is sent."
+    },
+    "invite.contact.page.open_chat": {
+      "text": "Open chat",
+      "comment": "Button on the contact invite page when the inviter is already a contact."
+    },
+    "invite.contact.page.own_body": {
+      "text": "Share it with the person you want to add.",
+      "comment": "Line under 'This is your own invite link'."
+    },
+    "invite.contact.page.own_title": {
+      "text": "This is your own invite link",
+      "comment": "Contact invite page opened by the person who made the link."
+    },
+    "invite.contact.page.sign_in": {
+      "text": "Sign in to add {name}",
+      "comment": "Primary button on the contact invite page for a visitor who is not signed in. {name} as in the heading."
+    },
+    "invite.contact.page.title": {
+      "text": "Add {name} to your contacts?",
+      "comment": "Heading of the contact invite page (ADR-0079). {name} is the inviter's display name as the link states it, else their @username."
+    },
+    "invite.contact.page.unnamed": {
+      "text": "this person",
+      "comment": "Stands in for {name} in the contact invite page and the pending chat when the link states neither a name nor a username."
     },
     "invite.contact.page_title": {
       "text": "Invite",
@@ -7634,6 +7762,10 @@
       "text": "Send request",
       "comment": "Button that sends a contact request to a person found by search."
     },
+    "settings.about.city_data": {
+      "text": "City data: DB-IP.com, CC BY 4.0",
+      "comment": "Settings > About: attribution for the city database the Devices screen uses. Keep DB-IP.com and CC BY 4.0 untranslated."
+    },
     "settings.about.lede_web": {
       "text": "Lakko on the web.",
       "comment": "Line under the About title in Settings, web client."
@@ -7909,12 +8041,12 @@
       "comment": "Small label on a row of Settings > Devices for a device that joined the account recently and that the person has not yet acknowledged. Refers to a device."
     },
     "settings.devices.remove.body": {
-      "text": "It is signed out now. The next time it connects, everything this account kept on it is deleted: chats, contacts, keys and the recovery phrase.",
+      "text": "It will be signed out and lose access to your messages.",
       "comment": "Body of the confirmation before removing one of the account's devices.",
       "security_critical": true
     },
     "settings.devices.remove.confirm": {
-      "text": "Remove device",
+      "text": "Remove",
       "comment": "The remove-device sheet in Settings > Devices (UX identity-recovery 18.1)."
     },
     "settings.devices.remove.confirm_named": {
@@ -7931,8 +8063,8 @@
       "comment": "The remove-device sheet in Settings > Devices (UX identity-recovery 18.1)."
     },
     "settings.devices.remove.title": {
-      "text": "Remove {device}?",
-      "comment": "Title of the confirmation before removing one of the account's devices; {device} is the row label, e.g. Device 2.",
+      "text": "Remove \"{device}\"?",
+      "comment": "Title of the confirmation before removing one of the account's devices; {device} is the row's title, e.g. iPhone 16 Pro (docs/ux/second-device.md section 3).",
       "security_critical": true
     },
     "settings.devices.remove.working": {
@@ -8260,6 +8392,15 @@
     "settings.password.title": {
       "text": "Password",
       "comment": "Card heading in Settings > Security."
+    },
+    "settings.privacy.show_city": {
+      "text": "Show my city to my other devices",
+      "comment": "Switch in Settings > Privacy, on by default. When on, this device tells the person's other devices which city it is in, shown on their Devices screen."
+    },
+    "settings.privacy.show_city.sub": {
+      "text": "Your other devices show the city this one is in. Lakko's servers keep no record of it.",
+      "comment": "Line under the Show my city to my other devices switch.",
+      "security_critical": true
     },
     "settings.profile.error.generic": {
       "text": "Could not save your name. Try again.",

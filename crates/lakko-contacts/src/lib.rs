@@ -103,6 +103,7 @@ pub mod call_welcome;
 pub mod channel_text;
 pub mod committer_beacon;
 pub mod committer_delegation;
+pub mod device_card;
 pub mod envelope;
 pub mod error;
 pub mod group_closed;
@@ -163,6 +164,13 @@ pub use committer_delegation::{
     COMMITTER_DELEGATION_ENVELOPE_MIN_LEN, COMMITTER_DELEGATION_VERSION_V2,
     MAX_COMMITTER_DELEGATIONS,
 };
+pub use device_card::{
+    compose_device_card, decode_device_card, device_card_is_newer, try_unwrap_device_card,
+    DeviceCard, DeviceCardError, DeviceCardField, DeviceCardFieldError, DevicePlatform,
+    DEVICE_CARD_APP_VERSION_MAX_BYTES, DEVICE_CARD_CITY_MAX_BYTES, DEVICE_CARD_COUNTRY_LEN,
+    DEVICE_CARD_ENVELOPE_DOMAIN_V1, DEVICE_CARD_ENVELOPE_MAX_LEN, DEVICE_CARD_ENVELOPE_MIN_LEN,
+    DEVICE_CARD_MODEL_MAX_BYTES, DEVICE_CARD_OS_MAX_BYTES, DEVICE_CARD_VERSION_V1,
+};
 pub use error::{ContactError, Result};
 pub use group_closed::{
     compose_group_closed, decode_group_closed, group_closed_is_newer, try_unwrap_group_closed,
@@ -197,8 +205,9 @@ pub use introduction::{
 };
 pub use invite::{
     compute_joiner_tag, generate_blob_id, generate_link_id, revocation_public_key,
-    revoke_canonical_bytes, sign_revocation, InviteCapability, BLOB_ID_B64URL_LEN, BLOB_ID_LEN,
-    JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1, LINK_ID_LEN, MAX_LABEL_LEN, NEVER_EXPIRES,
+    revoke_canonical_bytes, sign_revocation, InviteCapability, InvitePreview, BLOB_ID_B64URL_LEN,
+    BLOB_ID_LEN, JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1, LINK_ID_LEN, MAX_LABEL_LEN,
+    MAX_PREVIEW_LEN, MAX_PREVIEW_NAME_BYTES, MAX_PREVIEW_USERNAME_BYTES, NEVER_EXPIRES,
     OWNER_LIST_DOMAIN_V1, REVOCATION_KEY_LEN, REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS,
     SINGLE_USE,
 };
@@ -268,7 +277,8 @@ pub use registrar_seed::{
     REGISTRAR_SEED_ENVELOPE_DOMAIN_V1, REGISTRAR_SEED_ENVELOPE_LEN, REGISTRAR_SEED_VERSION_V2,
 };
 pub use request::{
-    compose, decode_and_verify, open_envelope, ContactRequest, OpenedRequest, ACCOUNT_ID_LEN,
+    compose, decode_and_verify, open_envelope, ContactRequest, LinkAnswer, OpenedRequest,
+    ACCOUNT_ID_LEN, LINK_ANSWER_LEN,
 };
 pub use safety::{
     safety_number, safety_number_bytes, SAFETY_NUMBER_DIGITS, SAFETY_NUMBER_DIGITS_PER_GROUP,
@@ -326,6 +336,15 @@ pub mod fuzz_api {
     #[must_use]
     pub fn contact_request_plaintext(plain: &[u8]) -> Option<bool> {
         crate::request::fuzz_split(plain)
+    }
+
+    /// Decode an `/i/` capability's inviter preview (ADR-0079) directly: the
+    /// owner signature hides it from a fuzzer otherwise. `None` when the
+    /// decoder refuses; `Some(true)` when the accepted preview validates and
+    /// re-encodes to the same bytes, `Some(false)` on a disagreement (a bug).
+    #[must_use]
+    pub fn invite_preview(bytes: &[u8]) -> Option<bool> {
+        crate::invite::fuzz_preview(bytes)
     }
 
     /// Open `row` as a mailbox row (ADR-0078) under a fixed key. `None` when

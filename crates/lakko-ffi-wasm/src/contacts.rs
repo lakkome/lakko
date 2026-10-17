@@ -497,11 +497,17 @@ impl ContactRequest {
     /// `wrapCallKeyPackage` / `wrapCallWelcome` intro) carries it too. The
     /// `ReachGrant` handle is consumed: read `verifyingKey()` first.
     ///
+    /// `linkAnswerId` and `linkAnswerSecret` (ADR-0079 §2) name the `/i/`
+    /// link the request is sent from: the capability's `linkId` (16 bytes)
+    /// and the link secret from the URL fragment (12 bytes). Pass two EMPTY
+    /// arrays for a request that does not come from an `/i/` link.
+    ///
     /// # Errors
     ///
-    /// Throws on any input-shape or AEAD failure, or a reply grant of any
-    /// class but `Reply`; throws an `Error` with a `profileError` code when
-    /// `profileEnvelope` is non-empty and invalid.
+    /// Throws on any input-shape or AEAD failure, a reply grant of any
+    /// class but `Reply`, or a link answer of the wrong width; throws an
+    /// `Error` with a `profileError` code when `profileEnvelope` is
+    /// non-empty and invalid.
     #[wasm_bindgen]
     #[allow(clippy::too_many_arguments)]
     pub fn compose(
@@ -513,8 +519,20 @@ impl ContactRequest {
         privacy_pass_token: &[u8],
         profile_envelope: &[u8],
         reply_grant: Option<ReachGrant>,
+        link_answer_id: &[u8],
+        link_answer_secret: &[u8],
         intro_message: &[u8],
     ) -> Result<Vec<u8>, JsValue> {
+        let link_answer = if link_answer_id.is_empty() && link_answer_secret.is_empty() {
+            None
+        } else {
+            Some(lakko_contacts::LinkAnswer {
+                link_id: <[u8; 16]>::try_from(link_answer_id)
+                    .map_err(|_| JsError::new("linkAnswerId must be 16 bytes"))?,
+                link_secret: <[u8; 12]>::try_from(link_answer_secret)
+                    .map_err(|_| JsError::new("linkAnswerSecret must be 12 bytes"))?,
+            })
+        };
         let profile = if profile_envelope.is_empty() {
             None
         } else {
@@ -558,6 +576,7 @@ impl ContactRequest {
             privacy_pass_token,
             profile.as_ref(),
             reply_grant.as_ref().map(ReachGrant::rust),
+            link_answer.as_ref(),
             intro_message,
         )
         .map_err(contact_err)?)
@@ -636,6 +655,7 @@ impl ContactRequest {
         Ok(OpenedContactRequest {
             profile: opened.profile.map(WasmProfile::from),
             reply_grant: opened.reply_grant.map(ReachGrant::from_rust),
+            link_answer: opened.link_answer,
             intro_message: opened.intro,
         })
     }
@@ -646,6 +666,7 @@ impl ContactRequest {
 pub struct OpenedContactRequest {
     profile: Option<WasmProfile>,
     reply_grant: Option<ReachGrant>,
+    link_answer: Option<lakko_contacts::LinkAnswer>,
     intro_message: Vec<u8>,
 }
 
@@ -666,6 +687,20 @@ impl OpenedContactRequest {
     #[wasm_bindgen(getter, js_name = replyGrant)]
     pub fn reply_grant(&self) -> Option<ReachGrant> {
         self.reply_grant.clone()
+    }
+
+    /// The 16-byte id of the `/i/` link the request answers (ADR-0079 §2),
+    /// or `undefined`. Ask `SyncedState.linkAnswerVerdict` with it, the
+    /// secret and the request's `fromPubkey`.
+    #[wasm_bindgen(getter, js_name = linkAnswerId)]
+    pub fn link_answer_id(&self) -> Option<Vec<u8>> {
+        self.link_answer.as_ref().map(|a| a.link_id.to_vec())
+    }
+
+    /// The 12-byte secret of that link, or `undefined`. SECRET: never log.
+    #[wasm_bindgen(getter, js_name = linkAnswerSecret)]
+    pub fn link_answer_secret(&self) -> Option<Vec<u8>> {
+        self.link_answer.as_ref().map(|a| a.link_secret.to_vec())
     }
 
     /// The intro message bytes, possibly empty. May itself be a call
@@ -1477,10 +1512,16 @@ impl InviteCapability {
     /// register its public key with the Delivery Service BEFORE sharing the
     /// link, and remove it when the link is revoked or expires.
     ///
+    /// `inviterDisplayName` and `inviterUsername` (ADR-0079 §1) name the owner
+    /// on the invite page: the owner's display name (trimmed; blank or
+    /// `undefined` = none) and username (normalised; blank or `undefined` =
+    /// none), sealed with the rest of the capability.
+    ///
     /// # Errors
     ///
-    /// `JsError` on any input-shape failure, or a grant of any class but
-    /// `Link`.
+    /// Throws on any input-shape failure, or a grant of any class but
+    /// `Link`; an `Error` with a `profileError` code for a preview that
+    /// breaks the ADR-0048 rules.
     #[wasm_bindgen]
     #[allow(clippy::too_many_arguments)]
     pub fn compose(
@@ -1493,38 +1534,55 @@ impl InviteCapability {
         label: &str,
         link_id: &[u8],
         link_grant: &ReachGrant,
-    ) -> Result<WasmInviteLinkMint, JsError> {
+        inviter_display_name: Option<String>,
+        inviter_username: Option<String>,
+    ) -> Result<WasmInviteLinkMint, JsValue> {
         let link_id = link_id16(link_id)?;
+        let preview = lakko_contacts::InvitePreview {
+            display_name: match inviter_display_name {
+                Some(name) => rust_normalize_display_name(&name)
+                    .map_err(|e| profile_error_value(ProfileError::DisplayName(e)))?
+                    .unwrap_or_default(),
+                None => String::new(),
+            },
+            username: match inviter_username.as_deref().map(str::trim) {
+                None | Some("") => String::new(),
+                Some(raw) => lakko_discovery_client::validate_username(raw)
+                    .map_err(|e| profile_error_value(ProfileError::Username(e)))?,
+            },
+        };
         if owner_signing_seed.len() != 32 {
-            return Err(JsError::new("ownerSigningSeed must be 32 bytes"));
+            return Err(JsValue::from(JsError::new(
+                "ownerSigningSeed must be 32 bytes",
+            )));
         }
         let mut seed = [0u8; 32];
         seed.copy_from_slice(owner_signing_seed);
         let signing = SigningKey::from_seed(&seed);
 
         if owner_account_id.len() != lakko_contacts::ACCOUNT_ID_LEN {
-            return Err(JsError::new(&format!(
+            return Err(JsValue::from(JsError::new(&format!(
                 "ownerAccountId must be {} bytes",
                 lakko_contacts::ACCOUNT_ID_LEN,
-            )));
+            ))));
         }
         let mut acct = [0u8; lakko_contacts::ACCOUNT_ID_LEN];
         acct.copy_from_slice(owner_account_id);
 
         if owner_x25519_pubkey.len() != PUBLIC_KEY_LEN {
-            return Err(JsError::new(&format!(
+            return Err(JsValue::from(JsError::new(&format!(
                 "ownerX25519Pubkey must be {PUBLIC_KEY_LEN} bytes",
-            )));
+            ))));
         }
         let mut x_arr = [0u8; PUBLIC_KEY_LEN];
         x_arr.copy_from_slice(owner_x25519_pubkey);
         let x25519_pub = X25519PublicKey::from_bytes(&x_arr).map_err(crypto_err)?;
 
         if label.len() > MAX_LABEL_LEN {
-            return Err(JsError::new(&format!(
+            return Err(JsValue::from(JsError::new(&format!(
                 "label is {} bytes, max is {MAX_LABEL_LEN}",
                 label.len(),
-            )));
+            ))));
         }
 
         let wire = rust_invite_compose(
@@ -1537,13 +1595,14 @@ impl InviteCapability {
             label,
             &link_id,
             link_grant.rust(),
+            &preview,
         )
         .map_err(contact_err)?;
-        seal_mint(
+        Ok(seal_mint(
             &signing,
             |secret| rust_invite_seal_link(secret, &wire),
             rust_generate_link_secret(),
-        )
+        )?)
     }
 
     /// Decode PLAINTEXT capability wire bytes and verify the Ed25519
@@ -1627,6 +1686,21 @@ impl InviteCapability {
     #[wasm_bindgen(getter)]
     pub fn label(&self) -> String {
         self.inner.label.clone()
+    }
+
+    /// The owner's display name as the link states it (ADR-0079 §1), or
+    /// `undefined`. The owner's own claim: shown on the invite page, never
+    /// used for identity.
+    #[wasm_bindgen(getter, js_name = inviterDisplayName)]
+    pub fn inviter_display_name(&self) -> Option<String> {
+        Some(self.inner.preview.display_name.clone()).filter(|n| !n.is_empty())
+    }
+
+    /// The owner's username as the link states it (ADR-0079 §1), canonical,
+    /// or `undefined`.
+    #[wasm_bindgen(getter, js_name = inviterUsername)]
+    pub fn inviter_username(&self) -> Option<String> {
+        Some(self.inner.preview.username.clone()).filter(|u| !u.is_empty())
     }
 
     /// The link's 16-byte reach scope id (ADR-0060 §6).
@@ -2276,6 +2350,12 @@ pub enum WasmIncomingEnvelopeKind {
     /// adopt it only once the server-side change is visible. It carries the
     /// new account's entropy: never log it.
     KeyRotation = 18,
+    /// What another device of this account says about itself (ADR-0080).
+    /// The decoded card rides the `deviceCard` getter; `payload` is empty.
+    /// Never render it. Meaningful ONLY in the account's own DeviceGroup:
+    /// store it under the sender's leaf signature key resolved at receipt,
+    /// keep it only when `deviceCardIsNewer`, drop it when the leaf leaves.
+    DeviceCard = 19,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2299,6 +2379,7 @@ pub struct WasmIncomingEnvelope {
     committer_delegation: Option<CommitterDelegationEnvelope>,
     group_closed: Option<WasmGroupClosed>,
     key_rotation: Option<crate::key_rotation::WasmKeyRotation>,
+    device_card: Option<crate::device_card::WasmDeviceCard>,
 }
 
 impl WasmIncomingEnvelope {
@@ -2321,6 +2402,7 @@ impl WasmIncomingEnvelope {
             shared_channels: None,
             group_closed: None,
             key_rotation: None,
+            device_card: None,
         }
     }
 }
@@ -2443,6 +2525,13 @@ impl WasmIncomingEnvelope {
     pub fn key_rotation(&self) -> Option<crate::key_rotation::WasmKeyRotation> {
         self.key_rotation.clone()
     }
+
+    /// Set only for `DeviceCard` (ADR-0080): the decoded card. `undefined`
+    /// for every other kind.
+    #[wasm_bindgen(getter, js_name = deviceCard)]
+    pub fn device_card(&self) -> Option<crate::device_card::WasmDeviceCard> {
+        self.device_card.clone()
+    }
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts
@@ -2559,6 +2648,10 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::KeyRotation(rotation) => WasmIncomingEnvelope {
             key_rotation: Some(rotation.into()),
             ..WasmIncomingEnvelope::of(K::KeyRotation)
+        },
+        IncomingEnvelope::DeviceCard(card) => WasmIncomingEnvelope {
+            device_card: Some(card.into()),
+            ..WasmIncomingEnvelope::of(K::DeviceCard)
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             payload: p.to_vec(),
@@ -3811,6 +3904,8 @@ mod tests {
             b"",
             b"",
             Some(test_reply_grant()),
+            &[],
+            &[],
             b"hi bob",
         )
         .unwrap();
@@ -3884,6 +3979,8 @@ mod tests {
             b"",
             &envelope,
             None,
+            &[],
+            &[],
             b"hi bob",
         )
         .unwrap();
@@ -4059,6 +4156,8 @@ mod tests {
             "alice@home",
             &TEST_LINK_ID,
             &test_link_grant(),
+            None,
+            None,
         )
         .unwrap();
 
@@ -4203,6 +4302,8 @@ mod tests {
             "",
             &TEST_LINK_ID,
             &test_link_grant(),
+            None,
+            None,
         )
         .unwrap();
 

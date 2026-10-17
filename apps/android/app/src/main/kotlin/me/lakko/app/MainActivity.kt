@@ -229,6 +229,9 @@ class MainActivity : ComponentActivity() {
         // ADR-0073 R.5 — a conversation that continues in a new group keeps
         // its row through the lineage register of the synced state.
         chatRepository.lineageRecorder = { successor, root -> deviceGroupSync.recordLineage(successor, root) }
+        // ADR-0079 section 4 — the contacts runtime reads the synced
+        // link-record register (auto-accept, the link list, revocations).
+        contactsRepository.deviceGroupSync = deviceGroupSync
         // ADR-0075 (amended 2026-10-13) - the account's devices keep the
         // recovery address in one register of the synced state.
         authRepository.recoveryAddressPort = object : me.lakko.app.auth.RecoveryAddressPort {
@@ -365,11 +368,20 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         me.lakko.app.calls.IncomingCallRinger.attach(applicationContext)
         me.lakko.app.calls.IncomingCallRinger.setAppForeground(true)
+        me.lakko.app.devices.DeviceCardCenter.foreground = true
+    }
+
+    /** ADR-0080 section 3: the person's touches and keys on this device are
+     *  what refreshes its device card; never a timer. */
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        me.lakko.app.devices.DeviceCardCenter.noteAction()
     }
 
     override fun onPause() {
         super.onPause()
         me.lakko.app.calls.IncomingCallRinger.setAppForeground(false)
+        me.lakko.app.devices.DeviceCardCenter.foreground = false
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -1930,6 +1942,14 @@ private fun SessionRoot(
                     me.lakko.app.ui.devices.NewDeviceNoticeBanner(
                         onOpenDevices = { navController.navigate(Routes.DEVICES) { launchSingleTop = true } },
                     )
+                    val invitedAll by contactsRepository.invited.collectAsStateWithLifecycle()
+                    val contactsNow by contactsRepository.state.collectAsStateWithLifecycle()
+                    val invitedShown = remember(invitedAll, contactsNow.accepted) {
+                        me.lakko.app.contacts.PendingContacts.shown(
+                            invitedAll,
+                            contactsNow.accepted.mapTo(HashSet()) { me.lakko.app.auth.base64Encode(it.request.fromPubkey) },
+                        )
+                    }
                     ChatListScreen(
                         modifier = Modifier.weight(1f),
                         repository = chatRepository,
@@ -1950,6 +1970,10 @@ private fun SessionRoot(
                         },
                         channels = channelsState,
                         deviceGroupSync = deviceGroupSync,
+                        // ADR-0079 — the people added through their invite
+                        // link, listed at once.
+                        invited = invitedShown,
+                        onOpenPendingChat = { hex -> navController.navigate(Routes.pendingChat(hex)) },
                         // docs/ux/chat-folders.md — the editor and Settings >
                         // Chat folders are pushed destinations.
                         onEditFolder = { id -> navController.navigate(Routes.folderEdit(id, null)) },
@@ -2145,6 +2169,7 @@ private fun SessionRoot(
                         viewModel = contactsVm,
                         onOpenContact = { key -> navController.navigate(Routes.contact(key)) },
                         onOpenChat = { hex -> navController.navigate(Routes.chat(hex)) },
+                        onOpenPendingChat = { hex -> navController.navigate(Routes.pendingChat(hex)) },
                         prefillUsername = foundUsername,
                         onPrefillConsumed = {
                             me.lakko.app.contacts.PendingContactLookup.consume()
@@ -2654,14 +2679,31 @@ private fun SessionRoot(
                     InviteLandingScreen(
                         viewModel = inviteVm,
                         onDone = { navController.popBackStack() },
-                        onOpenChat = { hex ->
-                            navController.navigate(Routes.chat(hex)) {
+                        // ADR-0079 — the page closes into the chat with the inviter.
+                        onOpenChat = { target ->
+                            val route = when (target) {
+                                is me.lakko.app.ui.contacts.InviteChatTarget.Pending ->
+                                    Routes.pendingChat(target.accountIdHex)
+                                is me.lakko.app.ui.contacts.InviteChatTarget.Conversation ->
+                                    Routes.chat(target.groupIdHex)
+                                is me.lakko.app.ui.contacts.InviteChatTarget.Contact ->
+                                    Routes.contact(target.routeKey)
+                            }
+                            navController.navigate(route) {
                                 popUpTo(Routes.INVITE) { inclusive = true }
                             }
                         },
-                        onOpenContact = { key ->
-                            navController.navigate(Routes.contact(key)) {
-                                popUpTo(Routes.INVITE) { inclusive = true }
+                    )
+                }
+                composable(Routes.PENDING_CHAT) { entry ->
+                    val accountIdHex = entry.arguments?.getString("accountIdHex") ?: return@composable
+                    me.lakko.app.ui.chat.PendingChatScreen(
+                        accountIdHex = accountIdHex,
+                        contacts = contactsRepository,
+                        onBack = { navController.popBackStack() },
+                        onConnected = { hex ->
+                            navController.navigate(Routes.chat(hex)) {
+                                popUpTo(Routes.PENDING_CHAT) { inclusive = true }
                             }
                         },
                     )
@@ -2784,6 +2826,10 @@ private object Routes {
     fun safetyNumber(key: String): String = "contact/$key/safety"
     const val INVITE = "invite/{slug}"
     fun invite(slug: String): String = "invite/${android.net.Uri.encode(slug)}"
+    /** ADR-0079 section 5 — the chat with a person added through their
+     *  invite link before their app answered; hex (URL-safe by construction). */
+    const val PENDING_CHAT = "invited/{accountIdHex}"
+    fun pendingChat(accountIdHex: String): String = "invited/$accountIdHex"
     const val GROUP_JOIN = "group_join/{slug}"
     fun groupJoin(link: me.lakko.app.chat.GroupJoinLink): String =
         "group_join/${android.net.Uri.encode(me.lakko.app.chat.composeGroupJoinArgument(link))}"

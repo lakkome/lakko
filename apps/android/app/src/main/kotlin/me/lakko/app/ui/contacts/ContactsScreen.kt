@@ -72,7 +72,9 @@ import me.lakko.app.l10n.joinFacts
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.contacts.IncomingContactRequest
+import me.lakko.app.contacts.PendingContacts
 import me.lakko.app.contacts.SentContactRequest
+import me.lakko.app.auth.base64Encode
 import me.lakko.app.discovery.ActiveInvite
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.profile.ResolvedName
@@ -110,6 +112,9 @@ public fun ContactsScreen(
     /** Open the 1x1 chat for an accepted contact (fallback when
      *  [onOpenContact] is not wired). */
     onOpenChat: ((groupIdHex: String) -> Unit)? = null,
+    /** ADR-0079 — open the chat with a person added through their invite
+     *  link whose app has not answered yet (by account id hex). */
+    onOpenPendingChat: ((accountIdHex: String) -> Unit)? = null,
     /** docs/ux/navigation.md section 4.3 — a username the conversation list's
      *  one lookup row resolved. The add sheet opens with it already filled in,
      *  because the person has typed it once and the request flow is the only
@@ -197,7 +202,14 @@ public fun ContactsScreen(
     // Defensive: rows persisted before the accept path deduplicated by key
     // may still hold one person twice, and LazyColumn keys must be unique.
     val accepted = state.accepted.distinctBy { contactRouteKey(it.request.fromPubkey) }
-    val sections = remember(accepted, nameVersion, query) {
+    // ADR-0079 section 4 — a person added through their invite link is listed
+    // at once, under the name the link states, mixed in alphabetically.
+    val invitedAll by viewModel.invited.collectAsStateWithLifecycle()
+    val invited = remember(invitedAll, accepted) {
+        PendingContacts.shown(invitedAll, accepted.mapTo(HashSet()) { base64Encode(it.request.fromPubkey) })
+    }
+    val unnamed = t("invite.contact.page.unnamed")
+    val sections = remember(accepted, invited, nameVersion, query, unnamed) {
         val rows = accepted.map { c ->
             val resolved = directory.resolve(c.request.fromPubkey)
             ContactRowModel(
@@ -205,6 +217,14 @@ public fun ContactsScreen(
                 name = resolved.primary,
                 username = resolved.verifiedUsername,
                 placeholder = resolved.isPlaceholder,
+            )
+        } + invited.map { p ->
+            val stated = PendingContacts.name(p)
+            ContactRowModel(
+                key = INVITED_ROW_PREFIX + p.accountIdHex,
+                name = stated ?: unnamed,
+                username = p.username.ifEmpty { null },
+                placeholder = stated == null,
             )
         }
         contactSections(filterContacts(rows, query))
@@ -250,7 +270,7 @@ public fun ContactsScreen(
                 ReauthPanel()
                 return@PullToRefreshBox
             }
-            val nothingAtAll = accepted.isEmpty() && pending.isEmpty() && state.sent.isEmpty()
+            val nothingAtAll = accepted.isEmpty() && invited.isEmpty() && pending.isEmpty() && state.sent.isEmpty()
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 item(key = "search") {
                     SearchField(
@@ -322,6 +342,8 @@ public fun ContactsScreen(
                                 row = row,
                                 onClick = {
                                     when {
+                                        row.key.startsWith(INVITED_ROW_PREFIX) ->
+                                            onOpenPendingChat?.invoke(row.key.removePrefix(INVITED_ROW_PREFIX))
                                         onOpenContact != null -> onOpenContact(row.key)
                                         contact?.groupIdHex != null && onOpenChat != null ->
                                             onOpenChat(contact.groupIdHex)
@@ -340,6 +362,10 @@ public fun ContactsScreen(
 // =============================================================================
 // List pieces
 // =============================================================================
+
+/** The row key prefix of a pending contact (ADR-0079); a contact's key is a
+ *  base64url signature key, which never contains `:`. */
+private const val INVITED_ROW_PREFIX = "invited:"
 
 @Composable
 private fun SearchField(query: String, onQueryChange: (String) -> Unit, modifier: Modifier = Modifier) {
@@ -468,6 +494,17 @@ private fun RequestRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+        // ADR-0079 section 3 — sent through a link that no longer works: an
+        // ordinary card, with this note.
+        if (req.viaDeadLink) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = t("contacts.request.dead_link_note"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 52.dp),
+            )
         }
         if (!req.intro.isNullOrBlank()) {
             Spacer(Modifier.height(6.dp))

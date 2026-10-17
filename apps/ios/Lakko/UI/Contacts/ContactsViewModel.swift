@@ -65,6 +65,17 @@ public final class ContactsViewModel: ObservableObject {
     /// repository update.
     @Published public private(set) var repositoryState: ContactsState = ContactsState()
 
+    /// ADR-0079 section 4 — the people added through their invite link whose
+    /// app has not answered yet, mirrored from ``ContactsRepository/invited``.
+    @Published public private(set) var invited: [PendingContact] = []
+
+    /// The pending contacts the list shows: those not yet an accepted
+    /// contact on this device.
+    public var shownInvited: [PendingContact] {
+        PendingContacts.shown(
+            invited, oneToOnePeerKeys: Set(repositoryState.accepted.map(\.request.fromPubkey)))
+    }
+
     // MARK: - Wiring
 
     private let repository: ContactsRepository
@@ -93,6 +104,11 @@ public final class ContactsViewModel: ObservableObject {
             .sink { [weak self] newState in
                 self?.repositoryState = newState
             }
+            .store(in: &cancellables)
+        self.invited = repository.invited
+        repository.$invited
+            .receive(on: RunLoop.main)
+            .sink { [weak self] list in self?.invited = list }
             .store(in: &cancellables)
         // A one-to-one conversation IS a contact: whenever the set of
         // conversations this device holds changes, every one-to-one peer

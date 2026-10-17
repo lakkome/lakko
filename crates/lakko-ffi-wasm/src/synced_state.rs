@@ -718,6 +718,138 @@ impl OwnUsernameRegister {
     }
 }
 
+/// Which ledger an invite link lives in (ADR-0079).
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkRecordKind {
+    /// A contact invite link (`/i/`).
+    Contact = 1,
+    /// A call invite link (`/c/`).
+    Call = 2,
+}
+
+/// One of the account's invite links (ADR-0079 section 4). The link secret
+/// is SECRET: never log it.
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkRecord {
+    inner: Stamped<core::LinkRecordEntry>,
+}
+
+#[wasm_bindgen]
+impl LinkRecord {
+    /// A record for a link just minted: no use yet, not revoked. `linkId`
+    /// 16 bytes, `linkSecret` 12, `ledgerId` 6 or empty (an inline link),
+    /// `maxUses` as the capability carries it (0 = single use,
+    /// `0xFFFFFFFF` = no limit), `expiryMs` 0 = never.
+    ///
+    /// # Errors
+    ///
+    /// Throws `"bounds: ..."` for a field out of bounds.
+    #[wasm_bindgen(constructor)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        link_id: &[u8],
+        link_secret: &[u8],
+        kind: LinkRecordKind,
+        ledger_id: &[u8],
+        expiry_ms: u64,
+        max_uses: u32,
+        minted_at_ms: u64,
+        label: String,
+    ) -> Result<LinkRecord, JsError> {
+        let value = core::LinkRecordEntry {
+            link_id: <[u8; 16]>::try_from(link_id)
+                .map_err(|_| JsError::new("bounds: link id must be 16 bytes"))?,
+            link_secret: <[u8; 12]>::try_from(link_secret)
+                .map_err(|_| JsError::new("bounds: link secret must be 12 bytes"))?,
+            kind: match kind {
+                LinkRecordKind::Contact => core::LinkRecordKind::Contact,
+                LinkRecordKind::Call => core::LinkRecordKind::Call,
+            },
+            ledger_id: ledger_id.to_vec(),
+            expiry_ms,
+            max_uses,
+            uses: 0,
+            revoked: false,
+            minted_at_ms,
+            label,
+            answered: Vec::new(),
+        };
+        value
+            .validate()
+            .map_err(|e| JsError::new(&format!("bounds: {e}")))?;
+        Ok(Self {
+            inner: Stamped { hlc: 0, value },
+        })
+    }
+
+    /// HLC stamp the register was written at (0 for a record not yet
+    /// written).
+    #[wasm_bindgen(getter)]
+    pub fn hlc(&self) -> u64 {
+        self.inner.hlc
+    }
+    /// The link's 16-byte id.
+    #[wasm_bindgen(getter, js_name = linkId)]
+    pub fn link_id(&self) -> Vec<u8> {
+        self.inner.value.link_id.to_vec()
+    }
+    /// The link's 12-byte secret. SECRET.
+    #[wasm_bindgen(getter, js_name = linkSecret)]
+    pub fn link_secret(&self) -> Vec<u8> {
+        self.inner.value.link_secret.to_vec()
+    }
+    /// Which ledger.
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> LinkRecordKind {
+        match self.inner.value.kind {
+            core::LinkRecordKind::Contact => LinkRecordKind::Contact,
+            core::LinkRecordKind::Call => LinkRecordKind::Call,
+        }
+    }
+    /// The 6-byte ledger id, or empty for an inline link.
+    #[wasm_bindgen(getter, js_name = ledgerId)]
+    pub fn ledger_id(&self) -> Vec<u8> {
+        self.inner.value.ledger_id.clone()
+    }
+    /// UNIX millis after which the link no longer works; 0 = never.
+    #[wasm_bindgen(getter, js_name = expiryMs)]
+    pub fn expiry_ms(&self) -> u64 {
+        self.inner.value.expiry_ms
+    }
+    /// The use limit as the capability carries it.
+    #[wasm_bindgen(getter, js_name = maxUses)]
+    pub fn max_uses(&self) -> u32 {
+        self.inner.value.max_uses
+    }
+    /// Requests accepted through the link so far.
+    #[wasm_bindgen(getter)]
+    pub fn uses(&self) -> u32 {
+        self.inner.value.uses
+    }
+    /// Revoked (final).
+    #[wasm_bindgen(getter)]
+    pub fn revoked(&self) -> bool {
+        self.inner.value.revoked
+    }
+    /// UNIX millis at which the link was minted.
+    #[wasm_bindgen(getter, js_name = mintedAtMs)]
+    pub fn minted_at_ms(&self) -> u64 {
+        self.inner.value.minted_at_ms
+    }
+    /// The owner's label, or empty.
+    #[wasm_bindgen(getter)]
+    pub fn label(&self) -> String {
+        self.inner.value.label.clone()
+    }
+    /// `true` when the link still works at `nowMs`.
+    #[wasm_bindgen(js_name = isLive)]
+    pub fn is_live(&self, now_ms: u64) -> bool {
+        self.inner.value.is_live(now_ms)
+    }
+}
+
 /// Canonicalise what a caller passed to `setOwnUsername`: `None` for "no
 /// username" (absent or blank), else the one username rule.
 fn canonical_own_username(
@@ -1205,6 +1337,122 @@ impl SyncedState {
             .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
     }
 
+    /// Write one of the account's invite links (ADR-0079 section 4) at
+    /// `hlc`. `true` when written; then send `linkRecordEnvelopeFor(linkId)`
+    /// in a DeviceGroup service envelope.
+    #[wasm_bindgen(js_name = setLinkRecord)]
+    pub fn set_link_record(&self, hlc: u64, record: &LinkRecord) -> Result<bool, JsError> {
+        let value = record.inner.value.clone();
+        self.with(|s| s.set_link_record(hlc, value))?
+            .map_err(|e| JsError::new(&format!("bounds: {e}")))
+    }
+
+    /// The record held for a link id, or `undefined`.
+    #[wasm_bindgen(js_name = linkRecord)]
+    pub fn link_record(&self, link_id: &[u8]) -> Result<Option<LinkRecord>, JsError> {
+        let Ok(id) = <[u8; 16]>::try_from(link_id) else {
+            return Ok(None);
+        };
+        self.with(|s| s.link_record(&id).map(|inner| LinkRecord { inner }))
+    }
+
+    /// Every link record (revoked ones included), ascending by link id.
+    #[wasm_bindgen(js_name = allLinkRecords)]
+    pub fn all_link_records(&self) -> Result<Vec<LinkRecord>, JsError> {
+        self.with(|s| {
+            s.all_link_records()
+                .into_iter()
+                .map(|inner| LinkRecord { inner })
+                .collect()
+        })
+    }
+
+    /// Mark a link revoked (final). `true` when the register changed.
+    #[wasm_bindgen(js_name = revokeLinkRecord)]
+    pub fn revoke_link_record(&self, hlc: u64, link_id: &[u8]) -> Result<bool, JsError> {
+        let id = <[u8; 16]>::try_from(link_id)
+            .map_err(|_| JsError::new("bounds: link id must be 16 bytes"))?;
+        self.with(|s| s.revoke_link_record(hlc, &id))?
+            .map_err(|e| JsError::new(&format!("bounds: {e}")))
+    }
+
+    /// Count one request accepted through a link from `requesterKey` (the
+    /// request's 32-byte `fromPubkey`). `true` when the register changed.
+    #[wasm_bindgen(js_name = recordLinkUse)]
+    pub fn record_link_use(
+        &self,
+        hlc: u64,
+        link_id: &[u8],
+        requester_key: &[u8],
+    ) -> Result<bool, JsError> {
+        let id = <[u8; 16]>::try_from(link_id)
+            .map_err(|_| JsError::new("bounds: link id must be 16 bytes"))?;
+        let key = <[u8; 32]>::try_from(requester_key)
+            .map_err(|_| JsError::new("bounds: requester key must be 32 bytes"))?;
+        self.with(|s| s.record_link_use(hlc, &id, &key))?
+            .map_err(|e| JsError::new(&format!("bounds: {e}")))
+    }
+
+    /// The one rule for a contact request carrying a link answer (ADR-0079
+    /// section 3): `"accept"` (run the accept path with no card, then
+    /// `recordLinkUse`), `"answered"` (show nothing) or `"dead"` (show the
+    /// card with the "no longer works" note). The secret is compared in
+    /// constant time; an answer of the wrong width is `"dead"`.
+    #[wasm_bindgen(js_name = linkAnswerVerdict)]
+    pub fn link_answer_verdict(
+        &self,
+        link_id: &[u8],
+        link_secret: &[u8],
+        requester_key: &[u8],
+        now_ms: u64,
+    ) -> Result<String, JsError> {
+        let (Ok(id), Ok(secret), Ok(key)) = (
+            <[u8; 16]>::try_from(link_id),
+            <[u8; 12]>::try_from(link_secret),
+            <[u8; 32]>::try_from(requester_key),
+        ) else {
+            return Ok(core::LinkAnswerVerdict::Dead.code().to_string());
+        };
+        self.with(|s| {
+            s.link_answer_verdict(&id, &secret, &key, now_ms)
+                .code()
+                .to_string()
+        })
+    }
+
+    /// The service envelope carrying one held link record with its original
+    /// stamp, or `undefined`.
+    #[wasm_bindgen(js_name = linkRecordEnvelopeFor)]
+    pub fn link_record_envelope_for(&self, link_id: &[u8]) -> Result<Option<Vec<u8>>, JsError> {
+        let Ok(id) = <[u8; 16]>::try_from(link_id) else {
+            return Ok(None);
+        };
+        self.with(|s| s.link_record_envelope_for(&id))
+    }
+
+    /// Every held link record as service envelopes: the catch-up re-send
+    /// beside `snapshotParts()` (link records are NOT in the parts).
+    #[wasm_bindgen(js_name = linkRecordEnvelopes)]
+    pub fn link_record_envelopes(&self) -> Result<Vec<js_sys::Uint8Array>, JsError> {
+        self.with(|s| {
+            s.link_record_envelopes()
+                .iter()
+                .map(|e| js_sys::Uint8Array::from(e.as_slice()))
+                .collect()
+        })
+    }
+
+    /// Decode a link-record envelope (route on `isLinkRecordEnvelope`) and
+    /// fold every register in. Fail closed. Returns whether anything
+    /// changed. Throws `"<code>: <reason>"` with code `wrongDomain` /
+    /// `unknownVersion` / `truncated` / `trailing` / `count` /
+    /// `notCanonical` / `entry`.
+    #[wasm_bindgen(js_name = applyLinkRecordEnvelope)]
+    pub fn apply_link_record_envelope(&self, envelope: &[u8]) -> Result<bool, JsError> {
+        self.with(|s| s.apply_link_record_envelope(envelope))?
+            .map_err(|e| JsError::new(&format!("{}: {e}", e.code())))
+    }
+
     /// The account's saved messages, most recently saved first (ADR-0065
     /// section 4). Removed ones are not listed.
     pub fn saved(&self) -> Result<Vec<SavedMessageView>, JsError> {
@@ -1329,6 +1577,15 @@ pub fn recovery_email_envelope_max_len() -> u32 {
 #[must_use]
 pub fn is_own_username_envelope(bytes: &[u8]) -> bool {
     core::is_own_username_envelope(bytes)
+}
+
+/// `true` when `bytes` open with the link-record envelope domain
+/// (`lakko/sync/link-record/v1`, ADR-0079): the routing question for a
+/// DeviceGroup service envelope.
+#[wasm_bindgen(js_name = isLinkRecordEnvelope)]
+#[must_use]
+pub fn is_link_record_envelope(bytes: &[u8]) -> bool {
+    core::is_link_record_envelope(bytes)
 }
 
 /// Longest own-username envelope `SyncedState.ownUsernameEnvelope()`

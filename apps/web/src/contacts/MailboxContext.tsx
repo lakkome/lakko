@@ -58,7 +58,7 @@ import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { waitingSentRequests } from "./contact-list-model";
 import { forgetInviteLinkSecret } from "./invite-link-secrets";
 import { listMintedLinks } from "./minted-links";
-import { revokeMintedLink, type OwnLinkRevokeOutcome } from "./own-links";
+import { revokeLinksRevokedElsewhere, revokeMintedLink, type OwnLinkRevokeOutcome } from "./own-links";
 import { forgetSentRequest, loadSentRequests, recordSentRequest } from "./sent-requests";
 import { forgetSentIntro, sentIntroFor } from "./sent-request-intros";
 import {
@@ -115,6 +115,12 @@ import {
 import { createPendingInbox, type FetchedRequest, type PendingInbox } from "./inbox-store";
 import { createMailboxPoller, type MailboxPoller } from "./mailbox-poller";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
+import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
+import { conversationKindOf } from "../chat/conversation-kind";
+import { personKeysOf } from "../chat/person-key";
+import { heldSends, persistHeldSends } from "../chat/held-send-queue";
+import { acceptContactRequest, linkAnswerAction } from "./accept-request";
+import { handOverPendingContact, loadPendingContacts, pendingContacts } from "./pending-contacts";
 
 /** Copy for a Welcome this device could not open. */
 export const JOIN_FAILURE_MESSAGE = (): string => t("contacts.mailbox.join_failed");
@@ -188,6 +194,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const chats = useChats();
   const profiles = useProfiles();
   const groupNames = useGroupNames();
+  const sync = useDeviceGroupSync();
   const client = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
     // ADR-0050: requests, acks and the account mailbox are the person's;
@@ -294,6 +301,39 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const [error, setError] = createLiveText();
   const [acceptedVersion, setAcceptedVersion] = createSignal(0);
   const [joinFailure, setJoinFailure] = createLiveText();
+
+  // ADR-0079 section 4 - a link this device minted that another device of
+  // the account revoked: only this device holds the seed that deletes the
+  // ledger row, so it does so when the register's mark arrives. Re-run on
+  // every change of the register; a link already revoked here has no record
+  // left and is skipped.
+  createEffect(() => {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    const revoked = new Set(sync.linkRecords().filter((r) => r.revoked).map((r) => r.linkIdHex));
+    if (revoked.size === 0) return;
+    void revokeLinksRevokedElsewhere(spentDiscovery, s.account.accountId, revoked);
+  });
+
+  // ADR-0079 section 5 - a pending contact whose one-to-one already exists
+  // on this device (its Welcome was joined before the pending record was
+  // read, or on another tab): hand its messages over now. Re-run whenever
+  // the pending list or the conversations change; a contact with nothing to
+  // hand over is a no-op.
+  createEffect(() => {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    const account = s.account.accountId;
+    void loadPendingContacts(account);
+    const waiting = pendingContacts();
+    if (waiting.length === 0) return;
+    const keys = new Set(waiting.map((p) => p.signaturePubkeyB64));
+    for (const g of chats.groups()) {
+      if (conversationKindOf(g.group) !== "chat") continue;
+      if (!personKeysOf(g.group).some((k) => keys.has(k))) continue;
+      void handOverToConversation(account, g.groupIdB64);
+    }
+  });
 
   // The signed-in account's mailbox cursor + pending requests, persisted
   // together (`inbox-store.ts`). `null` while signed out.
@@ -423,6 +463,61 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   });
   onCleanup(unsubscribeResetAccepted);
 
+  /**
+   * ADR-0079 section 3 - the device's own accept of a request sent through
+   * a live invite link: the ordinary accept path, then one use of the link
+   * counted in the synced register (with the requester's key, so another
+   * device of the account treats the same request as answered). `false`
+   * when the accept did not complete.
+   */
+  async function acceptThroughLink(request: IncomingContactRequest): Promise<boolean> {
+    const identity = auth.identitySecrets();
+    const answer = request.linkAnswer;
+    if (identity === null || answer === null) return false;
+    const outcome = await acceptContactRequest({ client, identity, chats, profiles }, request);
+    if (outcome.legacy || outcome.chatError !== null) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "invite-link accept did not complete; shown as a request",
+        outcome.chatError instanceof Error ? outcome.chatError.name : "legacy",
+      );
+      return false;
+    }
+    await sync.recordLinkUse(answer.linkId, request.fromPubkey);
+    setAcceptedVersion(acceptedVersion() + 1);
+    return true;
+  }
+
+  /**
+   * ADR-0079 section 5 - move the messages written to a pending contact into
+   * the held-send queue of the one-to-one just joined, then drop the pending
+   * record. Never throws.
+   */
+  async function handOverToConversation(accountIdB64: string, groupIdB64: string): Promise<void> {
+    const active = chats.groups().find((g) => g.groupIdB64 === groupIdB64);
+    if (active === undefined) return;
+    const conversationHex = groupIdHex(active.group.groupId);
+    try {
+      await handOverPendingContact(
+        accountIdB64,
+        {
+          oneToOne: conversationKindOf(active.group) === "chat",
+          personKeysB64: personKeysOf(active.group),
+        },
+        async (contact) => {
+          for (const m of contact.queue) {
+            heldSends.hold(conversationHex, { text: m.text, attached: [], reply: undefined }, m.createdAtMs);
+          }
+          await persistHeldSends(accountIdB64);
+          return true;
+        },
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("pending contact hand-over failed", err instanceof Error ? err.name : "");
+    }
+  }
+
   async function dispatch(
     events: readonly IncomingMailboxEvent[],
     polled: MailboxScope | null,
@@ -457,6 +552,29 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           // the sender's account, and the request is answered silently (the
           // conversation continues by itself) or dropped.
           if (await handleKnownContactRequest(ev.request, accountIdB64, ev.row)) continue;
+          // ADR-0079 section 3 - a request sent through one of this
+          // account's live invite links is accepted here, with no card; one
+          // already accepted (by this device or another) is answered; one
+          // whose link no longer works is an ordinary card with a note.
+          if (ev.request.linkAnswer !== null) {
+            const verdict = await sync.linkAnswerVerdict(
+              ev.request.linkAnswer.linkId,
+              ev.request.linkAnswer.linkSecret,
+              ev.request.fromPubkey,
+            );
+            requireCurrent();
+            const action = linkAnswerAction(true, verdict);
+            if (action === "drop") continue;
+            if (action === "accept") {
+              if (await acceptThroughLink(ev.request)) continue;
+              // The accept did not complete (a network failure while the
+              // conversation was founded): the person sees the request and
+              // can accept it, with no note, since the link was live.
+              ev.request.deadLink = false;
+            } else {
+              ev.request.deadLink = true;
+            }
+          }
           // ADR-0074 section 3.5a rule 5 - one request per person: a request
           // from the proven successor of a pending request's key replaces
           // it, silently; a stale one from a superseded key is dropped.
@@ -550,6 +668,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         // joined, once the join is durable. The members already there cannot
         // learn the newcomer's name any other way.
         for (const groupIdB64 of joinedGroupIds) profiles.groupJoined(groupIdB64);
+        // ADR-0079 section 5 - a one-to-one with a person this account added
+        // through their link: what was written to them before their app
+        // answered goes out now, in order, through the held-send queue.
+        for (const groupIdB64 of joinedGroupIds) await handOverToConversation(accountIdB64, groupIdB64);
       }
     } finally {
       // `stop()` cleared the banner when the session ended; a late failure of

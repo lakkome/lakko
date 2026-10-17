@@ -1813,9 +1813,10 @@ public final class DiscoveryClient {
     }
 
     /// The `/i/` sealed-blob ceiling (`lakko_contacts::invite::MAX_SEALED_LEN`,
-    /// discovery migration 0030): the capability carries a `link` reach grant
-    /// with the owner's mailbox binding (ADR-0060, ADR-0078).
-    fileprivate static let maxCapabilityBytes: Int = 404
+    /// discovery migration 0032): the capability carries a `link` reach grant
+    /// with the owner's mailbox binding (ADR-0060, ADR-0078) and the signed
+    /// inviter preview (ADR-0079).
+    static let maxCapabilityBytes: Int = 693
 
     /// The `/c/` sealed-blob ceiling
     /// (`lakko_contacts::call_invite::MAX_SEALED_LEN`, discovery migration

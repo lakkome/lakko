@@ -209,6 +209,18 @@ pub enum BoundsError {
     /// blob ids. A tombstone has none.
     #[error("removed saved message carries a value")]
     SavedRemovedCarriesValue,
+    /// A link record named a kind this build does not know (ADR-0079).
+    #[error("unknown link record kind")]
+    LinkRecordKind,
+    /// A link record's ledger id was neither empty nor 6 bytes.
+    #[error("link record ledger id length is out of bounds")]
+    LinkRecordLedgerIdLength,
+    /// A link record's label was longer than 64 bytes.
+    #[error("link record label is too long")]
+    LinkRecordLabel,
+    /// A link record named more than 16 requesters, or one twice.
+    #[error("link record requester list is out of bounds")]
+    LinkRecordAnswered,
 }
 
 /// Which kind of conversation a [`ConversationRef`] names.
@@ -850,6 +862,8 @@ pub enum SyncEntry {
     OwnUsername(OwnUsernameEntry),
     /// A saved message, or its removal (ADR-0065 section 4).
     Saved(SavedMessage),
+    /// One of the account's invite links (ADR-0079 section 4).
+    LinkRecord(super::link_record::LinkRecordEntry),
 }
 
 /// Which register an entry writes.
@@ -884,6 +898,8 @@ pub enum RegisterKey {
     OwnUsername,
     /// The saved register of this message in this conversation.
     Saved(ConversationRef, u64),
+    /// The link-record register of this link id (ADR-0079). Appended last.
+    LinkRecord([u8; super::link_record::LINK_RECORD_ID_LEN]),
 }
 
 impl RegisterKey {
@@ -913,6 +929,7 @@ const TAG_SAVED: u8 = 10;
 const TAG_LINEAGE: u8 = 11;
 const TAG_RECOVERY_EMAIL: u8 = 12;
 const TAG_OWN_USERNAME: u8 = 13;
+const TAG_LINK_RECORD: u8 = 14;
 
 impl SyncEntry {
     /// The register this entry writes.
@@ -932,6 +949,7 @@ impl SyncEntry {
             Self::RecoveryEmail(_) => RegisterKey::RecoveryEmail,
             Self::OwnUsername(_) => RegisterKey::OwnUsername,
             Self::Saved(m) => RegisterKey::Saved(m.conversation.clone(), m.message_id),
+            Self::LinkRecord(r) => RegisterKey::LinkRecord(r.link_id),
         }
     }
 
@@ -955,6 +973,7 @@ impl SyncEntry {
             Self::RecoveryEmail(r) => r.validate(),
             Self::OwnUsername(u) => u.validate(),
             Self::Saved(m) => m.validate(),
+            Self::LinkRecord(r) => r.validate(),
             Self::FolderRemoved(_)
             | Self::Flags(_)
             | Self::ReadCursor(_)
@@ -969,7 +988,10 @@ impl SyncEntry {
     ///
     /// Deterministic and injective per register, so on an exact stamp tie
     /// "larger bytes win" picks the same value on every device.
+    // One arm per register tag; splitting the match would hide that every tag
+    // is written here.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {
@@ -1044,6 +1066,10 @@ impl SyncEntry {
             Self::OwnUsername(u) => {
                 out.push(TAG_OWN_USERNAME);
                 put_bytes32(&mut out, u.username.as_bytes());
+            },
+            Self::LinkRecord(r) => {
+                out.push(TAG_LINK_RECORD);
+                r.encode_body(&mut out);
             },
             // The key (reference, message id) comes first and the state
             // byte directly after it, so on an exact stamp tie the two
@@ -1181,6 +1207,9 @@ impl SyncEntry {
             TAG_RECOVERY_EMAIL => Self::RecoveryEmail(take_recovery_email(&mut cur)?),
             TAG_OWN_USERNAME => Self::OwnUsername(take_own_username(&mut cur)?),
             TAG_SAVED => Self::Saved(take_saved(&mut cur)?),
+            TAG_LINK_RECORD => {
+                Self::LinkRecord(super::link_record::LinkRecordEntry::take_body(&mut cur)?)
+            },
             _ => return Err(CodecError::UnknownTag),
         };
         if !cur.is_empty() {

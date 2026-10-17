@@ -727,6 +727,9 @@ class MultiJoinerCall private constructor(
             // in the account's own DeviceGroup. A relay payload changes no
             // keys; dropped, and never rendered.
             FfiIncomingEnvelopeKind.KEY_ROTATION -> Unit
+            // ADR-0080 - a device card means something ONLY in the account's
+            // own DeviceGroup. A relay payload names no device; dropped.
+            FfiIncomingEnvelopeKind.DEVICE_CARD -> Unit
         }
     }
 

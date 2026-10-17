@@ -123,8 +123,18 @@ export default function JoinCall() {
   const callHost: CallHostApi = useCallHost();
 
   // ADR-0048 UX §4 — a guest (no account yet) is asked their name here,
-  // prefilled `Guest`, and it becomes the new account's profile name.
-  const [guestName, setGuestName] = createSignal(t("call.guest.default_name"));
+  // prefilled with "<adjective> <animal>" from the shared rule
+  // (`lakko_ui_rules::guest_name`), and it becomes the new account's profile
+  // name. The prefill lands once the core has loaded, and never over a name
+  // the visitor has started typing.
+  const [guestName, setGuestName] = createSignal("");
+  let guestNameEdited = false;
+  void loadWasm().then((wasm) => {
+    if (guestNameEdited) return;
+    const random = new Uint32Array(1);
+    crypto.getRandomValues(random);
+    setGuestName(wasm.guestName(random[0] ?? 0));
+  });
   const guestNameCheck = createDisplayNameCheck(guestName);
   /** The name to save once the guest session lands; `undefined` = nothing to
    *  save (the visitor already had a session). */
@@ -492,7 +502,10 @@ export default function JoinCall() {
                     type="text"
                     autocomplete="name"
                     value={guestName()}
-                    onInput={(e) => setGuestName(e.currentTarget.value)}
+                    onInput={(e) => {
+                      guestNameEdited = true;
+                      setGuestName(e.currentTarget.value);
+                    }}
                     aria-invalid={guestNameCheck().kind === "invalid"}
                   />
                 </label>

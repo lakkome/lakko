@@ -76,6 +76,7 @@ pub mod backup;
 pub mod call_relay;
 pub mod channels;
 pub mod contacts;
+pub mod device_card;
 pub mod device_link;
 pub mod discover;
 pub mod discovery;

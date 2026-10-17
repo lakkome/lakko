@@ -151,6 +151,7 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|contact|slug1`, ciphertext: ct } },
     { db: "lakko-minted-links", store: "rows", row: { key: `${acct}|call|slug2`, ciphertext: ct } },
     byId("lakko-sent-request-intros", "rows"),
+    byId("lakko-pending-contacts", "rows"),
     // ADR-0073 R.8: the service worker's plaintext copy of the retired keys.
     { db: "lakko-superseded-keys", store: "rows", row: { accountId: acct, keys: ["a2V5"] } },
     {
@@ -243,9 +244,13 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.last-observed-owner.v1.${acct}.${G}`, "\"owner\"");
   put(`lakko.leave-requested.v1.${acct}.${G}`, "5");
   put(`lakko.lineage.unsent.v1.${acct}`, "1");
+  put(`lakko.device-cards.v1.${acct}`, "{}");
+  put(`lakko.device-city.v1.${acct}`, "{}");
+  put(`lakko.device-city-shown.v1.${acct}`, "0");
   put(`lakko.recovery-email.unsent.v1.${acct}`, "1");
   markFirstPasswordOwed(local, acct);
   put(`lakko.own-username.unsent.v1.${acct}`, "1");
+  put(`lakko.link-records.unsent.v1.${acct}`, "1");
   writeRenamedAt(local, acct, 5);
   writeRenameOwed(local, acct, { v: 1, oldUsername: "alice", newUsername: "alicia", phase: "binding" });
   put(
@@ -555,6 +560,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-device-sync": "account",
   "lakko-minted-links": "account",
   "lakko-sent-request-intros": "account",
+  "lakko-pending-contacts": "account",
   "lakko-superseded-keys": "account",
   "lakko-push-routing": "account",
   "lakko-anon-tokens": "account",
@@ -599,9 +605,13 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.last-observed-owner.v1": "account",
   "lakko.leave-requested.v1": "account",
   "lakko.lineage.unsent.v1.": "account",
+  "lakko.device-cards.v1.": "account",
+  "lakko.device-city.v1.": "account",
+  "lakko.device-city-shown.v1.": "account",
   "lakko.recovery-email.unsent.v1.": "account",
   "lakko:first-password-owed:": "account",
   "lakko.own-username.unsent.v1.": "account",
+  "lakko.link-records.unsent.v1.": "account",
   "lakko:username-changed-at:": "account",
   "lakko:username-change-owed:": "account",
   "lakko.contacts.verified-bindings.v1.": "account",

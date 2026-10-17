@@ -305,8 +305,24 @@ export interface IncomingContactRequest {
    *  written with; `null` when the request carried none or did not decrypt.
    *  Secret: never logged, kept only until the request is answered. */
   replyGrantB64: string | null;
+  /** ADR-0079 section 2 — which of this account's `/i/` links the request
+   *  answers (the link id and its secret, as the sender opened them), or
+   *  `null`. SECRET: compared with the link register, never logged. */
+  linkAnswer: LinkAnswer | null;
+  /** ADR-0079 section 3 — set by the mailbox when the link answer named no
+   *  live link of this account: the card shows "Sent with an invite link
+   *  that no longer works." Absent for every other request. */
+  deadLink?: boolean;
   /** ISO-8601 timestamp the DS recorded on receive. */
   createdAt: string;
+}
+
+/** ADR-0079 section 2 — the `/i/` link a contact request answers. SECRET. */
+export interface LinkAnswer {
+  /** The link's 16-byte id (`InviteCapability.linkId`). */
+  readonly linkId: Uint8Array;
+  /** The link's 12-byte secret (the URL fragment). */
+  readonly linkSecret: Uint8Array;
 }
 
 /** Options of the contact-request senders (ADR-0060 section 6). */
@@ -321,6 +337,9 @@ export interface ContactRequestOptions {
    *  record (a person in Everyone): where an unsigned request goes when no
    *  grant reaches them. Verified against the recipient's key before use. */
   readonly openBinding?: Uint8Array | null;
+  /** ADR-0079 section 2 — the `/i/` link this request is sent from, sealed
+   *  to the recipient so their device can accept it without asking. */
+  readonly linkAnswer?: LinkAnswer | null;
 }
 
 /** A verified incoming Welcome (MLS group-join blob) decoded
@@ -2734,6 +2753,9 @@ export class ContactsClient {
         privacyPassToken,
         profileEnvelope,
         reply?.grant ?? undefined,
+        // ADR-0079 section 2 — two empty arrays mean "no link answer".
+        options?.linkAnswer?.linkId ?? new Uint8Array(0),
+        options?.linkAnswer?.linkSecret ?? new Uint8Array(0),
         introMessage,
       );
     } catch (err) {
@@ -5136,9 +5158,17 @@ function decodeContactRequestBody(
   let intro: string | null = null;
   let profile: ReceivedProfile | null = null;
   let replyGrantB64: string | null = null;
+  let linkAnswer: LinkAnswer | null = null;
   try {
     const opened = parsed.openEnvelope(x25519Secret);
     intro = new TextDecoder("utf-8", { fatal: false }).decode(opened.introMessage);
+    // ADR-0079 section 2 — the link this request answers, if any. Copied
+    // before `free()`.
+    const linkId = opened.linkAnswerId;
+    const linkSecret = opened.linkAnswerSecret;
+    if (linkId !== undefined && linkSecret !== undefined) {
+      linkAnswer = { linkId: linkId.slice(), linkSecret: linkSecret.slice() };
+    }
     // ADR-0060 section 6 — the requester's `reply` grant, the key our accept
     // and ack are written with. Only a `reply` class is kept.
     const reply = opened.replyGrant;
@@ -5183,6 +5213,7 @@ function decodeContactRequestBody(
     intro,
     profile,
     replyGrantB64,
+    linkAnswer,
     createdAt,
   };
 }

@@ -14,8 +14,9 @@ import { useParams, type RouteSectionProps } from "@solidjs/router";
 import { ChatList } from "../chat/ChatList";
 
 export default function ChatsLayout(props: RouteSectionProps): JSX.Element {
-  const params = useParams<{ id?: string }>();
-  const open = (): boolean => params.id !== undefined;
+  const params = useParams<{ id?: string; hex?: string }>();
+  // `hex`: the pending chat of ADR-0079 (`/invited/:hex`).
+  const open = (): boolean => params.id !== undefined || params.hex !== undefined;
   return (
     <div class="lk-split" data-open={open() ? "true" : "false"}>
       <ChatList activeGroupIdB64={params.id ?? null} />

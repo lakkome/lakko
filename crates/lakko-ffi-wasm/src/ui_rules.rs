@@ -342,6 +342,15 @@ pub fn looks_like_a_name(typed: &str) -> bool {
     rust_looks_like_a_name(typed)
 }
 
+/// The name prefilled for a guest joining a call from a link:
+/// "<adjective> <animal>". `random` is any random 32-bit value from the
+/// caller (`crypto.getRandomValues`), enough to reach every pair.
+#[wasm_bindgen(js_name = guestName)]
+#[must_use]
+pub fn guest_name(random: u32) -> String {
+    lakko_ui_rules::guest_name::guest_name(u64::from(random))
+}
+
 /// Which info a conversation's name opens — `docs/ux/conversation-info.md`
 /// section 1.
 #[wasm_bindgen(js_name = InfoTarget)]

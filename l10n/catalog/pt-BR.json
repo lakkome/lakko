@@ -7614,14 +7614,6 @@
       "text": "Novo",
       "status": "machine"
     },
-    "settings.devices.remove.body": {
-      "text": "Ele já foi desconectado. Na próxima vez que se conectar, tudo o que esta conta guardava nele será apagado: conversas, contatos, chaves e a frase de recuperação.",
-      "status": "machine"
-    },
-    "settings.devices.remove.confirm": {
-      "text": "Remover dispositivo",
-      "status": "machine"
-    },
     "settings.devices.remove.confirm_named": {
       "text": "Remover {device}",
       "status": "machine"
@@ -7632,10 +7624,6 @@
     },
     "settings.devices.remove.reason_unused": {
       "text": "Não uso mais",
-      "status": "machine"
-    },
-    "settings.devices.remove.title": {
-      "text": "Remover {device}?",
       "status": "machine"
     },
     "settings.devices.remove.working": {
@@ -8408,6 +8396,78 @@
     },
     "who_can_find_me.title": {
       "text": "Quem pode me encontrar",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "Adicionar {name} aos seus contatos?",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "Adicionar",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "Agora não",
+      "status": "machine"
+    },
+    "invite.contact.page.sign_in": {
+      "text": "Entre para adicionar {name}",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Criar uma conta",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} já está nos seus contatos",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "Abrir conversa",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "Este é o seu próprio link de convite",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "Compartilhe com a pessoa que você quer adicionar.",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "Concluído",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Este link de convite não funciona mais",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Peça um novo a quem enviou.",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "Não foi possível adicionar {name}. Verifique sua conexão e tente de novo.",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "esta pessoa",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} vai receber suas mensagens quando o app estiver on-line de novo.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} ainda não respondeu. Você pode pedir um novo link.",
+      "status": "machine"
+    },
+    "chat.pending.call_disabled": {
+      "text": "Disponível quando {name} se conectar.",
+      "status": "machine"
+    },
+    "contacts.request.dead_link_note": {
+      "text": "Enviado com um link de convite que não funciona mais.",
       "status": "machine"
     }
   }

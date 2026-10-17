@@ -958,7 +958,8 @@ public final class ContactsClient {
         recipientX25519Pubkey: Data,
         profile: FfiProfile? = nil,
         introMessage: Data,
-        reach: ContactRequestReach = .none
+        reach: ContactRequestReach = .none,
+        linkAnswer: FfiLinkAnswer? = nil
     ) async throws -> SendResult {
         // ADR-0074 section 3.5a rule 1 — resolve before addressing. A bundle
         // carried by a link or a search result may name a key its owner has
@@ -982,7 +983,8 @@ public final class ContactsClient {
             profile: profile,
             introMessage: introMessage,
             replyGrant: try await reach.replyGrant(recipientAccountId),
-            plan: await reach.plan(recipientSignaturePubkey)
+            plan: await reach.plan(recipientSignaturePubkey),
+            linkAnswer: linkAnswer
         )
         return SendResult(
             recipientUsername: "",
@@ -1019,7 +1021,8 @@ public final class ContactsClient {
         profile: FfiProfile?,
         introMessage: Data,
         replyGrant: FfiReachGrant?,
-        plan: MailboxWritePlan?
+        plan: MailboxWritePlan?,
+        linkAnswer: FfiLinkAnswer? = nil
     ) async throws -> PublishedRequest {
         // ADR-0078 — the recipient's mailbox comes from a binding verified
         // against the key the envelope is sealed for (a link's grant, a
@@ -1064,6 +1067,9 @@ public final class ContactsClient {
                 // ADR-0060 section 6 — the requester's single-use `reply`
                 // grant: the recipient writes the accept and the ack with it.
                 replyGrant: replyGrant,
+                // ADR-0079 section 2 — the `/i/` link this request is sent
+                // from, sealed to the recipient.
+                linkAnswer: linkAnswer,
                 introMessage: introMessage
             )
         }
@@ -1278,12 +1284,15 @@ public final class ContactsClient {
                 let intro: String?
                 let profile: ProfileClaim?
                 var replyGrant: FfiReachGrant?
+                var linkAnswer: FfiLinkAnswer?
                 do {
                     let opened = try parsed.openEnvelope(
                         recipientX25519Priv: myX25519Secret
                     )
                     intro = String(data: opened.introMessage, encoding: .utf8) ?? ""
                     replyGrant = opened.replyGrant
+                    // ADR-0079 section 2 — the link this request answers.
+                    linkAnswer = opened.linkAnswer
                     // ADR-0048 — `nil` when the request carried no profile, or
                     // one that failed its bounds (the request itself stays
                     // valid). Bound by the caller to `fromPubkey`, which the
@@ -1314,7 +1323,7 @@ public final class ContactsClient {
                     profile: profile,
                     createdAt: message.createdAt
                 )
-                events.append(.contactRequest(req, replyGrant: replyGrant))
+                events.append(.contactRequest(req, replyGrant: replyGrant, linkAnswer: linkAnswer))
             }
         }
         return PollResult(events: events, cursor: cursor, hasMore: hasMore)
@@ -1403,6 +1412,11 @@ public struct IncomingContactRequest: Equatable, Codable {
     /// ``fromPubkey``; its username is shown only once verified.
     public let profile: ProfileClaim?
     public let createdAt: String
+    /// ADR-0079 section 3 — the request was sent through an invite link of
+    /// this account that no longer works (revoked, expired, used up,
+    /// unknown): the card shows "Sent with an invite link that no longer
+    /// works." `nil` for every other request.
+    public let viaDeadLink: Bool?
 
     public init(
         messageId: Int64,
@@ -1412,7 +1426,8 @@ public struct IncomingContactRequest: Equatable, Codable {
         validAfterMs: UInt64,
         intro: String?,
         profile: ProfileClaim? = nil,
-        createdAt: String
+        createdAt: String,
+        viaDeadLink: Bool? = nil
     ) {
         self.messageId = messageId
         self.fromPubkey = fromPubkey
@@ -1422,6 +1437,15 @@ public struct IncomingContactRequest: Equatable, Codable {
         self.intro = intro
         self.profile = profile
         self.createdAt = createdAt
+        self.viaDeadLink = viaDeadLink
+    }
+
+    /// The same request, marked as sent through a link that no longer works.
+    public func sentThroughDeadLink() -> IncomingContactRequest {
+        IncomingContactRequest(
+            messageId: messageId, fromPubkey: fromPubkey, fromAccountId: fromAccountId,
+            fromPseudonym: fromPseudonym, validAfterMs: validAfterMs, intro: intro,
+            profile: profile, createdAt: createdAt, viaDeadLink: true)
     }
 }
 
@@ -1491,7 +1515,10 @@ public enum IncomingMailboxEvent: Equatable {
     /// A verified request, with the requester's `reply` grant (ADR-0060
     /// section 6) — SECRET, handed to ``ReachCenter`` at receipt and never
     /// persisted with the pending request.
-    case contactRequest(IncomingContactRequest, replyGrant: FfiReachGrant? = nil)
+    /// ADR-0079 section 2 — `linkAnswer` names the `/i/` link of this
+    /// account the request is sent through, or `nil`. SECRET.
+    case contactRequest(
+        IncomingContactRequest, replyGrant: FfiReachGrant? = nil, linkAnswer: FfiLinkAnswer? = nil)
     case welcome(messageId: Int64, welcomeBytes: Data, createdAt: String)
     /// 1.9b1 — original recipient's accept-reply.
     case contactAck(IncomingContactAck)

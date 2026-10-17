@@ -100,6 +100,14 @@ import {
 } from "../../auth/protect/address-register";
 import { installUsernameRegister, publishRegisterUsername } from "../../auth/username-register";
 import { receiveServiceEnvelope } from "../../reach/service-envelope-intake";
+import {
+  bindDeviceCards,
+  noteDeviceAction,
+  pruneOwnDeviceCards,
+  scheduleOwnCardResend,
+  unbindDeviceCards,
+} from "../device-card-runtime";
+import { receiveDeviceCardEnvelope } from "../device-card-intake";
 import { sealKeyRotationAfterRemoval } from "../key-rotation";
 import { installKeyRotationPort, type JournalCatchUp } from "./key-rotation-port";
 import {
@@ -128,6 +136,12 @@ import {
   type LeafMember,
 } from "./growth";
 import { onRestoredSyncedState, registerSyncedStateSource } from "./synced-state-source";
+import {
+  readLinkRecords,
+  type LinkAnswerVerdict,
+  type LinkRecordModel,
+  type NewLinkRecord,
+} from "./link-records";
 import {
   bytesToHex,
   stampEdits,
@@ -260,7 +274,34 @@ export interface DeviceGroupSyncApi {
    * send; `false` also when the runtime has not started.
    */
   setLineage(successorGroupId: Uint8Array, rootConversationId: Uint8Array): Promise<boolean>;
+
+  /** ADR-0079 section 4 — reactive: the account's own invite links, every
+   *  device's, revoked ones included. */
+  readonly linkRecords: Accessor<readonly LinkRecordModel[]>;
+  /** Record a link just minted here, fold it at once and send it to the
+   *  account's other devices. `false` when the runtime has not started.
+   *  Never throws for a failed send (it is sent again at the next start). */
+  setLinkRecord(record: NewLinkRecord): Promise<boolean>;
+  /** Mark a link revoked (final), fold and send. `false` when nothing
+   *  changed. */
+  revokeLinkRecord(linkId: Uint8Array): Promise<boolean>;
+  /** Count one request accepted through a link, remembering the requester's
+   *  account key, fold and send. */
+  recordLinkUse(linkId: Uint8Array, requesterKey: Uint8Array): Promise<boolean>;
+  /** The one rule for a request's link answer (ADR-0079 section 3), asked
+   *  of the fold once it is loaded (waits up to a short bound for it); a
+   *  fold that never loads reads as `"dead"`, so the request is shown as a
+   *  card rather than lost. */
+  linkAnswerVerdict(
+    linkId: Uint8Array,
+    linkSecret: Uint8Array,
+    requesterKey: Uint8Array,
+  ): Promise<LinkAnswerVerdict>;
 }
+
+/** How long a link-answer verdict waits for the fold to load. Chosen, not
+ *  measured. */
+const LINK_VERDICT_WAIT_MS = 15_000;
 
 /** How long a catch-up waits for the journal's head before it reports no
  *  answer. Chosen, not measured. */
@@ -300,6 +341,7 @@ export function DeviceGroupSyncProvider(props: {
   const [order, setOrder] = createSignal<OrderState | null>(null);
   const [folders, setFolders] = createSignal<readonly FolderModel[]>([]);
   const [lineage, setLineageEntries] = createSignal<readonly LineageEntry[]>([]);
+  const [linkRecords, setLinkRecords] = createSignal<readonly LinkRecordModel[]>([]);
   const [outbox, setOutbox] = createSignal<readonly OutboxBatch[]>([]);
   const [ready, setReady] = createSignal(false);
   const [deviceRemoved, setDeviceRemoved] = createSignal(false);
@@ -327,6 +369,8 @@ export function DeviceGroupSyncProvider(props: {
     if (activeAccountIdB64 !== null) {
       publishOwnDeviceRoster({ accountIdB64: activeAccountIdB64, keysHex: keys });
     }
+    // ADR-0080: a leaf that left takes its card with it.
+    pruneOwnDeviceCards(keys);
     const addedHere =
       localChange && before !== null ? keys.filter((k) => !before.keys.includes(k)) : [];
     if (
@@ -477,6 +521,7 @@ export function DeviceGroupSyncProvider(props: {
     setOrder(p.order);
     setFolders(p.folders);
     setLineageEntries(p.lineage);
+    if (wasmSync !== null) setLinkRecords(readLinkRecords(synced, wasmSync.LinkRecordKind.Contact));
     // ADR-0075 (amended 2026-10-13): the recovery address the account's
     // devices keep, for the screens above this provider.
     if (activeAccountIdB64 !== null) {
@@ -516,6 +561,19 @@ export function DeviceGroupSyncProvider(props: {
     teardown();
   });
 
+  // ADR-0080 section 3: the person's actions on this device (a tap, a key)
+  // are what refreshes this device's card; never a timer. Hidden pages are
+  // ignored inside `noteDeviceAction`.
+  if (typeof document !== "undefined") {
+    const onAction = (): void => noteDeviceAction();
+    document.addEventListener("pointerdown", onAction, { capture: true, passive: true });
+    document.addEventListener("keydown", onAction, { capture: true });
+    onCleanup(() => {
+      document.removeEventListener("pointerdown", onAction, { capture: true });
+      document.removeEventListener("keydown", onAction, { capture: true });
+    });
+  }
+
   // A pairing on this device commits through a handle of its own; the
   // long-lived one here is then an epoch behind. Stop it before it can see
   // that commit, reload from disk, and - for an add - run the growth re-send.
@@ -526,6 +584,8 @@ export function DeviceGroupSyncProvider(props: {
           // The add's commit is published right after the announce; a floor
           // keeps the re-send behind it on the journal.
           await maybeScheduleSnapshot(change.growth.ownLeaf, change.growth.priorLeaves, 5_000);
+          // ADR-0080: every device that was there re-sends its own card.
+          scheduleOwnCardResend();
         }
       });
     }),
@@ -540,6 +600,8 @@ export function DeviceGroupSyncProvider(props: {
     // Already bootstrapping concurrently — drop the duplicate.
     if (activeAccountIdB64 === accountIdB64 && identity !== null) return;
     activeAccountIdB64 = accountIdB64;
+    // ADR-0080: the device cards of this account (stored, own, the switch).
+    bindDeviceCards(accountIdB64);
     // Everything below runs across awaits a sign-out can land in. `current`
     // is asked after each one; a stale bootstrap assigns nothing, starts
     // nothing and frees what it built.
@@ -673,6 +735,7 @@ export function DeviceGroupSyncProvider(props: {
     uninstallAddressRegister?.();
     uninstallAddressRegister = installAddressRegister({ accountIdB64, set: setRecoveryEmailImpl });
     void flushUnsentOwnUsername();
+    void flushUnsentLinkRecords();
     uninstallUsernameRegister?.();
     uninstallUsernameRegister = installUsernameRegister({ accountIdB64, set: setOwnUsernameImpl });
   }
@@ -783,6 +846,7 @@ export function DeviceGroupSyncProvider(props: {
     void persister.flush();
     binding.advance();
     reloading = false;
+    unbindDeviceCards();
     unregisterServiceSender?.();
     unregisterServiceSender = null;
     if (pollAbort !== null) {
@@ -837,6 +901,7 @@ export function DeviceGroupSyncProvider(props: {
     setOrder(null);
     setFolders([]);
     setLineageEntries([]);
+    setLinkRecords([]);
     setOutbox([]);
   }
 
@@ -914,6 +979,8 @@ export function DeviceGroupSyncProvider(props: {
       // ADR-0076 - and the own-username register, the same way.
       const ownUsername = synced.ownUsernameEnvelope();
       if (ownUsername !== undefined) await sendLineageEnvelopes([ownUsername]);
+      // ADR-0079 - and every link record, each with its original stamp.
+      await sendLineageEnvelopes(synced.linkRecordEnvelopes());
     } catch (err) {
       // The next growth, or the new device's own writes, carry the state
       // forward; a failed re-send is not retried in a loop.
@@ -1050,6 +1117,120 @@ export function DeviceGroupSyncProvider(props: {
       /* storage unavailable: the send below is the only attempt */
     }
     await sendOwnUsernameRegister(account);
+  }
+
+  // ----- ADR-0079: the link-record register -----------------------
+
+  /** `localStorage` marker: a link record written here has not been
+   *  confirmed sent (it holds no link, only the fact). Re-sending every
+   *  record is idempotent: the fold keeps the winning stamp. */
+  const linkRecordsUnsentKey = (account: string): string => `lakko.link-records.unsent.v1.${account}`;
+
+  async function sendLinkRecordEnvelopes(account: string, envelopes: readonly Uint8Array[]): Promise<void> {
+    try {
+      await sendLineageEnvelopes(envelopes);
+      localStorage.removeItem(linkRecordsUnsentKey(account));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "link-record register send failed; retried at the next start",
+        err instanceof Error ? err.name : "unknown",
+      );
+    }
+  }
+
+  async function flushUnsentLinkRecords(): Promise<void> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      if (localStorage.getItem(linkRecordsUnsentKey(account)) === null) return;
+    } catch {
+      return;
+    }
+    await sendLinkRecordEnvelopes(account, synced.linkRecordEnvelopes());
+  }
+
+  /** Fold a write here at once, mark it unsent and send the one record. */
+  async function afterLinkRecordWrite(linkId: Uint8Array): Promise<void> {
+    refresh();
+    const account = activeAccountIdB64;
+    if (account === null || synced === null) return;
+    try {
+      localStorage.setItem(linkRecordsUnsentKey(account), "1");
+    } catch {
+      /* storage unavailable: the send below is the only attempt */
+    }
+    const envelope = synced.linkRecordEnvelopeFor(linkId);
+    if (envelope !== undefined) await sendLinkRecordEnvelopes(account, [envelope]);
+  }
+
+  async function setLinkRecordImpl(record: NewLinkRecord): Promise<boolean> {
+    if (synced === null || wasmSync === null) return false;
+    let written: boolean;
+    try {
+      const r = new wasmSync.LinkRecord(
+        record.linkId,
+        record.linkSecret,
+        record.kind === "contact" ? wasmSync.LinkRecordKind.Contact : wasmSync.LinkRecordKind.Call,
+        record.ledgerId,
+        BigInt(Math.max(0, Math.floor(record.expiryMs))),
+        record.maxUses >>> 0,
+        BigInt(Math.max(0, Math.floor(record.mintedAtMs))),
+        record.label,
+      );
+      try {
+        written = synced.setLinkRecord(mintHlc(), r);
+      } finally {
+        r.free();
+      }
+    } catch {
+      // A record out of bounds: nothing is kept.
+      return false;
+    }
+    if (written) await afterLinkRecordWrite(record.linkId);
+    return written;
+  }
+
+  async function revokeLinkRecordImpl(linkId: Uint8Array): Promise<boolean> {
+    if (synced === null) return false;
+    let written: boolean;
+    try {
+      written = synced.revokeLinkRecord(mintHlc(), linkId);
+    } catch {
+      return false;
+    }
+    if (written) await afterLinkRecordWrite(linkId);
+    return written;
+  }
+
+  async function recordLinkUseImpl(linkId: Uint8Array, requesterKey: Uint8Array): Promise<boolean> {
+    if (synced === null) return false;
+    let written: boolean;
+    try {
+      written = synced.recordLinkUse(mintHlc(), linkId, requesterKey);
+    } catch {
+      return false;
+    }
+    if (written) await afterLinkRecordWrite(linkId);
+    return written;
+  }
+
+  async function linkAnswerVerdictImpl(
+    linkId: Uint8Array,
+    linkSecret: Uint8Array,
+    requesterKey: Uint8Array,
+  ): Promise<LinkAnswerVerdict> {
+    const deadline = Date.now() + LINK_VERDICT_WAIT_MS;
+    while (synced === null && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    }
+    if (synced === null) return "dead";
+    try {
+      const v = synced.linkAnswerVerdict(linkId, linkSecret, requesterKey, BigInt(Date.now()));
+      return v === "accept" || v === "answered" ? v : "dead";
+    } catch {
+      return "dead";
+    }
   }
 
   /** Send every register again when an earlier send was not confirmed. */
@@ -1316,6 +1497,15 @@ export function DeviceGroupSyncProvider(props: {
                 ) {
                   return;
                 }
+                // ADR-0080: a device card is kept under the sender's leaf
+                // key, resolved from the MLS-authenticated sender leaf HERE,
+                // against the roster this row was sealed under (C-68).
+                if (
+                  parsed.kind === "serviceEnvelope" &&
+                  receiveDeviceCardEnvelope(wasm, parsed.serviceEnvelope, processed.senderLeaf, membersOf(g))
+                ) {
+                  return;
+                }
                 applyParsed(parsed);
               } finally {
                 parsed.free();
@@ -1375,6 +1565,8 @@ export function DeviceGroupSyncProvider(props: {
       if (membersBefore !== null && membersAfter !== null) {
         const growth = detectGrowth(membersBefore, membersAfter);
         if (growth.grew) {
+          // ADR-0080: every device that was there re-sends its own card.
+          scheduleOwnCardResend();
           try {
             void maybeScheduleSnapshot(g.ownLeafIndex(), growth.priorLeaves);
           } catch (err) {
@@ -1596,6 +1788,18 @@ export function DeviceGroupSyncProvider(props: {
       if (wasmSync !== null && wasmSync.isRecoveryEmailEnvelope(parsed.serviceEnvelope)) {
         try {
           if (synced?.applyRecoveryEmailEnvelope(parsed.serviceEnvelope) === true) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch {
+          // A malformed register is dropped, never folded.
+        }
+        return;
+      }
+      // ADR-0079 - a link-record register, the same way.
+      if (wasmSync !== null && wasmSync.isLinkRecordEnvelope(parsed.serviceEnvelope)) {
+        try {
+          if (synced?.applyLinkRecordEnvelope(parsed.serviceEnvelope) === true) {
             observeHlc(synced.maxHlc());
             refresh();
           }
@@ -1854,6 +2058,11 @@ export function DeviceGroupSyncProvider(props: {
     pendingFolderSync: () => outbox().length > 0,
     lineage,
     setLineage: setLineageImpl,
+    linkRecords,
+    setLinkRecord: setLinkRecordImpl,
+    revokeLinkRecord: revokeLinkRecordImpl,
+    recordLinkUse: recordLinkUseImpl,
+    linkAnswerVerdict: linkAnswerVerdictImpl,
     deviceRemoved,
     deviceRoster,
     getDraft(groupId) {

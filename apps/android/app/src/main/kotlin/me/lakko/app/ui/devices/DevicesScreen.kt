@@ -35,6 +35,9 @@ import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.TabletAndroid
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -887,6 +890,14 @@ private fun DevicesList(
     var rotatedPhrase: Boolean? by remember { mutableStateOf(null) }
     // UX 17.5 - which rows carry `New`.
     val notice by me.lakko.app.devices.NewDeviceNotices.state.collectAsStateWithLifecycle()
+    // ADR-0080 - what each device said about itself.
+    val cards by me.lakko.app.devices.DeviceCardCenter.cards.collectAsStateWithLifecycle()
+    val locale = remember { java.util.Locale.getDefault() }
+    // UX section 3 - Remove all other devices: its sheet, the run, and each
+    // row's own progress while it runs.
+    var showRemoveAll by remember { mutableStateOf(false) }
+    var removingAll by remember { mutableStateOf(false) }
+    var rowRun: Map<String, RowRun> by remember { mutableStateOf(emptyMap()) }
 
     fun runner(): DeviceRemovalRunner? = DeviceRemovalRunner.onDevice(context, authRepository, chatRepository)
 
@@ -942,8 +953,39 @@ private fun DevicesList(
         }
 
         is DevicesListUi.Ready -> {
-            s.devices.forEachIndexed { index, device ->
-                val label = deviceRowLabel(device.isSelf, index).text()
+            val strings = me.lakko.app.l10n.Localization.strings.value
+            val words = me.lakko.app.devices.DeviceCards.Words(
+                device = t("devices.row.device"),
+                online = t("devices.row.online"),
+                app = { version ->
+                    if (version.isEmpty()) strings["devices.row.app_name"]
+                    else strings.format("devices.row.app", mapOf("version" to version))
+                },
+                place = { city, country ->
+                    strings.format("devices.row.place", mapOf("city" to city, "country" to country))
+                },
+                countryName = { code ->
+                    java.util.Locale("", code).getDisplayCountry(locale).ifEmpty { code }
+                },
+            )
+            val (current, others) = me.lakko.app.devices.DeviceCards.order(
+                s.devices.map { device ->
+                    val keyHex = hexKey(device.signaturePublicKey)
+                    me.lakko.app.devices.DeviceCards.RowInput(keyHex, device.leafIndex, device.isSelf, cards[keyHex])
+                },
+            )
+
+            @Composable
+            fun DeviceRow(input: me.lakko.app.devices.DeviceCards.RowInput) {
+                val device = s.devices.firstOrNull { hexKey(it.signaturePublicKey) == input.keyHex } ?: return
+                val view = me.lakko.app.devices.DeviceCards.view(
+                    input,
+                    words,
+                    System.currentTimeMillis(),
+                    java.time.ZoneId.systemDefault(),
+                    android.text.format.DateFormat.is24HourFormat(context),
+                    locale,
+                )
                 val isNew = !device.isSelf && me.lakko.app.devices.isNewDevice(
                     notice,
                     me.lakko.app.devices.newDeviceKey(device.signaturePublicKey),
@@ -951,76 +993,118 @@ private fun DevicesList(
                 val deviceIdB64Url = me.lakko.app.auth.base64UrlEncodeNoPad(device.signaturePublicKey)
                 val isPending = !device.isSelf && deviceIdB64Url in pending
                 val needsFinish = isPending && deviceIdB64Url in waitingOnPerson
+                val run = rowRun[input.keyHex]
                 ListItem(
-                    headlineContent = { Text(label, fontWeight = FontWeight.Medium) },
-                    supportingContent = when {
-                        device.isSelf -> {
-                            { Text(t("settings.devices.this_device.sub")) }
-                        }
-                        // Signed out at auth; the rest finishes by itself.
-                        isPending -> {
-                            { Text(t(RemovalCopy.ROW_PENDING)) }
-                        }
-                        // A text label, never colour alone.
-                        isNew -> {
-                            {
-                                Text(
+                    headlineContent = { Text(view.title, fontWeight = FontWeight.Medium) },
+                    supportingContent = {
+                        Column {
+                            if (view.detail.isNotEmpty()) Text(view.detail)
+                            if (view.place.isNotEmpty()) Text(view.place)
+                            when {
+                                run == RowRun.Removing -> Text(t(RemovalCopy.WORKING))
+                                run == RowRun.Failed -> Text(
+                                    t("devices.remove_all.row_failed"),
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                                // Signed out at auth; the rest finishes by itself.
+                                isPending -> Text(t(RemovalCopy.ROW_PENDING))
+                                // A text label, never colour alone.
+                                isNew -> Text(
                                     t("settings.devices.new_badge"),
                                     color = MaterialTheme.colorScheme.primary,
                                     fontWeight = FontWeight.SemiBold,
                                 )
                             }
                         }
-                        else -> null
                     },
                     leadingContent = {
                         Icon(
-                            if (device.isSelf) Icons.Filled.PhoneAndroid else Icons.Filled.Devices,
+                            when (view.icon) {
+                                me.lakko.app.devices.DeviceCards.IconKind.PHONE -> Icons.Filled.PhoneAndroid
+                                me.lakko.app.devices.DeviceCards.IconKind.TABLET -> Icons.Filled.TabletAndroid
+                                me.lakko.app.devices.DeviceCards.IconKind.COMPUTER -> Icons.Filled.Computer
+                                me.lakko.app.devices.DeviceCards.IconKind.BROWSER -> Icons.Filled.Language
+                                me.lakko.app.devices.DeviceCards.IconKind.UNKNOWN -> Icons.Filled.Devices
+                            },
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     },
-                    trailingContent = if (needsFinish) {
-                        {
-                            // The owed step needs the passkey again (after a
-                            // relaunch, or once the attestation aged out):
-                            // the gesture, then the steps still owed.
-                            TextButton(
-                                enabled = finishing == null,
-                                onClick = {
-                                    finishing = deviceIdB64Url
-                                    scope.launch {
-                                        try {
-                                            val attestation =
-                                                removalAttestation(context, authRepository, device.signaturePublicKey)
-                                            val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                                runner()?.remove(device.signaturePublicKey, attestation)
+                    trailingContent = {
+                        Column(horizontalAlignment = Alignment.End) {
+                            if (view.activity.isNotEmpty()) {
+                                Text(
+                                    view.activity,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (needsFinish) {
+                                // The owed step needs the passkey again (after a
+                                // relaunch, or once the attestation aged out):
+                                // the gesture, then the steps still owed.
+                                TextButton(
+                                    enabled = finishing == null,
+                                    onClick = {
+                                        finishing = deviceIdB64Url
+                                        scope.launch {
+                                            try {
+                                                val attestation =
+                                                    removalAttestation(context, authRepository, device.signaturePublicKey)
+                                                val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                                    runner()?.remove(device.signaturePublicKey, attestation)
+                                                }
+                                                if (result == me.lakko.app.devices.RemovalResult.Done) removedDone = true
+                                            } catch (cause: Throwable) {
+                                                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                                                // A dismissed gesture, or no
+                                                // answer: the row keeps its button.
+                                                Log.w(TAG, "WARN finishing a device removal: ${cause.javaClass.simpleName}")
+                                            } finally {
+                                                finishing = null
+                                                refresh()
                                             }
-                                            if (result == me.lakko.app.devices.RemovalResult.Done) removedDone = true
-                                        } catch (cause: Throwable) {
-                                            if (cause is kotlinx.coroutines.CancellationException) throw cause
-                                            // A dismissed gesture, or no
-                                            // answer: the row keeps its button.
-                                            Log.w(TAG, "WARN finishing a device removal: ${cause.javaClass.simpleName}")
-                                        } finally {
-                                            finishing = null
-                                            refresh()
                                         }
-                                    }
-                                },
-                            ) { Text(t(RemovalCopy.ROW_FINISH)) }
-                        }
-                    } else if (device.isSelf || isPending) {
-                        null
-                    } else {
-                        {
-                            TextButton(onClick = { confirming = device to label }) {
-                                Text(t("common.remove"), color = MaterialTheme.colorScheme.error)
+                                    },
+                                ) { Text(t(RemovalCopy.ROW_FINISH)) }
+                            } else if (!device.isSelf && !isPending && run != RowRun.Removing) {
+                                TextButton(
+                                    enabled = !removingAll,
+                                    onClick = {
+                                        rowRun = rowRun - input.keyHex
+                                        confirming = device to view.title
+                                    },
+                                ) {
+                                    Text(t("common.remove"), color = MaterialTheme.colorScheme.error)
+                                }
                             }
                         }
                     },
                     colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
                 )
+            }
+
+            if (current != null) {
+                SectionHeader(t("devices.section.this_device"))
+                DeviceRow(current)
+                if (others.isNotEmpty()) {
+                    // UX section 3: under the first section, in the
+                    // destructive colour, with its line.
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                        TextButton(enabled = !removingAll, onClick = { showRemoveAll = true }) {
+                            Text(t("devices.remove_all"), color = MaterialTheme.colorScheme.error)
+                        }
+                        Text(
+                            t("devices.remove_all.sub"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            if (others.isNotEmpty()) {
+                SectionHeader(t("devices.section.other_devices"))
+                for (input in others) DeviceRow(input)
             }
             if (rotatedDone) {
                 Text(
@@ -1069,6 +1153,44 @@ private fun DevicesList(
                 rotatedDone = true
                 refresh()
             },
+        )
+    }
+
+    if (showRemoveAll) {
+        RemoveAllDevicesSheet(
+            authRepository = authRepository,
+            onConfirmed = {
+                showRemoveAll = false
+                val ready = state as? DevicesListUi.Ready ?: return@RemoveAllDevicesSheet
+                val targets = ready.devices.filter { device ->
+                    !device.isSelf && me.lakko.app.auth.base64UrlEncodeNoPad(device.signaturePublicKey) !in pending
+                }
+                removingAll = true
+                scope.launch {
+                    try {
+                        for (device in targets) {
+                            val key = hexKey(device.signaturePublicKey)
+                            rowRun = rowRun + (key to RowRun.Removing)
+                            val closed = try {
+                                val attestation = removalAttestation(context, authRepository, device.signaturePublicKey)
+                                val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    runner()?.remove(device.signaturePublicKey, attestation)
+                                }
+                                result != null && removalSheetOutcome(result) == RemovalSheetOutcome.Close
+                            } catch (cause: Throwable) {
+                                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                                Log.w(TAG, "WARN removing one of all devices: ${cause.javaClass.simpleName}")
+                                false
+                            }
+                            rowRun = if (closed) rowRun - key else rowRun + (key to RowRun.Failed)
+                        }
+                    } finally {
+                        removingAll = false
+                        refresh()
+                    }
+                }
+            },
+            onClosed = { showRemoveAll = false },
         )
     }
 
@@ -1383,6 +1505,95 @@ private fun RemoveDeviceSheet(
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodyMedium,
             )
+        }
+    }
+}
+
+/** A row's own progress while Remove all other devices runs. */
+private enum class RowRun { Removing, Failed }
+
+/** Lower-case hex of a leaf key: the device-card store's key. */
+private fun hexKey(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
+
+@Composable
+private fun SectionHeader(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp),
+    )
+}
+
+/**
+ * `Remove all other devices?` (docs/ux/second-device.md section 3): the
+ * app's own modal with the proof block. One proof covers all of them; the
+ * removals then run on the list, each row with its own progress.
+ */
+@Composable
+private fun RemoveAllDevicesSheet(
+    authRepository: AuthRepository,
+    onConfirmed: () -> Unit,
+    onClosed: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val proof = me.lakko.app.ui.auth.rememberProofController(
+        authRepository,
+        me.lakko.app.ui.auth.ProofSurface.RemoveDevice,
+        key = "remove-all",
+    )
+    var working by remember { mutableStateOf(false) }
+    var line: UiText? by remember { mutableStateOf(null) }
+    val view = proof.view()
+    val confirm: () -> Unit = confirm@{
+        if (working || !proof.view().mainEnabled) return@confirm
+        removalGateLine(
+            removalGate(holdsAccountKeys = true, keyResetPublishOwed = authRepository.publishOwed()),
+        )?.let {
+            line = it
+            return@confirm
+        }
+        working = true
+        line = null
+        scope.launch {
+            try {
+                // The proof. Nothing is removed before it passes; every
+                // removal that follows runs under the grant it obtained.
+                if (!proof.ensure(context)) return@launch
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    authRepository.ensureIdentityKeyRecorded()
+                }
+                proof.clear()
+                onConfirmed()
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                line = UiText(RemovalCopy.ERROR_NOT_REVOKED)
+            } finally {
+                working = false
+            }
+        }
+    }
+    me.lakko.app.ui.components.LakkoModal(
+        onDismissRequest = { if (!working) onClosed() },
+        title = t("devices.remove_all.title"),
+        actions = {
+            TextButton(onClick = { proof.clear(); onClosed() }, enabled = !working) {
+                Text(t("common.cancel"))
+            }
+            TextButton(onClick = confirm, enabled = view.mainEnabled && !working && !view.working) {
+                Text(t("devices.remove_all.confirm"), color = MaterialTheme.colorScheme.error)
+            }
+        },
+    ) {
+        Text(t("devices.remove_all.body"))
+        me.lakko.app.ui.auth.ProofBlock(
+            controller = proof,
+            onSubmit = confirm,
+            onPasskey = { scope.launch { proof.provePasskey(context) } },
+        )
+        line?.let {
+            Text(it.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }

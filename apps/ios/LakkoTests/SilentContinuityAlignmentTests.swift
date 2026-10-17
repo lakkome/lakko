@@ -470,25 +470,22 @@ final class SilentContinuityAlignmentTests: XCTestCase {
         XCTAssertEqual(parsedForward.resendOriginMessageId, 8)
     }
 
-    // MARK: - D: an /i/ link from an established contact opens that contact
+    // MARK: - D: an /i/ link from an established contact offers its chat
 
-    @MainActor
-    func testAKnownContactOpensWithNoResultScreen() {
+    /// ADR-0079 / `docs/ux/contact-invite-link.md` section 3 — a link from a
+    /// person already in the contacts sends nothing and offers Open chat: the
+    /// one-to-one when this device holds it, else the contact.
+    func testAKnownContactOffersOpenChat() {
         typealias Model = InviteLandingViewModel
-        XCTAssertNil(Model.contactToOpen(.running))
-        XCTAssertFalse(Model.showsResult(.running))
-
-        let known = Model.State.done(.knownContact(contactMessageId: 41))
-        XCTAssertEqual(Model.contactToOpen(known), 41)
-        XCTAssertFalse(Model.showsResult(known), "no intermediate result screen")
-
-        for result: AcceptInviteResult in [
-            .alreadyAccepted, .expired, .exhausted, .notFound, .damaged, .rateLimited,
-            .accepted(recipientAccountId: Data(), inviterFingerprint: "f", groupIdHex: nil),
-        ] {
-            XCTAssertNil(Model.contactToOpen(.done(result)))
-            XCTAssertTrue(Model.showsResult(.done(result)))
-        }
+        XCTAssertEqual(
+            Model.state(for: .knownContact(contactMessageId: 41, groupIdHex: "ab", statedName: "Anna")),
+            .alreadyContacts(.conversation(groupIdHex: "ab"), statedName: "Anna"))
+        XCTAssertEqual(
+            Model.state(for: .knownContact(contactMessageId: 41, groupIdHex: nil, statedName: nil)),
+            .alreadyContacts(.contact(messageId: 41), statedName: nil))
+        XCTAssertEqual(Model.state(for: .dead), .dead)
+        XCTAssertEqual(Model.state(for: .own), .own)
+        XCTAssertEqual(Model.state(for: .failed(message: "x")), .openFailed)
     }
 }
 

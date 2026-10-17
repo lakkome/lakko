@@ -95,6 +95,34 @@ export async function revokeMintedLink(
   return outcome;
 }
 
+/**
+ * ADR-0079 section 4 — a link another device of the account revoked: the
+ * register says so, and only this device (which minted it) holds the seed
+ * that deletes its ledger row. For every record of this device whose link
+ * the register holds as revoked, revoke it now. Returns how many could not
+ * be reached (tried again at the next change). Never throws.
+ */
+export async function revokeLinksRevokedElsewhere(
+  discovery: DiscoveryClient,
+  accountIdB64: string,
+  revokedLinkIdsHex: ReadonlySet<string>,
+): Promise<number> {
+  if (revokedLinkIdsHex.size === 0) return 0;
+  let unreachable = 0;
+  for (const link of await listMintedLinks(accountIdB64)) {
+    let hex = "";
+    for (const b of link.linkId) hex += b.toString(16).padStart(2, "0");
+    if (!revokedLinkIdsHex.has(hex)) continue;
+    try {
+      if ((await revokeMintedLink(discovery, accountIdB64, link)) === "unreachable") unreachable += 1;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("own-links: a link revoked elsewhere could not be revoked", err instanceof Error ? err.name : "");
+    }
+  }
+  return unreachable;
+}
+
 /** Revoke every live link this device keeps a record of (account deletion,
  *  ADR-0078 section 10). Returns how many could not be reached; never throws
  *  for one link's refusal. */

@@ -1295,9 +1295,18 @@ public func nseIsServiceEnvelope(
     // seed, so the slim FFI answers a yes / no (`isKeyRotationEnvelope`) and
     // the bytes never become a Swift value. Defaulted for the reason above.
     isKeyRotation: (Data) -> Bool = { _ in false },
-    keyRotationEnvelopeLen: Int = 0
+    keyRotationEnvelopeLen: Int = 0,
+    // ADR-0080 — the eleventh, a device card. It rides the account's own
+    // DeviceGroup, which this process never reads; recognised and suppressed
+    // like every service envelope, never stored. A yes / no from the slim
+    // FFI (`isDeviceCardEnvelope`). Defaulted for the reason above.
+    isDeviceCard: (Data) -> Bool = { _ in false },
+    deviceCardEnvelopeLens: ClosedRange<Int> = 0...0
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
+    if nseLooksLikeDeviceCard(bytes, envelopeLens: deviceCardEnvelopeLens), isDeviceCard(bytes) {
+        return true
+    }
     if nseLooksLikeKeyRotation(bytes, envelopeLen: keyRotationEnvelopeLen), isKeyRotation(bytes) {
         return true
     }
@@ -1335,6 +1344,20 @@ public func nseIsServiceEnvelope(
         return true
     }
     return false
+}
+
+/// First byte of the ADR-0080 device-card domain separator
+/// (`"lakko/device-card/v1\0"`): the same ASCII `l` as every other envelope
+/// domain, its own constant for the same reason as the others.
+private let deviceCardEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for an ADR-0080 device card: the length range injected
+/// from the slim FFI (`deviceCardEnvelopeMinLen()` / `MaxLen()`, never a
+/// hand-copied number) plus the first domain byte. The peek decides nothing;
+/// `isDeviceCardEnvelope` is the verdict.
+public func nseLooksLikeDeviceCard(_ bytes: Data, envelopeLens: ClosedRange<Int>) -> Bool {
+    envelopeLens.lowerBound > 0 && envelopeLens.contains(bytes.count)
+        && bytes.first == deviceCardEnvelopeFirstByte
 }
 
 /// First byte of the ADR-0057 registrar-seed domain separator — the same ASCII

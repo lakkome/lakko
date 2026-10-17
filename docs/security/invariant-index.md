@@ -13,10 +13,10 @@ section that describes it.
 | Class | Count | Range | Source file |
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 80  | C-1..C-79, C-82  | [`calls.md`](./calls.md) |
+| **C-** | 82  | C-1..C-79, C-82..C-84  | [`calls.md`](./calls.md) |
 | **T-** | 16  | T-1..T-16  | [`transport.md`](./transport.md) |
 | **G-** | 51  | G-1..G-51 | [`known-gaps.md`](./known-gaps.md) â open / deferred |
-| Total invariants  | 99  | (I + C + T) | live properties |
+| Total invariants  | 105 | (I + C + T) | live properties |
 | Total open gaps   | 23  | (G)         | tracked + scoped |
 
 **Note on the `G-` counts.** These two rows had drifted badly and were corrected
@@ -106,7 +106,7 @@ in `crates/lakko-mls/`.
 | I-7 | Opening a `SealedBundle` with an unknown `algorithm` discriminator is rejected before AEAD-open is attempted | Forward-compat ratchet |
 | I-8 | `create_devicegroup_message` round-trips through `parse_devicegroup_payload` losslessly for every typed body variant | Wire-format byte-stability |
 
-## Call-side invariants (C-1..C-82)
+## Call-side invariants (C-1..C-84)
 
 Source: [`calls.md`](./calls.md). The `C-` class is the
 catch-all for "everything the SFU / channels / storage /
@@ -348,6 +348,18 @@ store gate and persist-before-publish rules).
 |---|---|
 | C-79 | **A DeviceGroup or PublisherGroup journal id is not computable from an account id or a channel id** ([ADR-0078](../adr/0078-servers-cannot-link-accounts.md) section 6, phase 6, built 2026-10-16 in `lakko-mls`, both FFI surfaces, `lakko-attest`, `services/ds` and web / iOS / Android; host-tested, not walked live, not deployed). DeviceGroup id `BLAKE3-derive-key("lakko/device-group/id/v2", account_seed)` (the lineage seed: the oldest own predecessor after an ADR-0074 rotation, so a rotation keeps the journal; an ADR-0073 reset moves it); PublisherGroup id `BLAKE3-derive-key("lakko/pubgrp/id/v3", owner_account_seed ‖ channel_id)`, so only the owner computes it and a co-publisher opens the group under the id its `/g/` link conveyed, the channel id riding in the link's sealed preview. `lakko_mls::channel_id_from_group_id` and the key-reset attestation's journal id are gone (auth would otherwise have to learn the seed-derived id). Pinned by proptests in `device_group.rs` / `publisher_group.rs` (an id computed from the account id or channel id alone never matches) and goldens. **Does NOT** hide that a journal exists or when it changes epoch (the epoch-key registration), nor class (c) timing. Invariants **#3** / **#5**. Full entry: [`calls.md` C-79](./calls.md). |
 | C-82 | **A channel PublisherGroup commit is recorded with its N+1 state before any of its effects leaves the device** (G-50, the [ADR-0040](../adr/0040-durable-pending-commit-outbox.md) treatment, built 2026-10-16 on web / iOS / Android; host-tested, not walked live). A co-publisher approve or a rotation reads the channels-service epoch first, then writes a `PublisherCommitEntry` and the N+1 provider snapshot fail-closed (web one IndexedDB put; iOS and Android entry first, then the snapshot, with the provider rolled back on a failure), then runs its steps (journal registration and the approve's commit, Welcome, staged reseal at the recorded target, appointment), each recorded as it lands; a restart resumes them and drops an entry whose group never reached its target epoch. **Does NOT** make an iOS or Android PublisherGroup provider survive Forget device (it is deleted with the account), nor publish a rotation commit to the journal (it never was). Invariant **#4**. Full entry: [`calls.md` C-82](./calls.md). |
+
+### C-83 — Invite links that make contacts (ADR-0079)
+
+| ID   | Title |
+|---|---|
+| C-83 | **A contact request is taken without a card only through a live invite link of the account** ([ADR-0079](../adr/0079-invite-link-makes-contacts.md) sections 2-4, built 2026-10-16 in `lakko-contacts`, `lakko-sync`, both FFI surfaces and web / iOS / Android; host-tested, not walked live). The request's sealed plaintext carries `link_id ‖ link_secret` (0 or 28 bytes); a device accepts by itself only when that names a contact link the synced link-record register holds as live, the secret matches in constant time, and the sender was not already answered. A dead or unknown link gives an ordinary card with a note; a revocation in the register is final in any arrival order (`beats` orders revoked first). One verdict, `SyncedState::link_answer_verdict`, on both FFI surfaces. **Does NOT** stop two of the inviter's devices racing to found two one-to-ones for one request, nor remove a ledger row at once when a link is revoked on a device that did not mint it (the minting device deletes it on seeing the mark). Invariants **#2** / **#5** (every new field is sealed end to end); #3 untouched. Full entry: [`calls.md` C-83](./calls.md). |
+
+### C-84 — Device cards (ADR-0080)
+
+| ID   | Title |
+|---|---|
+| C-84 | **A device card names nothing about its sender, travels only in the account's DeviceGroup, and the city behind it is looked up without a record** ([ADR-0080](../adr/0080-device-cards.md), built 2026-10-16 in `lakko-contacts`, both FFI surfaces, the NSE surface, `services/discovery` and web / iOS / Android; host-tested, not walked live, not deployed). Stored per DeviceGroup leaf signature key resolved at receipt (C-68), strictly newer `updated_at_ms` wins, dropped when the leaf leaves; bounded fail-closed decode (fuzz `device_card_decode`). `GET /discovery/locate`: no session, token or account, stores nothing, logs neither address nor answer, per-IP bucket; not asked under anti-censorship or with the city switch off. **Does NOT** hide the locate-then-publish timing from an operator of both services (class (c)), nor make a card's content true. Invariants **#1** / **#2** / **#5**. Full entry: [`calls.md` C-84](./calls.md). |
 
 ## Transport-layer invariants (T-1..T-16)
 

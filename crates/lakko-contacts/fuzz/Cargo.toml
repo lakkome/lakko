@@ -133,6 +133,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "device_card_decode"
+path = "fuzz_targets/device_card_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "pin_decode"
 path = "fuzz_targets/pin_decode.rs"
 test = false

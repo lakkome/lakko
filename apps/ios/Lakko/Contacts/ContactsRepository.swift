@@ -120,14 +120,28 @@ public final class ContactsRepository: ObservableObject {
     /// non-nil, ``refreshInbox(waitSecs:)`` forwards Welcome
     /// envelopes to ``ChatRepository/joinGroupFromWelcome(welcomeBytes:)``
     /// so a peer's `startGroupWith` lands a live 1×1 chat on this
-    /// device. The ``acceptInviteLink(slug:)`` orchestrator drives
-    /// `startGroupWith` against the invite owner when wired.
+    /// device. The device's own accept of a request through one of the
+    /// account's invite links (ADR-0079) drives `startGroupWith` against the
+    /// requester when wired.
     ///
     /// Marked `weak` to avoid a retain cycle — both repositories
     /// live in `@StateObject` slots at the `LakkoApp` scope and
     /// outlive any single view tree, so a `weak` reference is
     /// safe.
     public weak var chatRepository: ChatRepository?
+
+    /// ADR-0079 section 4 — the synced link-record register: the verdict on
+    /// a request's link answer, the use count, the revocations made on other
+    /// devices. Wired once at app start.
+    public weak var deviceGroupSync: DeviceGroupSyncRepository?
+
+    /// ADR-0079 section 5 — the inviters added through their link whose app
+    /// has not answered yet, for the bound account.
+    @Published public private(set) var invited: [PendingContact] = []
+
+    /// The one-to-one each pending contact moved into this session (account
+    /// id hex to group id hex): an open pending chat follows it there.
+    @Published public private(set) var handedOver: [String: String] = [:]
 
     public convenience init(
         authRepository: AuthRepository,
@@ -212,6 +226,7 @@ public final class ContactsRepository: ObservableObject {
             // sent log and generated invites were the outgoing account's too.
             state = state.with(
                 pending: [], accepted: [], sent: [], outstandingInvites: [], cursor: 0)
+            invited = []
             return
         }
         let persisted = inboxStore.load(accountIdB64: accountIdB64)
@@ -223,6 +238,7 @@ public final class ContactsRepository: ObservableObject {
             pending: persisted.pending, accepted: accepted, sent: sent, outstandingInvites: [],
             cursor: persisted.cursor)
         loadingBoundRows = false
+        invited = PendingContactStore.load(accountIdB64: accountIdB64)
     }
 
     // MARK: - Send
@@ -335,7 +351,8 @@ public final class ContactsRepository: ObservableObject {
         recipientSignaturePubkey: Data,
         recipientX25519Pubkey: Data,
         introMessage: Data,
-        link: RequestLink?
+        link: RequestLink?,
+        linkAnswer: FfiLinkAnswer? = nil
     ) async throws -> SendResult {
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         func send(reach: ContactRequestReach) async throws -> SendResult {
@@ -348,7 +365,8 @@ public final class ContactsRepository: ObservableObject {
                 recipientX25519Pubkey: recipientX25519Pubkey,
                 profile: ProfileDirectory.shared.ownProfileForRequest(),
                 introMessage: introMessage,
-                reach: reach)
+                reach: reach,
+                linkAnswer: linkAnswer)
         }
         do {
             return try await send(reach: Self.requestReach(link: link))
@@ -523,7 +541,7 @@ public final class ContactsRepository: ObservableObject {
                 // and Welcomes are not filed under whoever is bound now.
                 guard boundAccountIdB64 == pollAccountIdB64 else { break }
                 switch event {
-                case .contactRequest(let req, let replyGrant):
+                case .contactRequest(var req, let replyGrant, let linkAnswer):
                     // ADR-0060 section 6 — the requester's `reply` grant, filed
                     // under the key the request signature authenticated; the
                     // accept (Welcome) and the ack are written with it.
@@ -547,6 +565,25 @@ public final class ContactsRepository: ObservableObject {
                     // answered silently, dropped, or kept waiting for a
                     // verdict. Nothing is shown either way.
                     if await handleKnownContactRequest(req, client: client) { continue }
+                    // ADR-0079 section 3 — a request sent through one of this
+                    // account's live invite links is accepted here, with no
+                    // card; one already accepted (by this device or another)
+                    // is answered; one whose link no longer works is an
+                    // ordinary card with a note.
+                    if let linkAnswer {
+                        let verdict = await deviceGroupSync?.linkAnswerVerdict(
+                            linkId: linkAnswer.linkId, linkSecret: linkAnswer.linkSecret,
+                            requesterKey: req.fromPubkey) ?? .dead
+                        guard boundAccountIdB64 == pollAccountIdB64 else { break }
+                        switch verdict {
+                        case .answered:
+                            continue
+                        case .accept:
+                            if await acceptThroughLink(req, linkAnswer: linkAnswer) { continue }
+                        case .dead:
+                            req = req.sentThroughDeadLink()
+                        }
+                    }
                     newPending.append(req)
                 case .welcome(_, let welcomeBytes, _):
                     // 1.14f4 wires `ChatRepository.joinGroupFromWelcome`
@@ -571,6 +608,10 @@ public final class ContactsRepository: ObservableObject {
                         do {
                             _ = try await chatRepository
                                 .joinGroupFromWelcome(welcomeBytes: welcomeBytes)
+                            // ADR-0079 section 5 — a one-to-one with a person
+                            // added through their link: what was written to
+                            // them goes out now, in order.
+                            handOverJoinedPendingContacts()
                         } catch {
                             NSLog("contacts inbox: an account-mailbox Welcome did not open as a chat (expected for a co-publisher Welcome): \(error)")
                         }
@@ -673,6 +714,10 @@ public final class ContactsRepository: ObservableObject {
             // READ (never written to, nothing registered there) for 30 days
             // after this device adopted, then left.
             await pollPredecessorMailboxes(accountIdB64: pollAccountIdB64)
+            // ADR-0079 — a pending contact whose one-to-one exists already,
+            // and a link revoked on another device of the account.
+            handOverJoinedPendingContacts()
+            await revokeLinksRevokedElsewhere()
         } catch {
             // A cancelled poll (the screen was left, the session ended, the
             // long-poll was superseded) is not a failure: keep whatever the
@@ -1253,7 +1298,12 @@ public final class ContactsRepository: ObservableObject {
                 bootstrapReferral: bootstrapReferral,
                 label: label,
                 linkId: linkId,
-                linkGrant: linkGrant
+                linkGrant: linkGrant,
+                // ADR-0079 section 1 — the page the invited person opens
+                // names this account: the own display name and username,
+                // signed and sealed inside the capability.
+                inviterDisplayName: ProfileDirectory.shared.ownProfile?.displayName,
+                inviterUsername: ProfileDirectory.shared.ownUsername
             )
         } catch {
             throw ContactsError.wrap(error)
@@ -1302,6 +1352,13 @@ public final class ContactsRepository: ObservableObject {
             kind: .contact, slug: blobIdSlug, revocationSeed: revocation.seed, label: label,
             expiryMs: expiryMs, maxUses: Int64(maxUses), bootstrapReferral: bootstrapReferral,
             mintedAtMs: nowMs))
+        // ADR-0079 section 4 — the link's record goes to the synced register,
+        // so every device of the account auto-accepts a request through it,
+        // lists it and can revoke it. The revocation seed stays here.
+        await deviceGroupSync?.setLinkRecord(LinkRecord(
+            hlc: 0, linkId: linkId, linkSecret: mint.linkSecret, kind: .contact, ledgerId: blobId,
+            expiryMs: UInt64(max(0, expiryMs)), maxUses: maxUses, uses: 0, revoked: false,
+            mintedAtMs: UInt64(max(0, nowMs)), label: label, answered: []))
         let invite = GeneratedInvite(
             blobId: blobId,
             blobIdSlug: blobIdSlug,
@@ -1330,11 +1387,23 @@ public final class ContactsRepository: ObservableObject {
             )
         }
         let accountIdB64 = base64Encode(secrets.accountId)
+        // ADR-0079 section 4 — the revocation is marked in the synced register
+        // first, from whichever device: every device stops accepting through
+        // the link at once, and the device that minted it (the one holding
+        // the revocation seed) deletes the ledger row when it sees the mark.
+        let record = deviceGroupSync?.linkRecords.first { $0.kind == .contact && $0.ledgerId == blobId }
+        if let record { await deviceGroupSync?.revokeLinkRecord(linkId: record.linkId) }
         guard let own = OwnLinkStore.shared.link(
             accountIdB64: accountIdB64, kind: .contact, slug: base64UrlEncodeNoPad(blobId)),
               let seed = own.seed else {
-            throw ContactsError.wrap(ContactsError.simple(
-                "this device keeps no revocation key for that link"))
+            guard record != nil else {
+                throw ContactsError.wrap(ContactsError.simple(
+                    "this device keeps no revocation key for that link"))
+            }
+            // Minted on another device: that device revokes the ledger row.
+            ReachCenter.shared.removeLink(blobId: blobId)
+            InviteLinkSecretStore.shared.remove(accountIdB64: accountIdB64, slug: base64UrlEncodeNoPad(blobId))
+            return .revoked
         }
         let discovery = authenticatedDiscoveryClient()
         let bound = binding.capture()
@@ -1535,7 +1604,31 @@ public final class ContactsRepository: ObservableObject {
         }
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         let iso = ISO8601DateFormatter()
-        let rows = OwnLinkStore.shared.all(accountIdB64: base64Encode(secrets.accountId))
+        let accountIdB64 = base64Encode(secrets.accountId)
+        // ADR-0079 section 4 — the synced register lists every device's
+        // links, with their use counts. The link's secret is in the record,
+        // so Copy works on every device.
+        if let sync = deviceGroupSync, sync.ready {
+            let rows = LinkRecords.listedContactLinks(sync.linkRecords, nowMs: UInt64(max(0, nowMs)))
+                .map { record -> ActiveInvite in
+                    let slug = base64UrlEncodeNoPad(record.ledgerId)
+                    if InviteLinkSecretStore.shared.secret(accountIdB64: accountIdB64, slug: slug) == nil {
+                        InviteLinkSecretStore.shared.put(
+                            accountIdB64: accountIdB64, slug: slug, secret: record.linkSecret)
+                    }
+                    return ActiveInvite(
+                        blobIdSlug: slug,
+                        expiryMs: record.expiryMs,
+                        maxUses: record.maxUses,
+                        usedCount: record.uses,
+                        label: record.label,
+                        bootstrapReferral: false,
+                        createdAt: iso.string(
+                            from: Date(timeIntervalSince1970: TimeInterval(record.mintedAtMs) / 1000)))
+                }
+            return .list(rows)
+        }
+        let rows = OwnLinkStore.shared.all(accountIdB64: accountIdB64)
             .filter { $0.kind == .contact && !$0.isExpired(nowMs: nowMs) }
             .map { link in
                 ActiveInvite(
@@ -1587,281 +1680,275 @@ public final class ContactsRepository: ObservableObject {
         return bytes
     }
 
-    // MARK: - Joiner-side invite consume (1.14e8)
+    // MARK: - ADR-0079: the invite page (B) and the pending contact
 
-    /// Open + verify an invite-link slug, fetch the capability
-    /// bytes, consume (atomically bumps the server's used-counter
-    /// + records this joiner in the dedup side table), and drive
-    /// the ContactRequest send. Surfaces every distinct step as
-    /// an ``AcceptInviteResult`` variant so the
-    /// ``InviteLandingScreen`` (1.14e9) can render the right
-    /// outcome copy.
-    ///
-    /// Steps:
-    ///   1. base64url-decode the slug to recover the 6-byte
-    ///      `blob_id` (exactly 8 characters; the retired
-    ///      43-character id is refused as malformed).
-    ///   2. `DiscoveryClient.fetchInvite(blobId)` → capability wire
-    ///      bytes (404 → `notFound`).
-    ///   3. `InviteCapability.decodeAndVerify(wire)` — local
-    ///      Ed25519 signature check (a malicious server cannot
-    ///      serve substituted bytes).
-    ///   4. `isValidNow(now)` — expiry check.
-    ///   5. `DiscoveryClient.consumeInvite(blobId, capabilityBytes,
-    ///      joinerAccountId)` — atomic counter bump + dedup tag.
-    ///   6. `ContactsClient.sendContactRequestToBundle(...)` —
-    ///      ship a ContactRequest to the inviter's stranger inbox.
-    ///   7. `ChatRepository.startGroupWith(...)` (1.14f) — drives
-    ///      a live 1×1 group against the inviter when the chat
-    ///      bridge is wired, returning `groupIdHex`; falls back to
-    ///      `nil` (best-effort) if the bridge is absent or the
-    ///      call fails.
-    public func acceptInviteLink(slug token: String) async -> AcceptInviteResult {
-        guard let secrets = authRepository.identitySecrets else {
-            return .requiresReauth
-        }
+    /// Open an `/i/<slug>#<secret>` link for the invite page
+    /// (`docs/ux/contact-invite-link.md` section 3): fetch the sealed blob,
+    /// open it under the fragment's secret, and decide the page's state. No
+    /// use of the link is spent and nothing is sent here.
+    public func openInviteLink(slug token: String) async -> InviteOpenResult {
+        guard let secrets = authRepository.identitySecrets else { return .requiresReauth }
         // ADR-0028 amendment 2026-09-28 — `token` is `slug#fragment`; a
-        // missing or malformed fragment is a damaged link, refused before any
-        // request.
+        // missing or malformed fragment is a damaged link, which the page
+        // shows exactly like one that no longer works.
         let parts = InviteLinkSecret.split(token)
-        guard let blobId = Self.parseInviteSlug(parts.base) else {
-            return .malformedSlug
-        }
-        guard let linkSecret = InviteLinkSecret.read(parts.fragment) else {
-            return .damaged
-        }
-
-        // This accept is shielded from the screen's cancellation, so it runs
-        // to its end even after a sign-out. Every step below reads something
-        // of the BOUND account (the session token, the own profile, a reply
-        // key, the chat repository, the accepted list), so it stops as soon
-        // as the account that tapped the link is no longer the one bound.
+        guard let blobId = Self.parseInviteSlug(parts.base),
+              let linkSecret = InviteLinkSecret.read(parts.fragment) else { return .dead }
         let bound = binding.capture()
-        let discovery = authenticatedDiscoveryClient()
         let sealed: Data?
         do {
-            sealed = try await discovery.fetchInvite(blobId: blobId)
+            sealed = try await authenticatedDiscoveryClient().fetchInvite(blobId: blobId)
         } catch {
             if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
-            return .failed(message: (error as? LocalizedError)?.errorDescription
-                ?? "fetch failed")
+            return .failed(message: (error as? LocalizedError)?.errorDescription ?? "fetch failed")
         }
         guard bound.isCurrent else { return .requiresReauth }
-        guard let sealed = sealed else {
-            return .notFound
-        }
-
+        guard let sealed else { return .dead }
         let capability: InviteCapability
         do {
             capability = try InviteCapability.openLink(sealed: sealed, linkSecret: linkSecret)
         } catch {
-            // Wrong secret, another kind, tampered, substituted, or a
-            // capability that does not verify: the one damaged refusal.
-            return .damaged
+            return .dead
         }
-        // The joiner tag is computed over the PLAINTEXT capability.
-        let capabilityBytes = capability.wire()
-
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
-        if !capability.isValidNow(nowMs: nowMs) {
-            return .expired
+        guard capability.isValidNow(nowMs: nowMs) else { return .dead }
+        let ownerAccountId = capability.ownerAccountId()
+        if ownerAccountId == secrets.accountId { return .own }
+        // ADR-0073 R.7 case 1 / UX 16.6 — "already a contact" is the pin or a
+        // verified binding naming the row's key.
+        if let existing = establishedContact(ofAccountId: ownerAccountId) {
+            return .knownContact(
+                contactMessageId: existing.request.messageId, groupIdHex: existing.groupIdHex,
+                statedName: OpenedInvite.statedName(
+                    displayName: capability.inviterDisplayName(), username: capability.inviterUsername()))
         }
+        return .opened(OpenedInvite(
+            blobId: blobId,
+            capabilityBytes: capability.wire(),
+            ownerAccountId: ownerAccountId,
+            ownerSignaturePubkey: capability.ownerSignaturePubkey(),
+            ownerX25519Pubkey: capability.ownerX25519Pubkey(),
+            linkId: capability.linkId(),
+            linkSecret: linkSecret,
+            linkGrant: capability.linkGrant(),
+            displayName: capability.inviterDisplayName(),
+            username: capability.inviterUsername(),
+            label: capability.label(),
+            bootstrapReferral: capability.bootstrapReferral()))
+    }
 
-        // Snapshot bundle fields BEFORE the consume call.
-        let inviterAccountId = capability.ownerAccountId()
-        let inviterSigPubkey = capability.ownerSignaturePubkey()
-        let inviterX25519Pubkey = capability.ownerX25519Pubkey()
-        // ADR-0078 — the link grant carries the owner's mailbox binding (the
-        // core verified it against the owner's key when the capability
-        // opened); verified again here against the key the request is sealed
-        // to, so the request and the Welcome go to the mailbox the owner reads.
-        let linkGrant = capability.linkGrant()
-        let inviteLink = MailboxTarget.verifiedOrNil(grant: linkGrant, accountKey: inviterSigPubkey)
-            .map { RequestLink(seed: linkGrant.seed, target: $0) }
-
+    /// **Add** on the invite page (ADR-0079 sections 2 and 5): the link's
+    /// ledger use is spent, the inviter is recorded as a pending contact, and
+    /// the contact request goes out carrying the link answer, so the
+    /// inviter's device takes it by itself. The record is written BEFORE the
+    /// request is sent (an answer that comes back at once always finds it)
+    /// and removed again when the send fails. This device founds no
+    /// conversation: the inviter's device does, and its Welcome lands here.
+    public func addThroughInviteLink(_ invite: OpenedInvite) async -> InviteAddResult {
+        guard let secrets = authRepository.identitySecrets else { return .requiresReauth }
+        let bound = binding.capture()
         // The link carries its owner's keys and this flow never fetches the
-        // bundle, so it never passes the pin gate. Ask the same question of
-        // the link's keys here, before the link is consumed and before
-        // anything is sealed to them: for a pinned account whose link names
-        // another key, the published identity goes through the fail-closed
-        // gate (an attested reset is accepted there, silently), and a key
-        // that is still not the account's trusted key is refused (old keys
-        // do not come back). A stranger (no pin) proceeds.
+        // bundle: the same pin question is asked of them before anything is
+        // spent or sealed (an attested reset is accepted there, silently).
         do {
             try await clientFactory().refuseContactRequestToUnverifiedKeys(
-                accountId: inviterAccountId, recipientSignaturePubkey: inviterSigPubkey)
+                accountId: invite.ownerAccountId, recipientSignaturePubkey: invite.ownerSignaturePubkey)
         } catch {
             return .failed(message: "the link's keys are not the ones trusted for this account")
         }
-
-        // ADR-0073 R.7 case 1 / UX 16.6 — a link from a person who is already
-        // a contact (a reset loses their contacts; they may hand out a new
-        // link) OPENS that contact: no request is sent, no use of the link
-        // is spent and no result screen is shown in between. The
-        // check above ran R.2 first, so an attested reset was accepted there
-        // and an unproven change was refused. "Already a contact" is the pin
-        // or a verified binding naming the row's key: a row whose account id
-        // came only from a peer's own profile does not swallow this person's
-        // link.
-        if let existing = establishedContact(ofAccountId: inviterAccountId) {
-            // The link opens that contact: no result screen, no use spent.
-            return .knownContact(contactMessageId: existing.request.messageId)
-        }
-
-        // Consume — atomic counter bump + per-joiner dedup.
-        let consumeResult: ConsumeInviteResult
+        guard bound.isCurrent else { return .requiresReauth }
+        // The ledger's soft use count. Used up or gone since the page opened:
+        // the link no longer works. Used before by this account: sent again,
+        // the inviter's device answers it either way.
         do {
-            guard bound.isCurrent else { return .requiresReauth }
-            let discoveryConsume = authenticatedDiscoveryClient()
-            consumeResult = try await discoveryConsume.consumeInvite(
-                blobId: blobId,
-                capabilityBytes: capabilityBytes,
-                joinerAccountId: secrets.accountId
-            )
+            let result = try await authenticatedDiscoveryClient().consumeInvite(
+                blobId: invite.blobId, capabilityBytes: invite.capabilityBytes,
+                joinerAccountId: secrets.accountId)
+            switch result {
+            case .exhausted, .notFound: return .dead
+            case .alreadyConsumed, .consumed: break
+            }
         } catch {
             if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
-            return .failed(message: (error as? LocalizedError)?.errorDescription
-                ?? "consume failed")
+            return .failed(message: (error as? LocalizedError)?.errorDescription ?? "consume failed")
         }
-        guard bound.isCurrent else { return .requiresReauth }
-        switch consumeResult {
-        case .exhausted:
-            return .exhausted
-        case .notFound:
-            return .notFound
-        case .alreadyConsumed:
-            return .alreadyAccepted
-        case .consumed:
-            break // proceed to ContactRequest
-        }
-
-        // Ship a ContactRequest to the inviter's stranger inbox.
-        // The bundle is inline in the capability — no discovery
-        // round-trip needed.
-        let sendResult: SendResult
+        guard bound.isCurrent, let accountIdB64 = boundAccountIdB64 else { return .requiresReauth }
+        let contact = PendingContact(
+            accountIdHex: groupIdHex(invite.ownerAccountId),
+            signaturePubkey: invite.ownerSignaturePubkey,
+            x25519Pubkey: invite.ownerX25519Pubkey,
+            displayName: invite.displayName ?? "",
+            username: invite.username ?? "",
+            addedAtMs: Int64(Date().timeIntervalSince1970 * 1000))
+        setInvited(PendingContacts.adding(contact, to: invited), accountIdB64: accountIdB64)
+        // ADR-0078 — the link grant carries the owner's mailbox binding,
+        // verified against the key the request is sealed to.
+        let link = MailboxTarget.verifiedOrNil(grant: invite.linkGrant, accountKey: invite.ownerSignaturePubkey)
+            .map { RequestLink(seed: invite.linkGrant.seed, target: $0) }
         do {
-            // ADR-0060 section 6 — written with the link's grant, used for
-            // this flow only and never kept.
-            sendResult = try await sendRequestToBundle(
+            _ = try await sendRequestToBundle(
                 client: clientFactory(), secrets: secrets,
-                recipientAccountId: inviterAccountId,
-                recipientSignaturePubkey: inviterSigPubkey,
-                recipientX25519Pubkey: inviterX25519Pubkey,
+                recipientAccountId: invite.ownerAccountId,
+                recipientSignaturePubkey: invite.ownerSignaturePubkey,
+                recipientX25519Pubkey: invite.ownerX25519Pubkey,
                 introMessage: Data(),
-                link: inviteLink)
+                link: link,
+                // ADR-0079 section 2 — the link answer.
+                linkAnswer: FfiLinkAnswer(linkId: invite.linkId, linkSecret: invite.linkSecret))
         } catch {
-            return .failed(
-                message: (error as? LocalizedError)?.errorDescription
-                    ?? "ContactRequest send failed"
-            )
-        }
-        guard bound.isCurrent else { return .requiresReauth }
-
-        // 1.14f4 lights up the chat bridge — when wired, drive
-        // `ChatRepository.startGroupWith` against the invite
-        // owner so the joiner has a live 1×1 group on accept.
-        // Best-effort: a failure here drops back to the
-        // pre-1.14f4 "purely local marker" semantics with
-        // `groupIdHex = nil`; the UI surfaces a "chat creation
-        // failed, retry" hint.
-        let groupIdHex: String?
-        if let chatRepository = chatRepository {
-            do {
-                groupIdHex = try await chatRepository.startGroupWith(
-                    recipientAccountId: inviterAccountId,
-                    recipientSignaturePubkey: inviterSigPubkey,
-                    kind: .oneToOne,
-                    recipientPlan: inviteLink.map {
-                        MailboxWritePlan(
-                            target: $0.target,
-                            candidates: $0.seed.map { [DsMailboxWriteAuth(reachSeed: $0)] } ?? [])
-                    }
-                )
-            } catch {
-                groupIdHex = nil
+            if boundAccountIdB64 == accountIdB64 {
+                setInvited(invited.filter { $0.accountIdHex != contact.accountIdHex }, accountIdB64: accountIdB64)
             }
-        } else {
-            groupIdHex = nil
+            return .failed(message: (error as? LocalizedError)?.errorDescription ?? "request send failed")
         }
-        guard bound.isCurrent else { return .requiresReauth }
+        return .added(contact)
+    }
 
-        // Append the new contact to the accepted list so the user
-        // sees the result. Construct a synthetic
-        // IncomingContactRequest shell — the invite flow bypassed
-        // the stranger inbox, but the AcceptedContact UI shape
-        // expects one.
-        let syntheticRequest = IncomingContactRequest(
-            messageId: sendResult.messageId,
-            fromPubkey: inviterSigPubkey,
-            fromAccountId: inviterAccountId,
-            fromPseudonym: Data(repeating: 0, count: 32),
-            validAfterMs: nowMs,
-            intro: nil,
-            createdAt: sendResult.createdAt
-        )
-        state = state.with(
-            accepted: state.accepted + [
-                AcceptedContact(request: syntheticRequest, groupIdHex: groupIdHex)
-            ]
-        )
-        return .accepted(
-            recipientAccountId: inviterAccountId,
-            inviterFingerprint: capability.ownerFingerprint(),
-            groupIdHex: groupIdHex
-        )
+    private func setInvited(_ list: [PendingContact], accountIdB64: String) {
+        PendingContactStore.save(list, accountIdB64: accountIdB64)
+        if boundAccountIdB64 == accountIdB64 { invited = list }
+    }
+
+    /// The pending contact `accountIdHex`, while one is held.
+    public func pendingContact(accountIdHex: String) -> PendingContact? {
+        invited.first { $0.accountIdHex == accountIdHex }
+    }
+
+    /// ADR-0079 section 5 — the pending contacts whose one-to-one now exists
+    /// on this device (the Welcome joined in this poll, or before the record
+    /// was read): their messages move to the conversation's held-send queue
+    /// and the record goes. Run after every poll; a contact with no
+    /// conversation yet stays.
+    public func handOverJoinedPendingContacts() {
+        guard let chatRepository, let accountIdB64 = boundAccountIdB64, !invited.isEmpty else { return }
+        var remaining = invited
+        for thread in chatRepository.state.threads {
+            guard let facts = chatRepository.pendingInvitedFacts(groupIdHex: thread.groupIdHex),
+                  let contact = PendingContacts.forConversation(
+                    remaining, oneToOne: facts.oneToOne, personKeys: facts.personKeys)
+            else { continue }
+            guard chatRepository.handOverPendingInvitedMessages(
+                queueKey: contact.queueKey, toGroupIdHex: thread.groupIdHex) else { continue }
+            remaining.removeAll { $0.accountIdHex == contact.accountIdHex }
+            handedOver[contact.accountIdHex] = thread.groupIdHex
+        }
+        if remaining.count != invited.count { setInvited(remaining, accountIdB64: accountIdB64) }
+    }
+
+    // MARK: - ADR-0079: the inviter's device (A)
+
+    /// The device's own accept of a request sent through one of this
+    /// account's live invite links (ADR-0079 section 3): the ordinary accept
+    /// path (the one-to-one founded with the requester's `reply` grant, the
+    /// contact recorded, then the ack), then one use of the link counted in
+    /// the synced register. `false` when the accept did not complete; the
+    /// request is then shown as an ordinary card.
+    func acceptThroughLink(_ request: IncomingContactRequest, linkAnswer: FfiLinkAnswer) async -> Bool {
+        guard let chatRepository, let fromAccountId = request.fromAccountId else { return false }
+        let groupIdHex: String
+        do {
+            groupIdHex = try await chatRepository.startGroupWith(
+                recipientAccountId: fromAccountId,
+                recipientSignaturePubkey: request.fromPubkey,
+                kind: .oneToOne)
+        } catch {
+            NSLog("ADR-0079: invite-link accept did not complete; shown as a request")
+            return false
+        }
+        if !state.accepted.contains(where: { $0.request.fromPubkey == request.fromPubkey }) {
+            state = state.with(accepted: state.accepted + [AcceptedContact(request: request, groupIdHex: groupIdHex)])
+        }
+        do {
+            _ = try await sendContactAck(request: request)
+        } catch {
+            // Best effort, as on a manual accept.
+        }
+        await deviceGroupSync?.recordLinkUse(linkId: linkAnswer.linkId, requesterKey: request.fromPubkey)
+        return true
+    }
+
+    /// ADR-0079 section 4 — a link this device minted that another device of
+    /// the account revoked: only this device holds the seed that deletes the
+    /// ledger row (``OwnLinkStore``), so it does so when the register's mark
+    /// arrives. Run after every poll; a link already revoked here has no
+    /// record left.
+    public func revokeLinksRevokedElsewhere() async {
+        guard let sync = deviceGroupSync, let accountIdB64 = boundAccountIdB64 else { return }
+        let revokedSlugs = Set(sync.linkRecords.filter { $0.revoked && !$0.ledgerId.isEmpty }
+            .map { base64UrlEncodeNoPad($0.ledgerId) })
+        guard !revokedSlugs.isEmpty else { return }
+        for own in OwnLinkStore.shared.all(accountIdB64: accountIdB64)
+        where own.kind == .contact && revokedSlugs.contains(own.slug) {
+            guard let blobId = own.blobId else { continue }
+            _ = try? await revokeInviteLink(blobId: blobId)
+        }
     }
 }
 
-/// Discriminated outcome of
-/// ``ContactsRepository/acceptInviteLink(slug:)``.
-///
-/// Each variant maps to a distinct user-visible state on the
-/// ``InviteLandingScreen`` (1.14e9):
-///
-///   * ``accepted(recipientAccountId:groupIdHex:)`` — every step
-///     succeeded.
-///   * ``alreadyAccepted`` — the server's per-joiner dedup tag
-///     already had a row.
-///   * ``expired`` — the capability's `expiry_ms` is in the past.
-///   * ``exhausted`` — server returned 410 (max_uses ceiling hit).
-///   * ``notFound`` — server returned 404 (revoked / expired /
-///     never-issued).
-///   * ``malformedSlug`` — the URL slug is not valid base64url or
-///     doesn't decode to a 32-byte blob_id.
-///   * ``requiresReauth`` — ``AuthRepository/identitySecrets`` is
-///     `nil`.
-///   * ``failed(message:)`` — any other underlying failure.
-public enum AcceptInviteResult: Equatable {
-    /// Accept succeeded. `inviterFingerprint` is the 71-char
-    /// Signal-style safety number derived from the inviter's
-    /// Ed25519 pubkey — UI surfaces it after Accept so the
-    /// user can verify out-of-band whom they just connected
-    /// to (defence-in-depth against link-substitution
-    /// attacks; ROADMAP 3c3 / calls.md C-28).
-    case accepted(
-        recipientAccountId: Data,
-        inviterFingerprint: String,
-        groupIdHex: String?
-    )
-    case alreadyAccepted
-    /// ADR-0073 R.7 case 1 / UX 16.6 — the link is from a person who is
-    /// already an established contact: nothing was sent and no use of the
-    /// link was spent. The landing OPENS that contact (the route's key is the
-    /// contact's request id) and shows no result of its own.
-    case knownContact(contactMessageId: Int64)
-    case expired
-    case exhausted
-    case notFound
-    case malformedSlug
-    /// ADR-0028 amendment 2026-09-28 — the link's fragment secret is missing
-    /// or malformed, or the ledger's blob does not open under it.
-    case damaged
-    /// `429` from the discovery ledger on the fetch or the consume: the link
-    /// may be fine, the server asked this network address to slow down. The
-    /// screen says "try again later", never "invalid".
+/// What opening an `/i/` link gave the invite page (ADR-0079).
+public enum InviteOpenResult: Equatable {
+    case opened(OpenedInvite)
+    /// The link was revoked, expired, used up, is unknown, or is damaged:
+    /// one state on the page.
+    case dead
+    /// The link is this account's own.
+    case own
+    /// The inviter is already an established contact: the page offers
+    /// Open chat (the route key is the contact's request id, and the
+    /// one-to-one when this device holds it).
+    case knownContact(contactMessageId: Int64, groupIdHex: String?, statedName: String?)
     case rateLimited
     case requiresReauth
     case failed(message: String)
+}
+
+/// What **Add** did.
+public enum InviteAddResult: Equatable {
+    /// The inviter is a pending contact now; the page closes into the chat.
+    case added(PendingContact)
+    /// Used up or gone since the page opened.
+    case dead
+    case rateLimited
+    case requiresReauth
+    /// A network or server failure: the page stays, Add comes back.
+    case failed(message: String)
+}
+
+/// An opened `/i/` link: what the page shows and what **Add** needs.
+public struct OpenedInvite: Equatable {
+    public let blobId: Data
+    public let capabilityBytes: Data
+    public let ownerAccountId: Data
+    public let ownerSignaturePubkey: Data
+    public let ownerX25519Pubkey: Data
+    public let linkId: Data
+    /// SECRET: the link answer's secret.
+    public let linkSecret: Data
+    /// SECRET: the link's reach grant, used for this one write.
+    public let linkGrant: FfiReachGrant
+    public let displayName: String?
+    public let username: String?
+    public let label: String
+    public let bootstrapReferral: Bool
+
+    public static func == (a: OpenedInvite, b: OpenedInvite) -> Bool {
+        a.blobId == b.blobId && a.linkId == b.linkId
+    }
+
+    /// The name the link states: the display name, else `@username`, else
+    /// `nil` (the catalog's "this person").
+    public var statedName: String? {
+        Self.statedName(displayName: displayName, username: username)
+    }
+
+    /// The one rule for the name a link states.
+    public static func statedName(displayName: String?, username: String?) -> String? {
+        if let name = displayName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+        if let username, !username.isEmpty { return "@\(username)" }
+        return nil
+    }
 }
 
 // MARK: - State shape

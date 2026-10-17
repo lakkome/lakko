@@ -308,6 +308,7 @@ mod tests {
             b"",
             None,
             Some(&grant),
+            None,
             &wrapped,
         )
         .unwrap();
@@ -328,6 +329,7 @@ mod tests {
             b"",
             None,
             Some(&contact),
+            None,
             &wrapped,
         )
         .is_err());

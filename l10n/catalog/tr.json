@@ -7614,14 +7614,6 @@
       "text": "Yeni",
       "status": "machine"
     },
-    "settings.devices.remove.body": {
-      "text": "Oturumu şimdi kapatıldı. Bir sonraki bağlandığında bu hesabın onda tuttuğu her şey silinir: sohbetler, kişiler, anahtarlar ve kurtarma ifadesi.",
-      "status": "machine"
-    },
-    "settings.devices.remove.confirm": {
-      "text": "Cihazı kaldır",
-      "status": "machine"
-    },
     "settings.devices.remove.confirm_named": {
       "text": "Kaldır: {device}",
       "status": "machine"
@@ -7632,10 +7624,6 @@
     },
     "settings.devices.remove.reason_unused": {
       "text": "Artık kullanmıyorum",
-      "status": "machine"
-    },
-    "settings.devices.remove.title": {
-      "text": "{device} kaldırılsın mı?",
       "status": "machine"
     },
     "settings.devices.remove.working": {
@@ -8408,6 +8396,78 @@
     },
     "who_can_find_me.title": {
       "text": "Beni kimler bulabilir",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "{name} kişilerinize eklensin mi?",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "Ekle",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "Şimdi değil",
+      "status": "machine"
+    },
+    "invite.contact.page.sign_in": {
+      "text": "{name} kişisini eklemek için giriş yapın",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Hesap oluştur",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} zaten kişilerinizde",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "Sohbeti aç",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "Bu sizin kendi davet bağlantınız",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "Eklemek istediğiniz kişiyle paylaşın.",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "Tamam",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Bu davet bağlantısı artık çalışmıyor",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Gönderen kişiden yenisini isteyin.",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "{name} eklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "bu kişi",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name}, uygulaması tekrar çevrimiçi olduğunda mesajlarınızı alacak.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} henüz yanıt vermedi. Yeni bir bağlantı isteyebilirsiniz.",
+      "status": "machine"
+    },
+    "chat.pending.call_disabled": {
+      "text": "{name} bağlandığında kullanılabilir.",
+      "status": "machine"
+    },
+    "contacts.request.dead_link_note": {
+      "text": "Artık çalışmayan bir davet bağlantısıyla gönderildi.",
       "status": "machine"
     }
   }

@@ -332,7 +332,10 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             // from the slim FFI, never a decode (it carries the account's
             // next seed and this process has no use for it).
             isKeyRotation: { isKeyRotationEnvelope(plaintext: $0) },
-            keyRotationEnvelopeLen: Int(keyRotationEnvelopeLen())
+            keyRotationEnvelopeLen: Int(keyRotationEnvelopeLen()),
+            // ADR-0080 — a device card: a yes / no from the slim FFI.
+            isDeviceCard: { isDeviceCardEnvelope(plaintext: $0) },
+            deviceCardEnvelopeLens: Int(deviceCardEnvelopeMinLen())...Int(deviceCardEnvelopeMaxLen())
         ) {
             return nil
         }

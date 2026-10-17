@@ -56,6 +56,19 @@
 //! [`SyncedState::apply_own_username_envelope`], persisted by
 //! [`SyncedState::to_bytes`], never in [`StateSnapshot`].
 //!
+//! ## The link-record register (ADR-0079 section 4)
+//!
+//! One register per invite link of the account, keyed by link id, carried by
+//! [`SyncedState::link_record_envelopes`] /
+//! [`SyncedState::apply_link_record_envelope`] and persisted with the rest,
+//! never in [`StateSnapshot`]. It follows the rule above with one addition
+//! that makes a revocation final: between two link records a revoked one
+//! beats a live one whatever the stamps, so the order is `(revoked, stamp,
+//! canonical bytes)`. That is still a total order on the values of one
+//! register, so the fold stays commutative, associative and idempotent.
+//! [`SyncedState::link_answer_verdict`] is the one rule every client asks
+//! when a contact request carries a link answer.
+//!
 //! ## Saved messages (ADR-0065 section 4)
 //!
 //! A saved message is one more register, keyed `(conversation, message
@@ -77,6 +90,11 @@ use super::lineage::{
     compose_lineage_envelope, decode_lineage_envelope, LineageEnvelopeError,
     LINEAGE_ENVELOPE_MAX_ENTRIES,
 };
+use super::link_record::{
+    compose_link_record_envelope, decode_link_record_envelope, LinkAnswerVerdict, LinkRecordEntry,
+    LinkRecordEnvelopeError, LINK_RECORD_ENVELOPE_MAX_ENTRIES, LINK_RECORD_ID_LEN,
+    LINK_RECORD_REQUESTER_KEY_LEN, LINK_RECORD_SECRET_LEN,
+};
 use super::own_username::{
     compose_own_username_envelope, decode_own_username_envelope, OwnUsernameEnvelopeError,
 };
@@ -88,10 +106,11 @@ use super::recovery_email::{
 /// The persistence format's version byte.
 ///
 /// `2` since the saved-message register (ADR-0065 section 4) joined the
-/// state. Version `1` is refused rather than read: nothing is deployed, and
-/// a build that silently accepted the older layout would be a second
-/// decoder nobody tests.
-const STATE_VERSION: u8 = 2;
+/// state, `3` since the link-record register (ADR-0079 section 4). Older
+/// versions are refused rather than read: nothing is deployed, and a build
+/// that silently accepted an older layout would be a second decoder nobody
+/// tests.
+const STATE_VERSION: u8 = 3;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,8 +170,15 @@ pub struct SyncedState {
     registers: BTreeMap<RegisterKey, Held>,
 }
 
-/// `true` when `(a_hlc, a_bytes)` beats `(b_hlc, b_bytes)`.
+/// `true` when `(a_hlc, a_bytes)` beats `(b_hlc, b_bytes)`. Between two link
+/// records a revoked one beats a live one first (ADR-0079: a revocation is
+/// final).
 fn beats(a_hlc: u64, a: &SyncEntry, b_hlc: u64, b: &SyncEntry) -> bool {
+    if let (SyncEntry::LinkRecord(x), SyncEntry::LinkRecord(y)) = (a, b) {
+        if x.revoked != y.revoked {
+            return x.revoked;
+        }
+    }
     match a_hlc.cmp(&b_hlc) {
         core::cmp::Ordering::Greater => true,
         core::cmp::Ordering::Less => false,
@@ -287,8 +313,10 @@ impl SyncedState {
                 // username travel in their own envelopes
                 // (`lineage_envelopes`, `recovery_email_envelope`,
                 // `own_username_envelope`), never in the snapshot.
-                SyncEntry::Lineage(_) | SyncEntry::RecoveryEmail(_) | SyncEntry::OwnUsername(_) => {
-                },
+                SyncEntry::Lineage(_)
+                | SyncEntry::RecoveryEmail(_)
+                | SyncEntry::OwnUsername(_)
+                | SyncEntry::LinkRecord(_) => {},
                 other => {
                     let _ = snap.folders.push(h.hlc, other.clone());
                 },
@@ -613,6 +641,164 @@ impl SyncedState {
     // -----------------------------------------------------------------
     // Queries.
     // -----------------------------------------------------------------
+
+    // -----------------------------------------------------------------
+    // Link records (ADR-0079 section 4).
+    // -----------------------------------------------------------------
+
+    /// Write a link record (a link just minted, or any change to one).
+    /// `Ok(true)` when it was written and should be sent
+    /// ([`Self::link_record_envelope_for`]).
+    ///
+    /// # Errors
+    ///
+    /// The [`super::entry::BoundsError`] the record breaks.
+    pub fn set_link_record(
+        &mut self,
+        hlc: u64,
+        record: LinkRecordEntry,
+    ) -> Result<bool, super::entry::BoundsError> {
+        Ok(matches!(
+            self.apply(hlc, SyncEntry::LinkRecord(record))?,
+            ApplyOutcome::Applied
+        ))
+    }
+
+    /// The record held for a link id.
+    #[must_use]
+    pub fn link_record(
+        &self,
+        link_id: &[u8; LINK_RECORD_ID_LEN],
+    ) -> Option<Stamped<LinkRecordEntry>> {
+        match self.registers.get(&RegisterKey::LinkRecord(*link_id)) {
+            Some(Held {
+                hlc,
+                entry: SyncEntry::LinkRecord(r),
+            }) => Some(Stamped {
+                hlc: *hlc,
+                value: r.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Every link record, ascending by link id.
+    #[must_use]
+    pub fn all_link_records(&self) -> Vec<Stamped<LinkRecordEntry>> {
+        self.registers
+            .values()
+            .filter_map(|h| match &h.entry {
+                SyncEntry::LinkRecord(r) => Some(Stamped {
+                    hlc: h.hlc,
+                    value: r.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Mark a link revoked. `Ok(true)` when the register changed (send it);
+    /// `Ok(false)` when no record is held or it was already revoked.
+    ///
+    /// # Errors
+    ///
+    /// The [`super::entry::BoundsError`] the held record breaks (never, for
+    /// a record the fold accepted).
+    pub fn revoke_link_record(
+        &mut self,
+        hlc: u64,
+        link_id: &[u8; LINK_RECORD_ID_LEN],
+    ) -> Result<bool, super::entry::BoundsError> {
+        let Some(held) = self.link_record(link_id) else {
+            return Ok(false);
+        };
+        if held.value.revoked {
+            return Ok(false);
+        }
+        let mut next = held.value;
+        next.revoked = true;
+        self.set_link_record(hlc.max(held.hlc.saturating_add(1)), next)
+    }
+
+    /// Count one accepted request through a link, remembering the
+    /// requester. `Ok(true)` when the register changed (send it); `Ok(false)`
+    /// when no live record is held for the link.
+    ///
+    /// # Errors
+    ///
+    /// The [`super::entry::BoundsError`] the held record breaks (never, for
+    /// a record the fold accepted).
+    pub fn record_link_use(
+        &mut self,
+        hlc: u64,
+        link_id: &[u8; LINK_RECORD_ID_LEN],
+        requester_key: &[u8; LINK_RECORD_REQUESTER_KEY_LEN],
+    ) -> Result<bool, super::entry::BoundsError> {
+        let Some(held) = self.link_record(link_id) else {
+            return Ok(false);
+        };
+        if held.value.revoked {
+            return Ok(false);
+        }
+        let next = held.value.with_use(requester_key);
+        self.set_link_record(hlc.max(held.hlc.saturating_add(1)), next)
+    }
+
+    /// The one rule for a contact request that carries a link answer
+    /// (ADR-0079 section 3, UX section 6): [`LinkAnswerVerdict::Accept`]
+    /// only for a live contact link of this account whose secret matches
+    /// (compared in constant time); [`LinkAnswerVerdict::Answered`] when the
+    /// requester was already accepted through it; otherwise
+    /// [`LinkAnswerVerdict::Dead`] (an unknown link included).
+    #[must_use]
+    pub fn link_answer_verdict(
+        &self,
+        link_id: &[u8; LINK_RECORD_ID_LEN],
+        link_secret: &[u8; LINK_RECORD_SECRET_LEN],
+        requester_key: &[u8; LINK_RECORD_REQUESTER_KEY_LEN],
+        now_ms: u64,
+    ) -> LinkAnswerVerdict {
+        self.link_record(link_id)
+            .map_or(LinkAnswerVerdict::Dead, |r| {
+                r.value.verdict(link_secret, requester_key, now_ms)
+            })
+    }
+
+    /// The envelope carrying one held link record with its original stamp.
+    #[must_use]
+    pub fn link_record_envelope_for(&self, link_id: &[u8; LINK_RECORD_ID_LEN]) -> Option<Vec<u8>> {
+        let held = self.link_record(link_id)?;
+        compose_link_record_envelope(&[held]).ok()
+    }
+
+    /// Every held link record with its original stamp, as envelopes of at
+    /// most [`LINK_RECORD_ENVELOPE_MAX_ENTRIES`] entries: the catch-up
+    /// re-send after the DeviceGroup grew.
+    #[must_use]
+    pub fn link_record_envelopes(&self) -> Vec<Vec<u8>> {
+        self.all_link_records()
+            .chunks(LINK_RECORD_ENVELOPE_MAX_ENTRIES)
+            .filter_map(|chunk| compose_link_record_envelope(chunk).ok())
+            .collect()
+    }
+
+    /// Decode a link-record envelope and fold every register in with its
+    /// original stamp. Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`LinkRecordEnvelopeError`].
+    pub fn apply_link_record_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<bool, LinkRecordEnvelopeError> {
+        let entries = decode_link_record_envelope(bytes)?;
+        Ok(self.apply_all(
+            entries
+                .into_iter()
+                .map(|s| (s.hlc, SyncEntry::LinkRecord(s.value))),
+        ))
+    }
 
     fn folder_ids(&self) -> Vec<FolderId> {
         let mut ids: Vec<FolderId> = self
@@ -1007,6 +1193,78 @@ mod tests {
             username: username.to_owned(),
         })
     }
+    fn link(id: u8, uses: u32, revoked: bool, label: u8) -> SyncEntry {
+        SyncEntry::LinkRecord(crate::synced::LinkRecordEntry {
+            link_id: [id; 16],
+            link_secret: [0x5C; 12],
+            kind: crate::synced::LinkRecordKind::Contact,
+            ledger_id: vec![],
+            expiry_ms: 0,
+            max_uses: 3,
+            uses,
+            revoked,
+            minted_at_ms: 0,
+            label: "x".repeat(usize::from(label)),
+            answered: vec![],
+        })
+    }
+
+    #[test]
+    fn link_records_are_written_used_revoked_and_carried() {
+        use crate::synced::{LinkAnswerVerdict, LinkRecordKind};
+        let mut a = SyncedState::new();
+        let SyncEntry::LinkRecord(record) = link(1, 0, false, 1) else {
+            unreachable!()
+        };
+        assert_eq!(a.set_link_record(5, record.clone()), Ok(true));
+        assert_eq!(a.set_link_record(5, record), Ok(false));
+        let id = [1u8; 16];
+        let secret = [0x5C; 12];
+        let bob = [0xB0; 32];
+        assert_eq!(
+            a.link_answer_verdict(&id, &secret, &bob, 0),
+            LinkAnswerVerdict::Accept
+        );
+        assert_eq!(
+            a.link_answer_verdict(&[2; 16], &secret, &bob, 0),
+            LinkAnswerVerdict::Dead
+        );
+        // A use, written on a stamp lower than the held one, still lands.
+        assert_eq!(a.record_link_use(1, &id, &bob), Ok(true));
+        let held = a.link_record(&id).unwrap();
+        assert_eq!(held.value.uses, 1);
+        assert_eq!(held.hlc, 6);
+        assert_eq!(
+            a.link_answer_verdict(&id, &secret, &bob, 0),
+            LinkAnswerVerdict::Answered
+        );
+        // Another device learns it from the envelope.
+        let mut b = SyncedState::new();
+        for e in a.link_record_envelopes() {
+            assert_eq!(b.apply_link_record_envelope(&e), Ok(true));
+        }
+        assert_eq!(b.all_link_records(), a.all_link_records());
+        // Revoke on b; a later live write on a cannot bring it back.
+        assert_eq!(b.revoke_link_record(7, &id), Ok(true));
+        assert_eq!(b.revoke_link_record(8, &id), Ok(false));
+        assert_eq!(a.record_link_use(100, &id, &[0xB1; 32]), Ok(true));
+        let live_later = a.link_record_envelope_for(&id).unwrap();
+        assert_eq!(b.apply_link_record_envelope(&live_later), Ok(false));
+        assert!(b.link_record(&id).unwrap().value.revoked);
+        let revoked = b.link_record_envelope_for(&id).unwrap();
+        assert_eq!(a.apply_link_record_envelope(&revoked), Ok(true));
+        assert!(a.link_record(&id).unwrap().value.revoked);
+        assert_eq!(a.record_link_use(200, &id, &[0xB2; 32]), Ok(false));
+        assert_eq!(
+            a.link_answer_verdict(&id, &secret, &[0xB3; 32], 0),
+            LinkAnswerVerdict::Dead
+        );
+        // Persisted, and never in the snapshot.
+        assert_eq!(SyncedState::from_bytes(&a.to_bytes()).unwrap(), a);
+        assert!(a.snapshot().stamped_entries().is_empty());
+        assert_eq!(held.value.kind, LinkRecordKind::Contact);
+    }
+
     fn member(f: u8, c: u8, state: MemberState) -> SyncEntry {
         SyncEntry::FolderMember(FolderMember {
             folder_id: fid(f),
@@ -1215,14 +1473,16 @@ mod tests {
         );
         let mut s = SyncedState::new();
         s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
-        let mut v1 = s.to_bytes();
-        assert_eq!(v1[0], 2);
-        v1[0] = 1;
-        assert_eq!(
-            SyncedState::from_bytes(&v1),
-            Err(CodecError::UnknownVersion)
-        );
-        assert_eq!(SyncedState::new().to_bytes(), vec![2, 0, 0, 0, 0]);
+        let mut old = s.to_bytes();
+        assert_eq!(old[0], 3);
+        for version in [1u8, 2] {
+            old[0] = version;
+            assert_eq!(
+                SyncedState::from_bytes(&old),
+                Err(CodecError::UnknownVersion)
+            );
+        }
+        assert_eq!(SyncedState::new().to_bytes(), vec![3, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -1492,7 +1752,7 @@ mod tests {
         assert_eq!(b, before);
         // Nor does a state whose register breaks a bound: the whole state
         // is refused.
-        let mut bytes = vec![2, 0, 0, 0, 1];
+        let mut bytes = vec![STATE_VERSION, 0, 0, 0, 1];
         bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
         bytes.extend_from_slice(&[0, 0, 0, 7, 12, 0, 0, 0, 2, b'a', b'@']);
         assert_eq!(
@@ -1634,7 +1894,7 @@ mod tests {
         );
         assert_eq!(b, before);
         // A persisted state whose register breaks the rule is refused whole.
-        let mut bytes = vec![2, 0, 0, 0, 1];
+        let mut bytes = vec![STATE_VERSION, 0, 0, 0, 1];
         bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
         bytes.extend_from_slice(&[0, 0, 0, 8, 13, 0, 0, 0, 3, b'B', b'o', b'b']);
         assert_eq!(
@@ -1757,7 +2017,7 @@ mod tests {
         assert_eq!(SyncedState::from_bytes(&bytes), Ok(s));
         assert_eq!(SyncedState::from_bytes(&[]), Err(CodecError::Truncated));
         assert_eq!(
-            SyncedState::from_bytes(&[3, 0, 0, 0, 0]),
+            SyncedState::from_bytes(&[4, 0, 0, 0, 0]),
             Err(CodecError::UnknownVersion)
         );
         let mut trailing = bytes;
@@ -1904,7 +2164,11 @@ mod tests {
                     h,
                     save_at(c, m, at, &blobs.into_iter().collect::<Vec<u8>>())
                 )),
-            (hlc, c, 0u64..2).prop_map(|(h, c, m)| (h, unsave(c, m))),
+            (hlc.clone(), c.clone(), 0u64..2).prop_map(|(h, c, m)| (h, unsave(c, m))),
+            // Link records: two links, uses, a revocation, so live writes
+            // meet revocations on every stamp order.
+            (hlc, 0u8..2, 0u32..3, any::<bool>(), c)
+                .prop_map(|(h, id, uses, revoked, label)| (h, link(id, uses, revoked, label))),
         ]
     }
 
@@ -1920,6 +2184,9 @@ mod tests {
         }
         if let Some(envelope) = from.own_username_envelope() {
             into.apply_own_username_envelope(&envelope).unwrap();
+        }
+        for envelope in from.link_record_envelopes() {
+            into.apply_link_record_envelope(&envelope).unwrap();
         }
     }
 
@@ -1955,6 +2222,25 @@ mod tests {
             prop_assert_eq!(a.own_username_register(), b.own_username_register());
             prop_assert_eq!(a.saved(), b.saved());
             prop_assert_eq!(a.saved_blob_ids(), b.saved_blob_ids());
+            prop_assert_eq!(a.all_link_records(), b.all_link_records());
+        }
+
+        /// ADR-0079: a link revoked by any write stays revoked whatever
+        /// arrives after it, in any order.
+        #[test]
+        fn a_revocation_is_final_in_any_order(
+            entries in prop::collection::vec(arb_entry(), 0..24),
+        ) {
+            let s = fold(&entries);
+            for id in 0u8..2 {
+                let revoked_somewhere = entries.iter().any(|(_, e)| {
+                    matches!(e, SyncEntry::LinkRecord(r) if r.link_id == [id; 16] && r.revoked)
+                });
+                let held = s.link_record(&[id; 16]).map(|r| r.value.revoked);
+                if revoked_somewhere {
+                    prop_assert_eq!(held, Some(true));
+                }
+            }
         }
 
         /// The tie-break, stated on its own: for any two writes of ONE

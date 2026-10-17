@@ -167,10 +167,16 @@ data class JoinCallUiState(
     val guestDeleted: Boolean = false,
 )
 
-/** ADR-0048 UX §4 — the guest name field's prefill, in the interface
- *  language at the moment the screen opens. */
+/** ADR-0048 UX §4 — the guest name field's prefill: "<adjective> <animal>"
+ *  from the shared rule (`lakko_ui_rules::guest_name`), drawn when the screen
+ *  opens. Where the native library is not loaded (host tests) the catalog's
+ *  plain word stands in. */
 internal val GUEST_NAME_DEFAULT: String
-    get() = UiText("call.guest.default_name").render()
+    get() = try {
+        uniffi.lakko_ffi_uniffi.guestName(kotlin.random.Random.nextLong().toULong())
+    } catch (_: Throwable) {
+        UiText("call.guest.default_name").render()
+    }
 
 
 /** What the landing needs from the auth layer: [AuthRepository] in

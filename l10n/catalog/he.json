@@ -7614,14 +7614,6 @@
       "text": "חדש",
       "status": "machine"
     },
-    "settings.devices.remove.body": {
-      "text": "הוא נותק כעת. בפעם הבאה שיתחבר, יימחק כל מה שהחשבון הזה שמר בו: צ'אטים, אנשי קשר, מפתחות וביטוי השחזור.",
-      "status": "machine"
-    },
-    "settings.devices.remove.confirm": {
-      "text": "הסרת המכשיר",
-      "status": "machine"
-    },
     "settings.devices.remove.confirm_named": {
       "text": "הסרת {device}",
       "status": "machine"
@@ -7632,10 +7624,6 @@
     },
     "settings.devices.remove.reason_unused": {
       "text": "אני כבר לא משתמש/ת בו",
-      "status": "machine"
-    },
-    "settings.devices.remove.title": {
-      "text": "להסיר את {device}?",
       "status": "machine"
     },
     "settings.devices.remove.working": {
@@ -8408,6 +8396,78 @@
     },
     "who_can_find_me.title": {
       "text": "מי יכול למצוא אותי",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "להוסיף את {name} לאנשי הקשר שלך?",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "הוספה",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "לא עכשיו",
+      "status": "machine"
+    },
+    "invite.contact.page.sign_in": {
+      "text": "יש להתחבר כדי להוסיף את {name}",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "יצירת חשבון",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} כבר באנשי הקשר שלך",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "פתיחת צ׳אט",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "זה קישור ההזמנה שלך",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "שתפו אותו עם האדם שתרצו להוסיף.",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "סיום",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "קישור ההזמנה הזה כבר לא עובד",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "בקשו קישור חדש ממי ששלח אותו.",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "לא ניתן היה להוסיף את {name}. בדקו את החיבור ונסו שוב.",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "האדם הזה",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} יקבל את ההודעות שלך כשהאפליקציה שלו תתחבר שוב.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} עדיין לא ענה. אפשר לבקש ממנו קישור חדש.",
+      "status": "machine"
+    },
+    "chat.pending.call_disabled": {
+      "text": "יהיה זמין כש־{name} יתחבר.",
+      "status": "machine"
+    },
+    "contacts.request.dead_link_note": {
+      "text": "נשלח דרך קישור הזמנה שכבר לא עובד.",
       "status": "machine"
     }
   }

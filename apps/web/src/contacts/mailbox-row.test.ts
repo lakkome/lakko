@@ -139,6 +139,9 @@ describe("dispatching the rows of one mailbox read", () => {
         new Uint8Array(0),
         new Uint8Array(0),
         undefined,
+        // ADR-0079 — no link answer.
+        new Uint8Array(0),
+        new Uint8Array(0),
         new TextEncoder().encode("hi"),
       );
       const row = sealRowFor(wasm, targetOf(bob), "contact-request", wire);

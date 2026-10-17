@@ -134,6 +134,7 @@ use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
     ContactError, ContactRequest as RustContactRequest, Direction as RustDirection,
     IdentityPseudonym as RustIdentityPseudonym, InviteCapability as RustInviteCapability,
+    InvitePreview as RustInvitePreview, LinkAnswer as RustLinkAnswer,
     PerRelationship as RustPerRelationship, StrangerInbox as RustStrangerInbox, ACCOUNT_ID_LEN,
     MAX_LABEL_LEN, PSEUDONYM_LEN,
 };
@@ -415,13 +416,19 @@ impl PerRelationship {
 /// `wrapCallKeyPackage` / `wrapCallWelcome` intro) carries it too, for the
 /// Welcome back.
 ///
+/// `link_answer` (ADR-0079 §2) names the `/i/` link the request is sent
+/// from: the capability's `linkId` and the link secret from the URL
+/// fragment. Sealed to the recipient; the recipient's device accepts the
+/// request without asking when it names one of its live links. `None` for a
+/// request that does not come from an `/i/` link.
+///
 /// `intro_message` is the optional plaintext payload (sealed in
 /// an HPKE-equivalent envelope to `recipient_x25519_pub`).
 ///
 /// # Errors
 ///
 /// * [`FfiError::Contacts`] on wrong-length seed / account-id /
-///   pseudonym, over-cap `privacy_pass_token`, or any AEAD
+///   pseudonym / link answer, over-cap `privacy_pass_token`, or any AEAD
 ///   failure inside the sealed envelope.
 /// * A `Username*` / `DisplayName*` variant when `profile` violates a
 ///   bound — nothing is composed, so no recipient ever drops it.
@@ -440,10 +447,12 @@ pub fn compose_contact_request(
     privacy_pass_token: Vec<u8>,
     profile: Option<FfiProfile>,
     reply_grant: Option<crate::scoped_discovery::FfiReachGrant>,
+    link_answer: Option<FfiLinkAnswer>,
     intro_message: Vec<u8>,
 ) -> Result<Vec<u8>, FfiError> {
     let profile = profile.map(prepare_profile).transpose()?;
     let reply_grant = reply_grant.map(RustReachGrant::try_from).transpose()?;
+    let link_answer = link_answer.map(RustLinkAnswer::try_from).transpose()?;
     if sender_signing_seed.len() != 32 {
         return Err(FfiError::Contacts(
             "senderSigningSeed must be 32 bytes".to_string(),
@@ -481,9 +490,51 @@ pub fn compose_contact_request(
         &privacy_pass_token,
         profile.as_ref(),
         reply_grant.as_ref(),
+        link_answer.as_ref(),
         &intro_message,
     )?;
     Ok(wire)
+}
+
+/// Which `/i/` link a contact request answers (ADR-0079 §2). SECRET: the
+/// secret opens the link; never log either field.
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
+pub struct FfiLinkAnswer {
+    /// The link's 16-byte id (`InviteCapability.linkId`).
+    pub link_id: Vec<u8>,
+    /// The link's 12-byte secret (the URL fragment).
+    pub link_secret: Vec<u8>,
+}
+
+impl core::fmt::Debug for FfiLinkAnswer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FfiLinkAnswer").finish_non_exhaustive()
+    }
+}
+
+impl TryFrom<FfiLinkAnswer> for RustLinkAnswer {
+    type Error = FfiError;
+
+    fn try_from(a: FfiLinkAnswer) -> Result<Self, FfiError> {
+        let link_id = <[u8; 16]>::try_from(a.link_id.as_slice())
+            .map_err(|_| FfiError::Contacts("linkAnswer.linkId must be 16 bytes".to_string()))?;
+        let link_secret = <[u8; 12]>::try_from(a.link_secret.as_slice()).map_err(|_| {
+            FfiError::Contacts("linkAnswer.linkSecret must be 12 bytes".to_string())
+        })?;
+        Ok(Self {
+            link_id,
+            link_secret,
+        })
+    }
+}
+
+impl From<RustLinkAnswer> for FfiLinkAnswer {
+    fn from(a: RustLinkAnswer) -> Self {
+        Self {
+            link_id: a.link_id.to_vec(),
+            link_secret: a.link_secret.to_vec(),
+        }
+    }
 }
 
 /// Composed and verified ContactRequest. Mirror of
@@ -587,6 +638,7 @@ impl ContactRequest {
         Ok(OpenedContactRequest {
             profile: opened.profile.map(Into::into),
             reply_grant: opened.reply_grant.map(Into::into),
+            link_answer: opened.link_answer.map(Into::into),
             intro_message: opened.intro,
         })
     }
@@ -605,6 +657,12 @@ pub struct OpenedContactRequest {
     /// requester's mailbox with `DsProofSigner.forReach(replyGrant.seed)`.
     /// Always class `Reply`; a grant of any other class fails the open.
     pub reply_grant: Option<crate::scoped_discovery::FfiReachGrant>,
+    /// Which of the recipient's `/i/` links the request answers (ADR-0079
+    /// §2), or `None`. SECRET. Ask `SyncedState.linkAnswerVerdict` with it
+    /// and the request's `fromPubkey`: `Accept` runs the accept path without
+    /// a card, `Answered` shows nothing, `Dead` shows the card with the
+    /// "no longer works" note.
+    pub link_answer: Option<FfiLinkAnswer>,
     /// The intro message, possibly empty. May itself be a call envelope —
     /// classify it with [`dispatch_incoming_envelope`] as before.
     pub intro_message: Vec<u8>,
@@ -1188,11 +1246,18 @@ pub fn group_name_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u6
 /// it when the link is revoked or expires. The grant travels inside the
 /// signed, sealed capability, so only a link holder reads it.
 ///
+/// `inviter_display_name` and `inviter_username` (ADR-0079 §1) name the
+/// owner on the invite page: the owner's own display name (trimmed; blank =
+/// none) and username (normalised, `@Alice` -> `alice`). Both are sealed
+/// under the link secret with the rest of the capability.
+///
 /// # Errors
 ///
 /// * [`FfiError::Contacts`] on wrong-length seed / account-id /
 ///   x25519 pubkey / link id, on a label exceeding `MAX_LABEL_LEN`
 ///   bytes, or on a grant of any class but `Link`.
+/// * A `DisplayName*` / `Username*` variant for a preview that breaks the
+///   ADR-0048 rules.
 /// * [`FfiError::Reach`] `seedLength` for a grant seed that is not 32 bytes.
 /// * [`FfiError::Crypto`] when `owner_x25519_pubkey` is not a
 ///   valid X25519 public key (canonical encoding).
@@ -1208,9 +1273,21 @@ pub fn compose_invite_capability(
     label: String,
     link_id: Vec<u8>,
     link_grant: crate::scoped_discovery::FfiReachGrant,
+    inviter_display_name: Option<String>,
+    inviter_username: Option<String>,
 ) -> Result<InviteLinkMint, FfiError> {
     let link_id = link_id16(&link_id)?;
     let link_grant = RustReachGrant::try_from(link_grant)?;
+    let preview = RustInvitePreview {
+        display_name: match inviter_display_name {
+            Some(name) => rust_normalize_display_name(&name)?.unwrap_or_default(),
+            None => String::new(),
+        },
+        username: match inviter_username.as_deref().map(str::trim) {
+            None | Some("") => String::new(),
+            Some(raw) => lakko_discovery_client::validate_username(raw)?,
+        },
+    };
     if owner_signing_seed.len() != 32 {
         return Err(FfiError::Contacts(
             "ownerSigningSeed must be 32 bytes".to_string(),
@@ -1254,6 +1331,7 @@ pub fn compose_invite_capability(
         &label,
         &link_id,
         &link_grant,
+        &preview,
     )?;
     seal_mint(
         &signing,
@@ -1377,6 +1455,19 @@ impl InviteCapability {
     /// The link's 16-byte reach scope id (ADR-0060 §6).
     pub fn link_id(&self) -> Vec<u8> {
         self.inner.link_id.to_vec()
+    }
+
+    /// The owner's display name as the link states it (ADR-0079 §1), or
+    /// `None`. The owner's own claim: shown on the invite page, never used
+    /// for identity.
+    pub fn inviter_display_name(&self) -> Option<String> {
+        Some(self.inner.preview.display_name.clone()).filter(|n| !n.is_empty())
+    }
+
+    /// The owner's username as the link states it (ADR-0079 §1), canonical,
+    /// or `None`.
+    pub fn inviter_username(&self) -> Option<String> {
+        Some(self.inner.preview.username.clone()).filter(|u| !u.is_empty())
     }
 
     /// The link's `link` reach grant (ADR-0060 §6). SECRET — hold it only
@@ -2270,6 +2361,17 @@ pub enum FfiIncomingEnvelopeKind {
     /// change is visible. The envelope carries the new account's entropy:
     /// never log it.
     KeyRotation,
+    /// What another device of this account says about itself (ADR-0080).
+    /// The decoded card rides the `device_card` field; `payload` is empty.
+    /// Never render it. Appended last so every earlier variant keeps its
+    /// ordinal.
+    ///
+    /// Meaningful ONLY in the account's own DeviceGroup: met anywhere else,
+    /// drop it. Store it under the sender's DeviceGroup leaf signature key
+    /// resolved at receipt (C-68), keep it only when
+    /// [`crate::device_card::device_card_is_newer`], drop it when the leaf
+    /// leaves.
+    DeviceCard,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2338,6 +2440,10 @@ pub struct FfiIncomingEnvelope {
     /// initialisers compile.
     #[uniffi(default = None)]
     pub key_rotation: Option<crate::key_rotation::FfiKeyRotation>,
+    /// Set only for `DeviceCard` (ADR-0080): the decoded card. `None` for
+    /// every other kind. Defaults to `None` so existing initialisers compile.
+    #[uniffi(default = None)]
+    pub device_card: Option<crate::device_card::FfiDeviceCard>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -2433,6 +2539,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             key_rotation: Some(rotation.into()),
             ..FfiIncomingEnvelope::of(K::KeyRotation)
         },
+        IncomingEnvelope::DeviceCard(card) => FfiIncomingEnvelope {
+            device_card: Some(card.into()),
+            ..FfiIncomingEnvelope::of(K::DeviceCard)
+        },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),
             ..FfiIncomingEnvelope::of(K::IntroMessage)
@@ -2460,6 +2570,7 @@ impl FfiIncomingEnvelope {
             shared_channels: None,
             group_closed: None,
             key_rotation: None,
+            device_card: None,
         }
     }
 }
@@ -3570,6 +3681,7 @@ mod tests {
             vec![], // privacy_pass_token — empty for unit test
             None,   // profile (ADR-0048)
             Some(test_reply_grant()),
+            None,
             intro.clone(),
         )
         .expect("compose");
@@ -3635,6 +3747,7 @@ mod tests {
             vec![],
             None,
             Some(test_link_grant()),
+            None,
             b"hi".to_vec(),
         )
         .expect_err("a link grant is not a reply grant");
@@ -3673,7 +3786,8 @@ mod tests {
             0,
             vec![], // privacy_pass_token
             None,   // profile (ADR-0048)
-            None,   // reply grant (ADR-0060 §6)
+            None,
+            None, // reply grant (ADR-0060 §6)
             vec![],
         )
         .expect_err("expected wrong-length rejection");
@@ -3693,7 +3807,8 @@ mod tests {
             0,
             vec![], // privacy_pass_token
             None,   // profile (ADR-0048)
-            None,   // reply grant (ADR-0060 §6)
+            None,
+            None, // reply grant (ADR-0060 §6)
             vec![],
         )
         .expect_err("expected wrong-length rejection");
@@ -3731,6 +3846,8 @@ mod tests {
             "lunch group".to_string(),
             TEST_LINK_ID.to_vec(),
             test_link_grant(),
+            None,
+            None,
         )
         .expect("compose");
         assert_eq!(mint.link_secret.len(), 12);
@@ -3777,6 +3894,8 @@ mod tests {
                 String::new(),
                 TEST_LINK_ID.to_vec(),
                 test_reply_grant(),
+                None,
+                None,
             ),
             Err(FfiError::Contacts(_))
         ));
@@ -3805,6 +3924,8 @@ mod tests {
             too_long,
             TEST_LINK_ID.to_vec(),
             test_link_grant(),
+            None,
+            None,
         )
         .expect_err("expected oversize-label rejection");
         match err {
@@ -3941,6 +4062,8 @@ mod tests {
             String::new(),
             TEST_LINK_ID.to_vec(),
             test_link_grant(),
+            None,
+            None,
         )
         .expect("compose");
         // The tag is over the PLAINTEXT capability the link opens to.
@@ -3986,7 +4109,8 @@ mod tests {
             0,
             vec![], // privacy_pass_token
             None,   // profile (ADR-0048)
-            None,   // reply grant (ADR-0060 §6)
+            None,
+            None, // reply grant (ADR-0060 §6)
             b"secret".to_vec(),
         )
         .expect("compose");
@@ -4022,6 +4146,7 @@ mod tests {
             0,
             token.clone(),
             None, // profile (ADR-0048)
+            None,
             None, // reply grant (ADR-0060 §6)
             b"".to_vec(),
         )
@@ -5135,6 +5260,7 @@ mod tests {
             0,
             vec![],
             Some(typed_profile()),
+            None,
             None, // reply grant (ADR-0060 §6)
             b"hi bob".to_vec(),
         )
@@ -5156,6 +5282,7 @@ mod tests {
             0,
             vec![],
             Some(bad),
+            None,
             None, // reply grant (ADR-0060 §6)
             b"hi bob".to_vec(),
         )

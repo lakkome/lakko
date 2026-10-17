@@ -60,10 +60,10 @@
 //!     fresh ephemeral per envelope (`crate::envelope::seal`),
 //!     so we don't need the owner-side prekey here.
 //!
-//! ## Wire format (manual codec, v2 — ADR-0060 §6)
+//! ## Wire format (manual codec, v3 — ADR-0079)
 //!
 //! ```text
-//! u8           schema version (= 2)
+//! u8           schema version (= 3)
 //! [32 bytes]   owner_signature_pubkey            — Ed25519 verifying key
 //! [16 bytes]   owner_account_id                  — UUIDv7 raw
 //! [32 bytes]   owner_x25519_pubkey               — long-term HPKE init key
@@ -74,16 +74,31 @@
 //! [label_len]  label_bytes (UTF-8, ≤ MAX_LABEL_LEN)
 //! [16 bytes]   link_id                            — random, the reach scope of this link
 //! [134 bytes]  link_grant                         — ReachGrant, class `link` (SECRET)
+//! u8           inviter_name_len                   — 0..=255
+//! [..]         inviter_name (UTF-8)               — the ADR-0048 display-name rule, or empty
+//! u8           inviter_username_len               — 0 or 3..=32
+//! [..]         inviter_username                   — canonical `[a-z0-9_]`, or empty
 //! [64 bytes]   signature                          — Ed25519 over the above
 //! ```
 //!
 //! Signature covers everything from the schema-version byte through
-//! `link_grant` inclusive — i.e. the entire encoding except the
+//! the inviter preview inclusive — i.e. the entire encoding except the
 //! trailing 64-byte signature itself. Mirrors `request.rs`'s
 //! pattern exactly.
 //!
-//! v1 (no link grant) is refused: a flag day, since nothing is deployed
-//! (ADR-0060).
+//! v1 (no link grant) and v2 (no inviter preview) are refused: a flag day,
+//! since nothing is deployed (ADR-0060, ADR-0079).
+//!
+//! ## The inviter preview (ADR-0079 section 1)
+//!
+//! The capability names its owner, so the invite page can say who invites:
+//! the owner's display name (the ADR-0048 rule, at most
+//! [`MAX_PREVIEW_NAME_BYTES`] bytes) and username (the canonical username
+//! rule), either of which may be empty. Both are inside the signed part and
+//! inside the link seal, so the ledger and the server see ciphertext only
+//! (invariant #2), and a relay can neither read nor swap them. They are the
+//! owner's claim about themselves, exactly as a profile is: shown on the
+//! invite page, never used for identity.
 //!
 //! ## The link grant (ADR-0060 §6)
 //!
@@ -135,6 +150,7 @@
 //!     "Alice's home",
 //!     &link_id,    // generate_link_id(), kept with the link for revoke
 //!     &link_grant, // ReachGrant::derive(account_seed, Link, &link_id, 0)
+//!     &InvitePreview { display_name: "Alice".into(), username: "alice".into() },
 //! )?;
 //! let secret = lakko_contacts::link_seal::generate_link_secret();
 //! let sealed = lakko_contacts::invite::seal_link(&secret, &bytes)?;
@@ -159,12 +175,108 @@ use lakko_crypto::signing::{
 };
 
 use crate::error::{ContactError, Result};
+use crate::profile::{check_display_name, DISPLAY_NAME_MAX_BYTES};
 use crate::reach::{ReachClass, ReachGrant, REACH_GRANT_LEN};
 use crate::request::ACCOUNT_ID_LEN;
+use crate::username::{check_canonical_username, USERNAME_MAX_LEN};
 
 /// Current schema version on the wire. v2 (ADR-0060) added the link id and
-/// the link reach grant; v1 is refused.
-const SCHEMA_VERSION: u8 = 2;
+/// the link reach grant; v3 (ADR-0079) the inviter preview. Older versions
+/// are refused.
+const SCHEMA_VERSION: u8 = 3;
+
+/// Longest inviter display name the preview carries (the ADR-0048 byte
+/// bound).
+pub const MAX_PREVIEW_NAME_BYTES: usize = DISPLAY_NAME_MAX_BYTES;
+
+/// Longest inviter username the preview carries.
+pub const MAX_PREVIEW_USERNAME_BYTES: usize = USERNAME_MAX_LEN;
+
+/// Most bytes the inviter preview adds to a capability wire: two length
+/// bytes, the longest name and the longest username.
+pub const MAX_PREVIEW_LEN: usize = 1 + MAX_PREVIEW_NAME_BYTES + 1 + MAX_PREVIEW_USERNAME_BYTES;
+
+/// Who the link invites to (ADR-0079 section 1): the owner's display name
+/// and username as the owner states them. Either may be empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InvitePreview {
+    /// The owner's display name (the ADR-0048 rule), or empty.
+    pub display_name: String,
+    /// The owner's canonical username, or empty.
+    pub username: String,
+}
+
+impl InvitePreview {
+    /// Check both fields: a name that is empty or passes the display-name
+    /// rule, a username that is empty or canonical.
+    ///
+    /// # Errors
+    ///
+    /// [`ContactError::InvalidArgument`] naming the field and the reason
+    /// code; never the value.
+    pub fn validate(&self) -> Result<()> {
+        if !self.display_name.is_empty() {
+            check_display_name(&self.display_name).map_err(|e| {
+                ContactError::InvalidArgument(format!("inviter name: {}", e.code()))
+            })?;
+        }
+        if !self.username.is_empty() {
+            check_canonical_username(&self.username).map_err(|e| {
+                ContactError::InvalidArgument(format!("inviter username: {}", e.code()))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        // Both lengths are bounded by `validate` (255 and 32 bytes).
+        out.push(u8::try_from(self.display_name.len()).unwrap_or(u8::MAX));
+        out.extend_from_slice(self.display_name.as_bytes());
+        out.push(u8::try_from(self.username.len()).unwrap_or(u8::MAX));
+        out.extend_from_slice(self.username.as_bytes());
+    }
+
+    /// Read a preview off the cursor, fail-closed.
+    fn take(cur: &mut &[u8]) -> Result<Self> {
+        let name_len = usize::from(take_u8(cur)?);
+        let name = std::str::from_utf8(take_n(cur, name_len)?)
+            .map_err(|_| ContactError::InvalidEncoding("inviter name is not UTF-8".into()))?
+            .to_string();
+        let username_len = usize::from(take_u8(cur)?);
+        if username_len > MAX_PREVIEW_USERNAME_BYTES {
+            return Err(ContactError::InvalidEncoding(
+                "inviter username is too long".into(),
+            ));
+        }
+        let username = std::str::from_utf8(take_n(cur, username_len)?)
+            .map_err(|_| ContactError::InvalidEncoding("inviter username is not UTF-8".into()))?
+            .to_string();
+        let preview = Self {
+            display_name: name,
+            username,
+        };
+        preview.validate().map_err(|e| match e {
+            ContactError::InvalidArgument(reason) => ContactError::InvalidEncoding(reason),
+            other => other,
+        })?;
+        Ok(preview)
+    }
+}
+
+/// The fuzz oracle behind `fuzz_api::invite_preview`: decode a preview
+/// encoding directly (the signature otherwise hides it from a fuzzer).
+/// `None` when refused; `Some(true)` when the accepted preview re-encodes to
+/// the same bytes with nothing left over; `Some(false)` on a disagreement.
+pub(crate) fn fuzz_preview(bytes: &[u8]) -> Option<bool> {
+    let mut cur = bytes;
+    let preview = InvitePreview::take(&mut cur).ok()?;
+    if !cur.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    preview.encode_into(&mut out);
+    Some(out == bytes && preview.validate().is_ok())
+}
 
 /// Length of the random per-link id an `/i/` or `/c/` capability carries:
 /// the scope of the link's reach grant (ADR-0060 §6). The owner mints one
@@ -275,8 +387,8 @@ pub const BLOB_ID_LEN: usize = 6;
 pub const BLOB_ID_B64URL_LEN: usize = 8;
 
 /// Longest capability wire [`compose`] can produce: the fixed fields plus a
-/// [`MAX_LABEL_LEN`]-byte label, the link id, the link grant and the
-/// signature (277 bytes).
+/// [`MAX_LABEL_LEN`]-byte label, the link id, the link grant, the longest
+/// inviter preview and the signature (663 bytes).
 pub const MAX_WIRE_LEN: usize = 1
     + ED25519_PUB_LEN
     + ACCOUNT_ID_LEN
@@ -288,6 +400,7 @@ pub const MAX_WIRE_LEN: usize = 1
     + MAX_LABEL_LEN
     + LINK_ID_LEN
     + REACH_GRANT_LEN
+    + MAX_PREVIEW_LEN
     + SIGNATURE_LEN;
 
 /// Longest sealed `/i/` link blob (what the discovery ledger stores).
@@ -561,6 +674,9 @@ pub struct InviteCapability {
     /// the holder signs the contact request's mailbox write with it. Always
     /// class [`ReachClass::Link`].
     pub link_grant: ReachGrant,
+    /// Who the link invites to (ADR-0079): the owner's display name and
+    /// username, the owner's own claim.
+    pub preview: InvitePreview,
 }
 
 impl InviteCapability {
@@ -613,10 +729,13 @@ impl InviteCapability {
 /// `ReachGrant::derive(account_seed, ReachClass::Link, link_id, version)`
 /// and registers its public key before sharing the link.
 ///
+/// `preview` names the owner on the invite page (ADR-0079 section 1).
+///
 /// # Errors
 ///
 /// - [`ContactError::InvalidArgument`] when `label.len() > MAX_LABEL_LEN`,
-///   or `link_grant` is not class [`ReachClass::Link`].
+///   `link_grant` is not class [`ReachClass::Link`], or `preview` breaks
+///   the display-name or username rule.
 #[allow(clippy::too_many_arguments)]
 pub fn compose(
     owner_signing: &SigningKey,
@@ -628,6 +747,7 @@ pub fn compose(
     label: &str,
     link_id: &[u8; LINK_ID_LEN],
     link_grant: &ReachGrant,
+    preview: &InvitePreview,
 ) -> Result<Vec<u8>> {
     if label.len() > MAX_LABEL_LEN {
         return Err(ContactError::InvalidArgument(format!(
@@ -636,6 +756,7 @@ pub fn compose(
             MAX_LABEL_LEN,
         )));
     }
+    preview.validate()?;
     check_link_grant(link_grant)?;
     let owner_pubkey = owner_signing.verifying_key();
     check_link_grant_binding(link_grant, &owner_pubkey)?;
@@ -649,6 +770,7 @@ pub fn compose(
         label,
         link_id,
         link_grant,
+        preview,
     );
     let signature = owner_signing.sign(&wire);
     wire.extend_from_slice(&signature.to_bytes());
@@ -668,8 +790,9 @@ pub fn compose(
 /// # Errors
 ///
 /// - [`ContactError::InvalidEncoding`] — wire format malformed,
-///   wrong schema version (v1 included), oversized label, a link grant
-///   that does not parse or is not class `link`, or trailing bytes.
+///   wrong schema version (v1 and v2 included), oversized label, a link
+///   grant that does not parse or is not class `link`, an inviter preview
+///   that breaks the display-name or username rule, or trailing bytes.
 /// - [`ContactError::BadSignature`] — Ed25519 verification failed.
 /// - [`ContactError::Crypto`] — embedded pubkey bytes did not
 ///   parse as a valid Ed25519 / X25519 point.
@@ -725,6 +848,7 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<InviteCapability> {
     let mut link_id = [0u8; LINK_ID_LEN];
     link_id.copy_from_slice(take_n(&mut cur, LINK_ID_LEN)?);
     let link_grant = decode_link_grant(take_n(&mut cur, REACH_GRANT_LEN)?)?;
+    let preview = InvitePreview::take(&mut cur)?;
     let signature_bytes = take_n(&mut cur, SIGNATURE_LEN)?;
     let signature = Signature::from_bytes(signature_bytes).map_err(ContactError::Crypto)?;
 
@@ -746,6 +870,7 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<InviteCapability> {
         &label,
         &link_id,
         &link_grant,
+        &preview,
     );
     owner_signature_pubkey
         .verify(&signed_prefix, &signature)
@@ -765,6 +890,7 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<InviteCapability> {
         label,
         link_id,
         link_grant,
+        preview,
     })
 }
 
@@ -783,6 +909,7 @@ fn encode_signing_prefix(
     label: &str,
     link_id: &[u8; LINK_ID_LEN],
     link_grant: &ReachGrant,
+    preview: &InvitePreview,
 ) -> Vec<u8> {
     let label_len_u16 =
         u16::try_from(label.len()).expect("label fits in u16; caller checked MAX_LABEL_LEN");
@@ -798,6 +925,7 @@ fn encode_signing_prefix(
     out.extend_from_slice(label.as_bytes());
     out.extend_from_slice(link_id);
     out.extend_from_slice(&link_grant.encode());
+    preview.encode_into(&mut out);
     out
 }
 
@@ -860,6 +988,7 @@ mod tests {
             label,
             &TEST_LINK_ID,
             &link_grant_of(signing),
+            &InvitePreview::default(),
         )
     }
 
@@ -876,6 +1005,7 @@ mod tests {
         prefix.extend_from_slice(&0u16.to_be_bytes());
         prefix.extend_from_slice(&TEST_LINK_ID);
         prefix.extend_from_slice(grant_bytes);
+        prefix.extend_from_slice(&[0, 0]); // empty inviter preview
         let sig = signing.sign(&prefix);
         prefix.extend_from_slice(&sig.to_bytes());
         prefix
@@ -896,16 +1026,18 @@ mod tests {
             "",
             &link_id,
             &grant,
+            &InvitePreview::default(),
         )
         .unwrap();
         let cap = decode_and_verify(&wire).unwrap();
         assert_eq!(cap.link_id, link_id);
         assert_eq!(cap.link_grant, grant);
         assert_eq!(cap.link_grant.verifying_key(), grant.verifying_key());
-        // The id and the grant sit before the signature; flipping either is
-        // a signature failure, so a relay cannot swap the grant.
-        let grant_at = wire.len() - SIGNATURE_LEN - REACH_GRANT_LEN;
-        for at in [grant_at - 1, grant_at + 1, wire.len() - SIGNATURE_LEN - 1] {
+        // The id and the grant sit before the (empty, two-byte) preview and
+        // the signature; flipping either is a signature failure, so a relay
+        // cannot swap the grant.
+        let grant_at = wire.len() - SIGNATURE_LEN - 2 - REACH_GRANT_LEN;
+        for at in [grant_at - 1, grant_at + 1, grant_at + REACH_GRANT_LEN - 1] {
             let mut bad = wire.clone();
             bad[at] ^= 0x01;
             assert!(matches!(
@@ -935,6 +1067,7 @@ mod tests {
                     "",
                     &TEST_LINK_ID,
                     &grant,
+                    &InvitePreview::default(),
                 ),
                 Err(ContactError::InvalidArgument(_))
             ));
@@ -977,8 +1110,180 @@ mod tests {
                 "",
                 &TEST_LINK_ID,
                 &test_link_grant(),
+                &InvitePreview::default(),
             ),
             Err(ContactError::InvalidArgument(_))
+        ));
+    }
+
+    fn max_preview() -> InvitePreview {
+        // 63 four-byte scalars and one three-byte scalar: 255 bytes in 64
+        // scalars, the longest name both display-name bounds admit.
+        let mut name = "\u{1F600}".repeat(63);
+        name.push('\u{20AC}');
+        assert_eq!(name.len(), MAX_PREVIEW_NAME_BYTES);
+        InvitePreview {
+            display_name: name,
+            username: "a".repeat(MAX_PREVIEW_USERNAME_BYTES),
+        }
+    }
+
+    #[test]
+    fn the_inviter_preview_round_trips_inside_the_signature() {
+        let (signing, account_id, x25519_pub) = fixture();
+        let preview = InvitePreview {
+            display_name: "Anna Ivanova".into(),
+            username: "anna".into(),
+        };
+        let wire = compose(
+            &signing,
+            &account_id,
+            &x25519_pub,
+            0,
+            0,
+            false,
+            "",
+            &TEST_LINK_ID,
+            &link_grant_of(&signing),
+            &preview,
+        )
+        .unwrap();
+        assert_eq!(decode_and_verify(&wire).unwrap().preview, preview);
+        // Every preview byte is signed.
+        let preview_at = wire.len() - SIGNATURE_LEN - (2 + 12 + 4);
+        for at in preview_at..wire.len() - SIGNATURE_LEN {
+            let mut bad = wire.clone();
+            bad[at] ^= 0x01;
+            assert!(decode_and_verify(&bad).is_err());
+        }
+        // A name alone and a username alone both round-trip.
+        for p in [
+            InvitePreview {
+                display_name: "Anna".into(),
+                username: String::new(),
+            },
+            InvitePreview {
+                display_name: String::new(),
+                username: "anna_1".into(),
+            },
+        ] {
+            let wire = compose(
+                &signing,
+                &account_id,
+                &x25519_pub,
+                0,
+                0,
+                false,
+                "",
+                &TEST_LINK_ID,
+                &link_grant_of(&signing),
+                &p,
+            )
+            .unwrap();
+            assert_eq!(decode_and_verify(&wire).unwrap().preview, p);
+        }
+    }
+
+    #[test]
+    fn an_invalid_preview_is_refused_by_compose_and_decode() {
+        let (signing, account_id, x25519_pub) = fixture();
+        let bad = [
+            (" Anna", ""),
+            ("An\nna", ""),
+            ("Anna\u{202E}", ""),
+            ("", "Anna"),
+            ("", "an"),
+            ("", "anna.b"),
+        ];
+        for (name, username) in bad {
+            let preview = InvitePreview {
+                display_name: name.into(),
+                username: username.into(),
+            };
+            assert!(matches!(
+                compose(
+                    &signing,
+                    &account_id,
+                    &x25519_pub,
+                    0,
+                    0,
+                    false,
+                    "",
+                    &TEST_LINK_ID,
+                    &link_grant_of(&signing),
+                    &preview,
+                ),
+                Err(ContactError::InvalidArgument(_))
+            ));
+            // The same preview hand-signed: decode refuses it as an encoding
+            // error even though the signature verifies.
+            let mut prefix = encode_signing_prefix(
+                &signing.verifying_key(),
+                &account_id,
+                &x25519_pub,
+                0,
+                0,
+                false,
+                "",
+                &TEST_LINK_ID,
+                &link_grant_of(&signing),
+                &InvitePreview::default(),
+            );
+            prefix.truncate(prefix.len() - 2);
+            preview.encode_into(&mut prefix);
+            let sig = signing.sign(&prefix);
+            prefix.extend_from_slice(&sig.to_bytes());
+            assert!(matches!(
+                decode_and_verify(&prefix),
+                Err(ContactError::InvalidEncoding(_))
+            ));
+        }
+        // A username length byte past the bound is refused before the bytes
+        // are read.
+        let mut prefix = encode_signing_prefix(
+            &signing.verifying_key(),
+            &account_id,
+            &x25519_pub,
+            0,
+            0,
+            false,
+            "",
+            &TEST_LINK_ID,
+            &link_grant_of(&signing),
+            &InvitePreview::default(),
+        );
+        let n = prefix.len();
+        prefix[n - 1] = 33;
+        prefix.extend_from_slice(&[b'a'; 33]);
+        let sig = signing.sign(&prefix);
+        prefix.extend_from_slice(&sig.to_bytes());
+        assert!(matches!(
+            decode_and_verify(&prefix),
+            Err(ContactError::InvalidEncoding(_))
+        ));
+    }
+
+    #[test]
+    fn the_preview_oracle_accepts_exactly_canonical_previews() {
+        let mut out = Vec::new();
+        max_preview().encode_into(&mut out);
+        assert_eq!(out.len(), MAX_PREVIEW_LEN);
+        assert_eq!(fuzz_preview(&out), Some(true));
+        assert_eq!(fuzz_preview(&[0, 0]), Some(true));
+        assert_eq!(fuzz_preview(&[0, 0, 0]), None);
+        assert_eq!(fuzz_preview(&[1, 0xFF, 0]), None);
+        assert_eq!(fuzz_preview(&[]), None);
+    }
+
+    #[test]
+    fn a_v2_capability_is_refused() {
+        let (signing, _, _) = fixture();
+        // A v2 wire had no preview: a v2 version byte is refused whatever
+        // follows.
+        let wire = hand_signed_with_grant(&signing, 2, &link_grant_of(&signing).encode());
+        assert!(matches!(
+            decode_and_verify(&wire),
+            Err(ContactError::InvalidEncoding(_))
         ));
     }
 
@@ -1011,8 +1316,21 @@ mod tests {
     fn sealed_link_round_trips_and_refuses_a_wrong_secret() {
         let (signing, account_id, x25519_pub) = fixture();
         let label = "x".repeat(MAX_LABEL_LEN);
-        let wire = compose_t(&signing, &account_id, &x25519_pub, 0, 3, true, &label).unwrap();
+        let wire = compose(
+            &signing,
+            &account_id,
+            &x25519_pub,
+            0,
+            3,
+            true,
+            &label,
+            &TEST_LINK_ID,
+            &link_grant_of(&signing),
+            &max_preview(),
+        )
+        .unwrap();
         assert_eq!(wire.len(), MAX_WIRE_LEN);
+        assert_eq!(MAX_WIRE_LEN, 663);
         let secret = crate::link_seal::generate_link_secret();
         let sealed = seal_link(&secret, &wire).unwrap();
         assert_eq!(sealed.len(), MAX_SEALED_LEN);
@@ -1355,6 +1673,7 @@ mod tests {
             "",
             &TEST_LINK_ID,
             &link_grant_of(&signing_real),
+            &InvitePreview::default(),
         );
         let bad_sig = signing_attacker.sign(&wire);
         wire.extend_from_slice(&bad_sig.to_bytes());
@@ -1386,6 +1705,7 @@ mod tests {
         prefix.extend_from_slice(&label_bytes);
         prefix.extend_from_slice(&TEST_LINK_ID);
         prefix.extend_from_slice(&test_link_grant().encode());
+        prefix.extend_from_slice(&[0, 0]); // empty inviter preview
 
         let sig = signing.sign(&prefix);
         let mut wire = prefix;
@@ -1664,7 +1984,8 @@ mod tests {
             1_700_000_000_000, // valid_after_ms
             b"",               // privacy_pass_token (empty for the test)
             None,              // profile (ADR-0048)
-            None,              // reply grant (ADR-0060)
+            None,
+            None, // reply grant (ADR-0060)
             intro,
         )
         .expect("Bob's ContactRequest compose must succeed");

@@ -16,15 +16,20 @@
  * real error; the same bytes would be rejected again by whoever opens them).
  *
  * ADR-0078 section 10: the ledger rows name no owner, so there is no owner
- * query. The list is this device's own records of the links it minted, read
- * when this panel opens and after every change; a link minted on another
- * device is listed and revoked there. Revoking signs with the link's own
- * revocation seed, never the account key.
+ * query. ADR-0079 section 4 replaced "the links made on this device": the
+ * list is the account's link-record register (`devices/sync/link-records.ts`),
+ * which every device of the account holds, so a link made on another device
+ * is listed, copied and revoked here too. The revocation seed stays on the
+ * device that minted the link (`minted-links.ts`): revoking there deletes the
+ * ledger row at once; revoking anywhere else marks the register revoked
+ * (final) and the minting device deletes the row when it sees the mark
+ * (`own-links.ts` `revokeLinksRevokedElsewhere`). Either way no device of the
+ * account takes a request through the link from that moment.
  */
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
-import { base64Encode, base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { DiscoveryClient } from "../discovery/client";
 import { Icon } from "../ui/icons";
@@ -35,10 +40,8 @@ import { createLiveText } from "../l10n/live-text";
 import { contactsErrorText } from "./errors";
 import { reachSession } from "../reach/reach-service";
 import {
-  isInlineLinkSlug,
   listMintedLinks,
   rememberMintedLink,
-  type MintedLinkFacts,
   type MintedLinkRow,
 } from "./minted-links";
 import { newRevocationKey, revokeMintedLink } from "./own-links";
@@ -59,6 +62,9 @@ import {
   type MaxUsesPreset,
 } from "./invite";
 import { describeInviteCreated, describeInviteExpiry, describeInviteLimit } from "./invite-describe";
+import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
+import { listedContactLinks, type LinkRecordModel } from "../devices/sync/link-records";
+import { useProfiles } from "../profile/ProfileContext";
 
 /** A link this panel can show: one this device minted and keeps a record
  *  of, or the inline fallback minted a moment ago (no server row, so it
@@ -72,44 +78,49 @@ interface LinkRow {
   /** The facts under the title, rendered in the current language. */
   readonly meta: () => string;
   readonly revocable: boolean;
-  /** The record the revoke acts on; `null` for the inline fallback. */
-  readonly link: MintedLinkRow | null;
+  /** The register record the revoke acts on; `null` for the inline
+   *  fallback. */
+  readonly record: LinkRecordModel | null;
 }
 
-/** A row for one kept record, or `null` for a record of another shape (a
- *  ledger id of another width, no facts kept). */
-function rowOf(link: MintedLinkRow, nowMs: number, widths: InviteLinkWidths): LinkRow | null {
-  const facts: MintedLinkFacts | null = link.facts;
-  if (facts === null || isInlineLinkSlug(link.blobIdSlug)) return null;
+/** A row for one register record, or `null` for an inline link (no ledger
+ *  row to point at) or a ledger id of another width. Pure. */
+function rowOfRecord(record: LinkRecordModel, nowMs: number, widths: InviteLinkWidths): LinkRow | null {
+  if (record.ledgerId.length === 0) return null;
   let url: string;
   try {
-    const pointer = composePointerInviteUrl(base64UrlDecodeNoPad(link.blobIdSlug), widths);
-    url = `${pointer}${appendInviteLinkSecret("", link.linkSecret, widths)}`;
+    const pointer = composePointerInviteUrl(record.ledgerId, widths);
+    url = `${pointer}${appendInviteLinkSecret("", record.linkSecret, widths)}`;
   } catch {
     return null;
   }
-  const meta = (): string => {
-    const parts = [
-      link.mintedAtMs === null ? "" : describeInviteCreated(new Date(link.mintedAtMs).toISOString()),
-      describeInviteExpiry(facts.expiryMs, nowMs),
-      describeInviteLimit(facts.maxUses),
-    ].filter((p) => p.length > 0);
-    if (facts.bootstrapReferral) parts.push(t("invite.links.for_new_user"));
-    return joinFacts(parts);
-  };
+  const meta = (): string =>
+    joinFacts(
+      [
+        describeInviteCreated(new Date(record.mintedAtMs).toISOString()),
+        describeInviteExpiry(record.expiryMs, nowMs),
+        describeInviteLimit(record.maxUses),
+      ].filter((p) => p.length > 0),
+    );
   return {
-    key: link.blobIdSlug,
+    key: record.linkIdHex,
     url,
-    label: facts.label.length > 0 ? facts.label : null,
+    label: record.label.length > 0 ? record.label : null,
     meta,
-    revocable: link.revocationSeed !== null,
-    link,
+    revocable: true,
+    record,
   };
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((v, k) => v === b[k]);
 }
 
 export function InviteLinksPanel(): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
+  const sync = useDeviceGroupSync();
+  const profiles = useProfiles();
   const discovery = new DiscoveryClient();
   discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
 
@@ -132,11 +143,13 @@ export function InviteLinksPanel(): JSX.Element {
   const rows = (): LinkRow[] => {
     const now = Date.now();
     const w = widths();
+    // ADR-0079: the register's live contact links (a used-up single-use link
+    // and a revoked one leave the list), newest first.
     const listed =
       w === null
         ? []
-        : links()
-            .map((l) => rowOf(l, now, w))
+        : listedContactLinks(sync.linkRecords(), now)
+            .map((r) => rowOfRecord(r, now, w))
             .filter((r): r is LinkRow => r !== null);
     const inline = inlineLink();
     return inline === null ? listed : [inline, ...listed];
@@ -211,6 +224,9 @@ export function InviteLinksPanel(): JSX.Element {
           label(),
           linkId,
           linkGrant,
+          // ADR-0079 section 1 — the link names its owner on the invite page.
+          profiles.ownProfile().displayName ?? undefined,
+          profiles.ownUsername() ?? undefined,
         );
       } catch (composeErr) {
         await session.revokeLink(linkId).catch(() => undefined);
@@ -251,6 +267,18 @@ export function InviteLinksPanel(): JSX.Element {
             },
           },
         );
+        // ADR-0079 section 4 — the link joins the synced register, so every
+        // device of the account recognises a request through it.
+        await sync.setLinkRecord({
+          linkId,
+          linkSecret,
+          kind: "contact",
+          ledgerId: blobId,
+          expiryMs: Number(expiryMs),
+          maxUses: maxUsesValue,
+          mintedAtMs: Date.now(),
+          label: label(),
+        });
         setInlineLink(null);
         await load();
       } catch (uploadErr) {
@@ -263,6 +291,18 @@ export function InviteLinksPanel(): JSX.Element {
         }
         // eslint-disable-next-line no-console
         console.warn("invite upload network-failed; falling back to the inline link");
+        // An inline link has no ledger row; its record is what lets a device
+        // of this account take a request sent through it.
+        await sync.setLinkRecord({
+          linkId,
+          linkSecret,
+          kind: "contact",
+          ledgerId: new Uint8Array(0),
+          expiryMs: Number(expiryMs),
+          maxUses: maxUsesValue,
+          mintedAtMs: Date.now(),
+          label: label(),
+        });
         setInlineLink({
           key: "inline",
           url: composeSealedInviteLink({
@@ -276,7 +316,7 @@ export function InviteLinksPanel(): JSX.Element {
           label: label().length > 0 ? label() : null,
           meta: () => t("invite.links.inline_note"),
           revocable: false,
-          link: null,
+          record: null,
         });
       }
       setCreating(false);
@@ -302,24 +342,31 @@ export function InviteLinksPanel(): JSX.Element {
   }
 
   async function onRevoke(row: LinkRow): Promise<void> {
-    const link = row.link;
-    if (link === null) return;
+    const record = row.record;
+    if (record === null) return;
     setError(null);
     setNotice(null);
     setBusyKey(row.key);
     try {
       const secrets = auth.identitySecrets();
       if (secrets === null) throw new KeyedError("invite.links.error.sign_in_revoke");
-      // ADR-0078 section 10: signed by the link's own revocation seed; the
-      // link's reach key (ADR-0060 section 6) and the record go with it, so a
-      // request written under the link is dropped even by a joiner who
-      // fetched it.
-      const outcome = await revokeMintedLink(discovery, base64Encode(secrets.accountId), link);
-      if (outcome === "unreachable") {
-        throw new KeyedError("chat.error.revoke_link");
+      // ADR-0079 section 4 — marked revoked in the register first: no device
+      // of the account takes a request through it from now on, whatever the
+      // ledger answers.
+      await sync.revokeLinkRecord(record.linkId);
+      // ADR-0078 section 10: the ledger row is deleted with the link's own
+      // revocation seed, which only the minting device holds; elsewhere the
+      // minting device deletes it when it sees the mark. The reach key
+      // (ADR-0060 section 6) goes now on any device.
+      const local = links().find((l) => l.kind === "contact" && bytesEqual(l.linkId, record.linkId));
+      if (local !== undefined) {
+        const outcome = await revokeMintedLink(discovery, base64Encode(secrets.accountId), local);
+        if (outcome === "unreachable") throw new KeyedError("chat.error.revoke_link");
+        forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), local.blobIdSlug);
+        setLinks(links().filter((l) => l.blobIdSlug !== local.blobIdSlug));
+      } else {
+        await reachSession()?.revokeLink(record.linkId).catch(() => undefined);
       }
-      forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), link.blobIdSlug);
-      setLinks(links().filter((l) => l.blobIdSlug !== link.blobIdSlug));
       setNotice(() => t("invite.links.revoked"));
     } catch (err) {
       setError(contactsErrorText(err, "chat.error.revoke_link"));

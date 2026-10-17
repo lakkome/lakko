@@ -82,6 +82,9 @@ public struct ChatListScreen: View {
     /// keeps the row indicators + the sort order live as sibling devices
     /// publish updates.
     @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
+    /// ADR-0079 — the people added through their invite link whose app has
+    /// not answered yet are listed in All chats at once.
+    @EnvironmentObject private var contactsRepository: ContactsRepository
     /// `docs/ux/calls.md` section 2.1.1 — the app-level 1x1 call host, read for
     /// ONE thing: a call arriving in a MUTED conversation, which is offered on
     /// that conversation's row here as well as in the chat itself. Every other
@@ -381,7 +384,8 @@ public struct ChatListScreen: View {
     /// One page: All chats (`folder == nil`) or one folder's rows.
     @ViewBuilder
     private func listPage(rows visible: [ConversationListRow], folder: FolderView?) -> some View {
-        if visible.isEmpty {
+        let invited = folder == nil ? invitedRows : []
+        if visible.isEmpty && invited.isEmpty {
             // Inside a scroll view so the pull gesture works on the empty list
             // too.
             ScrollView {
@@ -406,6 +410,11 @@ public struct ChatListScreen: View {
         } else {
             let quietCall = callHost.quietIncomingCall
             List {
+                ForEach(invited) { contact in
+                    InvitedChatRow(contact: contact)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                }
                 ForEach(visible) { row in
                     VStack(spacing: 8) {
                         Button { onOpen(row) } label: {
@@ -455,6 +464,19 @@ public struct ChatListScreen: View {
             // Rebuilt on a layout-direction flip: a UIKit-backed List keeps the
             // mirroring it was built with (see SettingsScreen).
             .id(l10n.layoutDirection)
+        }
+    }
+
+    /// ADR-0079 section 4 — the pending contacts with no one-to-one yet,
+    /// filtered by the search like any row.
+    private var invitedRows: [PendingContact] {
+        let peers = Set(contactsRepository.state.accepted.map(\.request.fromPubkey))
+        let shown = PendingContacts.shown(contactsRepository.invited, oneToOnePeerKeys: peers)
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return shown }
+        return shown.filter { contact in
+            let title = PendingContacts.name(contact) ?? l10n.t("invite.contact.page.unnamed")
+            return ChatListFormatting.matches(query: trimmed, title: title, preview: "")
         }
     }
 
@@ -1119,5 +1141,33 @@ public final class ChatListViewModel: ObservableObject {
         for thread in threads {
             try? await repository.pollGroup(groupIdHex: thread.groupIdHex)
         }
+    }
+}
+
+/// ADR-0079 section 4 — the chat with a person added through their invite
+/// link before their app has answered: drawn like any row (no "pending"
+/// badge), opening the pending chat.
+struct InvitedChatRow: View {
+    let contact: PendingContact
+
+    var body: some View {
+        let title = PendingContacts.name(contact) ?? Localization.text("invite.contact.page.unnamed")
+        NavigationLink(value: TabRoute.pendingChat(accountIdHex: contact.accountIdHex)) {
+            HStack(alignment: .center, spacing: 12) {
+                InitialsAvatar(name: title, identity: contact.accountIdHex, size: 40)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.body)
+                        .foregroundStyle(Color.lakkoText)
+                        .lineLimit(1)
+                    Text(Localization.text("chat.pending.waiting", texts: ["name": title]))
+                        .font(.subheadline)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
     }
 }

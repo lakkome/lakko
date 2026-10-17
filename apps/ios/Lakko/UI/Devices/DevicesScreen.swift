@@ -622,6 +622,18 @@ private struct DevicesListView: View {
     @ObservedObject private var l10n = Localization.shared
     /// UX 17.5 — which rows carry `New`.
     @ObservedObject private var notice = NewDeviceNoticeCenter.shared
+    /// ADR-0080 — what each device said about itself.
+    @ObservedObject private var cards = DeviceCardCenter.shared
+    /// UX section 3 — the Remove all other devices sheet, the run it starts,
+    /// and each row's own progress while it runs.
+    @State private var showingRemoveAll = false
+    @State private var removingAll = false
+    @State private var rowRun: [String: RowRun] = [:]
+
+    private enum RowRun: Equatable {
+        case removing
+        case failed
+    }
 
     private enum ListState: Equatable {
         case loading
@@ -696,22 +708,52 @@ private struct DevicesListView: View {
         rotationResume = rotation?.resume ?? .nothing
     }
 
-    var body: some View {
-        Section {
-            switch state {
-            case .loading:
-                ProgressView(l10n.t("common.loading"))
-            case .ready(let devices):
-                // A device has no human label yet (no platform, model or
-                // user-set name reaches the client), so the row says
-                // "This device" / "Device N" rather than showing its key.
-                // The record carries no added date either, so none is shown.
-                ForEach(Array(devices.enumerated()), id: \.element.id) { index, device in
-                    let title = DeviceRowPresentation.title(isSelf: device.isSelf, position: index + 1)
-                    HStack(spacing: 12) {
-                        Image(systemName: device.isSelf ? "iphone" : "laptopcomputer.and.iphone")
-                            .foregroundStyle(Color.lakkoTextMuted)
-                        Text(title)
+    /// ADR-0080 — the words a row needs, in the interface language.
+    private var rowWords: DeviceCards.Words {
+        let locale = l10n.locale
+        return DeviceCards.Words(
+            device: l10n.t("devices.row.device"),
+            online: l10n.t("devices.row.online"),
+            app: { version in
+                version.isEmpty ? l10n.t("devices.row.app_name") : l10n.t("devices.row.app", texts: ["version": version])
+            },
+            place: { city, country in l10n.t("devices.row.place", texts: ["city": city, "country": country]) },
+            countryName: { code in locale.localizedString(forRegionCode: code) ?? code })
+    }
+
+    private func rows(_ devices: [DeviceRemoval.DeviceListItem]) -> [DeviceCards.RowInput] {
+        devices.map { device in
+            let keyHex = hexEncode(device.signaturePublicKey)
+            return DeviceCards.RowInput(
+                keyHex: keyHex, leafIndex: device.leafIndex, isSelf: device.isSelf, card: cards.cards[keyHex])
+        }
+    }
+
+    private static func iconName(_ kind: DeviceCards.IconKind) -> String {
+        switch kind {
+        case .phone: return "iphone"
+        case .tablet: return "ipad"
+        case .computer: return "laptopcomputer"
+        case .browser: return "globe"
+        case .unknown: return "laptopcomputer.and.iphone"
+        }
+    }
+
+    @ViewBuilder
+    private func deviceRow(_ input: DeviceCards.RowInput, _ devices: [DeviceRemoval.DeviceListItem]) -> some View {
+        if let device = devices.first(where: { hexEncode($0.signaturePublicKey) == input.keyHex }) {
+            let view = DeviceCards.view(
+                input, words: rowWords, nowMs: Int64(Date().timeIntervalSince1970 * 1000),
+                calendar: .current, locale: l10n.locale)
+            let deviceIdB64 = device.signaturePublicKey.base64EncodedString()
+            let run = rowRun[input.keyHex]
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: Self.iconName(view.icon))
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(view.title)
                             .font(.body)
                             .foregroundStyle(Color.lakkoText)
                         if notice.isNew(signaturePublicKey: device.signaturePublicKey) {
@@ -721,12 +763,27 @@ private struct DevicesListView: View {
                                 .foregroundStyle(Color.lakkoAccent)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
-                                .overlay(
-                                    Capsule().stroke(Color.lakkoAccent, lineWidth: 1)
-                                )
+                                .overlay(Capsule().stroke(Color.lakkoAccent, lineWidth: 1))
                         }
-                        Spacer()
-                        let deviceIdB64 = device.signaturePublicKey.base64EncodedString()
+                    }
+                    if !view.detail.isEmpty {
+                        Text(view.detail).font(.footnote).foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    if !view.place.isEmpty {
+                        Text(view.place).font(.footnote).foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    if run == .removing {
+                        Text(l10n.t(RemoveDeviceCopy.working)).font(.footnote).foregroundStyle(Color.lakkoTextMuted)
+                    } else if run == .failed {
+                        Text(l10n.t("devices.remove_all.row_failed")).font(.footnote).foregroundStyle(Color.lakkoDanger)
+                    }
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 6) {
+                    if !view.activity.isEmpty {
+                        Text(view.activity).font(.footnote).foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    if run != .removing {
                         switch DeviceRowPresentation.control(
                             isSelf: device.isSelf,
                             removalPending: removal.pendingDeviceIds.contains(deviceIdB64),
@@ -735,15 +792,11 @@ private struct DevicesListView: View {
                             EmptyView()
                         case .pending:
                             // UX 18.1 — signed out, removal still finishing:
-                            // a label and no Remove control. It finishes by
-                            // itself the next time this device is online.
+                            // a label and no Remove control.
                             Text(l10n.t(RemoveDeviceCopy.pending))
                                 .font(.footnote)
                                 .foregroundStyle(Color.lakkoTextMuted)
                         case .pendingFinish:
-                            // The owed step needs the person's passkey again
-                            // (ADR-0015): the label and the one button that
-                            // runs the gesture and completes the removal.
                             let finishing = removal.finishingDeviceIds.contains(deviceIdB64)
                             Text(l10n.t(RemoveDeviceCopy.pending))
                                 .font(.footnote)
@@ -758,37 +811,92 @@ private struct DevicesListView: View {
                             .disabled(finishing)
                         case .remove:
                             Button(role: .destructive) {
-                                removing = RemoveTarget(key: device.signaturePublicKey, title: title)
+                                rowRun[input.keyHex] = nil
+                                removing = RemoveTarget(key: device.signaturePublicKey, title: view.title)
                             } label: {
                                 Text(l10n.t("common.remove"))
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.small)
+                            .disabled(removingAll)
                         }
                     }
-                    .padding(.vertical, 2)
-                }
-
-            case .error(let message):
-                VStack(alignment: .leading, spacing: 8) {
-                    Label(message.text, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(Color.lakkoDanger)
-                        .font(.footnote)
-                    Button(l10n.t("common.try_again")) { refresh() }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
                 }
             }
-        } header: {
-            Text(l10n.t("settings.devices.list.title"))
-        } footer: {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(l10n.t("settings.devices.list.lede"))
-                if let note {
-                    Text(l10n.t(note.key))
-                        .foregroundStyle(note.isError ? Color.lakkoDanger : Color.lakkoTextMuted)
+            .padding(.vertical, 2)
+            .accessibilityElement(children: .contain)
+        }
+    }
+
+    @ViewBuilder private var listFooter: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(l10n.t("settings.devices.list.lede"))
+            if let note {
+                Text(l10n.t(note.key))
+                    .foregroundStyle(note.isError ? Color.lakkoDanger : Color.lakkoTextMuted)
+            }
+            rotationFooter
+        }
+    }
+
+    var body: some View {
+        Group {
+            switch state {
+            case .loading:
+                Section {
+                    ProgressView(l10n.t("common.loading"))
+                } header: {
+                    Text(l10n.t("settings.devices.list.title"))
                 }
-                rotationFooter
+            case .ready(let devices):
+                let ordered = DeviceCards.order(rows(devices))
+                if let current = ordered.current {
+                    Section {
+                        deviceRow(current, devices)
+                        if !ordered.others.isEmpty {
+                            Button(role: .destructive) {
+                                showingRemoveAll = true
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(l10n.t("devices.remove_all"))
+                                        .foregroundStyle(Color.lakkoDanger)
+                                    Text(l10n.t("devices.remove_all.sub"))
+                                        .font(.footnote)
+                                        .foregroundStyle(Color.lakkoTextMuted)
+                                }
+                            }
+                            .disabled(removingAll)
+                        }
+                    } header: {
+                        Text(l10n.t("devices.section.this_device"))
+                    } footer: {
+                        if ordered.others.isEmpty { listFooter }
+                    }
+                }
+                if !ordered.others.isEmpty {
+                    Section {
+                        ForEach(ordered.others, id: \.keyHex) { input in
+                            deviceRow(input, devices)
+                        }
+                    } header: {
+                        Text(l10n.t("devices.section.other_devices"))
+                    } footer: {
+                        listFooter
+                    }
+                }
+            case .error(let message):
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(message.text, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Color.lakkoDanger)
+                            .font(.footnote)
+                        Button(l10n.t("common.try_again")) { refresh() }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    }
+                } header: {
+                    Text(l10n.t("settings.devices.list.title"))
+                }
             }
         }
         .onAppear { refresh() }
@@ -802,6 +910,19 @@ private struct DevicesListView: View {
             await rotation?.resumeOwed()
             refreshRotation()
             refresh()
+        }
+        // UX section 3 — Remove all other devices: one proof covers all.
+        .sheet(isPresented: $showingRemoveAll) {
+            RemoveAllDevicesSheet(
+                authRepository: authRepository,
+                blocked: removal.canStart(deviceId: Data()) == .blockedPublishOwed,
+                onConfirmed: {
+                    showingRemoveAll = false
+                    removeAllOthers()
+                },
+                onClose: { showingRemoveAll = false }
+            )
+            .presentationDetents([.medium, .large])
         }
         // The new words of a rotation whose sheet was closed before they
         // could be shown (UX 18.1, "Keys changed, publishing still owed").
@@ -852,6 +973,46 @@ private struct DevicesListView: View {
                 }
             )
             .presentationDetents([.medium, .large])
+        }
+    }
+
+    /// `Remove all`: the proof passed in the sheet; now each other device's
+    /// own removal (ADR-0074), one after another, each with its ADR-0015
+    /// gesture when the account has a passkey. A device that could not be
+    /// removed keeps its row with "Could not remove. Try again." and its own
+    /// `Remove`.
+    private func removeAllOthers() {
+        guard case .ready(let devices) = state, !removingAll else { return }
+        let targets = devices.filter { device in
+            !device.isSelf && !removal.pendingDeviceIds.contains(device.signaturePublicKey.base64EncodedString())
+        }
+        removingAll = true
+        Task { @MainActor in
+            defer {
+                removingAll = false
+                refresh()
+            }
+            for device in targets {
+                let key = hexEncode(device.signaturePublicKey)
+                rowRun[key] = .removing
+                let attestation: Data?
+                switch await RemoveDeviceAttestation.obtain(
+                    sessionToken: authRepository.identitySecrets?.sessionToken ?? sessionToken,
+                    deviceKey: device.signaturePublicKey) {
+                case .notNeeded: attestation = nil
+                case .obtained(let bytes): attestation = bytes
+                case .cancelled:
+                    rowRun[key] = .failed
+                    continue
+                }
+                let result = await removal.remove(deviceId: device.signaturePublicKey, attestation: attestation)
+                if RemoveDeviceSheetState.closes(on: result) {
+                    rowRun[key] = nil
+                    onDeviceRemoved(device.signaturePublicKey)
+                } else {
+                    rowRun[key] = .failed
+                }
+            }
         }
     }
 
@@ -1057,5 +1218,93 @@ struct TotpEnrollView: View {
         return .error(UiText {
             AuthErrorCopy.shared(err) ?? Localization.text("settings.recovery.totp.error.generic")
         })
+    }
+}
+
+// ---- Remove all other devices (docs/ux/second-device.md section 3) ----
+
+/// The confirmation before removing every other device: the app's own sheet
+/// with the proof block. One proof covers all of them; the removals run on
+/// the list, each row showing its own progress.
+private struct RemoveAllDevicesSheet: View {
+    let blocked: Bool
+    let onConfirmed: () -> Void
+    let onClose: () -> Void
+
+    @StateObject private var proof: FreshAuthProofModel
+    @State private var working = false
+    @ObservedObject private var l10n = Localization.shared
+
+    init(
+        authRepository: AuthRepository,
+        blocked: Bool,
+        onConfirmed: @escaping () -> Void,
+        onClose: @escaping () -> Void
+    ) {
+        self.blocked = blocked
+        self.onConfirmed = onConfirmed
+        self.onClose = onClose
+        self._proof = StateObject(
+            wrappedValue: FreshAuthProofModel(surface: .removeDevice, repository: authRepository))
+    }
+
+    private var busy: Bool { working || proof.layout.working }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text(l10n.t("devices.remove_all.title"))
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(Color.lakkoText)
+                    .accessibilityAddTraits(.isHeader)
+                Text(l10n.t("devices.remove_all.body"))
+                    .font(.subheadline)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                if blocked {
+                    AuthHint(text: l10n.t(RemoveDeviceCopy.publishOwed), isError: true)
+                } else {
+                    FreshAuthBlock(model: proof, onSubmit: confirm)
+                }
+                let enabled = !busy && !blocked && proof.layout.ready
+                Button(action: confirm) {
+                    HStack(spacing: 8) {
+                        if busy { ProgressView().controlSize(.small) }
+                        Text(l10n.t("devices.remove_all.confirm"))
+                            .font(.body.weight(.medium))
+                    }
+                    .foregroundStyle(Color.lakkoDanger)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: LakkoRadius.control)
+                            .stroke(Color.lakkoDanger, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(!enabled)
+                .opacity(enabled ? 1 : 0.5)
+                AuthSecondaryButton(title: l10n.t("common.cancel"), disabled: busy) {
+                    proof.closed()
+                    onClose()
+                }
+            }
+            .padding(24)
+        }
+        .background(Color.lakkoBackground)
+        .environment(\.layoutDirection, l10n.layoutDirection)
+        .interactiveDismissDisabled(busy)
+        .task { await proof.opened() }
+    }
+
+    private func confirm() {
+        guard !busy, !blocked, proof.layout.ready else { return }
+        Task { @MainActor in
+            working = true
+            defer { working = false }
+            // The proof. Nothing is removed before it passes; the removals
+            // that follow all run under the grant it obtained.
+            guard await proof.ensure() else { return }
+            proof.closed()
+            onConfirmed()
+        }
     }
 }

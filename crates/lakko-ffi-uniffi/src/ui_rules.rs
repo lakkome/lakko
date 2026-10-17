@@ -250,6 +250,14 @@ pub fn looks_like_a_name(typed: String) -> bool {
     rust_looks_like_a_name(&typed)
 }
 
+/// The name prefilled for a guest joining a call from a link:
+/// "<adjective> <animal>". `random` is any random value from the caller.
+#[uniffi::export]
+#[must_use]
+pub fn guest_name(random: u64) -> String {
+    lakko_ui_rules::guest_name::guest_name(random)
+}
+
 /// Which info a conversation's name opens — `docs/ux/conversation-info.md`
 /// section 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -1906,6 +1914,11 @@ mod tests {
         assert!(looks_like_a_name("@anna".to_string()));
         assert!(!looks_like_a_name("ab".to_string()));
         assert_eq!(bare_name("  @anna ".to_string()), "anna");
+    }
+
+    #[test]
+    fn the_guest_name_crosses_the_boundary_intact() {
+        assert_eq!(guest_name(0), "Calm Dog");
     }
 
     #[test]

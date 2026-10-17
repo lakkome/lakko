@@ -458,6 +458,24 @@ scp translation-bundle.bin lakkome@lakko.me:/var/www/lakko-release/lakko-transla
 
 `version` must be greater than the `version` in `l10n/catalog/en.json` that the builds in the field were compiled with. Served immediately, no reload.
 
+### City database for device cards (ADR-0080)
+
+`GET /discovery/locate` (anonymous, behind the existing `/discovery/` and `/api/discovery/` locations; no nginx change) answers the city and country of the request's own address so a device can put them in its end-to-end encrypted device card. Discovery reads **DB-IP City Lite** in MaxMind format from the path in `LAKKO_DISCOVERY_CITY_DB`. Unset or unreadable: the route answers `{}` and discovery logs one warning at startup; nothing else depends on it.
+
+**Install and refresh monthly** (DB-IP publishes a new Lite file each month; the file name carries the month. The download URL below was written from DB-IP's naming and not fetched when this was written; if it fails, take the "MMDB" link from https://db-ip.com/db/download/ip-to-city-lite):
+
+```bash
+# on the VPS, as lakkome
+mkdir -p /var/lib/lakko/geo
+curl -fsSL -o /tmp/dbip-city-lite.mmdb.gz "https://download.db-ip.com/free/dbip-city-lite-$(date +%Y-%m).mmdb.gz"
+gunzip -c /tmp/dbip-city-lite.mmdb.gz > /var/lib/lakko/geo/dbip-city-lite.mmdb.new
+mv /var/lib/lakko/geo/dbip-city-lite.mmdb.new /var/lib/lakko/geo/dbip-city-lite.mmdb
+# /etc/lakko/lakko.env: LAKKO_DISCOVERY_CITY_DB=/var/lib/lakko/geo/dbip-city-lite.mmdb
+sudo systemctl restart lakko-svc-discovery   # the file is read once at startup
+```
+
+**Licence:** DB-IP City Lite is CC BY 4.0. The attribution "City data: DB-IP.com, CC BY 4.0" is in each client's Settings > About (`settings.about.city_data`). The route keeps no record of who asked; nginx access logging is already off on the discovery locations.
+
 ## Backup / restore
 
 Phase 2 sprint task. Bare minimum:

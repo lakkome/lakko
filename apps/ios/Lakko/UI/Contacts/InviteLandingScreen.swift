@@ -3,290 +3,281 @@
 
 import SwiftUI
 
-/// SwiftUI screen the user lands on after tapping a
-/// `https://lakko.me/i/<slug>` Universal Link.
+/// The invite page (ADR-0079, `docs/ux/contact-invite-link.md` section 3): the
+/// screen a tapped `https://lakko.me/i/<id>#<secret>` link lands on.
 ///
-/// Mirror of:
+/// Mirror of `apps/web/src/routes/Invite.tsx` and the Android
+/// `InviteLandingScreen.kt`. Opening the link spends nothing and sends
+/// nothing; **Add** spends one ledger use, records the inviter as a pending
+/// contact and sends the request carrying the link answer, then the page
+/// closes into the chat with the inviter. No fingerprint, no safety number:
+/// those stay on the contact's info screen.
 ///
-///   * `apps/android/.../ui/contacts/InviteLandingScreen.kt`
-///     (1.15e11b)
-///   * `apps/web/src/contacts/InviteLandingRoute.tsx` (1.17e11b)
-///
-/// Drives ``ContactsRepository/acceptInviteLink(slug:)`` on first
-/// appear + renders one of the nine discriminated
-/// ``AcceptInviteResult`` variants. The user dismisses the result
-/// with Done; the host calls
-/// ``InviteIntake/clear()`` to drop the parked slug.
-///
-/// **Phase 1.9b4 (ADR-0005 §13.4) note:** the iOS / Android
-/// landing screens auto-accept every invite — including
-/// `bootstrap_referral` referrals — as soon as the surface
-/// mounts. The tap on the universal link is the consent gesture;
-/// requiring a second tap on Accept would be redundant. The web
-/// client keeps an explicit Accept button for non-referral
-/// invites (lets the user attach an intro) and only auto-
-/// accepts `bootstrap_referral=true` invites for parity.
+/// A signed-out person never reaches this screen: the deep link is parked
+/// until a session lands, and the page then opens in its default state.
 public struct InviteLandingScreen: View {
 
     @ObservedObject public var viewModel: InviteLandingViewModel
     public var onDone: () -> Void
-    /// ADR-0073 R.7 case 1 / UX 16.6 — a link from a person who is already a
-    /// contact opens that contact (the route's key is the contact's request
-    /// id): this screen is replaced, it shows no result of its own.
-    public var onOpenContact: (Int64) -> Void
+    /// The chat with the inviter: the pending chat after **Add**, the
+    /// one-to-one when they are already a contact.
+    public var onOpenChat: (InviteLandingViewModel.ChatTarget) -> Void
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
 
     public init(
         viewModel: InviteLandingViewModel,
         onDone: @escaping () -> Void,
-        onOpenContact: @escaping (Int64) -> Void = { _ in }
+        onOpenChat: @escaping (InviteLandingViewModel.ChatTarget) -> Void
     ) {
         self.viewModel = viewModel
         self.onDone = onDone
-        self.onOpenContact = onOpenContact
+        self.onOpenChat = onOpenChat
     }
 
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(spacing: 16) {
                 content
-                // No Done while the flow runs or hands over to the contact:
-                // there is no result on this screen to be done with.
-                if InviteLandingViewModel.showsResult(viewModel.state) {
-                    Button(action: {
-                        viewModel.dismiss()
-                        onDone()
-                    }) {
-                        Text(l10n.t("common.done"))
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                }
             }
+            .frame(maxWidth: .infinity)
             .padding(24)
         }
         .navigationTitle(l10n.t("invite.contact.page_title"))
         .navigationBarTitleDisplayMode(.inline)
-        .task {
-            await viewModel.run()
-            openContactIfKnown()
+        .task { await viewModel.open() }
+        .onChange(of: viewModel.chatToOpen) { _, target in
+            guard let target else { return }
+            viewModel.dismiss()
+            onOpenChat(target)
         }
     }
 
-    /// Hand over to the contact the link's owner already is, once.
-    private func openContactIfKnown() {
-        guard let contact = InviteLandingViewModel.contactToOpen(viewModel.state) else { return }
-        viewModel.dismiss()
-        onOpenContact(contact)
+    private func name(_ stated: String?) -> String {
+        stated ?? l10n.t("invite.contact.page.unnamed")
     }
 
     @ViewBuilder
     private var content: some View {
         switch viewModel.state {
-        case .running, .done(.knownContact):
-            // A known contact is never a result here: the progress stays
-            // until the contact's own screen replaces this one.
-            VStack(alignment: .leading, spacing: 8) {
-                ProgressView()
-                    .controlSize(.large)
-                Text(l10n.t("invite.contact.accepting"))
-                    .font(.title3)
-                    .fontWeight(.semibold)
-            }
+        case .loading:
+            ProgressView().controlSize(.large).padding(.top, 40)
 
-        case .done(let result):
-            VStack(alignment: .leading, spacing: 12) {
-                Text(headline(for: result))
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                Text(copy(for: result))
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                fingerprintBlock(for: result)
-                if result == .rateLimited {
-                    Button(l10n.t("common.try_again")) {
-                        Task { await viewModel.retry() }
-                    }
-                    .buttonStyle(.bordered)
-                }
-            }
-        }
-    }
-
-    /// Surface the inviter's Signal-style safety number on
-    /// the `.accepted` result. iOS auto-accepts every invite
-    /// (ADR-0005 §13.4), so this is a **post-facto OOB
-    /// verification** affordance — defence-in-depth against
-    /// link-substitution attacks. The user can compare the
-    /// digits against what the inviter shared through a
-    /// trusted channel and remove the contact if mismatched.
-    /// Mirror of the web `Invite.tsx` safety-number row,
-    /// adapted to the iOS auto-accept flow.
-    @ViewBuilder
-    private func fingerprintBlock(for result: AcceptInviteResult) -> some View {
-        if case .accepted(_, let fingerprint, _) = result {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(l10n.t("contacts.safety.number"))
+        case .ready(let invite, let adding, let failed):
+            InitialsAvatar(
+                name: invite.statedName ?? "",
+                identity: base64Encode(invite.ownerSignaturePubkey),
+                size: 72,
+                placeholderSymbol: "person.fill")
+            Text(l10n.t("invite.contact.page.title", texts: ["name": name(invite.statedName)]))
+                .font(.title2.weight(.semibold))
+                .multilineTextAlignment(.center)
+            if let username = invite.username, !username.isEmpty, invite.statedName != "@\(username)" {
+                Text("@\(username)")
                     .font(.subheadline)
-                    .fontWeight(.semibold)
-                Text(fingerprint)
-                    .font(.system(.callout, design: .monospaced))
-                    .textSelection(.enabled)
-                    .lineLimit(nil)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(l10n.t("invite.contact.check_body"))
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.lakkoTextMuted)
             }
-            .padding(12)
-            .background(Color.secondary.opacity(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        }
-    }
+            if !invite.label.isEmpty {
+                Text(invite.label)
+                    .font(.body)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .multilineTextAlignment(.center)
+            }
+            Button {
+                Task { await viewModel.add() }
+            } label: {
+                Group {
+                    if adding { ProgressView() } else { Text(l10n.t("invite.contact.page.add")) }
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(adding)
+            Button {
+                viewModel.dismiss()
+                onDone()
+            } label: {
+                Text(l10n.t("invite.contact.page.not_now")).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(adding)
+            if failed {
+                Text(l10n.t("invite.contact.page.add_failed", texts: ["name": name(invite.statedName)]))
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoDanger)
+                    .multilineTextAlignment(.center)
+            }
 
-    /// The catalog key of the result's headline (ADR-0061 batch 4).
-    private func headline(for result: AcceptInviteResult) -> String {
-        switch result {
-        case .accepted: return l10n.t("invite.contact.result.sent_title")
-        case .alreadyAccepted, .knownContact: return l10n.t("invite.contact.result.already_title")
-        case .expired: return l10n.t("invite.contact.result.expired_title")
-        case .exhausted: return l10n.t("invite.contact.result.used_up_title")
-        case .notFound: return l10n.t("invite.contact.result.not_found_title")
-        case .malformedSlug: return l10n.t("invite.contact.invalid_title")
-        case .damaged: return l10n.t("invite.contact.invalid_title")
-        case .rateLimited: return l10n.t("invite.contact.result.rate_limited_title")
-        case .requiresReauth: return l10n.t("chat.reauth.title")
-        case .failed: return l10n.t("invite.contact.result.failed_title")
-        }
-    }
+        case .alreadyContacts(let target, let statedName):
+            Text(l10n.t("invite.contact.page.already_title", texts: ["name": name(statedName)]))
+                .font(.title2.weight(.semibold))
+                .multilineTextAlignment(.center)
+            Button {
+                viewModel.dismiss()
+                onOpenChat(target)
+            } label: {
+                Text(l10n.t("invite.contact.page.open_chat")).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
 
-    /// The result's explanation. A failure's own detail is diagnostic prose
-    /// (ADR-0061 section 6): it goes to the log, the screen says the
-    /// action's sentence.
-    private func copy(for result: AcceptInviteResult) -> String {
-        switch result {
-        case .accepted:
-            return l10n.t("invite.contact.result.sent_body")
-        case .alreadyAccepted, .knownContact:
-            return l10n.t("invite.contact.result.already_body")
-        case .expired:
-            return l10n.t("invite.contact.expired")
-        case .exhausted:
-            return l10n.t("invite.contact.used_up")
-        case .notFound:
-            return l10n.t("invite.contact.no_longer_valid")
-        case .malformedSlug:
-            // The web renders a fragment-less link as the invalid panel.
-            return l10n.t("invite.contact.invalid_body")
-        case .damaged:
-            return l10n.t("invite.link.damaged")
+        case .own:
+            message(title: l10n.t("invite.contact.page.own_title"), body: l10n.t("invite.contact.page.own_body"))
+
+        case .dead:
+            message(title: l10n.t("invite.contact.page.dead_title"), body: l10n.t("invite.contact.page.dead_body"))
+
         case .rateLimited:
-            return inviteRateLimitedMessage
+            Text(inviteRateLimitedMessage)
+                .font(.body)
+                .multilineTextAlignment(.center)
+            Button(l10n.t("common.try_again")) {
+                Task { await viewModel.retryOpen() }
+            }
+            .buttonStyle(.bordered)
+
+        case .openFailed:
+            Text(l10n.t("invite.contact.result.failed_title"))
+                .font(.title2.weight(.semibold))
+                .multilineTextAlignment(.center)
+            Button(l10n.t("common.try_again")) {
+                Task { await viewModel.retryOpen() }
+            }
+            .buttonStyle(.bordered)
+
         case .requiresReauth:
-            return l10n.t("contacts.reauth.body")
-        case .failed:
-            return l10n.t("invite.contact.accept_failed")
+            message(title: l10n.t("chat.reauth.title"), body: l10n.t("contacts.reauth.body"))
         }
+    }
+
+    @ViewBuilder
+    private func message(title: String, body: String) -> some View {
+        Text(title)
+            .font(.title2.weight(.semibold))
+            .multilineTextAlignment(.center)
+        Text(body)
+            .font(.body)
+            .foregroundStyle(Color.lakkoTextMuted)
+            .multilineTextAlignment(.center)
+        Button {
+            viewModel.dismiss()
+            onDone()
+        } label: {
+            Text(l10n.t("invite.contact.page.done")).frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
     }
 }
 
-/// State + dispatcher for ``InviteLandingScreen``.
-///
-/// Mirror of `apps/android/.../ui/contacts/InviteLandingViewModel.kt`
-/// (1.15e11b). Single-shot: kicks the consume on first
-/// ``run()`` call, settles into ``State/done(_:)``, stays there
-/// until the screen is dismissed.
+/// State and actions of ``InviteLandingScreen``.
 @MainActor
 public final class InviteLandingViewModel: ObservableObject {
 
-    /// Two-state local FSM. Mirrors the Android side's `Running` /
-    /// `Done` sealed hierarchy.
+    /// Where the page closes into.
+    public enum ChatTarget: Equatable {
+        /// The chat with a person added through their link whose app has not
+        /// answered yet (keyed on the inviter's account id hex).
+        case pending(accountIdHex: String)
+        /// The one-to-one with an established contact.
+        case conversation(groupIdHex: String)
+        /// An established contact this device holds no conversation with:
+        /// their info screen (keyed on the accepted request's id).
+        case contact(messageId: Int64)
+    }
+
     public enum State: Equatable {
-        case running
-        case done(AcceptInviteResult)
+        case loading
+        /// The default page. `adding` while Add runs; `failed` after a
+        /// network failure (the line under the button).
+        case ready(OpenedInvite, adding: Bool, failed: Bool)
+        case alreadyContacts(ChatTarget, statedName: String?)
+        case own
+        /// Revoked, expired, used up, unknown or damaged: one state.
+        case dead
+        case rateLimited
+        case openFailed
+        case requiresReauth
     }
 
-    @Published public private(set) var state: State = .running
-
-    /// The contact a finished flow opens instead of showing a result: the
-    /// link's owner is already an established contact.
-    ///
-    /// | state                         | opens a contact | shows a result |
-    /// |-------------------------------|-----------------|----------------|
-    /// | running                       | no              | no             |
-    /// | done, a known contact         | that contact    | no             |
-    /// | done, anything else           | no              | yes            |
-    public nonisolated static func contactToOpen(_ state: State) -> Int64? {
-        if case .done(.knownContact(let contactMessageId)) = state { return contactMessageId }
-        return nil
-    }
-
-    /// Whether the screen shows a result (and its Done button) for `state`.
-    public nonisolated static func showsResult(_ state: State) -> Bool {
-        guard case .done = state else { return false }
-        return contactToOpen(state) == nil
-    }
+    @Published public private(set) var state: State = .loading
+    /// Set once Add has recorded the pending contact: the screen closes into
+    /// that chat.
+    @Published public private(set) var chatToOpen: ChatTarget?
 
     private let slug: String
     private let repository: ContactsRepository
     private let intake: InviteIntake
-    private var didRun: Bool = false
+    private var didOpen = false
 
-    public init(
-        slug: String,
-        repository: ContactsRepository,
-        intake: InviteIntake
-    ) {
+    public init(slug: String, repository: ContactsRepository, intake: InviteIntake) {
         self.slug = slug
         self.repository = repository
         self.intake = intake
     }
 
-    /// Drive the accept-invite flow exactly once. The
-    /// `.task { await viewModel.run() }` modifier fires on view
-    /// appear; SwiftUI may re-run the modifier across body
-    /// rebuilds, but the `didRun` guard keeps the consume to a
-    /// single invocation per VM lifetime.
-    public func run() async {
-        guard !didRun else { return }
-        didRun = true
-        // Accepting is several writes in a row (the link is consumed, the
-        // request is sent, the chat is created). This runs from the screen's
-        // `.task`, which is cancelled when the person leaves; stopped half
-        // way, the link would be spent with no request sent, and the next
-        // tap would read "already accepted". So the accept runs to its end
-        // whether or not the screen is still there.
+    /// What the page shows for each result of opening the link.
+    public nonisolated static func state(for result: InviteOpenResult) -> State {
+        switch result {
+        case .opened(let invite): return .ready(invite, adding: false, failed: false)
+        case .dead: return .dead
+        case .own: return .own
+        case .knownContact(let messageId, let groupIdHex, let statedName):
+            let target: ChatTarget = groupIdHex.map { .conversation(groupIdHex: $0) }
+                ?? .contact(messageId: messageId)
+            return .alreadyContacts(target, statedName: statedName)
+        case .rateLimited: return .rateLimited
+        case .requiresReauth: return .requiresReauth
+        case .failed: return .openFailed
+        }
+    }
+
+    /// Open the link once per screen.
+    public func open() async {
+        guard !didOpen else { return }
+        didOpen = true
+        await load()
+    }
+
+    /// Open again after a refusal or a network failure.
+    public func retryOpen() async {
+        state = .loading
+        await load()
+    }
+
+    private func load() async {
+        let result = await repository.openInviteLink(slug: slug)
+        if case .failed(let message) = result { NSLog("[invite] open failed: \(message)") }
+        state = Self.state(for: result)
+    }
+
+    /// **Add**. Runs to its end even when the screen goes away: stopped half
+    /// way, the ledger use would be spent with no request sent.
+    public func add() async {
+        guard case .ready(let invite, false, _) = state else { return }
+        state = .ready(invite, adding: true, failed: false)
         let repository = self.repository
-        let slug = self.slug
         let result = await Cancellation.shielded {
-            await repository.acceptInviteLink(slug: slug)
+            await repository.addThroughInviteLink(invite)
         }
-        Self.logFailure(result)
-        state = .done(result)
-    }
-
-    /// A failure's detail is diagnostic prose: logged, never shown.
-    private static func logFailure(_ result: AcceptInviteResult) {
-        if case .failed(let message) = result {
-            NSLog("[invite] accept failed: \(message)")
+        switch result {
+        case .added(let contact):
+            chatToOpen = .pending(accountIdHex: contact.accountIdHex)
+        case .dead:
+            state = .dead
+        case .rateLimited:
+            state = .ready(invite, adding: false, failed: true)
+        case .requiresReauth:
+            state = .requiresReauth
+        case .failed(let message):
+            NSLog("[invite] add failed: \(message)")
+            state = .ready(invite, adding: false, failed: true)
         }
     }
 
-    /// Run the accept flow again after a rate-limit refusal
-    /// (`429`): nothing was consumed, so a second pass is the
-    /// same request made later. Any other outcome is final.
-    public func retry() async {
-        guard case .done(.rateLimited) = state else { return }
-        state = .running
-        let result = await repository.acceptInviteLink(slug: slug)
-        Self.logFailure(result)
-        state = .done(result)
-    }
-
-    /// Drop the parked slug so a subsequent invite tap goes
-    /// through cleanly.
+    /// Drop the parked slug so the next invite tap goes through cleanly.
     public func dismiss() {
         intake.clear()
     }

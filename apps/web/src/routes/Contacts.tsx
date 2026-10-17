@@ -91,6 +91,13 @@ import { conversationWithContact } from "../contacts/contact-conversation";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { ownPersonKeyB64, personKeysOf } from "../chat/person-key";
 import { foundOneToOneWith } from "../contacts/found-one-to-one";
+import { acceptContactRequest } from "../contacts/accept-request";
+import {
+  loadPendingContacts,
+  pendingContacts,
+  shownPendingContacts,
+  type PendingContact,
+} from "../contacts/pending-contacts";
 import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
 import { screenAnchor } from "../ui/screen-anchor";
@@ -269,60 +276,47 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   }
 
   async function onAccept(req: IncomingContactRequest): Promise<void> {
-    // Always upsert into the accepted list first — the user has explicitly
-    // trusted this peer; the group-creation step below is best-effort and a
-    // network blip shouldn't undo the acceptance.
-    const keyB64 = base64Encode(req.fromPubkey);
-    const contact: AcceptedContact = {
-      signaturePubkeyB64: keyB64,
-      // ADR-0048 — no local rename on accept (keep one the user already set);
-      // the name shown comes from the resolver.
-      displayName: loadAccepted().find((c) => c.signaturePubkeyB64 === keyB64)?.displayName ?? "",
-      acceptedAtMs: Date.now(),
-      // ADR-0021 — persist the peer's account_id (hex) when the request
-      // carried it, so the SFU group-call roster can resolve names.
-      ...(req.fromAccountId ? { accountIdHex: syncGroupIdHex(req.fromAccountId) } : {}),
-    };
-    setAccepted(upsertAccepted(contact));
     mailbox.removePending(req.messageId);
     setAcceptError(null);
-
-    // The 1:1 chat (its Welcome) goes FIRST and the ContactAck after it. Both
-    // are written with the requester's `reply` grant (ADR-0060 section 6),
-    // and the requester closes that key as soon as the ack arrives: an ack
-    // sent first let a requester that is online close the key before the
-    // Welcome landed, and the Welcome was refused (seen live 2026-09-30).
-    // The ack is best-effort and always sent, the chat failing or not.
-    const sendAck = async (): Promise<void> => {
-      try {
-        await props.client.sendContactAck(requireIdentity(), req);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("sendContactAck failed", err);
-      }
-    };
-
-    // 1.16e3b: Accept-driven group creation. Requires the v2 wire format —
-    // surface a clean error for legacy senders.
-    if (req.fromAccountId === null) {
-      await sendAck();
+    // The one accept path (`contacts/accept-request.ts`), shared with the
+    // device's own accept of a request through a live invite link
+    // (ADR-0079): contact first, then the 1:1 Welcome, then the ack.
+    const outcome = await acceptContactRequest(
+      { client: props.client, identity: requireIdentity(), chats, profiles },
+      req,
+    );
+    setAccepted(outcome.accepted);
+    if (outcome.legacy) {
       setAcceptError(() => t("contacts.accept.error.old_version"));
       return;
     }
-    try {
-      await foundChatWith(contact, req.fromAccountId, req.fromPubkey, req.replyGrantB64);
-    } catch (err) {
+    if (outcome.chatError !== null) {
       // Don't unwind the acceptance; just surface the error.
       setAcceptError(
         contactsErrorText(
-          err,
+          outcome.chatError,
           "contacts.error.start_chat",
           memberNameOf(profiles.resolve(req.fromPubkey)),
         ),
       );
     }
-    await sendAck();
   }
+
+  // ---- ADR-0079: inviters added through a link, not answered yet ---
+  createEffect(() => {
+    const account = accountIdB64();
+    if (account !== null) void loadPendingContacts(account);
+  });
+  /** The pending contacts the list shows: those with no one-to-one yet. */
+  const pendingShown = createMemo((): PendingContact[] => {
+    const own = ownPersonKeyB64(chats.identity());
+    const peers = new Set<string>();
+    for (const g of chats.groups()) {
+      if (conversationKindOf(g.group) !== "chat") continue;
+      for (const k of personKeysOf(g.group)) if (k !== own) peers.add(k);
+    }
+    return shownPendingContacts(pendingContacts(), peers);
+  });
 
   function onDecline(req: IncomingContactRequest): void {
     mailbox.removePending(req.messageId);
@@ -588,6 +582,8 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         onDecline={onDecline}
         sent={sent}
         onDismissSent={onDismissSent}
+        invited={pendingShown}
+        onOpenInvited={(c) => navigate(paths.pendingChat(c.accountIdHex))}
         contacts={accepted}
         selectedKey={selectedKey}
         onSelect={(key) => {

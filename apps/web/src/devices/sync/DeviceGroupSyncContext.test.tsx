@@ -92,7 +92,12 @@ vi.mock("../../wasm", () => ({
       ownUsername(): string | undefined {
         return undefined;
       }
+      // ADR-0079: the link-record register, read on every refresh.
+      allLinkRecords(): unknown[] {
+        return [];
+      }
     },
+    LinkRecordKind: { Contact: 1, Call: 2 },
   }),
 }));
 vi.mock("../lifecycle", () => ({
@@ -137,6 +142,8 @@ vi.mock("../../reach/service-envelope-intake", () => ({ receiveServiceEnvelope: 
 vi.mock("../../reach/service-envelope-outbox", () => ({
   flushServiceEnvelopes: async () => undefined,
   registerServiceEnvelopeSender: () => () => undefined,
+  setServiceEnvelopeComposer: () => undefined,
+  markServiceEnvelopeDirty: () => undefined,
 }));
 vi.mock("../../chat/folders/folder-model", () => ({
   bytesToHex: () => "",

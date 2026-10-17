@@ -7614,14 +7614,6 @@
       "text": "新",
       "status": "machine"
     },
-    "settings.devices.remove.body": {
-      "text": "它现已退出登录。下次连接时，此账号保存在其上的所有内容都会被删除：聊天、联系人、密钥和恢复短语。",
-      "status": "machine"
-    },
-    "settings.devices.remove.confirm": {
-      "text": "移除设备",
-      "status": "machine"
-    },
     "settings.devices.remove.confirm_named": {
       "text": "移除{device}",
       "status": "machine"
@@ -7632,10 +7624,6 @@
     },
     "settings.devices.remove.reason_unused": {
       "text": "我不再使用它了",
-      "status": "machine"
-    },
-    "settings.devices.remove.title": {
-      "text": "移除{device}？",
       "status": "machine"
     },
     "settings.devices.remove.working": {
@@ -8408,6 +8396,78 @@
     },
     "who_can_find_me.title": {
       "text": "谁可以找到我",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "将 {name} 添加到联系人？",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "添加",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "暂不",
+      "status": "machine"
+    },
+    "invite.contact.page.sign_in": {
+      "text": "登录以添加 {name}",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "创建账号",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} 已在你的联系人中",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "打开聊天",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "这是你自己的邀请链接",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "把它分享给你想添加的人。",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "完成",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "此邀请链接已失效",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "请向发送者索要新的链接。",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "无法添加 {name}。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "此人",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} 的应用下次联网时会收到你的消息。",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} 尚未回复。你可以请对方发一个新链接。",
+      "status": "machine"
+    },
+    "chat.pending.call_disabled": {
+      "text": "{name} 连接后即可使用。",
+      "status": "machine"
+    },
+    "contacts.request.dead_link_note": {
+      "text": "通过已失效的邀请链接发送。",
       "status": "machine"
     }
   }

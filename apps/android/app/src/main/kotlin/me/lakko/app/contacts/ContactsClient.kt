@@ -30,6 +30,7 @@ import uniffi.lakko_ffi_uniffi.ContactAck
 import uniffi.lakko_ffi_uniffi.ContactRequest
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.FfiProfile
+import uniffi.lakko_ffi_uniffi.FfiLinkAnswer
 import uniffi.lakko_ffi_uniffi.FfiReachGrant
 import uniffi.lakko_ffi_uniffi.composeContactAck
 import uniffi.lakko_ffi_uniffi.composeContactRequest
@@ -664,6 +665,10 @@ public class ContactsClient(
          *  through search), its binding already verified against the
          *  recipient's account key. `null` writes nothing. */
         reach: MailboxDest? = null,
+        /** ADR-0079 section 2 — the answer to the recipient's own `/i/` link
+         *  this request is sent through, so their device accepts it by itself.
+         *  SECRET. `null` for every other request. */
+        linkAnswer: FfiLinkAnswer? = null,
     ): SendResult {
         // ADR-0074 section 3.5a rule 1 - resolve before addressing. A bundle
         // carried by a link or a search result may name a key its owner has
@@ -692,6 +697,7 @@ public class ContactsClient(
             senderProfile = senderProfile,
             replyGrant = replyGrant,
             dest = reach,
+            linkAnswer = linkAnswer,
         )
         return SendResult(
             recipientUsername = "",
@@ -1302,6 +1308,7 @@ public class ContactsClient(
         senderProfile: FfiProfile?,
         replyGrant: FfiReachGrant?,
         dest: MailboxDest?,
+        linkAnswer: FfiLinkAnswer? = null,
     ): PublishedRequest {
         // ADR-0074 3.5a rule 1 - resolve before addressing. A request is
         // SEALED to the X25519 key published with [recipientSignaturePubkey],
@@ -1350,6 +1357,9 @@ public class ContactsClient(
                 // write the accept (the 1:1 Welcome) and the ack back into the
                 // sender's closed mailbox.
                 replyGrant = replyGrant,
+                // ADR-0079 section 2 — `link_id || link_secret` of the
+                // recipient's link, sealed with the rest.
+                linkAnswer = linkAnswer,
                 introMessage = introMessage,
             )
         } catch (e: FfiException) {
@@ -1563,8 +1573,12 @@ public class ContactsClient(
                         // intact; the request is still authentic.
                         var senderProfile: me.lakko.app.profile.PeerProfile? = null
                         var replyGrant: FfiReachGrant? = null
+                        var linkAnswer: FfiLinkAnswer? = null
                         val intro: String? = try {
                             val opened = req.openEnvelope(myX25519Secret)
+                            // ADR-0079 section 2 — the answer to one of this
+                            // account's own invite links, when it carries one.
+                            linkAnswer = opened.linkAnswer
                             // ADR-0060 §6 — the requester's reply key, bound
                             // to the verified `from_pubkey`: kept by the
                             // repository for the accept and the ack.
@@ -1603,6 +1617,7 @@ public class ContactsClient(
                             createdAt = message.createdAt,
                             profile = senderProfile,
                             replyGrant = replyGrant,
+                            linkAnswer = linkAnswer,
                         )
                     }
                     events.add(IncomingMailboxEvent.ContactRequest(request))
@@ -1685,6 +1700,13 @@ public data class IncomingContactRequest(
      *  bound to [fromPubkey]. SECRET: kept by the reach manager, never
      *  persisted with the pending row. `null` when none was carried. */
     val replyGrant: FfiReachGrant? = null,
+    /** ADR-0079 section 2 — the answer to one of this account's own invite
+     *  links the request was sent through. SECRET: decided on when the
+     *  request arrives and never persisted with the pending row. */
+    val linkAnswer: FfiLinkAnswer? = null,
+    /** ADR-0079 section 3 — the request named a link this account no longer
+     *  holds as live: shown as an ordinary card with a note. */
+    val viaDeadLink: Boolean = false,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -1696,7 +1718,8 @@ public data class IncomingContactRequest(
             validAfterMs == other.validAfterMs &&
             intro == other.intro &&
             createdAt == other.createdAt &&
-            profile == other.profile
+            profile == other.profile &&
+            viaDeadLink == other.viaDeadLink
     }
 
     override fun hashCode(): Int {

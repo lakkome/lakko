@@ -5296,3 +5296,97 @@ the records are deleted with the account). It does not publish a rotation
 commit to the journal; a co-publisher still learns a rotation only through
 the reseal. On web a refused record leaves the tab without channel writes
 until it reloads.
+
+## Invite links that make contacts (C-83)
+
+### C-83: A contact request is taken without a card only through a live invite link of the account
+
+**Statement.** A device accepts an incoming contact request by itself, with
+no request card, only when the request's sealed plaintext carries a link
+answer (`link_id ‖ link_secret`, ADR-0079 section 2) that names a contact
+link held in the account's synced link-record register (ADR-0079 section 4)
+as live (not revoked, not expired, not used up), whose stored secret equals
+the answer's in constant time, and the sender's key is not one the link was
+already answered for. A request whose answer names a revoked, expired, used
+up or unknown link is shown as an ordinary request card with a note; one
+already answered is dropped. A revocation in the register is final: no later
+write, from any device and at any stamp, makes the link live again.
+
+**Why it holds.** The verdict is one function in `lakko-sync`
+(`SyncedState::link_answer_verdict` over `LinkRecordEntry::verdict`), on both
+FFI surfaces, and no client re-derives it. The secret compare goes through
+`lakko_contacts::link_seal::link_secrets_match` / `LinkAnswer::matches`
+(`SecretBytes`, constant time). The register's fold orders a revoked entry
+above any live one before the HLC stamp (`beats`), so a revocation survives
+any arrival order. The request's link answer is inside the HPKE-sealed
+contact-request plaintext, so the Delivery Service and the discovery ledger
+never see it (invariants #2, #5). The secret itself is the 12-byte link
+secret the URL fragment carries (ADR-0028 amendment 2026-09-28), so a party
+that never held the link cannot produce an answer.
+
+**Where it is enforced.** `crates/lakko-contacts/src/request.rs` (the
+`link_answer_len(u8) ‖ link_id(16) ‖ link_secret(12)` field, 0 or 28 bytes,
+fail-closed), `crates/lakko-sync/src/synced/link_record.rs` (the register,
+its envelope `lakko/sync/link-record/v1\0`, the verdict),
+`crates/lakko-sync/src/synced/state.rs` (`beats`, persisted state version 3).
+Clients: web `contacts/MailboxContext.tsx` + `contacts/accept-request.ts`,
+iOS `Contacts/ContactsRepository.swift` (`refreshInbox`,
+`acceptThroughLink`), Android `contacts/ContactsRepository.kt`
+(`triageLinkAnswers`, `acceptThroughLink`). Pinned by the proptests
+`a_mismatched_secret_is_never_accepted`,
+`the_matching_secret_accepts_exactly_a_live_contact_link` and
+`a_revocation_is_final_in_any_order`, the request codec's round-trip and
+refusal tests, and the extended fuzz targets
+`contact_request_decode_and_verify` and `synced_state_decode`.
+Unit-tested on 2026-10-16; not walked live.
+
+**What this does NOT do.** It does not stop two devices of the inviter, each
+seeing the same request before either device's use count reached the other,
+from both founding a one-to-one (the second is a duplicate conversation, not
+an extra member). It does not make a ledger row disappear at once when a link
+is revoked on a device that did not mint it: the minting device holds the
+revocation seed and deletes the row when it sees the register's mark, so
+until then the ledger still serves the sealed blob (the inviter's devices
+already refuse requests through it). It does not authenticate the inviter's
+name on the invite page beyond the capability's signature: the name is the
+inviter's own claim, signed by their account key.
+
+### C-84: A device card names nothing about its sender, travels only in the account's DeviceGroup, and the city behind it is looked up without a record
+
+[ADR-0080](../adr/0080-device-cards.md).
+**The rule.** A device card (`lakko-contacts::device_card`, domain
+`lakko/device-card/v1\0`) carries platform, model, app version, system,
+city, country and two times, and nothing that names the sender. It is sent
+only as a DeviceGroup `ServiceEnvelope`; a receiver stores it under the
+DeviceGroup leaf signature key it resolves from the MLS-authenticated sender
+leaf at receipt (C-68: never a leaf index), keeps it only when its
+`updated_at_ms` is strictly newer, and drops it when the leaf leaves the
+roster. A card met in any other group is dropped. The decode is bounded and
+fail-closed (closed platform set, byte bounds, no control or format
+characters, compose refuses what decode refuses). The city comes from
+`GET /discovery/locate`, which takes no session, no token and no account,
+reads only the source address the per-IP limiter already trusts, stores
+nothing and writes no log line naming the address or the answer; a device on
+the anti-censorship connection (native) or with "Show my city to my other
+devices" off asks nothing and sends an empty city.
+
+**Where it is enforced.** Core `crates/lakko-contacts/src/device_card.rs`
+(15 unit tests, fuzz `device_card_decode`), the dispatcher arm in
+`incoming_envelope.rs`; both FFI surfaces (`device_card.rs`); the NSE decodes
+it only to suppress it (`lakko-ffi-extension/src/device_card.rs`, golden).
+`services/discovery/src/locate.rs` and the route tests in `main.rs`
+(`locate_logs_neither_the_address_nor_the_answer` captures every event and
+span at TRACE; `locate_answers_for_the_trusted_source_address_without_a_session`
+runs over a pool that is never reached). Clients: web
+`apps/web/src/devices/device-card-intake.ts` (sender resolution) and
+`device-card-runtime.ts`; iOS `Devices/DeviceCardCenter.swift` and
+`DeviceGroupSyncRepository.receiveDeviceCard`; Android
+`devices/DeviceCardCenter.kt` and `DeviceGroupSyncRepository.receiveDeviceCard`.
+Host-tested 2026-10-16; not walked live, not deployed.
+
+**What this does NOT do.** It does not hide from an operator watching both
+discovery and the Delivery Service that a locate request and a DeviceGroup
+publish came from one address (ADR-0078 class (c)). A device's card is its
+own statement; nothing checks that the model or city are true. The web
+client has no anti-censorship connection, so its locate always uses its own
+address unless the switch is off.

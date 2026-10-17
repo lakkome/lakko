@@ -48,22 +48,38 @@ public struct ContactsScreen: View {
             uniquingKeysWith: { first, _ in first })
     }
 
+    private var invitedById: [String: PendingContact] {
+        Dictionary(viewModel.shownInvited.map { ($0.accountIdHex, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
     /// The contacts as the grouping sees them, already filtered by the search.
-    private var items: [ContactListPresentation.Item<Int64>] {
+    /// ADR-0079 — a person added through their invite link is listed at once,
+    /// under the name the link states, mixed in alphabetically.
+    private var items: [ContactListPresentation.Item<ContactRowId>] {
         // Reading `revision` subscribes this body to every profile change.
         _ = profiles.revision
-        return viewModel.repositoryState.accepted.compactMap { contact in
+        let accepted = viewModel.repositoryState.accepted.compactMap { contact -> ContactListPresentation.Item<ContactRowId>? in
             let resolved = profiles.resolve(signatureKey: contact.request.fromPubkey)
             let item = ContactListPresentation.Item(
-                id: contact.request.messageId,
+                id: ContactRowId.contact(contact.request.messageId),
                 name: resolved.name,
                 username: resolved.verifiedUsername,
                 isPlaceholder: resolved.isPlaceholder)
             return ContactListPresentation.matches(item, query: query) ? item : nil
         }
+        let invited = viewModel.shownInvited.compactMap { contact -> ContactListPresentation.Item<ContactRowId>? in
+            let stated = PendingContacts.name(contact)
+            let item = ContactListPresentation.Item(
+                id: ContactRowId.invited(contact.accountIdHex),
+                name: stated ?? l10n.t("invite.contact.page.unnamed"),
+                username: contact.username.isEmpty ? nil : contact.username,
+                isPlaceholder: stated == nil)
+            return ContactListPresentation.matches(item, query: query) ? item : nil
+        }
+        return accepted + invited
     }
 
-    private var sections: [ContactListPresentation.LetterSection<Int64>] {
+    private var sections: [ContactListPresentation.LetterSection<ContactRowId>] {
         ContactListPresentation.sections(items)
     }
 
@@ -78,6 +94,7 @@ public struct ContactsScreen: View {
     private var showsEmptyState: Bool {
         !viewModel.repositoryState.requiresReauth && !isSearching
             && viewModel.repositoryState.accepted.isEmpty
+            && viewModel.shownInvited.isEmpty
             && viewModel.repositoryState.pending.isEmpty
             && viewModel.repositoryState.sent.isEmpty
     }
@@ -249,8 +266,15 @@ public struct ContactsScreen: View {
         ForEach(sections, id: \.letter) { section in
             Section {
                 ForEach(section.ids, id: \.self) { id in
-                    if let contact = contactsById[id] {
-                        ContactRow(contact: contact)
+                    switch id {
+                    case .contact(let messageId):
+                        if let contact = contactsById[messageId] {
+                            ContactRow(contact: contact)
+                        }
+                    case .invited(let accountIdHex):
+                        if let contact = invitedById[accountIdHex] {
+                            InvitedRow(contact: contact)
+                        }
                     }
                 }
             } header: {
@@ -266,6 +290,45 @@ public struct ContactsScreen: View {
 }
 
 // MARK: - Rows
+
+/// A row of the contact list: an accepted contact, or a person added through
+/// their invite link whose app has not answered yet (ADR-0079).
+enum ContactRowId: Hashable {
+    case contact(Int64)
+    case invited(String)
+}
+
+/// ADR-0079 — a person added through their invite link, before their app has
+/// answered: listed like any contact (no "pending" badge), opening the chat
+/// with them.
+private struct InvitedRow: View {
+    @ObservedObject private var l10n = Localization.shared
+    let contact: PendingContact
+
+    var body: some View {
+        let stated = PendingContacts.name(contact)
+        NavigationLink(value: TabRoute.pendingChat(accountIdHex: contact.accountIdHex)) {
+            HStack(spacing: 12) {
+                InitialsAvatar(
+                    name: stated ?? "",
+                    identity: base64Encode(contact.signaturePubkey),
+                    size: 40,
+                    placeholderSymbol: "person.fill"
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(stated ?? l10n.t("invite.contact.page.unnamed"))
+                        .foregroundStyle(Color.lakkoText)
+                    if !contact.username.isEmpty, stated != "@\(contact.username)" {
+                        Text("@\(contact.username)")
+                            .font(.subheadline)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+}
 
 /// One contact: 40 pt avatar, display name, `@username` under it. Pushes the
 /// detail through the tab's route table.
@@ -322,6 +385,13 @@ private struct IncomingRequestRow: View {
                     if let line = resolved.usernameLine {
                         Text(line)
                             .font(.subheadline)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                    // ADR-0079 section 3 — sent through a link that no longer
+                    // works: an ordinary card, with this note.
+                    if request.viaDeadLink == true {
+                        Text(l10n.t("contacts.request.dead_link_note"))
+                            .font(.footnote)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
                     if let intro = request.intro?.trimmingCharacters(in: .whitespacesAndNewlines),

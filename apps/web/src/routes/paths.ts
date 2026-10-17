@@ -115,6 +115,15 @@ export const paths = {
     return `/groups/${groupIdB64Url}`;
   },
   /**
+   * ADR-0079 — the chat with a person added through their invite link whose
+   * app has not answered yet. `accountIdHex` is the inviter's 16-byte account
+   * id as 32 lower-case hex characters (the pending record's key). Once the
+   * one-to-one exists, the view follows to `chat(...)`.
+   */
+  pendingChat(accountIdHex: string): string {
+    return `/invited/${accountIdHex}`;
+  },
+  /**
    * Build the path of an invite link for a slug (1.18c): the
    * 8-character ledger id of the sealed capability, or the sealed
    * blob itself. The link secret is NOT part of the path: it rides
@@ -200,6 +209,12 @@ export const contactRoutePattern = "/contacts/:key?" as const;
  * layout (`paths.groups`).
  */
 export const groupChatRoutePattern = "/:id" as const;
+
+/**
+ * The matchable pattern for the pending chat (ADR-0079) — must stay in sync
+ * with `paths.pendingChat(...)`. Relative to the Chats layout.
+ */
+export const pendingChatRoutePattern = "/invited/:hex" as const;
 
 /**
  * The matchable pattern for the dynamic invite-link route — must

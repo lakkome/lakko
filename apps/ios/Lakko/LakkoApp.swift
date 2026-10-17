@@ -211,12 +211,15 @@ struct LakkoApp: App {
         self._deviceGroupSync = StateObject(wrappedValue: sync)
         self._inviteIntake = StateObject(wrappedValue: intake)
         // Wire the chat bridge on the contacts repository so refreshInbox can
-        // forward Welcomes + acceptInviteLink can drive startGroupWith. Both
+        // forward Welcomes + an invite-link accept can drive startGroupWith. Both
         // repositories live for the process, so this is wired once, here,
         // rather than on every evaluation of a view init.
         let contacts = ContactsRepository(authRepository: auth)
         self._contactsRepository = StateObject(wrappedValue: contacts)
         contacts.chatRepository = chat
+        // ADR-0079 section 4 — the link-record register the inbox asks about
+        // a request's link answer.
+        contacts.deviceGroupSync = sync
         // ADR-0073 R.2 — the one seam between the identity gate, which accepts
         // a contact's attested reset wherever a bundle is fetched, and the
         // layers that follow it up. Nothing that listens shows anything.
@@ -639,6 +642,9 @@ struct LakkoApp: App {
                     // notification extension may have to put on a ringing
                     // lock screen while this app is not running.
                     services.chatRepository.mirrorCallPeerNames()
+                    // ADR-0080 — the person's touches refresh this device's
+                    // card (the recogniser is put on any new window).
+                    UserActionObserver.install()
                 }
             }
             // ADR-0061 — the mirrored names carry words of the interface
@@ -1078,6 +1084,10 @@ enum TabRoute: Hashable {
     case inviteLanding(slug: String)
     case groupJoinLanding(slug: String)
     case callJoinLanding(slug: String)
+    /// ADR-0079 section 5 — the chat with a person added through their
+    /// invite link before their app has answered (keyed on their account id
+    /// hex); replaced by `.chat` once the one-to-one exists.
+    case pendingChat(accountIdHex: String)
 
     /// The chat this route shows, if it is a chat.
     var chatGroupIdHex: String? {
@@ -2020,12 +2030,26 @@ private struct SessionRoot: View, Equatable {
                     intake: inviteIntake
                 ),
                 onDone: { pop(route, from: tab) },
-                // A link from an established contact opens that contact,
-                // in place of the landing (web / Android).
-                onOpenContact: { messageId in
-                    replaceTop(route, with: .contactDetail(messageId: messageId), in: tab)
+                // ADR-0079 — the page closes into the chat with the inviter.
+                onOpenChat: { target in
+                    switch target {
+                    case .pending(let accountIdHex):
+                        replaceTop(route, with: .pendingChat(accountIdHex: accountIdHex), in: tab)
+                    case .conversation(let groupIdHex):
+                        replaceTop(route, with: .chat(groupIdHex: groupIdHex), in: tab)
+                    case .contact(let messageId):
+                        replaceTop(route, with: .contactDetail(messageId: messageId), in: tab)
+                    }
                 }
             )
+        case .pendingChat(let accountIdHex):
+            PendingChatScreen(
+                accountIdHex: accountIdHex,
+                contacts: contactsRepository,
+                chat: chatRepository,
+                onConnected: { groupIdHex in
+                    replaceTop(route, with: .chat(groupIdHex: groupIdHex), in: tab)
+                })
         case .groupJoinLanding(let slug):
             // ADR-0028 (G-3) — a tapped `/g/<slug>` group join-ticket link.
             // The landing screen requests to join + polls for the admin's

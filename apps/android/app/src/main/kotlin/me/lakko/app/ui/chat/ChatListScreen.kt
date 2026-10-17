@@ -187,6 +187,10 @@ public fun ChatListScreen(
     peopleSearch: me.lakko.app.search.PeopleSearchService? = null,
     /** A contact row of the people results: open their chat. */
     onOpenContact: (keyB64: String) -> Unit = {},
+    /** ADR-0079 section 4 — the people added through their invite link whose
+     *  app has not answered yet, listed in All chats at once. */
+    invited: List<me.lakko.app.contacts.PendingContact> = emptyList(),
+    onOpenPendingChat: (accountIdHex: String) -> Unit = {},
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -459,6 +463,8 @@ public fun ChatListScreen(
                         rows = visible,
                         folder = null,
                         handlers = rowHandlers,
+                        invited = invitedMatching(invited, query),
+                        onOpenPendingChat = onOpenPendingChat,
                         // UX who-can-find-me 6.1 — people under the matching
                         // conversations.
                         footer = if (searching && peopleSearch != null) {
@@ -489,10 +495,16 @@ public fun ChatListScreen(
                     ) { page ->
                         val folder = folders.getOrNull(page - 1)
                         if (folder == null) {
-                            if (rows.isEmpty()) {
+                            if (rows.isEmpty() && invited.isEmpty()) {
                                 EmptyPanel(onStart = { createMenuOpen = true })
                             } else {
-                                ConversationList(rows = rows, folder = null, handlers = rowHandlers)
+                                ConversationList(
+                                    rows = rows,
+                                    folder = null,
+                                    handlers = rowHandlers,
+                                    invited = invited,
+                                    onOpenPendingChat = onOpenPendingChat,
+                                )
                             }
                         } else {
                             val inFolder = remember(folder, allRows) { folderRows(folder, allRows) }
@@ -668,11 +680,17 @@ private fun ConversationList(
     handlers: RowHandlers,
     /** Drawn after the last row (the people search while searching). */
     footer: (@Composable () -> Unit)? = null,
+    /** ADR-0079 — the pending contacts, drawn first like any row. */
+    invited: List<me.lakko.app.contacts.PendingContact> = emptyList(),
+    onOpenPendingChat: (String) -> Unit = {},
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(vertical = 4.dp),
     ) {
+        items(items = invited, key = { "invited:${it.accountIdHex}" }) { contact ->
+            InvitedChatRow(contact = contact, onClick = { onOpenPendingChat(contact.accountIdHex) })
+        }
         items(items = rows, key = { "${it.kind}:${it.id}" }) { row ->
             val menu = RowMenuModel(row = row, folder = folder, handlers = handlers)
             if (row.kind == ConversationRowKind.CHANNEL) {
@@ -699,6 +717,52 @@ private fun ConversationList(
         }
         if (footer != null) {
             item(key = "people-search") { footer() }
+        }
+    }
+}
+
+/** The pending contacts whose stated name or username matches [query]. */
+@Composable
+private fun invitedMatching(
+    invited: List<me.lakko.app.contacts.PendingContact>,
+    query: String,
+): List<me.lakko.app.contacts.PendingContact> {
+    val q = query.trim()
+    if (q.isEmpty()) return invited
+    return invited.filter { c ->
+        me.lakko.app.contacts.PendingContacts.name(c)?.contains(q, ignoreCase = true) == true ||
+            c.username.contains(q.removePrefix("@"), ignoreCase = true)
+    }
+}
+
+/**
+ * ADR-0079 section 4 — the chat with a person added through their invite link
+ * before their app answered: drawn like any row (no "pending" badge).
+ */
+@Composable
+private fun InvitedChatRow(contact: me.lakko.app.contacts.PendingContact, onClick: () -> Unit) {
+    val title = me.lakko.app.contacts.PendingContacts.name(contact) ?: t("invite.contact.page.unnamed")
+    androidx.compose.foundation.layout.Row(
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        me.lakko.app.ui.components.LakkoAvatar(name = title, seed = contact.accountIdHex, size = 48.dp)
+        androidx.compose.foundation.layout.Spacer(Modifier.width(12.dp))
+        androidx.compose.foundation.layout.Column {
+            androidx.compose.material3.Text(
+                text = title,
+                style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+            )
+            androidx.compose.material3.Text(
+                text = t("chat.pending.waiting", mapOf("name" to title)),
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
         }
     }
 }

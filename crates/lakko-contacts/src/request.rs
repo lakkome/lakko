@@ -23,7 +23,7 @@
 //!    recovering Alice's profile (if any) and the intro message.
 //! 4. Surfaces the request to UI: Accept / Decline / Block / Ignore.
 //!
-//! ## Sealed plaintext (ADR-0048 §2, ADR-0060 §6)
+//! ## Sealed plaintext (ADR-0048 §2, ADR-0060 §6, ADR-0079 §2)
 //!
 //! The bytes inside `sealed_envelope` are:
 //!
@@ -32,12 +32,26 @@
 //! [..]         profile envelope     — crate::profile wire, `profile_len` bytes
 //! u8           reply_grant_len      — 0 = no reply grant, else exactly 134
 //! [134]         reply_grant          — crate::reach::ReachGrant, class `reply` (SECRET)
+//! u8           link_answer_len      — 0 = no link answer, else exactly 28
+//! [16]         link_id              — the `/i/` link the sender opened
+//! [12]         link_secret          — that link's secret (SECRET)
 //! [..]         intro message        — everything that remains (may be empty)
 //! ```
 //!
 //! There is no dual format: nothing is deployed, so a sealed plaintext
 //! without the prefixes is simply malformed, and the outer schema moved to
-//! v4 so a request framed the old way is refused before it is opened.
+//! v5 so a request framed the old way is refused before it is opened.
+//!
+//! ## The link answer (ADR-0079 §2)
+//!
+//! A request sent from an `/i/` link carries the link's id and secret, as
+//! the sender received them, so the recipient's device can tell that the
+//! request answers one of its own links and accept it without asking
+//! (ADR-0079 §3). It is sealed to the recipient, so only the recipient reads
+//! it; it proves the sender holds the link, whose secret is only ever in a
+//! URL fragment. A `link_answer_len` other than 0 or 28 is a framing error.
+//! Whether the answer names a live link is the recipient's decision
+//! (`lakko_sync::SyncedState::link_answer_verdict`), never this codec's.
 //!
 //! **Who the profile belongs to.** The envelope carries no identity.
 //! The recipient binds the profile to `from_pubkey`, which the request
@@ -130,13 +144,66 @@ use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN,
 
 use crate::envelope;
 use crate::error::{ContactError, Result};
+use crate::invite::LINK_ID_LEN;
+use crate::link_seal::{link_secrets_match, LINK_SECRET_LEN};
 use crate::profile::{compose_profile, decode_profile, Profile};
 use crate::pseudonym::{decode_pseudonym, PSEUDONYM_LEN};
 use crate::reach::{ReachClass, ReachGrant, REACH_GRANT_LEN};
 
-/// Current `compose`d schema version (ADR-0060 — the reply grant in the
+/// Current `compose`d schema version (ADR-0079 — the link answer in the
 /// sealed plaintext). The only version accepted.
-const SCHEMA_VERSION: u8 = 4;
+const SCHEMA_VERSION: u8 = 5;
+
+/// Byte length of a link answer in the sealed plaintext: the link id and the
+/// link secret (ADR-0079 §2).
+pub const LINK_ANSWER_LEN: usize = LINK_ID_LEN + LINK_SECRET_LEN;
+
+/// [`LINK_ANSWER_LEN`] as the one-byte `link_answer_len` value.
+const LINK_ANSWER_WIRE_LEN: u8 = {
+    assert!(LINK_ANSWER_LEN <= u8::MAX as usize);
+    #[allow(clippy::cast_possible_truncation)]
+    let len = LINK_ANSWER_LEN as u8;
+    len
+};
+
+/// Which `/i/` link a request answers (ADR-0079 §2): the link's id and its
+/// secret, as the sender opened them. SECRET: never logged (the `Debug`
+/// output omits the secret).
+#[derive(Clone, PartialEq, Eq)]
+pub struct LinkAnswer {
+    /// The link's 16-byte id ([`crate::invite::InviteCapability::link_id`]).
+    pub link_id: [u8; LINK_ID_LEN],
+    /// The link's 12-byte secret (the URL fragment).
+    pub link_secret: [u8; LINK_SECRET_LEN],
+}
+
+impl LinkAnswer {
+    /// `true` when this answer names `link_id` and carries `link_secret`.
+    /// The secret is compared in constant time.
+    #[must_use]
+    pub fn matches(
+        &self,
+        link_id: &[u8; LINK_ID_LEN],
+        link_secret: &[u8; LINK_SECRET_LEN],
+    ) -> bool {
+        // Both sides are evaluated so the time does not depend on which
+        // differs.
+        let id = self.link_id == *link_id;
+        let secret = link_secrets_match(&self.link_secret, link_secret);
+        id & secret
+    }
+
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.link_id);
+        out.extend_from_slice(&self.link_secret);
+    }
+}
+
+impl core::fmt::Debug for LinkAnswer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("LinkAnswer").finish_non_exhaustive()
+    }
+}
 
 /// `from_account_id` length in bytes (UUIDv7 raw, matches
 /// `services/auth.accounts.id` and the rest of the Lakko stack).
@@ -214,6 +281,10 @@ pub struct OpenedRequest {
     /// to the sender's mailbox with it. Always class
     /// [`ReachClass::Reply`] when present.
     pub reply_grant: Option<ReachGrant>,
+    /// Which of the recipient's `/i/` links the request answers (ADR-0079
+    /// §2), or `None`. SECRET: the recipient compares it with its own link
+    /// records and never logs it.
+    pub link_answer: Option<LinkAnswer>,
     /// The intro message, possibly empty — itself possibly a call
     /// envelope, classified with [`crate::incoming_envelope`].
     pub intro: Vec<u8>,
@@ -224,7 +295,9 @@ pub struct OpenedRequest {
 /// The sender supplies their Ed25519 signing key (for authentication),
 /// the recipient's X25519 public key (for sealed-envelope encryption),
 /// an optional profile (ADR-0048), an optional `reply` reach grant
-/// (ADR-0060 §6, see the module docs), an optional intro message body, and
+/// (ADR-0060 §6, see the module docs), an optional link answer (ADR-0079
+/// §2: the `/i/` link the request is sent from), an optional intro message
+/// body, and
 /// an optional Privacy Pass
 /// attestation token (Phase 1.9b2). `from_pseudonym` should be
 /// freshly generated per-recipient (use
@@ -258,6 +331,7 @@ pub fn compose(
     privacy_pass_token: &[u8],
     profile: Option<&Profile>,
     reply_grant: Option<&ReachGrant>,
+    link_answer: Option<&LinkAnswer>,
     intro_message: &[u8],
 ) -> Result<Vec<u8>> {
     if privacy_pass_token.len() > MAX_PRIVACY_PASS_TOKEN_LEN {
@@ -273,7 +347,8 @@ pub fn compose(
                 ContactError::InvalidArgument(format!("reply grant binding: {}", e.code()))
             })?;
     }
-    let sealed_plaintext = frame_sealed_plaintext(profile, reply_grant, intro_message)?;
+    let sealed_plaintext =
+        frame_sealed_plaintext(profile, reply_grant, link_answer, intro_message)?;
     let sealed_envelope = envelope::seal(recipient_x25519_pub, ENVELOPE_AAD, &sealed_plaintext)?;
 
     let from_pubkey = sender_signing.verifying_key();
@@ -386,7 +461,7 @@ pub fn open_envelope(
     recipient_priv: &X25519SecretKey,
 ) -> Result<OpenedRequest> {
     let plaintext = envelope::open(recipient_priv, ENVELOPE_AAD, &req.sealed_envelope)?;
-    let (profile, reply_grant, intro) = split_sealed_plaintext(&plaintext)?;
+    let (profile, reply_grant, link_answer, intro) = split_sealed_plaintext(&plaintext)?;
     if let Some(grant) = &reply_grant {
         grant
             .mailbox_pk_verified(&req.from_pubkey.to_bytes())
@@ -397,15 +472,18 @@ pub fn open_envelope(
     Ok(OpenedRequest {
         profile,
         reply_grant,
+        link_answer,
         intro: intro.to_vec(),
     })
 }
 
 /// Build the sealed plaintext
-/// `profile_len ‖ profile ‖ reply_grant_len ‖ reply_grant ‖ intro`.
+/// `profile_len ‖ profile ‖ reply_grant_len ‖ reply_grant ‖ link_answer_len ‖
+/// link_answer ‖ intro`.
 fn frame_sealed_plaintext(
     profile: Option<&Profile>,
     reply_grant: Option<&ReachGrant>,
+    link_answer: Option<&LinkAnswer>,
     intro_message: &[u8],
 ) -> Result<Vec<u8>> {
     let profile_bytes = match profile {
@@ -435,6 +513,8 @@ fn frame_sealed_plaintext(
             + profile_bytes.len()
             + REPLY_GRANT_LEN_PREFIX_LEN
             + grant_len
+            + 1
+            + LINK_ANSWER_LEN
             + intro_message.len(),
     );
     out.extend_from_slice(&profile_len.to_be_bytes());
@@ -444,6 +524,13 @@ fn frame_sealed_plaintext(
             // REACH_GRANT_LEN is 134, a one-byte value by construction.
             out.push(REPLY_GRANT_WIRE_LEN);
             out.extend_from_slice(&grant.encode());
+        },
+        None => out.push(0),
+    }
+    match link_answer {
+        Some(answer) => {
+            out.push(LINK_ANSWER_WIRE_LEN);
+            answer.encode_into(&mut out);
         },
         None => out.push(0),
     }
@@ -459,14 +546,21 @@ const REPLY_GRANT_WIRE_LEN: u8 = {
     len
 };
 
-/// Split an opened sealed plaintext into `(profile, reply_grant, intro)`.
+/// The four parts of an opened sealed plaintext.
+type SplitPlaintext<'a> = (
+    Option<Profile>,
+    Option<ReachGrant>,
+    Option<LinkAnswer>,
+    &'a [u8],
+);
+
+/// Split an opened sealed plaintext into `(profile, reply_grant,
+/// link_answer, intro)`.
 ///
 /// Framing errors are errors; a well-framed but invalid profile is
 /// `None`; a present but invalid reply grant is an error (see the module
-/// docs for why the three differ).
-pub(crate) fn split_sealed_plaintext(
-    plaintext: &[u8],
-) -> Result<(Option<Profile>, Option<ReachGrant>, &[u8])> {
+/// docs for why the three differ); a link answer is framing only.
+pub(crate) fn split_sealed_plaintext(plaintext: &[u8]) -> Result<SplitPlaintext<'_>> {
     let mut cur = plaintext;
     let len_bytes: [u8; PROFILE_LEN_PREFIX_LEN] = take_n(&mut cur, PROFILE_LEN_PREFIX_LEN)?
         .try_into()
@@ -504,12 +598,28 @@ pub(crate) fn split_sealed_plaintext(
             )));
         },
     };
-    Ok((profile, reply_grant, cur))
+    let link_answer = match take_u8(&mut cur)? {
+        0 => None,
+        LINK_ANSWER_WIRE_LEN => {
+            let link_id = take_array::<LINK_ID_LEN>(&mut cur)?;
+            let link_secret = take_array::<LINK_SECRET_LEN>(&mut cur)?;
+            Some(LinkAnswer {
+                link_id,
+                link_secret,
+            })
+        },
+        other => {
+            return Err(ContactError::InvalidEncoding(format!(
+                "link answer length {other}, expected 0 or {LINK_ANSWER_LEN}",
+            )));
+        },
+    };
+    Ok((profile, reply_grant, link_answer, cur))
 }
 
 /// The fuzz oracle behind `fuzz_api::contact_request_plaintext`.
 pub(crate) fn fuzz_split(plain: &[u8]) -> Option<bool> {
-    let (profile, reply_grant, intro) = split_sealed_plaintext(plain).ok()?;
+    let (profile, reply_grant, link_answer, intro) = split_sealed_plaintext(plain).ok()?;
     if reply_grant
         .as_ref()
         .is_some_and(|g| g.class != ReachClass::Reply)
@@ -523,7 +633,13 @@ pub(crate) fn fuzz_split(plain: &[u8]) -> Option<bool> {
     if profile.is_none() && profile_len != 0 {
         return Some(true);
     }
-    let reframed = frame_sealed_plaintext(profile.as_ref(), reply_grant.as_ref(), intro).ok()?;
+    let reframed = frame_sealed_plaintext(
+        profile.as_ref(),
+        reply_grant.as_ref(),
+        link_answer.as_ref(),
+        intro,
+    )
+    .ok()?;
     Some(reframed == plain)
 }
 
@@ -634,6 +750,7 @@ mod tests {
             b"",
             None,
             None,
+            None,
             b"hi bob",
         )
         .unwrap();
@@ -671,6 +788,7 @@ mod tests {
             b"",
             None,
             None,
+            None,
             b"",
         )
         .unwrap();
@@ -703,6 +821,7 @@ mod tests {
             b"",
             None,
             None,
+            None,
             b"",
         )
         .unwrap();
@@ -722,6 +841,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             b"",
+            None,
             None,
             None,
             b"intro",
@@ -748,6 +868,7 @@ mod tests {
             pseudonym,
             0,
             b"",
+            None,
             None,
             None,
             b"intro",
@@ -777,6 +898,7 @@ mod tests {
             b"",
             None,
             None,
+            None,
             b"secret",
         )
         .unwrap();
@@ -803,6 +925,7 @@ mod tests {
             b"",
             None,
             None,
+            None,
             b"private",
         )
         .unwrap();
@@ -823,6 +946,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             b"",
+            None,
             None,
             None,
             b"x",
@@ -848,6 +972,7 @@ mod tests {
             b"",
             None,
             None,
+            None,
             b"x",
         )
         .unwrap();
@@ -868,6 +993,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             b"",
+            None,
             None,
             None,
             b"x",
@@ -895,6 +1021,7 @@ mod tests {
             b"",
             None,
             None,
+            None,
             b"intro",
         )
         .unwrap();
@@ -905,6 +1032,7 @@ mod tests {
             pseudonym,
             0,
             b"",
+            None,
             None,
             None,
             b"intro",
@@ -935,6 +1063,7 @@ mod tests {
             token,
             None,
             None,
+            None,
             b"hello",
         )
         .unwrap();
@@ -961,6 +1090,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             token,
+            None,
             None,
             None,
             b"",
@@ -994,6 +1124,7 @@ mod tests {
             [0u8; PSEUDONYM_LEN],
             0,
             &huge,
+            None,
             None,
             None,
             b"",
@@ -1049,6 +1180,7 @@ mod tests {
             b"",
             Some(&alice_profile()),
             None,
+            None,
             b"hi bob",
         )
         .unwrap();
@@ -1070,6 +1202,7 @@ mod tests {
             b"",
             Some(&alice_profile()),
             None,
+            None,
             b"",
         )
         .unwrap();
@@ -1082,7 +1215,7 @@ mod tests {
     fn sealed_plaintext_framing_is_pinned() {
         let grant = reply_grant();
         let framed =
-            frame_sealed_plaintext(Some(&alice_profile()), Some(&grant), b"intro").unwrap();
+            frame_sealed_plaintext(Some(&alice_profile()), Some(&grant), None, b"intro").unwrap();
         let profile_wire = crate::profile::compose_profile(&alice_profile()).unwrap();
         let len = u16::try_from(profile_wire.len()).unwrap();
         let p = profile_wire.len();
@@ -1090,11 +1223,12 @@ mod tests {
         assert_eq!(&framed[2..2 + p], profile_wire.as_slice());
         assert_eq!(framed[2 + p], 134);
         assert_eq!(&framed[3 + p..3 + p + 134], &grant.encode());
-        assert_eq!(&framed[3 + p + 134..], b"intro");
-        // Nothing: two zero prefixes, then the intro verbatim.
+        assert_eq!(framed[3 + p + 134], 0);
+        assert_eq!(&framed[4 + p + 134..], b"intro");
+        // Nothing: three zero prefixes, then the intro verbatim.
         assert_eq!(
-            frame_sealed_plaintext(None, None, b"x").unwrap(),
-            b"\x00\x00\x00x"
+            frame_sealed_plaintext(None, None, None, b"x").unwrap(),
+            b"\x00\x00\x00\x00x"
         );
     }
 
@@ -1124,6 +1258,7 @@ mod tests {
                 b"",
                 profile.as_ref(),
                 Some(&grant),
+                None,
                 intro,
             )
             .unwrap();
@@ -1143,6 +1278,7 @@ mod tests {
             b"",
             None,
             Some(&grant),
+            None,
             &welcome,
         )
         .unwrap();
@@ -1163,6 +1299,7 @@ mod tests {
             b"",
             None,
             Some(&foreign),
+            None,
             b"",
         )
         .unwrap_err();
@@ -1186,6 +1323,7 @@ mod tests {
                 b"",
                 None,
                 Some(&grant),
+                None,
                 b"hi",
             )
             .unwrap_err();
@@ -1246,6 +1384,7 @@ mod tests {
         // Control: the well-formed grant opens.
         let mut good = vec![0, 0, 134];
         good.extend_from_slice(&reply_grant().encode());
+        good.push(0);
         let opened = open_envelope(&signed_request_sealing(&good), &bob).unwrap();
         assert_eq!(opened.reply_grant, Some(reply_grant()));
         assert!(opened.intro.is_empty());
@@ -1263,10 +1402,11 @@ mod tests {
             b"",
             None,
             None,
+            None,
             b"x",
         )
         .unwrap();
-        for version in [1u8, 2, 3] {
+        for version in [1u8, 2, 3, 4] {
             let mut old = wire.clone();
             old[0] = version;
             assert!(matches!(
@@ -1288,6 +1428,7 @@ mod tests {
             0,
             b"",
             Some(&bad),
+            None,
             None,
             b"hi",
         )
@@ -1316,6 +1457,7 @@ mod tests {
             plaintext.extend_from_slice(&garbage);
             plaintext.push(134);
             plaintext.extend_from_slice(&reply_grant().encode());
+            plaintext.push(0);
             plaintext.extend_from_slice(b"hi bob");
             let req = signed_request_sealing(&plaintext);
             let opened = open_envelope(&req, &bob).unwrap();
@@ -1337,6 +1479,13 @@ mod tests {
             vec![0x00],
             // No reply-grant length after an empty profile.
             vec![0x00, 0x00],
+            // No link-answer length after an empty reply grant.
+            vec![0x00, 0x00, 0x00],
+            // A link-answer length that is neither 0 nor 28.
+            vec![0x00, 0x00, 0x00, 27],
+            vec![0x00, 0x00, 0x00, 29],
+            // 28 declared, fewer carried.
+            [vec![0x00, 0x00, 0x00, 28], vec![9u8; 27]].concat(),
             // Declares 10 profile bytes, carries 3.
             vec![0x00, 0x0A, 1, 2, 3],
             // A raw, unframed intro: "le" reads as a 27749-byte profile.
@@ -1351,5 +1500,76 @@ mod tests {
                 "{plaintext:?}"
             );
         }
+    }
+
+    fn link_answer() -> LinkAnswer {
+        LinkAnswer {
+            link_id: [0x1D; LINK_ID_LEN],
+            link_secret: [0x5C; LINK_SECRET_LEN],
+        }
+    }
+
+    /// ADR-0079 §2: the link answer rides sealed beside the profile and the
+    /// reply grant, and comes back exactly.
+    #[test]
+    fn a_link_answer_round_trips_with_and_without_the_rest() {
+        let bob = recipient_x25519();
+        for (profile, grant, intro) in [
+            (None, None, b"".as_slice()),
+            (Some(alice_profile()), Some(reply_grant()), b"hi".as_slice()),
+        ] {
+            let wire = compose(
+                &sender(),
+                &sender_account_id(),
+                &bob.public_key(),
+                [0u8; PSEUDONYM_LEN],
+                0,
+                b"",
+                profile.as_ref(),
+                grant.as_ref(),
+                Some(&link_answer()),
+                intro,
+            )
+            .unwrap();
+            let opened = open_envelope(&decode_and_verify(&wire).unwrap(), &bob).unwrap();
+            assert_eq!(opened.link_answer, Some(link_answer()));
+            assert_eq!(opened.profile, profile);
+            assert_eq!(opened.reply_grant, grant);
+            assert_eq!(opened.intro, intro);
+        }
+        // Framing: the length byte then the id then the secret.
+        let framed = frame_sealed_plaintext(None, None, Some(&link_answer()), b"x").unwrap();
+        let mut expected = vec![0, 0, 0, 28];
+        expected.extend_from_slice(&[0x1D; LINK_ID_LEN]);
+        expected.extend_from_slice(&[0x5C; LINK_SECRET_LEN]);
+        expected.push(b'x');
+        assert_eq!(framed, expected);
+        assert_eq!(LINK_ANSWER_LEN, 28);
+    }
+
+    #[test]
+    fn link_answer_matching_needs_the_id_and_the_secret() {
+        let a = link_answer();
+        assert!(a.matches(&[0x1D; LINK_ID_LEN], &[0x5C; LINK_SECRET_LEN]));
+        assert!(!a.matches(&[0x1E; LINK_ID_LEN], &[0x5C; LINK_SECRET_LEN]));
+        assert!(!a.matches(&[0x1D; LINK_ID_LEN], &[0x5D; LINK_SECRET_LEN]));
+        let mut secret = [0x5C; LINK_SECRET_LEN];
+        secret[LINK_SECRET_LEN - 1] ^= 1;
+        assert!(!a.matches(&[0x1D; LINK_ID_LEN], &secret));
+        // The secret never reaches Debug output.
+        let shown = format!("{a:?}");
+        assert!(!shown.contains("92") && !shown.contains("5c") && !shown.contains("5C"));
+    }
+
+    #[test]
+    fn the_split_oracle_accepts_a_framed_link_answer() {
+        let framed = frame_sealed_plaintext(
+            Some(&alice_profile()),
+            Some(&reply_grant()),
+            Some(&link_answer()),
+            b"intro",
+        )
+        .unwrap();
+        assert_eq!(fuzz_split(&framed), Some(true));
     }
 }

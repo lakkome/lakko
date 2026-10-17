@@ -84,6 +84,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// ADR-0076 section 3 — the account's own username, as its devices keep
     /// it: one more register of the synced state. `nil` when never written.
     @Published public private(set) var ownUsername: String?
+    /// ADR-0079 section 4 — the account's own invite links, every device's,
+    /// revoked ones included.
+    @Published public private(set) var linkRecords: [LinkRecord] = []
 
     /// The synced state of the bound account was loaded from disk: a write
     /// that waited for it can run. Wired by the composition root.
@@ -241,6 +244,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         // seeds the acknowledged set; a later one may raise the notice for a
         // device added while the app was closed and already applied.
         reportRoster(group: ensured.group)
+        // ADR-0080 — this account's device cards, sent through this
+        // repository's DeviceGroup `ServiceEnvelope`.
+        DeviceCardCenter.shared.bind(accountIdB64: accountIdB64) { [weak self] envelope in
+            await self?.sendServiceEnvelope(envelope)
+        }
 
         let groupId: Data
         do {
@@ -279,6 +287,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
         cancelPollAndDropHandles()
         NewDeviceNoticeCenter.shared.bind(accountIdB64: nil)
+        DeviceCardCenter.shared.unbind()
         pendingServiceEnvelopes = [:]
         activeAccountIdB64 = nil
         activeAccountId = nil
@@ -375,6 +384,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if address != recoveryEmail { recoveryEmail = address }
         let name = (try? s.ownUsername()).flatMap { $0 }
         if name != ownUsername { ownUsername = name }
+        let links = (try? s.allLinkRecords()) ?? []
+        if links != linkRecords { linkRecords = links }
         let isPending = pending?.isPending ?? false
         if pendingSync != isPending { pendingSync = isPending }
     }
@@ -595,6 +606,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if isRecoveryEmailEnvelope(bytes: envelope) { return "recovery-email" }
         // ADR-0076 — likewise the own-username register.
         if isOwnUsernameEnvelope(bytes: envelope) { return "own-username" }
+        // ADR-0079 — every link record is its own slot.
+        if isLinkRecordEnvelope(bytes: envelope) { return "link-record:" + envelope.base64EncodedString() }
         guard let kind = try? dispatchIncomingEnvelope(plaintext: envelope).kind else {
             return envelope.base64EncodedString()
         }
@@ -775,6 +788,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         await flushUnsentRecoveryEmail()
         guard bound.isCurrent else { return }
         await flushUnsentOwnUsername()
+        guard bound.isCurrent else { return }
+        await flushUnsentLinkRecords()
         while !Task.isCancelled, bound.isCurrent {
             if !pendingServiceEnvelopes.isEmpty {
                 await flushPendingServiceEnvelopes()
@@ -882,14 +897,19 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
                 mutated = true
                 switch processed {
-                case .application(let data, _, _):
+                case .application(let data, let senderLeaf, _):
                     // ADR-0023 added the sender leaf to the
-                    // Application case; the DeviceGroup sync path
-                    // doesn't authorise on it (removals are gated
-                    // upstream by the attestation verify), so it's
-                    // ignored here.
+                    // Application case. Removals do not authorise on it
+                    // (they are gated upstream by the attestation verify);
+                    // ADR-0080's device card keys on it, resolved to the
+                    // leaf's signature key HERE, against the roster this row
+                    // was sealed under (C-68: a leaf index is never stored).
                     do {
                         let parsed = try parseDevicegroupPayload(plaintext: data)
+                        if case .serviceEnvelope(let envelope) = parsed.body,
+                           receiveDeviceCard(envelope, senderLeaf: senderLeaf, group: g) {
+                            break
+                        }
                         applyParsed(parsed)
                     } catch {
                         NSLog("DeviceGroupSync parseDevicegroupPayload failed: %@", error.localizedDescription)
@@ -1119,6 +1139,18 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
                 return
             }
+            // ADR-0079 — a link-record register, the same way.
+            if isLinkRecordEnvelope(bytes: envelope) {
+                do {
+                    if try syncedState.applyLinkRecordEnvelope(envelope: envelope) {
+                        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                        stateChanged()
+                    }
+                } catch {
+                    NSLog("ADR-0079: link-record envelope refused")
+                }
+                return
+            }
             // ADR-0076 — the own-username register, the same way.
             if isOwnUsernameEnvelope(bytes: envelope) {
                 do {
@@ -1168,6 +1200,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     private func noteMembershipChange(before: [DeviceLeaf], group g: DeviceGroup) {
         reportRoster(group: g)
         guard let after = try? g.devices(), let own = try? g.ownLeafIndex() else { return }
+        // ADR-0080 — every device that was there re-sends its own card.
+        let beforeKeys = Set(before.map(\.signaturePublicKey))
+        if after.contains(where: { !beforeKeys.contains($0.signaturePublicKey) }) {
+            DeviceCardCenter.shared.scheduleResend()
+        }
         guard DeviceGroupGrowth.shouldResend(ownLeaf: own, before: before, after: after) else {
             return
         }
@@ -1205,6 +1242,24 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             accountIdB64: accountIdB64,
             roster: devices.map(\.signaturePublicKey),
             ownKey: own)
+        // ADR-0080 — a leaf that left takes its card with it.
+        DeviceCardCenter.shared.prune(rosterKeysHex: devices.map { hexEncode($0.signaturePublicKey) })
+    }
+
+    /// ADR-0080 — take in `envelope` when it is a device card. `true` when it
+    /// was one (kept or dropped), `false` for any other envelope. The sender
+    /// is the MLS-authenticated leaf of the row, resolved against the roster
+    /// at receipt; a row with no sender leaf, or a leaf the roster does not
+    /// hold, is dropped.
+    func receiveDeviceCard(_ envelope: Data, senderLeaf: UInt32?, group g: DeviceGroup) -> Bool {
+        guard let card = try? decodeDeviceCardEnvelope(plaintext: envelope) else { return false }
+        guard let senderLeaf, let roster = try? g.devices(),
+              let sender = roster.first(where: { $0.leafIndex == senderLeaf }) else { return true }
+        DeviceCardCenter.shared.receive(
+            senderKeyHex: hexEncode(sender.signaturePublicKey),
+            card: DeviceCardCenter.stored(card),
+            rosterKeysHex: roster.map { hexEncode($0.signaturePublicKey) })
+        return true
     }
 
     /// Publish every catch-up part as its own DeviceGroup message, each under
@@ -1245,7 +1300,100 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if let envelope = (try? syncedState.ownUsernameEnvelope()).flatMap({ $0 }) {
             await sendServiceEnvelope(envelope)
         }
+        // ADR-0079 — and every link record, with its original stamp.
+        for envelope in (try? syncedState.linkRecordEnvelopes()) ?? [] {
+            await sendServiceEnvelope(envelope)
+        }
     }
+
+    // MARK: - ADR-0079: the link-record register
+
+    static func linkRecordsUnsentKey(accountIdB64: String) -> String {
+        "lakko.link-records.unsent.v1.\(accountIdB64)"
+    }
+
+    func flushUnsentLinkRecords() async {
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.linkRecordsUnsentKey(accountIdB64: account)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return }
+        do {
+            try await sendLineageEnvelopes((try? syncedState.linkRecordEnvelopes()) ?? [])
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("ADR-0079: link-record register send failed; retried at the next start")
+        }
+    }
+
+    /// Fold a write here at once, persist it, mark it unsent and send the
+    /// one record to the account's other devices.
+    private func afterLinkRecordWrite(linkId: Data) async {
+        stateChanged()
+        persistSyncState()
+        guard let account = activeAccountIdB64 else { return }
+        let key = Self.linkRecordsUnsentKey(accountIdB64: account)
+        UserDefaults.standard.set(true, forKey: key)
+        do {
+            if let envelope = try syncedState.linkRecordEnvelopeFor(linkId: linkId) {
+                try await sendLineageEnvelopes([envelope])
+            }
+            UserDefaults.standard.removeObject(forKey: key)
+        } catch {
+            NSLog("ADR-0079: link-record register send failed; retried at the next start")
+        }
+    }
+
+    /// Record a link just minted (ADR-0079 section 4). `false` when the
+    /// synced state is not loaded or the record is refused.
+    @discardableResult
+    public func setLinkRecord(_ record: LinkRecord) async -> Bool {
+        guard ready, !deviceRemoved else { return false }
+        let written: Bool
+        do {
+            written = try syncedState.setLinkRecord(hlc: Hlc.mint(), record: record)
+        } catch {
+            NSLog("ADR-0079: link record refused")
+            return false
+        }
+        if written { await afterLinkRecordWrite(linkId: record.linkId) }
+        return written
+    }
+
+    /// Mark a link revoked (final). `false` when nothing changed.
+    @discardableResult
+    public func revokeLinkRecord(linkId: Data) async -> Bool {
+        guard ready, !deviceRemoved else { return false }
+        let written = (try? syncedState.revokeLinkRecord(hlc: Hlc.mint(), linkId: linkId)) ?? false
+        if written { await afterLinkRecordWrite(linkId: linkId) }
+        return written
+    }
+
+    /// Count one request accepted through a link, remembering the requester.
+    @discardableResult
+    public func recordLinkUse(linkId: Data, requesterKey: Data) async -> Bool {
+        guard ready, !deviceRemoved else { return false }
+        let written = (try? syncedState.recordLinkUse(
+            hlc: Hlc.mint(), linkId: linkId, requesterKey: requesterKey)) ?? false
+        if written { await afterLinkRecordWrite(linkId: linkId) }
+        return written
+    }
+
+    /// The one rule for a request's link answer (ADR-0079 section 3), asked
+    /// of the fold once it is loaded (waits a short bound for it). A fold that
+    /// never loads reads as `.dead`, so the request is shown as a card rather
+    /// than lost.
+    public func linkAnswerVerdict(linkId: Data, linkSecret: Data, requesterKey: Data) async -> LinkAnswerVerdict {
+        let deadline = Date().addingTimeInterval(Self.linkVerdictWaitSeconds)
+        while !ready, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        guard ready else { return .dead }
+        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+        return (try? syncedState.linkAnswerVerdict(
+            linkId: linkId, linkSecret: linkSecret, requesterKey: requesterKey, nowMs: nowMs)) ?? .dead
+    }
+
+    /// How long a link-answer verdict waits for the fold. Chosen, not measured.
+    static let linkVerdictWaitSeconds: TimeInterval = 15
 
     // MARK: - ADR-0076: the own-username register
 
@@ -1459,6 +1607,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             if after.count > before.count {
                 let envelopes = Self.handOverEnvelopes(
                     accountIdB64: accountIdB64, reach: .shared, profiles: .shared)
+                    + [DeviceCardCenter.shared.ownEnvelope()].compactMap { $0 }
                 Task { @MainActor [weak self] in
                     for envelope in envelopes {
                         await self?.sendServiceEnvelope(envelope)

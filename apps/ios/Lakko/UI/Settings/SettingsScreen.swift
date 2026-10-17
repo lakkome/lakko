@@ -18,6 +18,8 @@ struct SettingsScreen: View {
     @ObservedObject private var profiles = ProfileDirectory.shared
     /// ADR-0061 — the interface language; every catalog string here follows it.
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0080 — the "Show my city to my other devices" switch.
+    @ObservedObject private var deviceCards = DeviceCardCenter.shared
     /// The existing delete-account flow (auth `DELETE /account`, the passkey
     /// action ceremony on a 403, the discovery purge, then the local wipe)
     /// lives on ``PasskeysViewModel``; the danger zone drives that same
@@ -138,10 +140,22 @@ struct SettingsScreen: View {
             }
 
             // `docs/ux/who-can-find-me.md` section 2 — Privacy, after Profile.
-            Section(l10n.t("settings.section.privacy")) {
+            Section {
                 row(l10n.t("who_can_find_me.title"), systemImage: "person.2.badge.gearshape") {
                     onOpen(.whoCanFindMe)
                 }
+                // ADR-0080 — per device, on by default.
+                Toggle(isOn: Binding(
+                    get: { deviceCards.showCity },
+                    set: { deviceCards.setShowCity($0) }
+                )) {
+                    Label(l10n.t("settings.privacy.show_city"), systemImage: "mappin.and.ellipse")
+                        .foregroundStyle(Color.lakkoText)
+                }
+            } header: {
+                Text(l10n.t("settings.section.privacy"))
+            } footer: {
+                Text(l10n.t("settings.privacy.show_city.sub"))
             }
 
             Section(l10n.t("settings.section.security")) {
@@ -228,6 +242,10 @@ struct SettingsScreen: View {
                     Text("AGPL-3.0-or-later")
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
+                // ADR-0080 — the city database's attribution (CC BY 4.0).
+                Text(l10n.t("settings.about.city_data"))
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
                 // ADR-0061 section 5 — only while a signed translation
                 // update is active (UX spec section 7).
                 if let signedAt = l10n.translationsSignedAtMillis {

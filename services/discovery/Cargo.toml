@@ -112,6 +112,9 @@ lakko-transparency.workspace = true
 # thiserror, both already here.
 lakko-attest.workspace = true
 
+# ADR-0080 - reads the city database behind `GET /discovery/locate`.
+maxminddb.workspace = true
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

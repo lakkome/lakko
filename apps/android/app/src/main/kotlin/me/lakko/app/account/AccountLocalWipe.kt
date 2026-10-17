@@ -168,6 +168,9 @@ public object AccountLocalWipe {
         Step("new-device-notice") { ctx, acct ->
             me.lakko.app.devices.NewDeviceNoticeStore.onDevice(ctx).deleteAccount(acct)
         },
+        // ADR-0080: the cards of the account's devices, this device's own
+        // card, its city answer and its "Show my city" switch.
+        Step("device-cards") { ctx, acct -> me.lakko.app.devices.DeviceCardCenter.deleteAccountRows(ctx, acct) },
         Step("recovery-phrase") { ctx, acct -> me.lakko.app.backup.PhraseStore.deletePhrase(ctx, acct) },
         // A guest account's phrase is kept under a key of its own
         // (`auth/GuestAccount.kt`), so it has a step of its own.
@@ -285,6 +288,11 @@ public object AccountLocalWipe {
         // requests (recipients and intro texts).
         Step("sent-contact-requests") { ctx, acct ->
             me.lakko.app.contacts.SentRequestsFiles.deleteAccount(ctx, acct)
+        },
+        // ADR-0079 - the people added through their invite link and what was
+        // written to them (sealed, named by the account id in hex).
+        Step("pending-contacts") { ctx, acct ->
+            me.lakko.app.contacts.PendingContactsFiles.deleteAccount(ctx, acct)
         },
         Step("identity-pins") { ctx, acct -> me.lakko.app.contacts.PeerPinStore.deleteForOwner(ctx, acct) },
         Step("invite-link-secrets") { ctx, acct ->

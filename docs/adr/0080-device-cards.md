@@ -115,3 +115,104 @@ keys), so this is the existing network-origin residual, not a new link.
 CLAUDE.md ADR row and module map rows (`lakko-contacts`, `services/discovery`);
 PRODUCT-READINESS multi-device row; `docs/ux/second-device.md` section 3 is
 the UX source of truth.
+
+## As built (2026-10-16)
+
+Built the same day in the core, both FFI surfaces, the NSE surface,
+`services/discovery` and the three clients; host-tested only. Nothing was
+walked on a device or against a server, and nothing is deployed.
+
+**Core and FFI.** `lakko-contacts::device_card` as section 1, with the bounds
+read as **bytes** (model, system 64; app version 32; city 64; country empty or
+two ASCII capital letters). Every string may be empty and must be trimmed;
+control characters, U+2028 / U+2029 and every format character of the
+profile's table are refused, with none of the display name's joiner
+exceptions. Platform wire bytes are frozen: ios 1, ipados 2, macos 3,
+android 4, web 5, desktop 6. `DeviceCard::normalized` removes what the
+bounds refuse from operating-system text (line breaks become spaces, a string
+is cut on a character boundary, a country that is not two letters is emptied)
+and is the identity on a valid card; the FFI composers normalize before
+composing, so a client never fails to compose from a user agent or a city
+answer. Dispatched as `IncomingEnvelope::DeviceCard` right after the
+key-rotation envelope. UniFFI kind `DeviceCard` is appended last (ordinal
+safety) and the `device_card` field defaults to `None`; wasm kind 19. The
+extension crate answers only `isDeviceCardEnvelope` and the length range, and
+the NSE filter has an arm for it, defaulted like the key-rotation arm.
+
+**Discovery.** `GET /discovery/locate` sits in the rate-limited router, so it
+shares the per-IP bucket (and, if a bearer token is sent, the account bucket)
+of the other anonymous routes. The source address is the one
+`rate_limit::source_ip` already trusts (X-Real-IP, else the rightmost
+X-Forwarded-For entry, else the socket); no nginx change was needed. The
+answer is the database's English city name and its ISO code, a half when only
+one is known, or `{}`; a city longer than the card's bound or carrying a
+control character is dropped. `Cache-Control: no-store`. A configured but
+unreadable file does not stop discovery: it logs one warning and answers `{}`
+(chosen so a broken monthly refresh cannot take discovery down). The file is
+read once at startup; a refresh is a restart. `maxminddb` 0.32 with default
+features off; `cargo deny check licenses` passed with it.
+
+**Clients (the same on web, iOS and Android).**
+
+- The own card: web `platform = web`, model "Browser on System" from the user
+  agent (Chrome, Edge, Opera, Firefox, Safari; iOS, iPadOS, Android, macOS,
+  Windows, ChromeOS, Linux; the frozen macOS 10.15 and Windows NT 10.0 versions
+  are left out), app version `web` so the row reads "Lakko web". iOS: model
+  from `utsname` (the simulated model in the Simulator) through a table of
+  iPhone 13 to iPhone 16 identifiers, else the identifier; `ipados` on an iPad;
+  `macos` / "Mac" for the iOS app on a Mac. Android: `Build.MANUFACTURER` and
+  `Build.MODEL` without repeating the maker, `Android <release>`.
+- An action is any pointer or key event on web (document, capture phase,
+  ignored while the page is hidden), a touch on any window on iOS (a
+  recogniser that cancels nothing), `Activity.onUserInteraction` on Android
+  (with a foreground flag from `onResume` / `onPause`). Each action asks the
+  rule; a card is sent when none exists, a field other than the times changed,
+  or the last is 30 minutes old.
+- The city is asked for at most every 6 hours (chosen, not measured), only on
+  an action, never with the switch off and never while the native
+  anti-censorship connection is armed (web has none). Turning the switch off
+  sends a card with no city at once.
+- **"Show my city to my other devices" is per device and not synced**: it
+  governs what this device puts in its own card, and one device's choice
+  about its location should not change another's.
+- The growth re-send: every device that was in the DeviceGroup before a
+  device joined re-sends its stored card unchanged after a uniform random
+  delay below 30 s, only while in the foreground. The pairing hand-over also
+  carries the own card (web through the service-envelope outbox, iOS through
+  `handOverEnvelopes`; Android only through the growth re-send).
+- Received cards are stored per account (web `localStorage`, iOS
+  `UserDefaults.standard`, Android one `SharedPreferences` file), keyed by the
+  sender's leaf signature key in hex, resolved from the MLS-authenticated
+  sender leaf against the roster at receipt; pruned whenever the roster is
+  read. Forget device / Delete account remove the keys (each client's wipe
+  list).
+- The Devices screen: section "This device" (one row, "online"), "Remove all
+  other devices" with its line when others exist, section "Other devices"
+  ordered by last activity with cardless rows last. Activity uses each
+  client's chat-list time format (time today, weekday within six days, else a
+  date). The country name is the platform's name for the code in the
+  interface locale.
+- **Remove one** keeps the ADR-0074 reason pair ("I do not use it any more" /
+  "It was lost or stolen") between the new title and body and the buttons,
+  because removing it would remove the only entry to the key rotation. The
+  title, body and button take the new copy.
+- **Remove all** asks the fresh-auth proof once, then runs each device's own
+  removal in turn; each row shows "Removing..." and then either disappears
+  or keeps "Could not remove. Try again." with its own Remove. **With a
+  passkey on the account, each removal still asks its own passkey assertion**
+  (the ADR-0015 attestation is bound to one leaf), so "one prompt" holds for
+  the proof and not for the attestations.
+- **Not built: the added date on a row whose card has not arrived.** No FFI
+  exposes the leaf binding's `issued_at`, and adding it is a `lakko-mls`
+  change this ADR rules out; such a row shows its generic icon and "Device".
+
+**Tests.** Core: 15 unit tests in `device_card.rs`, fuzz target
+`device_card_decode` (compile-checked, not run). FFI: round-trip and dispatch
+tests on UniFFI (2), wasm (1), extension (4, including the golden of the NSE
+pre-filter shape). Discovery: 3 unit tests in `locate.rs`, 4 route tests in
+`main.rs` (answers for the trusted address without a session and over a pool
+never reached, `{}` without a database, the per-address bucket, and a
+TRACE-level capture that finds neither the address nor the answer). Clients:
+web `device-cards.test.ts` (store rules, send rule, order, row text, user
+agent, sender resolution, codec round trip through the real wasm); iOS
+`DeviceCardsTests.swift`; Android `DeviceCardsTest.kt`.

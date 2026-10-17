@@ -42,6 +42,7 @@ import FeedImport from "./FeedImport";
 import { ChannelSubscribe, ChannelView, JoinCoPublisher, NewChannel } from "./Channels";
 import ChannelsLayout, { ChannelsIndex } from "./ChannelsLayout";
 import Chat from "./Chat";
+import PendingChat from "./PendingChat";
 import DevProbe from "./DevProbe";
 import Devices from "./Devices";
 import Invite from "./Invite";
@@ -57,6 +58,7 @@ import {
   groupJoinRoutePattern,
   inviteRoutePattern,
   paths,
+  pendingChatRoutePattern,
 } from "./paths";
 
 /** All app routes. Consumed by `<Router>` in `App.tsx`. */
@@ -125,6 +127,8 @@ export const routes: RouteDefinition[] = [
         children: [
           { path: paths.home, component: Home },
           { path: chatRoutePattern, component: () => <Chat backTo={paths.home} /> },
+          // ADR-0079 — the chat with an inviter whose app has not answered.
+          { path: pendingChatRoutePattern, component: PendingChat },
         ],
       },
       // Groups: the same chat view, beside the group list; Back returns to it.

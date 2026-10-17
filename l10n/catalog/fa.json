@@ -7614,14 +7614,6 @@
       "text": "جدید",
       "status": "machine"
     },
-    "settings.devices.remove.body": {
-      "text": "اکنون از حساب خارج شده است. دفعه بعد که وصل شود، هر چه این حساب روی آن نگه داشته حذف می‌شود: گفتگوها، مخاطبان، کلیدها و عبارت بازیابی.",
-      "status": "machine"
-    },
-    "settings.devices.remove.confirm": {
-      "text": "حذف دستگاه",
-      "status": "machine"
-    },
     "settings.devices.remove.confirm_named": {
       "text": "حذف {device}",
       "status": "machine"
@@ -7632,10 +7624,6 @@
     },
     "settings.devices.remove.reason_unused": {
       "text": "دیگر از آن استفاده نمی‌کنم",
-      "status": "machine"
-    },
-    "settings.devices.remove.title": {
-      "text": "{device} حذف شود؟",
       "status": "machine"
     },
     "settings.devices.remove.working": {
@@ -8408,6 +8396,78 @@
     },
     "who_can_find_me.title": {
       "text": "چه کسی می‌تواند مرا پیدا کند",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "{name} را به مخاطبانتان اضافه می‌کنید؟",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "افزودن",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "حالا نه",
+      "status": "machine"
+    },
+    "invite.contact.page.sign_in": {
+      "text": "برای افزودن {name} وارد شوید",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "ساخت حساب",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} از قبل در مخاطبان شماست",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "باز کردن گفتگو",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "این پیوند دعوت خودتان است",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "آن را با کسی که می‌خواهید اضافه کنید به اشتراک بگذارید.",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "تمام",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "این پیوند دعوت دیگر کار نمی‌کند",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "از فرستنده یک پیوند تازه بخواهید.",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "افزودن {name} ممکن نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "این شخص",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} پیام‌هایتان را وقتی برنامه‌اش دوباره آنلاین شود دریافت می‌کند.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} هنوز پاسخ نداده است. می‌توانید از او پیوند تازه بخواهید.",
+      "status": "machine"
+    },
+    "chat.pending.call_disabled": {
+      "text": "وقتی {name} وصل شود در دسترس است.",
+      "status": "machine"
+    },
+    "contacts.request.dead_link_note": {
+      "text": "با پیوند دعوتی فرستاده شده که دیگر کار نمی‌کند.",
       "status": "machine"
     }
   }

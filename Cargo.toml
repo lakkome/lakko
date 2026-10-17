@@ -113,6 +113,11 @@ futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# ADR-0080 - the city database (DB-IP City Lite, MaxMind format) behind
+# `GET /discovery/locate`. ISC licence; default features off (no mmap, no
+# unsafe string decoding).
+maxminddb = { version = "0.32", default-features = false }
+
 # SMTP client for the one letter `services/auth` sends (ADR-0075 recovery
 # email code). Minimal features: the SMTP transport and the message builder
 # over tokio with rustls (ring provider, bundled web PKI roots). Default

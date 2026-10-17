@@ -756,6 +756,10 @@ final class MultiJoinerCall {
             // meaningful ONLY in the account's own DeviceGroup. Anywhere else
             // it is dropped, never opened and never rendered.
             break
+        case .deviceCard:
+            // ADR-0080 — a device card is meaningful ONLY in the account's
+            // own DeviceGroup. A relay payload names no device; dropped.
+            break
         }
     }
 

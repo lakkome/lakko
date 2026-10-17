@@ -91,10 +91,10 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 
 /// Server-side ceiling on the sealed blob: the longest sealed `/i/` link the
-/// codec can produce (`lakko_contacts::invite::MAX_SEALED_LEN`, 404 bytes),
-/// derived rather than written as a literal. Pinned to the `VARBINARY` width
-/// of `invites.sealed_capability` in `migrations/0030_link_grant_mailbox_binding_width.sql`
-/// by a test.
+/// codec can produce (`lakko_contacts::invite::MAX_SEALED_LEN`, 693 bytes
+/// since the ADR-0079 inviter preview), derived rather than written as a
+/// literal. Pinned to the `VARBINARY` width of `invites.sealed_capability` in
+/// `migrations/0031_invite_preview_width.sql` by a test.
 const MAX_SEALED_BYTES: usize = MAX_SEALED_LEN;
 
 // `BLOB_ID_LEN` is sourced from `lakko_contacts::invite` so the
@@ -788,17 +788,18 @@ mod tests {
     /// "everything past N bytes 500s in production".
     #[test]
     fn max_sealed_bytes_matches_column_width() {
-        let migration = include_str!("../migrations/0031_ownerless_invite_ledgers.sql");
-        let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
+        // ADR-0079: the column was widened for the inviter preview by 0032.
+        let widened = include_str!("../migrations/0032_invite_preview_width.sql");
+        let widened = widened.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            normalised.contains(&format!(
-                "sealed_capability VARBINARY({MAX_SEALED_BYTES}) NOT NULL COMMENT \
+            widened.contains(&format!(
+                "MODIFY sealed_capability VARBINARY({MAX_SEALED_BYTES}) NOT NULL COMMENT \
                  'lakko_contacts::link_seal sealed InviteCapability"
             )),
             "MAX_SEALED_BYTES ({MAX_SEALED_BYTES}) must match invites.sealed_capability \
-             in 0031_ownerless_invite_ledgers.sql",
+             in 0032_invite_preview_width.sql",
         );
-        assert_eq!(MAX_SEALED_BYTES, 404);
+        assert_eq!(MAX_SEALED_BYTES, 693);
     }
 
     /// ADR-0078 section 10: no ledger table has an owner or an issuer
@@ -896,6 +897,7 @@ mod tests {
     /// verifies only against the link's own revocation key. Gated
     /// on `LAKKO_DISCOVERY_TEST_DATABASE_URL` (skips when unset).
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn a_sealed_invite_round_trips_through_the_ledger() {
         use axum::extract::{Path, State};
         use axum::Json;
@@ -933,10 +935,17 @@ mod tests {
                 0,
             )
             .unwrap(),
+            // ADR-0079: the longest inviter preview, so the row is the
+            // widest sealed blob the column must hold.
+            &lakko_contacts::invite::InvitePreview {
+                display_name: format!("{}\u{20AC}", "\u{1F600}".repeat(63)),
+                username: "a".repeat(32),
+            },
         )
         .unwrap();
         let secret = generate_link_secret();
         let sealed = seal_link(&secret, &wire).unwrap();
+        assert_eq!(sealed.len(), MAX_SEALED_BYTES);
         assert_eq!(sealed.len(), MAX_SEALED_BYTES);
 
         let Json(stored) = upload(

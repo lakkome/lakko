@@ -12,7 +12,7 @@
 //! recipient's stranger-inbox polling loop until restart.
 //!
 //! The same bytes also drive the SEALED-plaintext splitter (profile, reply
-//! grant, intro; ADR-0048 §2, ADR-0060 §6) through
+//! grant, link answer, intro; ADR-0048 §2, ADR-0060 §6, ADR-0079 §2) through
 //! `fuzz_api::contact_request_plaintext`, which the AEAD otherwise hides from
 //! a fuzzer: anything it accepts must re-frame to the same bytes.
 

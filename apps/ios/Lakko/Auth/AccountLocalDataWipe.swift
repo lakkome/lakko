@@ -301,6 +301,14 @@ enum AccountLocalDataWipe {
             standard.removeObject(
                 forKey: DeviceGroupSyncRepository.recoveryEmailUnsentKey(accountIdB64: accountIdB64))
         }
+        // ADR-0079 — the unsent link-record marker and the people added
+        // through their invite link (their queued messages are in the
+        // held-send queue, cleared above).
+        step("link-records-unsent") {
+            standard.removeObject(
+                forKey: DeviceGroupSyncRepository.linkRecordsUnsentKey(accountIdB64: accountIdB64))
+        }
+        step("pending-contacts") { PendingContactStore.clear(accountIdB64: accountIdB64) }
         step("profiles") { ProfileDirectory.shared.forget(accountIdB64: accountIdB64) }
         step("contacts-inbox") { ContactsInboxStore().clear(accountIdB64: accountIdB64) }
         // ADR-0073 R.3 — the requests kept waiting for an identity verdict.
@@ -384,6 +392,13 @@ enum AccountLocalDataWipe {
         }
         step("new-device-notice") {
             NewDeviceNoticeStore(defaults: standard).clear(accountIdB64: accountIdB64)
+        }
+        // ADR-0080 — the cards of the account's devices, this device's own
+        // card, its city answer and its "Show my city" switch.
+        step("device-cards") {
+            standard.removeObject(forKey: DeviceCards.cardsKey(accountIdB64: accountIdB64))
+            standard.removeObject(forKey: DeviceCards.cityKey(accountIdB64: accountIdB64))
+            standard.removeObject(forKey: DeviceCards.showCityKey(accountIdB64: accountIdB64))
         }
         step("decrypted-media") {
             MediaSessionCache.shared.purge()

@@ -2726,6 +2726,18 @@
       "text": "Собеседник",
       "status": "machine"
     },
+    "chat.pending.call_disabled": {
+      "text": "Будет доступно, когда {name} подключится.",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} ещё не ответил. Можно попросить новую ссылку.",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} получит ваши сообщения, когда приложение снова будет в сети.",
+      "status": "machine"
+    },
     "chat.photo.load_failed": {
       "text": "Не удалось загрузить фото",
       "status": "machine"
@@ -4056,6 +4068,10 @@
     },
     "contacts.request.accept": {
       "text": "Принять",
+      "status": "machine"
+    },
+    "contacts.request.dead_link_note": {
+      "text": "Отправлено по ссылке-приглашению, которая больше не работает.",
       "status": "machine"
     },
     "contacts.request.decline": {
@@ -5922,6 +5938,62 @@
       "text": "Эта ссылка больше не действует. Попросите человека прислать новую.",
       "status": "machine"
     },
+    "invite.contact.page.add": {
+      "text": "Добавить",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "Не удалось добавить {name}. Проверьте подключение и попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} уже есть в ваших контактах",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Создать аккаунт",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Попросите у отправителя новую.",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Эта ссылка-приглашение больше не работает",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "Готово",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "Не сейчас",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "Открыть чат",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "Отправьте её человеку, которого хотите добавить.",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "Это ваша собственная ссылка-приглашение",
+      "status": "machine"
+    },
+    "invite.contact.page.sign_in": {
+      "text": "Войдите, чтобы добавить {name}",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "Добавить {name} в контакты?",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "этого человека",
+      "status": "machine"
+    },
     "invite.contact.page_title": {
       "text": "Приглашение",
       "status": "machine"
@@ -7614,14 +7686,6 @@
       "text": "Новое",
       "status": "machine"
     },
-    "settings.devices.remove.body": {
-      "text": "Оно уже вышло из аккаунта. При следующем подключении с него будет удалено всё, что хранил этот аккаунт: чаты, контакты, ключи и фраза восстановления.",
-      "status": "machine"
-    },
-    "settings.devices.remove.confirm": {
-      "text": "Удалить устройство",
-      "status": "machine"
-    },
     "settings.devices.remove.confirm_named": {
       "text": "Удалить: {device}",
       "status": "machine"
@@ -7632,10 +7696,6 @@
     },
     "settings.devices.remove.reason_unused": {
       "text": "Я им больше не пользуюсь",
-      "status": "machine"
-    },
-    "settings.devices.remove.title": {
-      "text": "Удалить: {device}?",
       "status": "machine"
     },
     "settings.devices.remove.working": {

@@ -158,6 +158,7 @@ mod invite;
 mod key_reset;
 mod keypackage;
 mod ledger_id;
+mod locate;
 mod oprf;
 mod rate_limit;
 mod registry;
@@ -241,6 +242,9 @@ pub(crate) struct AppState {
     /// ADR-0076 — how often an account may rename and how long a retired
     /// name stays unclaimable (both 30 days by default; chosen).
     pub(crate) name_policy: registry::NamePolicy,
+    /// ADR-0080 — the city database `GET /discovery/locate` reads. Knows
+    /// nothing when `LAKKO_DISCOVERY_CITY_DB` is unset or unreadable.
+    pub(crate) city_lookup: Arc<dyn locate::CityLookup>,
 }
 
 /// G-discovery-ratelimit: token buckets on the anonymous OPRF / lookup
@@ -404,6 +408,7 @@ async fn main() -> Result<()> {
         username_cert_key: Arc::new(username_cert_key),
         key_reset_attest_key,
         name_policy,
+        city_lookup: locate::city_lookup_from_env(),
     };
 
     let _spent_pruner = state.anon_tokens.spawn_pruner();
@@ -609,6 +614,9 @@ pub(crate) fn build_app(state: AppState) -> Router {
         // ADR-0060 — find people in Everyone by one name term.
         .route("/discovery/name/lookup", post(visibility::name_lookup))
         .route("/discovery/channel/lookup", post(channel_names::lookup))
+        // ADR-0080 — the city of the request's own address, for a device
+        // card. Anonymous, stores nothing, logs nothing; per-IP bucket only.
+        .route("/discovery/locate", get(locate::locate))
         // The three invite ledgers' open fetch routes. Since the
         // short-link amendment of ADR-0028 (2026-09-27) a ledger id is a
         // random 6-byte handle (2^48), so guessing live ids is an
@@ -884,17 +892,14 @@ mod tests {
     /// real router over a lazy pool that is never reached: a malformed id is
     /// refused with 400 before any DB work, so the first `burst` requests
     /// from one address answer 400 and the next one 429.
-    #[tokio::test]
-    async fn invite_fetch_and_consume_routes_are_rate_limited() {
+    /// The real state over a lazy pool that is never reached: a route that
+    /// touched the database would fail, so a route that answers did not.
+    fn lazy_state(limit: rate_limit::Limit, city_lookup: Arc<dyn locate::CityLookup>) -> AppState {
         let secret = Arc::new(TokenSecret::new(vec![7u8; 32]).unwrap());
-        let limit = rate_limit::Limit {
-            per_minute: 60.0,
-            burst: 3.0,
-        };
         let db = MySqlPoolOptions::new()
             .connect_lazy("mysql://nobody:nothing@127.0.0.1:1/none")
             .unwrap();
-        let state = AppState {
+        AppState {
             anon_tokens: TokenVerifier::new(db.clone(), None),
             db,
             oprf: Arc::new(
@@ -912,7 +917,23 @@ mod tests {
             username_cert_key: Arc::new(lakko_crypto::signing::SigningKey::from_seed(&[3u8; 32])),
             key_reset_attest_key: None,
             name_policy: registry::NamePolicy::defaults(),
+            city_lookup,
+        }
+    }
+
+    /// The three ledgers' open fetch + consume routes sit behind the per-IP
+    /// bucket (the short-link amendment of ADR-0028: a 6-byte id is
+    /// guessable, so the rate limit is what bounds enumeration). Builds the
+    /// real router over a lazy pool that is never reached: a malformed id is
+    /// refused with 400 before any DB work, so the first `burst` requests
+    /// from one address answer 400 and the next one 429.
+    #[tokio::test]
+    async fn invite_fetch_and_consume_routes_are_rate_limited() {
+        let limit = rate_limit::Limit {
+            per_minute: 60.0,
+            burst: 3.0,
         };
+        let state = lazy_state(limit, Arc::new(locate::NoCityLookup));
         let app = build_app(state);
         for (method, uri) in [
             ("GET", "/discovery/invite/too-long-for-an-id"),
@@ -943,6 +964,173 @@ mod tests {
                 statuses[3],
                 StatusCode::TOO_MANY_REQUESTS,
                 "{method} {uri} must be behind the per-IP bucket: {statuses:?}"
+            );
+        }
+    }
+
+    /// A fake city database: answers for the documentation addresses it was
+    /// given and counts nothing.
+    struct FakeCities(Vec<(std::net::IpAddr, locate::Place)>);
+
+    impl locate::CityLookup for FakeCities {
+        fn locate(&self, ip: std::net::IpAddr) -> Option<locate::Place> {
+            self.0
+                .iter()
+                .find(|(a, _)| *a == ip)
+                .map(|(_, p)| p.clone())
+        }
+    }
+
+    fn almere() -> locate::Place {
+        locate::Place {
+            city: Some("Almere".to_string()),
+            country: Some("NL".to_string()),
+        }
+    }
+
+    fn locate_app(burst: f64) -> Router {
+        let lookup = FakeCities(vec![
+            ("203.0.113.7".parse().unwrap(), almere()),
+            (
+                "2001:db8::1".parse().unwrap(),
+                locate::Place {
+                    city: None,
+                    country: Some("DE".to_string()),
+                },
+            ),
+        ]);
+        build_app(lazy_state(
+            rate_limit::Limit {
+                per_minute: 60.0,
+                burst,
+            },
+            Arc::new(lookup),
+        ))
+    }
+
+    async fn locate_as(app: &Router, headers: &[(&str, &str)]) -> (StatusCode, String, String) {
+        let mut req = Request::builder().method("GET").uri("/discovery/locate");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let r = app
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = r.status();
+        let cache = r
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(body.to_vec()).unwrap(), cache)
+    }
+
+    /// ADR-0080 section 4: no session, no token; the address nginx wrote is
+    /// the one located (the same rule the per-IP limiter trusts), and the
+    /// answer is never cached. The lazy pool is never reached, so the route
+    /// read and wrote no database.
+    #[tokio::test]
+    async fn locate_answers_for_the_trusted_source_address_without_a_session() {
+        let app = locate_app(100.0);
+        let (status, body, cache) = locate_as(&app, &[("x-real-ip", "203.0.113.7")]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, r#"{"city":"Almere","country":"NL"}"#);
+        assert_eq!(cache, "no-store");
+        // The client-supplied leftmost forwarded entry is ignored.
+        let (_, body, _) =
+            locate_as(&app, &[("x-forwarded-for", "198.51.100.1, 203.0.113.7")]).await;
+        assert_eq!(body, r#"{"city":"Almere","country":"NL"}"#);
+        let (_, body, _) =
+            locate_as(&app, &[("x-forwarded-for", "203.0.113.7, 198.51.100.1")]).await;
+        assert_eq!(body, "{}");
+        let (_, body, _) = locate_as(&app, &[("x-real-ip", "2001:db8::1")]).await;
+        assert_eq!(body, r#"{"country":"DE"}"#);
+        let (status, body, _) = locate_as(&app, &[("x-real-ip", "198.51.100.200")]).await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "{}"));
+    }
+
+    #[tokio::test]
+    async fn locate_without_a_database_answers_empty() {
+        let app = build_app(lazy_state(
+            rate_limit::Limit {
+                per_minute: 60.0,
+                burst: 10.0,
+            },
+            Arc::new(locate::NoCityLookup),
+        ));
+        let (status, body, _) = locate_as(&app, &[("x-real-ip", "203.0.113.7")]).await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "{}"));
+    }
+
+    #[tokio::test]
+    async fn locate_is_behind_the_per_address_bucket() {
+        let app = locate_app(2.0);
+        let mut statuses = Vec::new();
+        for _ in 0..3 {
+            statuses.push(locate_as(&app, &[("x-real-ip", "203.0.113.7")]).await.0);
+        }
+        assert_eq!(
+            statuses,
+            vec![
+                StatusCode::OK,
+                StatusCode::OK,
+                StatusCode::TOO_MANY_REQUESTS
+            ]
+        );
+        // Another address has its own bucket.
+        let (status, _, _) = locate_as(&app, &[("x-real-ip", "198.51.100.9")]).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// ADR-0080 section 4 / ADR-0078 section 11: no log line names the
+    /// address or the answer. Captures EVERY event and span field at TRACE
+    /// level while the real router (with its request `TraceLayer`) serves a
+    /// locate, then searches the output.
+    #[tokio::test]
+    async fn locate_logs_neither_the_address_nor_the_answer() {
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let writer = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::FULL)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let app = locate_app(100.0);
+        let (_, body, _) = locate_as(
+            &app,
+            &[
+                ("x-real-ip", "203.0.113.7"),
+                ("x-forwarded-for", "203.0.113.7"),
+            ],
+        )
+        .await;
+        drop(guard);
+        assert!(body.contains("Almere"), "the fake answered");
+        let logged = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        assert!(!logged.is_empty(), "the request span was captured");
+        for secret in ["203.0.113.7", "Almere", "\"NL\"", "country"] {
+            assert!(
+                !logged.contains(secret),
+                "a log line names {secret:?}: {logged}"
             );
         }
     }

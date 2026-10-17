@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import me.lakko.app.launchBound
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.auth.OwnUsernameState
@@ -41,6 +42,8 @@ import uniffi.lakko_ffi_uniffi.DeviceGroupBody
 import uniffi.lakko_ffi_uniffi.FolderChangeSet
 import uniffi.lakko_ffi_uniffi.FolderView
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.LinkAnswerVerdict
+import uniffi.lakko_ffi_uniffi.LinkRecord
 import uniffi.lakko_ffi_uniffi.ParsedDeviceGroupPayload
 import uniffi.lakko_ffi_uniffi.ProcessedMessage
 import uniffi.lakko_ffi_uniffi.SyncedState
@@ -329,6 +332,11 @@ public class DeviceGroupSyncRepository(
         // acknowledges what is there: the device that let it in shows no
         // banner about it.
         me.lakko.app.devices.NewDeviceNotices.bind(applicationContext, accountIdB64)
+        // ADR-0080 - this account's device cards, sent through this
+        // runtime's DeviceGroup `ServiceEnvelope`.
+        me.lakko.app.devices.DeviceCardCenter.bind(applicationContext, accountIdB64) { envelope ->
+            sendServiceEnvelope(envelope)
+        }
         reportRoster(ensured.group, accountIdB64, localChange = letIn)
         if (seedState) startSyncStatePersistence(accountIdB64)
         mutableReady.value = true
@@ -434,6 +442,7 @@ public class DeviceGroupSyncRepository(
      */
     public fun clear() {
         me.lakko.app.devices.NewDeviceNotices.unbind()
+        me.lakko.app.devices.DeviceCardCenter.unbind()
         cancelPollAndDropHandles()
         activeAccountIdB64.set(null)
         activeAccountId.set(null)
@@ -469,10 +478,38 @@ public class DeviceGroupSyncRepository(
             } else {
                 me.lakko.app.devices.NewDeviceNotices.onRoster(applicationContext, accountIdB64, roster, self)
             }
+            // ADR-0080 - a leaf that left takes its card with it.
+            me.lakko.app.devices.DeviceCardCenter.prune(rows.map { hexOf(it.signaturePublicKey) })
         } catch (cause: Throwable) {
             Log.w(LOG_TAG, "device roster not read for the new-device notice (${cause.javaClass.simpleName})")
         }
     }
+
+    /**
+     * ADR-0080 - take in [envelope] when it is a device card. `true` when it
+     * was one (kept or dropped), `false` for any other envelope. The sender
+     * is the MLS-authenticated leaf of the row, resolved against the roster
+     * at receipt; a row with no sender leaf, or a leaf the roster does not
+     * hold, is dropped.
+     */
+    private fun receiveDeviceCard(envelope: ByteArray, senderLeaf: UInt?, g: DeviceGroup): Boolean {
+        val card = try {
+            uniffi.lakko_ffi_uniffi.decodeDeviceCardEnvelope(envelope)
+        } catch (_: Throwable) {
+            return false
+        }
+        val leaf = senderLeaf ?: return true
+        val roster = runCatching { g.devices() }.getOrNull() ?: return true
+        val sender = roster.firstOrNull { it.leafIndex == leaf } ?: return true
+        me.lakko.app.devices.DeviceCardCenter.receive(
+            hexOf(sender.signaturePublicKey),
+            me.lakko.app.devices.DeviceCardCenter.fromFfi(card),
+            roster.map { hexOf(it.signaturePublicKey) },
+        )
+        return true
+    }
+
+    private fun hexOf(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
 
     /**
      * ADR-0074 section 2.3 — the leaf signature keys of the devices in the
@@ -546,6 +583,7 @@ public class DeviceGroupSyncRepository(
             try {
                 republishRecoveryEmail(state)
                 republishOwnUsername(state)
+                republishLinkRecords(state)
                 republishLineage(state)
                 // ADR-0073 R.5 - every person-facing store is keyed by
                 // conversation id; a screen holding ANY segment's id reads the
@@ -825,6 +863,98 @@ public class DeviceGroupSyncRepository(
         if (changed) republish()
     }
 
+    // ------------------------------------------------------------
+    // ADR-0079 - the account's own invite links
+    // ------------------------------------------------------------
+
+    private val mutableLinkRecords: MutableStateFlow<List<LinkRecord>> = MutableStateFlow(emptyList())
+
+    /** The account's own invite links, every device's, revoked ones included
+     *  (ADR-0079 section 4). */
+    public val linkRecords: StateFlow<List<LinkRecord>> = mutableLinkRecords.asStateFlow()
+
+    /** Project the register. Under [stateLock]. */
+    private fun republishLinkRecords(state: SyncedState) {
+        val next = runCatching { state.allLinkRecords() }.getOrNull().orEmpty()
+        if (next != mutableLinkRecords.value) mutableLinkRecords.value = next
+    }
+
+    /** Fold one local link-record write, then send that record to the
+     *  account's other devices. A failed publish is kept by the pending
+     *  flag and re-sent with the catch-up. */
+    private suspend fun writeLinkRecord(linkId: ByteArray, write: (SyncedState) -> Boolean): Boolean {
+        val envelope = synchronized(stateLock) {
+            val state = syncedState ?: return false
+            val written = try {
+                write(state)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "link record refused (${cause.javaClass.simpleName})")
+                false
+            }
+            if (!written) return false
+            runCatching { state.linkRecordEnvelopeFor(linkId) }.getOrNull()
+        }
+        republish()
+        if (envelope != null) {
+            try {
+                sendServiceEnvelope(envelope)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "link record not published (${cause.javaClass.simpleName})")
+                pendingFlag?.recordFailure()
+            }
+        }
+        return true
+    }
+
+    /** Record a link just minted. `false` when the state is not open or the
+     *  record is refused. */
+    public suspend fun setLinkRecord(record: LinkRecord): Boolean =
+        writeLinkRecord(record.linkId) { it.setLinkRecord(Hlc.mint(), record) }
+
+    /** Mark a link revoked (final). `false` when nothing changed. */
+    public suspend fun revokeLinkRecord(linkId: ByteArray): Boolean =
+        writeLinkRecord(linkId) { it.revokeLinkRecord(Hlc.mint(), linkId) }
+
+    /** Count one request accepted through a link, remembering the requester. */
+    public suspend fun recordLinkUse(linkId: ByteArray, requesterKey: ByteArray): Boolean =
+        writeLinkRecord(linkId) { it.recordLinkUse(Hlc.mint(), linkId, requesterKey) }
+
+    /**
+     * The one rule for a request's link answer (ADR-0079 section 3), asked
+     * of the fold once it is loaded (waits [LINK_VERDICT_WAIT_MS] for it). A
+     * fold that never loads reads as DEAD, so the request is shown as a card
+     * rather than lost.
+     */
+    public suspend fun linkAnswerVerdict(
+        linkId: ByteArray,
+        linkSecret: ByteArray,
+        requesterKey: ByteArray,
+    ): LinkAnswerVerdict {
+        withTimeoutOrNull(LINK_VERDICT_WAIT_MS) { ready.first { it } }
+        return synchronized(stateLock) {
+            val state = syncedState ?: return LinkAnswerVerdict.DEAD
+            runCatching {
+                state.linkAnswerVerdict(linkId, linkSecret, requesterKey, System.currentTimeMillis().toULong())
+            }.getOrDefault(LinkAnswerVerdict.DEAD)
+        }
+    }
+
+    /** A received link-record envelope, folded by its original stamp. */
+    private fun applyLinkRecord(envelope: ByteArray) {
+        val changed = synchronized(stateLock) {
+            val state = syncedState ?: return
+            try {
+                state.applyLinkRecordEnvelope(envelope)
+            } catch (cause: Throwable) {
+                Log.w(LOG_TAG, "link record envelope refused (${cause.javaClass.simpleName})")
+                false
+            }
+        }
+        if (changed) republish()
+    }
+
     /** Fold this device's own write in, under its own leaf. */
     private fun foldLocal(body: DeviceGroupBody, hlc: ULong) {
         val ownLeaf = runCatching { group.get()?.ownLeafIndex() }.getOrNull() ?: 0u
@@ -860,6 +990,8 @@ public class DeviceGroupSyncRepository(
         runCatching { restored.recoveryEmailEnvelope() }.getOrNull()?.let { applyRecoveryEmail(it) }
         // ADR-0076 - and the own-username register.
         runCatching { restored.ownUsernameEnvelope() }.getOrNull()?.let { applyOwnUsername(it) }
+        // ADR-0079 - and the link records.
+        for (envelope in runCatching { restored.linkRecordEnvelopes() }.getOrNull().orEmpty()) applyLinkRecord(envelope)
     }
 
     /** Permanently destroy the repository — cancels the
@@ -1068,6 +1200,11 @@ public class DeviceGroupSyncRepository(
             runCatching { syncedState?.ownUsernameEnvelope() }.getOrNull()
         }
         ownUsernameEnvelope?.let { sendServiceEnvelope(it) }
+        // ADR-0079 - nor are the link records; each goes with its own stamp.
+        val linkRecordEnvelopes = synchronized(stateLock) {
+            runCatching { syncedState?.linkRecordEnvelopes() }.getOrNull().orEmpty()
+        }
+        for (envelope in linkRecordEnvelopes) sendServiceEnvelope(envelope)
     }
 
     /** Re-send everything this device holds if a write of ours is still
@@ -1126,6 +1263,7 @@ public class DeviceGroupSyncRepository(
      */
     public fun onLocalDeviceAdded(priorLeaves: List<UInt>) {
         if (!reopenAfterLocalChange(letIn = true)) return
+        me.lakko.app.devices.DeviceCardCenter.scheduleResend()
         onGrowth(priorLeaves)
     }
 
@@ -1256,6 +1394,12 @@ public class DeviceGroupSyncRepository(
                             )
                             val body = parsed.body
                             if (body is DeviceGroupBody.ServiceEnvelope &&
+                                uniffi.lakko_ffi_uniffi.isLinkRecordEnvelope(body.envelope)
+                            ) {
+                                // ADR-0079 - one of the account's invite links
+                                // from another of its devices.
+                                applyLinkRecord(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 uniffi.lakko_ffi_uniffi.isOwnUsernameEnvelope(body.envelope)
                             ) {
                                 // ADR-0076 - the account's username from
@@ -1284,6 +1428,12 @@ public class DeviceGroupSyncRepository(
                                 // DeviceGroup; verified and stored as
                                 // pending by the auth side, never rendered.
                                 keyRotationSink?.invoke(body.envelope)
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                receiveDeviceCard(body.envelope, processed.senderLeaf, g)
+                            ) {
+                                // ADR-0080 - a device card, kept under the
+                                // sender's leaf key resolved here, against the
+                                // roster this row was sealed under (C-68).
                             } else if (body is DeviceGroupBody.ServiceEnvelope) {
                                 // ADR-0060 section 7 — the Visibility setting and
                                 // the ReachState counters from another of this
@@ -1306,7 +1456,12 @@ public class DeviceGroupSyncRepository(
                     } else if (processed is ProcessedMessage.Commit) {
                         val after = runCatching { g.devices().map { it.leafIndex }.toSet() }.getOrNull()
                         if (after != null) {
-                            SyncCatchUp.priorLeavesIfGrown(knownLeaves, after)?.let(::onGrowth)
+                            SyncCatchUp.priorLeavesIfGrown(knownLeaves, after)?.let { prior ->
+                                // ADR-0080 - every device that was there
+                                // re-sends its own card.
+                                me.lakko.app.devices.DeviceCardCenter.scheduleResend()
+                                onGrowth(prior)
+                            }
                             knownLeaves = after
                         }
                         // UX 17.5 - another device changed the account's
@@ -1667,6 +1822,10 @@ public class DeviceGroupSyncRepository(
 
     public companion object {
         private const val LOG_TAG = "DeviceGroupSync"
+
+        /** How long a link-answer verdict waits for the fold (ADR-0079). Chosen,
+         *  not measured. */
+        internal const val LINK_VERDICT_WAIT_MS: Long = 15_000L
 
         /** Per-account "a write is waiting" flag. Not secret: a boolean. */
         internal const val PENDING_PREFS = "lakko-device-sync-pending"

@@ -143,6 +143,14 @@ pub fn link_secret_from_slice(secret: &[u8]) -> Result<[u8; LINK_SECRET_LEN]> {
     <[u8; LINK_SECRET_LEN]>::try_from(secret).map_err(|_| ContactError::LinkDamaged)
 }
 
+/// Compare two link secrets in constant time (ADR-0079 section 3: the
+/// inviter's device checks a request's link answer against its own record
+/// without a timing side channel on the secret).
+#[must_use]
+pub fn link_secrets_match(a: &[u8; LINK_SECRET_LEN], b: &[u8; LINK_SECRET_LEN]) -> bool {
+    lakko_crypto::secret::SecretBytes::new(*a) == lakko_crypto::secret::SecretBytes::new(*b)
+}
+
 fn link_key(kind: LinkKind, secret: &[u8; LINK_SECRET_LEN], nonce: &Nonce) -> Result<AeadKey> {
     let key = hkdf_sha256::<AEAD_KEY_LEN>(secret, nonce, kind.key_domain())?;
     Ok(key)

@@ -12,6 +12,11 @@
 //! `invite_link_open`), and the discovery service no longer
 //! parses capabilities. The link's minter chooses those bytes,
 //! so any panic is a DoS vector on the joiner's landing page.
+//!
+//! The same bytes also drive the inviter preview decoder (ADR-0079: the
+//! owner's display name and username) directly through
+//! `fuzz_api::invite_preview`, since the owner signature hides it from a
+//! fuzzer: whatever it accepts must validate and re-encode to the same bytes.
 
 #![no_main]
 
@@ -19,4 +24,9 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let _ = lakko_contacts::invite::decode_and_verify(data);
+    assert_ne!(
+        lakko_contacts::fuzz_api::invite_preview(data),
+        Some(false),
+        "an accepted inviter preview must re-encode to the same bytes"
+    );
 });

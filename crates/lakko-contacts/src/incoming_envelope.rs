@@ -71,6 +71,10 @@
 //!     [`crate::visibility::try_unwrap_reach_state`] — the owner's own
 //!     setting and reach-key versions, from another of their devices
 //!     (ADR-0060 §7).
+//!     (The device card of ADR-0080,
+//!     [`crate::device_card::try_unwrap_device_card`], is checked earlier,
+//!     right after the key-rotation envelope; its separator prefixes no
+//!     other, so the position changes nothing.)
 //! 11. **Intro-message fallthrough** — plain free-text
 //!     `ContactRequest` (ADR-0005 scenario A; "add me as a
 //!     contact"). Caller renders the bytes as a UTF-8 intro
@@ -109,6 +113,7 @@ use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError}
 use crate::committer_delegation::{
     try_unwrap_committer_delegation, CommitterDelegationEnvelope, CommitterDelegationError,
 };
+use crate::device_card::{try_unwrap_device_card, DeviceCard, DeviceCardError};
 use crate::group_closed::{try_unwrap_group_closed, GroupClosedError, SUCCESSOR_GROUP_ID_LEN};
 use crate::group_name::{try_unwrap_group_name, GroupName, GroupNameError};
 use crate::introduction::{
@@ -310,6 +315,14 @@ pub enum IncomingEnvelope<'a> {
     /// both FFI surfaces), store it as pending, and adopt only once the
     /// server-side change is visible. See [`crate::key_rotation`].
     KeyRotation(KeyRotation),
+    /// What another device of this account says about itself (ADR-0080):
+    /// platform, model, versions, city, last activity. Never a chat bubble,
+    /// and meaningful ONLY in the account's own DeviceGroup: a client that
+    /// meets one in any other group drops it. The caller stores it under the
+    /// sender's DeviceGroup leaf signature key resolved at receipt (C-68),
+    /// keeps it only when [`crate::device_card::device_card_is_newer`] than
+    /// the stored card for that key, and drops it when the leaf leaves.
+    DeviceCard(DeviceCard),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -384,6 +397,9 @@ pub enum DispatchError {
     /// payload.
     #[error(transparent)]
     KeyRotation(#[from] KeyRotationError),
+    /// The device-card domain (ADR-0080) with a malformed payload.
+    #[error(transparent)]
+    DeviceCard(#[from] DeviceCardError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -468,6 +484,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7h. Key rotation — ADR-0074 section 3.3.
     if let Some(rotation) = try_unwrap_key_rotation(plaintext)? {
         return Ok(IncomingEnvelope::KeyRotation(rotation));
+    }
+    // 7i. Device card — ADR-0080.
+    if let Some(card) = try_unwrap_device_card(plaintext)? {
+        return Ok(IncomingEnvelope::DeviceCard(card));
     }
     // 8. Plain intro message — ADR-0005 scenario A.
     if let Some(record) = try_unwrap_introduction_offer(plaintext)? {

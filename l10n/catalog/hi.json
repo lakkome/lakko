@@ -7614,14 +7614,6 @@
       "text": "नया",
       "status": "machine"
     },
-    "settings.devices.remove.body": {
-      "text": "यह अभी साइन आउट हो गया है। अगली बार कनेक्ट होने पर इस अकाउंट ने इस पर जो कुछ रखा था, सब मिटा दिया जाएगा: चैट, संपर्क, कुंजियाँ और रिकवरी वाक्यांश।",
-      "status": "machine"
-    },
-    "settings.devices.remove.confirm": {
-      "text": "डिवाइस हटाएँ",
-      "status": "machine"
-    },
     "settings.devices.remove.confirm_named": {
       "text": "{device} हटाएँ",
       "status": "machine"
@@ -7632,10 +7624,6 @@
     },
     "settings.devices.remove.reason_unused": {
       "text": "अब इसका इस्तेमाल नहीं होता",
-      "status": "machine"
-    },
-    "settings.devices.remove.title": {
-      "text": "{device} हटाएँ?",
       "status": "machine"
     },
     "settings.devices.remove.working": {
@@ -8408,6 +8396,78 @@
     },
     "who_can_find_me.title": {
       "text": "मुझे कौन ढूँढ सकता है",
+      "status": "machine"
+    },
+    "invite.contact.page.title": {
+      "text": "{name} को अपने संपर्कों में जोड़ें?",
+      "status": "machine"
+    },
+    "invite.contact.page.add": {
+      "text": "जोड़ें",
+      "status": "machine"
+    },
+    "invite.contact.page.not_now": {
+      "text": "अभी नहीं",
+      "status": "machine"
+    },
+    "invite.contact.page.sign_in": {
+      "text": "{name} को जोड़ने के लिए साइन इन करें",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "खाता बनाएँ",
+      "status": "machine"
+    },
+    "invite.contact.page.already_title": {
+      "text": "{name} पहले से आपके संपर्कों में हैं",
+      "status": "machine"
+    },
+    "invite.contact.page.open_chat": {
+      "text": "चैट खोलें",
+      "status": "machine"
+    },
+    "invite.contact.page.own_title": {
+      "text": "यह आपका अपना आमंत्रण लिंक है",
+      "status": "machine"
+    },
+    "invite.contact.page.own_body": {
+      "text": "इसे उस व्यक्ति के साथ साझा करें जिसे आप जोड़ना चाहते हैं।",
+      "status": "machine"
+    },
+    "invite.contact.page.done": {
+      "text": "हो गया",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "यह आमंत्रण लिंक अब काम नहीं करता",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "भेजने वाले से नया लिंक माँगें।",
+      "status": "machine"
+    },
+    "invite.contact.page.add_failed": {
+      "text": "{name} को नहीं जोड़ा जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.contact.page.unnamed": {
+      "text": "इस व्यक्ति",
+      "status": "machine"
+    },
+    "chat.pending.waiting": {
+      "text": "{name} को आपके संदेश तब मिलेंगे जब उनका ऐप अगली बार ऑनलाइन होगा।",
+      "status": "machine"
+    },
+    "chat.pending.stale": {
+      "text": "{name} ने अभी तक जवाब नहीं दिया है। आप उनसे नया लिंक माँग सकते हैं।",
+      "status": "machine"
+    },
+    "chat.pending.call_disabled": {
+      "text": "{name} के जुड़ने पर उपलब्ध होगा।",
+      "status": "machine"
+    },
+    "contacts.request.dead_link_note": {
+      "text": "ऐसे आमंत्रण लिंक से भेजा गया जो अब काम नहीं करता।",
       "status": "machine"
     }
   }

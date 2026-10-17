@@ -32,6 +32,7 @@ pub mod call_group;
 pub mod capture;
 pub mod conversation;
 pub mod folder;
+pub mod guest_name;
 pub mod info;
 pub mod layer_display;
 pub mod lookup;
