@@ -768,33 +768,67 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// ADR-0079 (reworked 2026-10-17) — seal and post this device's claim of
     /// a link request into the account's DeviceGroup, on its own
     /// `ServiceEnvelope` carrier. `beforePublish` gets the sealed bytes (hex)
-    /// and must record them durably (`false` aborts the publish);
-    /// `onPublished` gets them with the DS message id once the publish
-    /// answers. A publish that throws may still have landed: the receive
-    /// loop then recognises the row by the recorded bytes
-    /// (``matchOwnLinkClaim``). Returns the DS message id.
+    /// and must record them durably (`false` aborts the publish). The
+    /// publish answer files nothing: the receive loop judges the row at its
+    /// position (``judgeOwnLinkRow``; it counts only when sealed at the
+    /// journal's epoch there). Returns the DS message id.
+    @discardableResult
     public func postLinkClaim(
         linkId: Data,
         requesterKey: Data,
-        beforePublish: (String) -> Bool,
-        onPublished: (String, Int64) -> Void
+        beforePublish: (String) -> Bool
     ) async throws -> Int64 {
         let envelope = try composeLinkClaimEnvelope(linkId: linkId, requesterAccountKey: requesterKey)
-        var wireHex = ""
-        let id = try await publish { group, identity in
+        return try await publishRecorded(envelope: envelope, beforePublish: beforePublish)
+    }
+
+    /// ADR-0079 (order of 2026-10-17) — publish the link-founded note (the
+    /// request, the one-to-one founded for it, its Welcome) into the
+    /// account's DeviceGroup, BEFORE any Welcome is written. `beforePublish`
+    /// records the sealed bytes first, so the receive loop judges the row at
+    /// its position. Returns the DS message id; throws when the publish
+    /// failed.
+    @discardableResult
+    public func postLinkFounded(
+        linkId: Data, requesterKey: Data, groupId: Data, welcome: Data,
+        beforePublish: (String) -> Bool
+    ) async throws -> Int64 {
+        let envelope = try composeLinkFoundedEnvelope(
+            linkId: linkId, requesterAccountKey: requesterKey, groupId: groupId, welcome: welcome)
+        return try await publishRecorded(envelope: envelope, beforePublish: beforePublish)
+    }
+
+    private func publishRecorded(envelope: Data, beforePublish: (String) -> Bool) async throws -> Int64 {
+        try await publish { group, identity in
             let wire = try group.createServiceEnvelopeMessage(identity: identity, envelope: envelope, hlc: Hlc.mint())
-            wireHex = LinkClaims.hex(wire)
-            guard beforePublish(wireHex) else {
+            guard beforePublish(LinkClaims.hex(wire)) else {
                 throw NSError(
                     domain: "DeviceGroupSync",
                     code: 3,
-                    userInfo: [NSLocalizedDescriptionKey: "Link claim not recorded"]
+                    userInfo: [NSLocalizedDescriptionKey: "Link row not recorded"]
                 )
             }
             return wire
         }
-        onPublished(wireHex, id)
-        return id
+    }
+
+    /// ADR-0079 — another device's link-founded note, taken in. Kept (the
+    /// earliest per request) only from a sender leaf the roster this row was
+    /// sealed under resolves (C-68). `true` when the envelope was a note
+    /// (kept or dropped).
+    func receiveLinkFounded(_ envelope: Data, senderLeaf: UInt32?, group g: DeviceGroup, messageId: Int64) -> Bool {
+        guard isLinkFoundedEnvelope(bytes: envelope) else { return false }
+        guard let note = try? decodeLinkFoundedEnvelope(plaintext: envelope) else { return true }
+        guard let senderLeaf, let roster = try? g.devices(),
+              roster.contains(where: { $0.leafIndex == senderLeaf }),
+              let account = activeAccountIdB64 else { return true }
+        let changed = LinkClaims.Record(accountIdB64: account).recordNote(
+            LinkClaims.requestKeyHex(linkId: note.linkId, requesterKey: note.requesterAccountKey),
+            note: LinkClaims.HeldNote(
+                id: messageId, groupIdB64: base64Encode(note.groupId), welcomeB64: base64Encode(note.welcome)),
+            nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        if changed { linkClaimsVersion += 1 }
+        return true
     }
 
     /// ADR-0079 — this device's DeviceGroup leaf key and the current
@@ -808,17 +842,63 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         return (ownKey, devices.map(\.signaturePublicKey))
     }
 
-    /// ADR-0079 — a journal row carrying one of this device's recorded
-    /// sealed claims is this device's own claim (its own application message
-    /// cannot be decrypted here): file its id. `true` when it was.
-    func matchOwnLinkClaim(_ mlsMessage: Data, messageId: Int64) -> Bool {
+    /// ADR-0079 (order of 2026-10-17) — the journal's epochs for one batch:
+    /// the record kept next to the claim record, or one starting at the
+    /// group's epoch when none is held for this DeviceGroup.
+    func loadJournalEpochs(_ g: DeviceGroup) -> (groupIdHex: String, epochs: FfiJournalEpochs)? {
+        guard let account = activeAccountIdB64, let groupId = try? g.groupId() else { return nil }
+        let groupIdHex = LinkClaims.hex(groupId)
+        if let stored = LinkClaims.Record(accountIdB64: account).journal(groupIdHex: groupIdHex) {
+            return (groupIdHex, FfiJournalEpochs(
+                base: stored.base, commitRowIds: stored.commitRowIds, commitEpochsAfter: stored.commitEpochsAfter))
+        }
+        guard let epoch = try? g.epoch() else { return nil }
+        let fresh = journalEpochsStartingAt(base: epoch)
+        // Kept at once: the start must not move with the group's epoch on
+        // later batches (an own commit merged early would then make an own
+        // claim sealed before it look straddled).
+        LinkClaims.Record(accountIdB64: account).setJournal(LinkClaims.Record.StoredJournal(
+            groupIdHex: groupIdHex, base: fresh.base,
+            commitRowIds: fresh.commitRowIds, commitEpochsAfter: fresh.commitEpochsAfter))
+        return (groupIdHex, fresh)
+    }
+
+    /// ADR-0079 — a journal row carrying one of this device's recorded sealed
+    /// claims or notes (its own application message cannot be decrypted
+    /// here) is judged at its position: it counts only when sealed at the
+    /// journal's epoch there. `true` when it was one.
+    func judgeOwnLinkRow(_ mlsMessage: Data, messageId: Int64, journal: FfiJournalEpochs) -> Bool {
         guard let account = activeAccountIdB64 else { return false }
         let record = LinkClaims.Record(accountIdB64: account)
-        guard record.hasUnmatchedWires(),
-              record.recordOwnClaimRow(wireHex: LinkClaims.hex(mlsMessage), messageId: messageId)
+        guard record.hasUnmatchedWires() else { return false }
+        let counts = epochOfMessage(bytes: mlsMessage).map {
+            journalRowCounts(epochs: journal, rowId: UInt64(max(0, messageId)), sealedEpoch: $0)
+        } ?? false
+        guard record.judgeOwnRow(
+            wireHex: LinkClaims.hex(mlsMessage), messageId: messageId, counts: counts) != nil
         else { return false }
         linkClaimsVersion += 1
         return true
+    }
+
+    /// ADR-0079 — after a row was processed (or judged as this device's
+    /// own): a commit that took effect moves the journal's epoch, and the
+    /// record is kept at once (it only ever follows the journal's content).
+    func observeJournalRow(
+        _ mlsMessage: Data, messageId: Int64, group g: DeviceGroup,
+        journal: inout FfiJournalEpochs, groupIdHex: String
+    ) {
+        guard let sealed = epochOfMessage(bytes: mlsMessage),
+              let after = epochAfterMessage(bytes: mlsMessage), after > sealed,
+              let groupEpoch = try? g.epoch(), let account = activeAccountIdB64 else { return }
+        let next = journalEpochsObserve(
+            epochs: journal, rowId: UInt64(max(0, messageId)), sealedEpoch: sealed,
+            epochAfter: after, groupEpochAfter: groupEpoch)
+        guard next != journal else { return }
+        journal = next
+        LinkClaims.Record(accountIdB64: account).setJournal(LinkClaims.Record.StoredJournal(
+            groupIdHex: groupIdHex, base: next.base,
+            commitRowIds: next.commitRowIds, commitEpochsAfter: next.commitEpochsAfter))
     }
 
     /// Wait until a fetch that STARTED after this call has found the
@@ -968,6 +1048,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             guard bound.isCurrent else { return }
 
             var mutated = false
+            // ADR-0079 (order of 2026-10-17) — the journal readability rule for
+            // this batch: own claims and notes judged at their rows, commits
+            // moving the journal's epoch.
+            var journal = group.flatMap { loadJournalEpochs($0) }
             for message in result.messages {
                 cursor = message.id
                 guard let id = identity, let g = group else { return }
@@ -979,10 +1063,23 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     NSLog("DeviceGroupSync envelope decode failed: %@", error.localizedDescription)
                     continue
                 }
-                // ADR-0079 — this device's own claim, recognised by the
-                // sealed bytes it recorded before the publish; filed before
-                // the cursor moves past it.
-                if matchOwnLinkClaim(entry.message, messageId: message.id) { continue }
+                // ADR-0079 — a commit that took effect moves the journal's
+                // epoch; observed after the row, whatever became of it.
+                defer {
+                    if var j = journal {
+                        observeJournalRow(
+                            entry.message, messageId: message.id, group: g,
+                            journal: &j.epochs, groupIdHex: j.groupIdHex)
+                        journal = j
+                    }
+                }
+                // ADR-0079 — this device's own claim or note, recognised by
+                // the sealed bytes it recorded before the publish and judged
+                // at this row's position; recorded before the cursor moves
+                // past it.
+                if let j = journal, judgeOwnLinkRow(entry.message, messageId: message.id, journal: j.epochs) {
+                    continue
+                }
                 let attestations: [Data] = entry.attestation.map { [$0] } ?? []
                 // ADR-0058 section 5.1 — the members before this row, to tell
                 // whether a commit grew the group.
@@ -1019,6 +1116,12 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                         // claim of a link request, resolved the same way.
                         if case .serviceEnvelope(let envelope) = parsed.body,
                            receiveLinkClaim(envelope, senderLeaf: senderLeaf, group: g, messageId: message.id) {
+                            break
+                        }
+                        // ADR-0079 (order of 2026-10-17) — another device's
+                        // link-founded note, resolved the same way.
+                        if case .serviceEnvelope(let envelope) = parsed.body,
+                           receiveLinkFounded(envelope, senderLeaf: senderLeaf, group: g, messageId: message.id) {
                             break
                         }
                         applyParsed(parsed)

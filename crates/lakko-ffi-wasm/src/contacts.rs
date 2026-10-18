@@ -2361,6 +2361,11 @@ pub enum WasmIncomingEnvelopeKind {
     /// The decoded claim rides the `linkClaim` getter; `payload` is empty.
     /// Never render it. Meaningful ONLY in the account's own DeviceGroup.
     LinkClaim = 20,
+    /// The device that won an invite-link request names the one-to-one it
+    /// founded, with the founding Welcome (ADR-0079, ordering of 2026-10-17).
+    /// The decoded note rides the `linkFounded` getter; `payload` is empty.
+    /// Never render it. Meaningful ONLY in the account's own DeviceGroup.
+    LinkFounded = 21,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -2386,6 +2391,7 @@ pub struct WasmIncomingEnvelope {
     key_rotation: Option<crate::key_rotation::WasmKeyRotation>,
     device_card: Option<crate::device_card::WasmDeviceCard>,
     link_claim: Option<crate::link_claim::WasmLinkClaim>,
+    link_founded: Option<crate::link_founded::WasmLinkFounded>,
 }
 
 impl WasmIncomingEnvelope {
@@ -2410,6 +2416,7 @@ impl WasmIncomingEnvelope {
             key_rotation: None,
             device_card: None,
             link_claim: None,
+            link_founded: None,
         }
     }
 }
@@ -2546,6 +2553,13 @@ impl WasmIncomingEnvelope {
     pub fn link_claim(&self) -> Option<crate::link_claim::WasmLinkClaim> {
         self.link_claim
     }
+
+    /// Set only for `LinkFounded` (ADR-0079): the decoded note. `undefined`
+    /// for every other kind.
+    #[wasm_bindgen(getter, js_name = linkFounded)]
+    pub fn link_founded(&self) -> Option<crate::link_founded::WasmLinkFounded> {
+        self.link_founded.clone()
+    }
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts
@@ -2666,6 +2680,10 @@ fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnve
         IncomingEnvelope::DeviceCard(card) => WasmIncomingEnvelope {
             device_card: Some(card.into()),
             ..WasmIncomingEnvelope::of(K::DeviceCard)
+        },
+        IncomingEnvelope::LinkFounded(note) => WasmIncomingEnvelope {
+            link_founded: Some(note.into()),
+            ..WasmIncomingEnvelope::of(K::LinkFounded)
         },
         IncomingEnvelope::LinkClaim(claim) => WasmIncomingEnvelope {
             link_claim: Some(claim.into()),

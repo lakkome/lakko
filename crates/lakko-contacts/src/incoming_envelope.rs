@@ -123,6 +123,7 @@ use crate::introduction::{
 };
 use crate::key_rotation::{try_unwrap_key_rotation, KeyRotation, KeyRotationError};
 use crate::link_claim::{try_unwrap_link_claim, LinkClaim, LinkClaimError};
+use crate::link_founded::{try_unwrap_link_founded, LinkFounded, LinkFoundedError};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
 use crate::pin::{try_unwrap_pin, PinError, PinOp};
 use crate::profile::{try_unwrap_profile, Profile, ProfileError};
@@ -335,6 +336,14 @@ pub enum IncomingEnvelope<'a> {
     /// [`crate::link_claim::link_claim_outcome`] under its per-group lock
     /// (C-62 sub-invariant 5).
     LinkClaim(LinkClaim),
+    /// The device that won a link request founded its one-to-one and names it
+    /// here, with the founding Welcome, before delivering that Welcome to
+    /// anyone (ADR-0079, ordering of 2026-10-17). Never a chat bubble, and
+    /// meaningful ONLY in the account's own DeviceGroup. The caller keeps the
+    /// earliest note per request from a resolvable DeviceGroup member (C-68);
+    /// a device that holds one never founds for that request, it writes the
+    /// note's Welcome to the requester.
+    LinkFounded(LinkFounded),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -415,6 +424,9 @@ pub enum DispatchError {
     /// The link-claim domain (ADR-0079) with a malformed payload.
     #[error(transparent)]
     LinkClaim(#[from] LinkClaimError),
+    /// The link-founded domain (ADR-0079) with a malformed payload.
+    #[error(transparent)]
+    LinkFounded(#[from] LinkFoundedError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -507,6 +519,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7j. Link-request claim — ADR-0079 (reworked 2026-10-17).
     if let Some(claim) = try_unwrap_link_claim(plaintext)? {
         return Ok(IncomingEnvelope::LinkClaim(claim));
+    }
+    // 7k. Link-founded note — ADR-0079 (ordering of 2026-10-17).
+    if let Some(note) = try_unwrap_link_founded(plaintext)? {
+        return Ok(IncomingEnvelope::LinkFounded(note));
     }
     // 8. Plain intro message — ADR-0005 scenario A.
     if let Some(record) = try_unwrap_introduction_offer(plaintext)? {
@@ -640,6 +656,34 @@ mod tests {
             Err(DispatchError::LinkClaim(LinkClaimError::UnknownVersion(
                 0x7F
             )))
+        );
+    }
+
+    #[test]
+    fn dispatches_a_link_founded_note_and_never_renders_it() {
+        use crate::link_founded::{compose_link_founded, LINK_FOUNDED_ENVELOPE_DOMAIN_V1};
+        let note = LinkFounded {
+            link_id: [5; 16],
+            requester_account_key: [6; 32],
+            group_id: [7; 32],
+            welcome: vec![8; 40],
+        };
+        let wire = compose_link_founded(&note).unwrap();
+        assert_eq!(
+            dispatch_incoming_envelope(&wire).unwrap(),
+            IncomingEnvelope::LinkFounded(note)
+        );
+        assert!(matches!(
+            dispatch_incoming_envelope(&wire[..wire.len() - 1]),
+            Err(DispatchError::LinkFounded(_))
+        ));
+        let mut bad = LINK_FOUNDED_ENVELOPE_DOMAIN_V1.to_vec();
+        bad.push(0x7F);
+        assert_eq!(
+            dispatch_incoming_envelope(&bad),
+            Err(DispatchError::LinkFounded(
+                LinkFoundedError::UnknownVersion(0x7F)
+            ))
         );
     }
 

@@ -951,33 +951,30 @@ public class DeviceGroupSyncRepository(
      * ADR-0079 (reworked 2026-10-17) - seal and post this device's claim of
      * a link request into the account's DeviceGroup, on its own
      * `ServiceEnvelope` carrier. [beforePublish] gets the sealed bytes (hex)
-     * and must record them durably (`false` aborts the publish);
-     * [onPublished] gets them with the DS message id once the publish
-     * answers. A publish that throws may still have landed: the receive loop
-     * then recognises the row by the recorded bytes ([matchOwnLinkClaim]).
-     * The snapshot is persisted before the publish, as for every service
-     * envelope. Returns the DS message id.
+     * and must record them durably (`false` aborts the publish). The publish
+     * answer files nothing: the receive loop judges the row at its position
+     * ([judgeOwnLinkRow]; it counts only when sealed at the journal's epoch
+     * there). The snapshot is persisted before the publish, as for every
+     * service envelope. Returns the DS message id.
      */
     public suspend fun postLinkClaim(
         linkId: ByteArray,
         requesterKey: ByteArray,
         beforePublish: (String) -> Boolean,
-        onPublished: (String, Long) -> Unit,
-    ): Long {
+    ): Long =
+        publishRecorded(uniffi.lakko_ffi_uniffi.composeLinkClaimEnvelope(linkId, requesterKey), beforePublish)
+
+    private suspend fun publishRecorded(envelope: ByteArray, beforePublish: (String) -> Boolean): Long {
         check(!mutableDeviceRemoved.value) { "this device was removed from the account" }
-        val envelope = uniffi.lakko_ffi_uniffi.composeLinkClaimEnvelope(linkId, requesterKey)
         val g = group.get() ?: error("DeviceGroupSync not bootstrapped")
         val id = identity.get() ?: error("DeviceGroupSync not bootstrapped")
         val accountIdB64 = activeAccountIdB64.get() ?: error("DeviceGroupSync not bootstrapped")
         val wireBytes = g.createServiceEnvelopeMessage(id, envelope, Hlc.mint())
-        val wireHex = me.lakko.app.contacts.LinkClaims.hex(wireBytes)
-        check(beforePublish(wireHex)) { "link claim not recorded" }
+        check(beforePublish(me.lakko.app.contacts.LinkClaims.hex(wireBytes))) { "link row not recorded" }
         DeviceGroupLifecycle.persistSnapshot(context = applicationContext, identity = id, accountIdB64 = accountIdB64)
-        val messageId = DsClient().use { ds ->
+        return DsClient().use { ds ->
             ds.publishGroup(g.groupId(), DeviceGroupJournalEnvelope.encode(wireBytes, null)).id
         }
-        onPublished(wireHex, messageId)
-        return messageId
     }
 
     /** ADR-0079 - this device's DeviceGroup leaf key and the current
@@ -992,16 +989,85 @@ public class DeviceGroupSyncRepository(
         return ownKey to devices.map { it.signaturePublicKey }
     }
 
+    /** ADR-0079 (order of 2026-10-17) - the journal's epochs for one batch:
+     *  the record kept next to the claim record, or one starting at the
+     *  group's epoch when none is held for this DeviceGroup. */
+    private fun loadJournalEpochs(g: DeviceGroup?): Pair<String, uniffi.lakko_ffi_uniffi.FfiJournalEpochs>? {
+        val group = g ?: return null
+        val accountIdB64 = activeAccountIdB64.get() ?: return null
+        val groupIdHex = runCatching { me.lakko.app.contacts.LinkClaims.hex(group.groupId()) }.getOrNull() ?: return null
+        val stored = me.lakko.app.contacts.LinkClaimRecord.onDevice(applicationContext, accountIdB64).journal(groupIdHex)
+        if (stored != null) {
+            return groupIdHex to uniffi.lakko_ffi_uniffi.FfiJournalEpochs(
+                stored.base.toULong(),
+                stored.commitRowIds.map { it.toULong() },
+                stored.commitEpochsAfter.map { it.toULong() },
+            )
+        }
+        val epoch = runCatching { group.epoch() }.getOrNull() ?: return null
+        val fresh = uniffi.lakko_ffi_uniffi.journalEpochsStartingAt(epoch)
+        // Kept at once: the start must not move with the group's epoch on
+        // later batches (an own commit merged early would then make an own
+        // claim sealed before it look straddled).
+        me.lakko.app.contacts.LinkClaimRecord.onDevice(applicationContext, accountIdB64).setJournal(
+            me.lakko.app.contacts.StoredJournal(groupIdHex, fresh.base.toLong(), emptyList(), emptyList()),
+        )
+        return groupIdHex to fresh
+    }
+
     /** ADR-0079 - a journal row carrying one of this device's recorded
-     *  sealed claims is this device's own claim (its own application message
-     *  cannot be decrypted here): file its id. `true` when it was. */
-    private fun matchOwnLinkClaim(mlsMessage: ByteArray, messageId: Long): Boolean {
+     *  sealed claims or notes (its own application message cannot be
+     *  decrypted here) is judged at its position: it counts only when
+     *  sealed at the journal's epoch there. `true` when it was one. */
+    private fun judgeOwnLinkRow(
+        mlsMessage: ByteArray,
+        messageId: Long,
+        journal: uniffi.lakko_ffi_uniffi.FfiJournalEpochs,
+    ): Boolean {
         val accountIdB64 = activeAccountIdB64.get() ?: return false
         val record = me.lakko.app.contacts.LinkClaimRecord.onDevice(applicationContext, accountIdB64)
         if (!record.hasUnmatchedWires()) return false
-        if (!record.recordOwnClaimRow(me.lakko.app.contacts.LinkClaims.hex(mlsMessage), messageId)) return false
+        val counts = uniffi.lakko_ffi_uniffi.epochOfMessage(mlsMessage)?.let {
+            uniffi.lakko_ffi_uniffi.journalRowCounts(journal, messageId.coerceAtLeast(0).toULong(), it)
+        } ?: false
+        record.judgeOwnRow(me.lakko.app.contacts.LinkClaims.hex(mlsMessage), messageId, counts) ?: return false
         mutableLinkClaimsVersion.value = mutableLinkClaimsVersion.value + 1
         return true
+    }
+
+    /** ADR-0079 - after a row was processed (or failed): a commit that took
+     *  effect moves the journal's epoch, and the record is kept at once (it
+     *  only ever follows the journal's content). Returns the record. */
+    private fun observeJournalRow(
+        mlsMessage: ByteArray,
+        messageId: Long,
+        g: DeviceGroup,
+        journal: Pair<String, uniffi.lakko_ffi_uniffi.FfiJournalEpochs>?,
+    ): Pair<String, uniffi.lakko_ffi_uniffi.FfiJournalEpochs>? {
+        val (groupIdHex, epochs) = journal ?: return null
+        val sealed = uniffi.lakko_ffi_uniffi.epochOfMessage(mlsMessage) ?: return journal
+        val after = uniffi.lakko_ffi_uniffi.epochAfterMessage(mlsMessage) ?: return journal
+        if (after <= sealed) return journal
+        val groupEpoch = runCatching { g.epoch() }.getOrNull() ?: return journal
+        val next = uniffi.lakko_ffi_uniffi.journalEpochsObserve(
+            epochs,
+            messageId.coerceAtLeast(0).toULong(),
+            sealed,
+            after,
+            groupEpoch,
+        )
+        if (next == epochs) return journal
+        activeAccountIdB64.get()?.let { accountIdB64 ->
+            me.lakko.app.contacts.LinkClaimRecord.onDevice(applicationContext, accountIdB64).setJournal(
+                me.lakko.app.contacts.StoredJournal(
+                    groupIdHex = groupIdHex,
+                    base = next.base.toLong(),
+                    commitRowIds = next.commitRowIds.map { it.toLong() },
+                    commitEpochsAfter = next.commitEpochsAfter.map { it.toLong() },
+                ),
+            )
+        }
+        return groupIdHex to next
     }
 
     /** Wait until a poll that started after this call read the DeviceGroup
@@ -1016,6 +1082,56 @@ public class DeviceGroupSyncRepository(
      * row was sealed under resolves (C-68); its DS id is kept with that
      * leaf's key. `true` when the envelope was a claim (kept or dropped).
      */
+    /**
+     * ADR-0079 (order of 2026-10-17) - publish the link-founded note (the
+     * request, the one-to-one founded for it, its Welcome) into the
+     * account's DeviceGroup, BEFORE any Welcome is written. Returns the DS
+     * message id; throws when the publish failed. The snapshot is persisted
+     * before the publish, as for every service envelope.
+     */
+    public suspend fun postLinkFounded(
+        linkId: ByteArray,
+        requesterKey: ByteArray,
+        groupId: ByteArray,
+        welcome: ByteArray,
+        beforePublish: (String) -> Boolean,
+    ): Long =
+        publishRecorded(
+            uniffi.lakko_ffi_uniffi.composeLinkFoundedEnvelope(linkId, requesterKey, groupId, welcome),
+            beforePublish,
+        )
+
+    /**
+     * ADR-0079 - another device's link-founded note, taken in. Kept (the
+     * earliest per request) only from a sender leaf the roster this row was
+     * sealed under resolves (C-68). `true` when the envelope was a note (kept
+     * or dropped).
+     */
+    private fun receiveLinkFounded(envelope: ByteArray, senderLeaf: UInt?, g: DeviceGroup, messageId: Long): Boolean {
+        if (!uniffi.lakko_ffi_uniffi.isLinkFoundedEnvelope(envelope)) return false
+        val note = try {
+            uniffi.lakko_ffi_uniffi.decodeLinkFoundedEnvelope(envelope)
+        } catch (_: Throwable) {
+            return true
+        }
+        val leaf = senderLeaf ?: return true
+        val roster = runCatching { g.devices() }.getOrNull() ?: return true
+        if (roster.none { it.leafIndex == leaf }) return true
+        val accountIdB64 = activeAccountIdB64.get() ?: return true
+        val changed = me.lakko.app.contacts.LinkClaimRecord.onDevice(applicationContext, accountIdB64)
+            .recordNote(
+                me.lakko.app.contacts.LinkClaims.requestKeyHex(note.linkId, note.requesterAccountKey),
+                me.lakko.app.contacts.LinkClaims.HeldNote(
+                    id = messageId,
+                    groupIdHex = DsClient.pseudonymHex(note.groupId),
+                    welcomeB64 = java.util.Base64.getEncoder().encodeToString(note.welcome),
+                ),
+                System.currentTimeMillis(),
+            )
+        if (changed) mutableLinkClaimsVersion.value = mutableLinkClaimsVersion.value + 1
+        return true
+    }
+
     private fun receiveLinkClaim(envelope: ByteArray, senderLeaf: UInt?, g: DeviceGroup, messageId: Long): Boolean {
         if (!uniffi.lakko_ffi_uniffi.isLinkClaimEnvelope(envelope)) return false
         val claim = try {
@@ -1451,6 +1567,10 @@ public class DeviceGroupSyncRepository(
                 }
 
                 var mutated = false
+                // ADR-0079 (order of 2026-10-17) - the journal readability
+                // rule for this batch: own claims and notes judged at their
+                // rows, commits moving the journal's epoch.
+                var journal = loadJournalEpochs(group.get())
                 for (message in result.messages) {
                     // The account this loop polls for is gone: the handles
                     // read below are nobody's, or the next account's.
@@ -1469,10 +1589,11 @@ public class DeviceGroupSyncRepository(
                         Log.w(LOG_TAG, "journal envelope decode failed at ${message.id}", cause)
                         continue
                     }
-                    // ADR-0079 - this device's own claim, recognised by the
-                    // sealed bytes it recorded before the publish; filed
-                    // before the cursor moves past it.
-                    if (matchOwnLinkClaim(entry.first, message.id)) continue
+                    // ADR-0079 - this device's own claim or note, recognised
+                    // by the sealed bytes it recorded before the publish and
+                    // judged at this row's position; recorded before the
+                    // cursor moves past it.
+                    if (journal != null && judgeOwnLinkRow(entry.first, message.id, journal.second)) continue
                     val attestations: List<ByteArray> =
                         entry.second?.let { listOf(it) } ?: emptyList()
                     val processed: ProcessedMessage = try {
@@ -1485,8 +1606,12 @@ public class DeviceGroupSyncRepository(
                         )
                     } catch (cause: Throwable) {
                         Log.w(LOG_TAG, "processIncomingVerifyingRemovals failed at ${message.id}", cause)
+                        // A commit that took effect (its own, merged early)
+                        // still moves the journal's epoch.
+                        journal = observeJournalRow(entry.first, message.id, g, journal)
                         continue
                     }
+                    journal = observeJournalRow(entry.first, message.id, g, journal)
                     mutated = true
                     if (processed is ProcessedMessage.Application) {
                         try {
@@ -1535,6 +1660,12 @@ public class DeviceGroupSyncRepository(
                                 // ADR-0080 - a device card, kept under the
                                 // sender's leaf key resolved here, against the
                                 // roster this row was sealed under (C-68).
+                            } else if (body is DeviceGroupBody.ServiceEnvelope &&
+                                receiveLinkFounded(body.envelope, processed.senderLeaf, g, message.id)
+                            ) {
+                                // ADR-0079 (order of 2026-10-17) - another
+                                // device's link-founded note, resolved the
+                                // same way.
                             } else if (body is DeviceGroupBody.ServiceEnvelope &&
                                 receiveLinkClaim(body.envelope, processed.senderLeaf, g, message.id)
                             ) {

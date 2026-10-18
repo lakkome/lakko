@@ -1285,7 +1285,8 @@ public class ChatRepository(
      * requester's devices AND every other device of this account (ADR-0050
      * section 2), the journal claimed, the founder's state persisted
      * fail-closed; NOTHING is sent. The caller records the returned founding
-     * durably before [holdLinkOneToOne] and [deliverLinkWelcome]; a retry runs
+     * durably, publishes the link-founded note, and only then runs
+     * [holdLinkOneToOne] and [deliverLinkWelcome]; a retry runs
      * those two again on the recorded founding and nothing is founded twice.
      */
     public suspend fun prepareLinkOneToOne(
@@ -1315,6 +1316,7 @@ public class ChatRepository(
                 groupIdHex = hex,
                 welcomeB64 = outboxB64(created.welcomeEnvelope),
                 targets = me.lakko.app.contacts.LinkClaims.welcomeOrder(targets) { it.isRecipient },
+                notePosted = false,
                 delivered = false,
             )
         }
@@ -1377,52 +1379,25 @@ public class ChatRepository(
             }
         }
 
-    /** ADR-0079 - write the Welcome this device joined [groupIdHex] from to
-     *  the requester's mailbox (the same bytes for every added leaf): the
-     *  founder may have left after writing this account's mailbox and before
-     *  writing theirs. The requester ignores a duplicate. */
-    public suspend fun forwardJoinedWelcome(
-        groupIdHex: String,
-        welcome: ByteArray,
+    /** ADR-0079 - write a link-founded note's Welcome to the requester's
+     *  mailbox: the founding device may have written this account's mailbox
+     *  and left before writing the requester's. The Welcome is the same bytes
+     *  for every added leaf, and the requester ignores a duplicate. Returns
+     *  the group's hex id when this device holds it, else `null`. */
+    public suspend fun forwardLinkWelcome(
+        note: me.lakko.app.contacts.LinkClaims.HeldNote,
         recipientAccountKey: ByteArray,
         recipientAccountId: ByteArray,
-    ): Unit =
+    ): String? =
         forSession {
             publishWelcomeToMailbox(
                 welcomeMailboxFor(recipientAccountKey),
-                welcome,
-                groupIdHex,
+                java.util.Base64.getDecoder().decode(note.welcomeB64),
+                note.groupIdHex,
                 accountIdHint = recipientAccountId,
             )
-            Unit
+            note.groupIdHex.takeIf { groups[it] != null }
         }
-
-    /** ADR-0079 - every held conversation with its kind and member account
-     *  keys (hex), the input of [me.lakko.app.contacts.LinkClaims.holdsOneToOneWith]. */
-    public fun heldConversationsByAccount(): List<me.lakko.app.contacts.LinkClaims.HeldConversation> =
-        groups.values.map { record ->
-            val oneToOne = runCatching { record.group.groupKind() }.getOrNull() == GroupKind.ONE_TO_ONE
-            val keys = runCatching { record.group.members() }.getOrNull().orEmpty().map {
-                me.lakko.app.contacts.LinkClaims.hex(personKeyOf(it))
-            }
-            me.lakko.app.contacts.LinkClaims.HeldConversation(oneToOne, keys)
-        }
-
-    /** ADR-0079 - the hex id of a held one-to-one with the account whose key
-     *  is [accountKey], or `null`. */
-    public fun heldOneToOneHex(accountKey: ByteArray): String? {
-        val want = me.lakko.app.contacts.LinkClaims.hex(accountKey)
-        return groups.entries.firstOrNull { (_, record) ->
-            val oneToOne = runCatching { record.group.groupKind() }.getOrNull() == GroupKind.ONE_TO_ONE
-            val keys = runCatching { record.group.members() }.getOrNull().orEmpty().map {
-                me.lakko.app.contacts.LinkClaims.hex(personKeyOf(it))
-            }
-            me.lakko.app.contacts.LinkClaims.holdsOneToOneWith(
-                listOf(me.lakko.app.contacts.LinkClaims.HeldConversation(oneToOne, keys)),
-                want,
-            )
-        }?.key
-    }
 
     /**
      * The fail-closed persist [startGroupWith] runs between creating a group

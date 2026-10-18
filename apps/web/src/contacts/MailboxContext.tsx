@@ -136,11 +136,9 @@ import {
 } from "./pending-contacts";
 import {
   type LinkClaimRecord as LinkClaimRecordHandle,
-  type LinkFounded,
   type ObservedClaim,
   claimsToDecide,
-  holdsOneToOneWith,
-  linkBuildStep,
+  runLinkBuild,
   welcomeOrder,
   linkClaimRecord,
   linkRequestKeyHex,
@@ -543,78 +541,19 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
    * `false` when the accept did not complete; the won claim stays recorded
    * and the next pass tries again.
    */
-  /** The marker of a zero-wait fetch a mailbox catch-up started: set by the
-   *  poller's fetch to whether that fetch found no row past its cursor. */
-  let catchUpFetch: { empty: boolean } | null = null;
-
-  /**
-   * ADR-0079 (2026-10-17) - read the account mailbox past NOW: zero-wait
-   * polls through the one poller (its dispatch joins every pending Welcome)
-   * until a fetch that started after this call found no row past the
-   * cursor. `false` when that did not happen within `timeoutMs` (offline, a
-   * dispatch that keeps failing, the session ended).
-   */
-  async function mailboxCatchUp(timeoutMs = 30_000): Promise<boolean> {
-    const started = Date.now();
-    while (Date.now() - started < timeoutMs) {
-      const signal = loopAbort?.signal;
-      if (signal === undefined || signal.aborted) return false;
-      const marker = { empty: false };
-      catchUpFetch = marker;
-      let outcome;
-      try {
-        const run = poller.poll(0, signal);
-        catchUpFetch = null;
-        outcome = await run;
-      } catch {
-        catchUpFetch = null;
-        return false;
-      }
-      if (outcome === "scope-changed") return false;
-      if (outcome === "dispatched" && marker.empty) return true;
-      // Rows were fetched (and dispatched), or another poll moved the
-      // cursor first: read again.
-    }
-    return false;
-  }
-
-  /** The member account keys (hex) of every held conversation, with its
-   *  kind: the input of `holdsOneToOneWith`. */
-  function heldConversationsByAccount(): { oneToOne: boolean; memberAccountKeysHex: string[] }[] {
-    return chats.groups().map((active) => {
-      let keys: string[] = [];
-      try {
-        const members = active.group.members() as { signaturePublicKey: Uint8Array; accountKey?: Uint8Array }[];
-        keys = members.map((m) =>
-          bytesToHex(m.accountKey !== undefined && m.accountKey.length === 32 ? m.accountKey : m.signaturePublicKey),
-        );
-      } catch {
-        keys = [];
-      }
-      return { oneToOne: conversationKindOf(active.group) === "chat", memberAccountKeysHex: keys };
-    });
-  }
-
   /** Groups founded for a link request in this page and not yet held. */
   const foundedLinkGroups = new Map<string, WasmGroupHandle>();
 
   /**
    * The winning device's accept of a request sent through one of this
-   * account's live invite links (ADR-0079 section 3, ordering of
-   * 2026-10-17). `false` when it did not complete; the won claim (and the
-   * founded record) stay, and the next pass takes it up where it stopped.
-   *
-   *   - a one-to-one founded for the request already (a failed publish, a
-   *     restart): the SAME group is made a held conversation and its
-   *     Welcome delivered again (duplicates are ignored by the receivers);
-   *   - otherwise the account mailbox is read past now first (pending
-   *     Welcomes joined) and a one-to-one with the requester held already
-   *     answers the request: nothing is built, the use is recorded;
-   *   - otherwise the one-to-one is founded in ONE commit adding the
-   *     requester's devices and every other device of this account, the
-   *     founding recorded BEFORE any Welcome leaves, then the Welcome
-   *     written to this account's own mailbox first and to the requester's
-   *     only after that write succeeded.
+   * account's live invite links (ADR-0079 section 3, order of 2026-10-17,
+   * `runLinkBuild`): its own founding carried on; else a link-founded note
+   * from another device answered by writing the note's Welcome to the
+   * requester (never founding); else found in ONE commit with every other
+   * device of this account, record the founding, publish the note, and only
+   * then write the Welcome to this account's own mailbox and then the
+   * requester's. `false` when it did not complete; every record stays, and
+   * the next pass takes it up where it stopped.
    */
   async function acceptThroughLink(
     request: IncomingContactRequest,
@@ -633,99 +572,102 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       acceptedAtMs: Date.now(),
       accountIdHex: groupIdHex(fromAccountId),
     };
-    const finish = async (groupIdB64: string | null): Promise<boolean> => {
-      upsertAcceptedContact(groupIdB64 === null ? contact : { ...contact, groupIdB64 }, accountIdB64);
-      try {
-        await client.sendContactAck(identity, request);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("sendContactAck failed", err instanceof Error ? err.name : "");
-      }
-      await sync.recordLinkUse(answer.linkId, request.fromPubkey);
-      setAcceptedVersion(acceptedVersion() + 1);
-      return true;
-    };
     try {
-      let founded: LinkFounded | null = claims.own(key)?.founded ?? null;
-      const step = linkBuildStep({
-        hasFounded: founded !== null,
-        mailboxCaughtUp: founded !== null ? false : await mailboxCatchUp(),
-        holdsOneToOne: founded !== null ? false : holdsOneToOneWith(heldConversationsByAccount(), bytesToHex(request.fromPubkey)),
-      });
-      if (step === "wait") return false;
-      if (step === "answered") {
-        // Another device of this account founded it (its Welcome reached this
-        // device's mailbox before the requester's), or the two already had
-        // one: answered, nothing built.
-        const held = chats
-          .groups()
-          .find(
-            (g) =>
-              conversationKindOf(g.group) === "chat" &&
-              holdsOneToOneWith(
-                [{ oneToOne: true, memberAccountKeysHex: heldMemberKeys(g.group) }],
-                bytesToHex(request.fromPubkey),
-              ),
-          );
-        // The requester may not hold this one-to-one's Welcome yet (its
-        // founder wrote this account's mailbox, then left before writing
-        // theirs): the Welcome this device joined from is the same bytes, so
-        // it is forwarded to the requester, who ignores a duplicate. A failed
-        // write keeps the request for the next pass.
-        const joinedWelcome = held === undefined ? null : claims.joinedWelcome(held.groupIdB64);
-        if (held !== undefined && joinedWelcome !== null) {
+      return await runLinkBuild({
+        founded: () => claims.own(key)?.founded ?? null,
+        note: () => claims.note(key),
+        prepare: async () => {
+          const prepared = await client.prepareGroupWith(identity, fromAccountId, "chat", request.fromPubkey);
+          const groupIdB64 = base64Encode(prepared.group.groupId);
+          foundedLinkGroups.set(groupIdB64, prepared.group);
+          return {
+            groupIdB64,
+            welcomeB64: base64Encode(prepared.welcome),
+            targets: welcomeOrder(
+              prepared.targets.map((t) => ({ accountKeyB64: base64Encode(t.accountKey), isRecipient: t.isRecipient })),
+            ),
+            notePosted: false,
+            delivered: false,
+          };
+        },
+        record: (founded) => claims.setFounded(key, founded),
+        postNote: async () => {
+          // Published once (a sealed note already recorded is not published
+          // again), then judged at its row: it counts only when sealed at the
+          // journal's epoch there, so every device can read it.
+          const own = claims.own(key);
+          if (own?.noteConfirmed === true) return true;
+          const founded = own?.founded ?? null;
+          if (founded === null) return false;
+          if (own?.noteWire == null) {
+            await sync.postLinkFounded(
+              answer.linkId,
+              request.fromPubkey,
+              base64Decode(founded.groupIdB64),
+              base64Decode(founded.welcomeB64),
+              (wireHex) => claims.setNoteWire(key, wireHex),
+            );
+          }
+          if ((await sync.catchUpJournal()) !== "read") return false;
+          if (claims.own(key)?.noteConfirmed === true) return true;
+          // Read past it and it did not count (straddled by a commit) or no
+          // row carried it: posted again at the next pass.
+          claims.dropUnlandedNote(key);
+          return false;
+        },
+        hold: async (founded) => {
+          let held = chats.get(founded.groupIdB64);
+          if (held === undefined) {
+            let group = foundedLinkGroups.get(founded.groupIdB64);
+            if (group === undefined) {
+              const device = chats.identity();
+              if (device === null) return null;
+              const wasm = await loadWasm();
+              // A restart between the founding and the delivery: the group
+              // is in the MLS snapshot the creation persisted.
+              const loaded = wasm.Group.load(device, base64Decode(founded.groupIdB64));
+              if (loaded === undefined) return null;
+              group = loaded;
+            }
+            foundedLinkGroups.delete(founded.groupIdB64);
+            held = chats.add({ label: DIRECT_CHAT_STAND_IN, group });
+            profiles.groupJoined(held.groupIdB64);
+            await chats.persistSnapshotDurable(accountIdB64);
+          }
+          return held.groupIdB64;
+        },
+        deliver: async (founded) => {
           await client.deliverPreparedWelcomes(
-            held.group.groupId,
-            base64Decode(joinedWelcome),
+            base64Decode(founded.groupIdB64),
+            base64Decode(founded.welcomeB64),
+            founded.targets.map((t) => ({ accountKey: base64Decode(t.accountKeyB64), isRecipient: t.isRecipient })),
+            { replyGrantB64: request.replyGrantB64 },
+          );
+        },
+        forward: async (note) => {
+          // The founding device may have written this account's mailbox and
+          // left before writing the requester's: the note's Welcome is the
+          // same bytes for every added leaf, and a duplicate is ignored.
+          await client.deliverPreparedWelcomes(
+            base64Decode(note.groupIdB64),
+            base64Decode(note.welcomeB64),
             [{ accountKey: request.fromPubkey, isRecipient: true }],
             { replyGrantB64: request.replyGrantB64 },
           );
-        }
-        return await finish(held?.groupIdB64 ?? null);
-      }
-      if (founded === null) {
-        const prepared = await client.prepareGroupWith(identity, fromAccountId, "chat", request.fromPubkey);
-        founded = {
-          groupIdB64: base64Encode(prepared.group.groupId),
-          welcomeB64: base64Encode(prepared.welcome),
-          targets: welcomeOrder(
-            prepared.targets.map((t) => ({ accountKeyB64: base64Encode(t.accountKey), isRecipient: t.isRecipient })),
-          ),
-          delivered: false,
-        };
-        foundedLinkGroups.set(founded.groupIdB64, prepared.group);
-        // Recorded before any Welcome leaves; a refused write throws, and
-        // nothing was posted (the claimed journal id is never reused).
-        claims.setFounded(key, founded);
-      }
-      let held = chats.get(founded.groupIdB64);
-      if (held === undefined) {
-        let group = foundedLinkGroups.get(founded.groupIdB64);
-        if (group === undefined) {
-          const device = chats.identity();
-          if (device === null) return false;
-          const wasm = await loadWasm();
-          // A restart between the founding and the delivery: the group is in
-          // the MLS snapshot the creation persisted.
-          const loaded = wasm.Group.load(device, base64Decode(founded.groupIdB64));
-          if (loaded === undefined) return false;
-          group = loaded;
-        }
-        foundedLinkGroups.delete(founded.groupIdB64);
-        held = chats.add({ label: DIRECT_CHAT_STAND_IN, group });
-        profiles.groupJoined(held.groupIdB64);
-        await chats.persistSnapshotDurable(accountIdB64);
-      }
-      if (!founded.delivered) {
-        await client.deliverPreparedWelcomes(
-          held.group.groupId,
-          base64Decode(founded.welcomeB64),
-          founded.targets.map((t) => ({ accountKey: base64Decode(t.accountKeyB64), isRecipient: t.isRecipient })),
-          { replyGrantB64: request.replyGrantB64 },
-        );
-        claims.setFounded(key, { ...founded, welcomeB64: "", delivered: true });
-      }
-      return await finish(held.groupIdB64);
+          return chats.get(note.groupIdB64)?.groupIdB64 ?? null;
+        },
+        finish: async (groupIdB64) => {
+          upsertAcceptedContact(groupIdB64 === null ? contact : { ...contact, groupIdB64 }, accountIdB64);
+          try {
+            await client.sendContactAck(identity, request);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("sendContactAck failed", err instanceof Error ? err.name : "");
+          }
+          await sync.recordLinkUse(answer.linkId, request.fromPubkey);
+          setAcceptedVersion(acceptedVersion() + 1);
+        },
+      });
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn(
@@ -733,17 +675,6 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         err instanceof Error ? err.name : "",
       );
       return false;
-    }
-  }
-
-  function heldMemberKeys(group: WasmGroupHandle): string[] {
-    try {
-      const members = group.members() as { signaturePublicKey: Uint8Array; accountKey?: Uint8Array }[];
-      return members.map((m) =>
-        bytesToHex(m.accountKey !== undefined && m.accountKey.length === 32 ? m.accountKey : m.signaturePublicKey),
-      );
-    } catch {
-      return [];
     }
   }
 
@@ -815,14 +746,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             // The sealed claim is recorded before the publish: whether or
             // not the publish answers, the receive loop recognises its row
             // by those bytes and files its id as this device's.
-            await sync.postLinkClaim(
-              answer.linkId,
-              req.fromPubkey,
-              (wireHex) => claims.addOwnWire(key, wireHex),
-              (wireHex, messageId) => {
-                claims.recordOwnClaimRow(wireHex, messageId);
-              },
-            );
+            await sync.postLinkClaim(answer.linkId, req.fromPubkey, (wireHex) => claims.addOwnWire(key, wireHex));
             step = "decide";
           }
           if (step === "decide" || step === "recheck") {
@@ -1001,21 +925,6 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             joinedWelcomeIds.add(ev.welcome.messageId);
             joinedGroupIds.push(active.groupIdB64);
             joined = true;
-            // ADR-0079 - the Welcome of a one-to-one is kept (bounded): if
-            // another device of this account founded it for an invite-link
-            // request and left before writing the requester's mailbox, this
-            // device forwards it when it takes the request over.
-            if (conversationKindOf(group) === "chat") {
-              try {
-                linkClaimRecord(accountIdB64).recordJoinedWelcome(
-                  active.groupIdB64,
-                  base64Encode(ev.welcome.welcomeBytes),
-                  Date.now(),
-                );
-              } catch {
-                // Kept best-effort: without it a takeover only answers.
-              }
-            }
           } catch (err) {
             if (err instanceof StaleMailboxScope) throw err;
             // ADR-0060 — every device of the account reads the one account
@@ -1104,13 +1013,8 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       if (polled === null) throw new Error("mailbox cursor write without an inbox");
       polled.inbox.advanceCursor(next);
     },
-    fetch: async (after, waitSecs, signal) => {
-      // A catch-up's zero-wait fetch: marked synchronously, before the await.
-      const marker = waitSecs === 0 ? catchUpFetch : null;
-      const batch = await client.pollMailbox(auth.identitySecrets(), after, waitSecs, signal);
-      if (marker !== null) marker.empty = batch.cursor <= after;
-      return batch;
-    },
+    fetch: async (after, waitSecs, signal) =>
+      client.pollMailbox(auth.identitySecrets(), after, waitSecs, signal),
     dispatch,
   });
 

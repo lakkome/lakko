@@ -70,6 +70,9 @@ public object LinkClaims {
         val welcomeB64: String,
         /** In delivery order: this account's own mailbox first. */
         val targets: List<FoundedTarget>,
+        /** The link-founded note was published into the account's
+         *  DeviceGroup; no Welcome is written before it. */
+        val notePosted: Boolean = false,
         val delivered: Boolean,
     )
 
@@ -85,36 +88,116 @@ public object LinkClaims {
 
     /** What a device that won a request does before it builds anything. */
     public enum class BuildStep {
-        /** A one-to-one was founded for it already: deliver that one's Welcome. */
+        /** A one-to-one was founded for it here already: carry that one on. */
         RESUME,
-        /** The account mailbox could not be read past now: decide next pass. */
-        WAIT,
-        /** A one-to-one with the requester is held already: answered, build nothing. */
-        ANSWERED,
+        /** Another device of the account founded it (its note is held):
+         *  never found; write the note's Welcome to the requester. */
+        FORWARD,
         /** Found the one-to-one. */
         FOUND,
     }
 
     /** Before any device builds a one-to-one for a request (the first winner,
-     *  or a device that took it over because the winner left the roster), it
-     *  reads its account mailbox past now and looks for a one-to-one with the
-     *  requester. */
-    public fun buildStep(hasFounded: Boolean, mailboxCaughtUp: Boolean, holdsOneToOne: Boolean): BuildStep =
+     *  or a device that took it over because the winner left the roster): its
+     *  own founding first, else a note from another device, else found. */
+    public fun buildStep(hasFounded: Boolean, hasNote: Boolean): BuildStep =
         when {
             hasFounded -> BuildStep.RESUME
-            !mailboxCaughtUp -> BuildStep.WAIT
-            holdsOneToOne -> BuildStep.ANSWERED
+            hasNote -> BuildStep.FORWARD
             else -> BuildStep.FOUND
         }
 
-    /** A held conversation as the one-to-one check reads it. */
-    public data class HeldConversation(val oneToOne: Boolean, val memberAccountKeysHex: List<String>)
+    /** A link-founded note another device of the account posted (ADR-0079):
+     *  the one-to-one it founded for a request, and that group's Welcome. */
+    @Serializable
+    public data class HeldNote(
+        /** The DS message id of the note's row: the earliest per request is kept. */
+        val id: Long,
+        val groupIdHex: String,
+        val welcomeB64: String,
+    )
 
-    /** Whether one of [conversations] is a one-to-one with the account whose
-     *  key is [requesterKeyHex]. */
-    public fun holdsOneToOneWith(conversations: List<HeldConversation>, requesterKeyHex: String): Boolean {
-        val want = requesterKeyHex.lowercase()
-        return conversations.any { c -> c.oneToOne && c.memberAccountKeysHex.any { it.lowercase() == want } }
+    /** What the build needs from the device, injected so the order is one
+     *  tested function ([runBuild]). */
+    public interface BuildDeps {
+        /** This device's founding for the request, if any. */
+        public fun founded(): Founded?
+
+        /** The earliest note another device posted for the request, if any. */
+        public fun note(): HeldNote?
+
+        /** Found the one-to-one locally (ONE commit with every other own
+         *  device, the journal claimed, the state persisted); nothing is sent. */
+        public suspend fun prepare(): Founded
+
+        /** Record the founding durably; `false` when the write failed. */
+        public fun record(founded: Founded): Boolean
+
+        /** Publish the link-founded note into the account's DeviceGroup
+         *  (once: a sealed note already recorded is not published again),
+         *  read the journal past it, and answer whether its row COUNTS
+         *  (sealed at the journal's epoch at its position, so every device
+         *  can read it). `false` when it was straddled (posted again next
+         *  pass) or not yet read; throws when the publish failed. */
+        public suspend fun postNote(founded: Founded): Boolean
+
+        /** Make the founded group a held conversation; `false` when it
+         *  cannot be brought up. */
+        public suspend fun hold(founded: Founded): Boolean
+
+        /** Write the Welcome: this account's mailbox first, then the
+         *  requester's. */
+        public suspend fun deliver(founded: Founded)
+
+        /** Write a note's Welcome to the requester's mailbox (a duplicate is
+         *  ignored); the group's hex id when this device holds it, else `null`. */
+        public suspend fun forward(note: HeldNote): String?
+
+        /** The contact row, the ack and the use count. */
+        public suspend fun finish(groupIdHex: String?)
+    }
+
+    /**
+     * The build of a won request, in its one order (ADR-0079, 2026-10-17): a
+     * founding of this device's own is carried on (nothing is founded twice);
+     * else a note from another device means it founded already, so its
+     * Welcome is written to the requester and the request answered, never
+     * founded; else found, record the founding, publish the note, and only
+     * after the note landed counting (its row sealed at the journal's epoch
+     * there, so every device can read it) write the Welcome (own mailbox
+     * first). `false` when the founding could not be recorded or the group
+     * held; a throw from any step propagates with every record where it was.
+     */
+    public suspend fun runBuild(d: BuildDeps): Boolean {
+        var founded = d.founded()
+        when (buildStep(hasFounded = founded != null, hasNote = founded == null && d.note() != null)) {
+            BuildStep.FORWARD -> {
+                val note = d.note() ?: return false
+                d.finish(d.forward(note))
+                return true
+            }
+            BuildStep.FOUND -> {
+                val made = d.prepare()
+                if (!d.record(made)) return false
+                founded = made
+            }
+            BuildStep.RESUME -> Unit
+        }
+        var current = founded ?: return false
+        if (!current.notePosted) {
+            // No Welcome on the strength of a note the other devices cannot read.
+            if (!d.postNote(current)) return false
+            current = current.copy(notePosted = true)
+            if (!d.record(current)) return false
+        }
+        if (!d.hold(current)) return false
+        if (!current.delivered) {
+            d.deliver(current)
+            current = current.copy(welcomeB64 = "", delivered = true)
+            d.record(current)
+        }
+        d.finish(current.groupIdHex)
+        return true
     }
 
     /** This device's own claims for one request. */
@@ -134,6 +217,12 @@ public object LinkClaims {
         val settled: Boolean = false,
         /** The one-to-one founded for the request (won claims only). */
         val founded: Founded? = null,
+        /** The sealed link-founded note (hex), recorded BEFORE its publish
+         *  and not yet judged at its journal row. */
+        val noteWire: String? = null,
+        /** The note's row counted: sealed at the journal's epoch at its
+         *  position, so every device of the account can read it. */
+        val noteConfirmed: Boolean = false,
     ) {
         /** Whether this device holds any claim for the request. */
         public val holdsClaim: Boolean get() = won != null || ids.isNotEmpty() || wires.isNotEmpty()
@@ -275,16 +364,27 @@ public class InMemoryLinkClaimStorage : LinkClaimStorage {
 private data class SeenClaims(val claims: List<LinkClaims.Observed>, val at: Long)
 
 @Serializable
-private data class JoinedWelcome(val welcomeB64: String, val at: Long)
+private data class StoredNote(val note: LinkClaims.HeldNote, val at: Long)
+
+/** The journal's epochs as this device read them (ADR-0079): the persisted
+ *  form of the core's `JournalEpochs`, for one DeviceGroup. */
+@Serializable
+public data class StoredJournal(
+    val groupIdHex: String,
+    val base: Long,
+    val commitRowIds: List<Long>,
+    val commitEpochsAfter: List<Long>,
+)
 
 @Serializable
 private data class ClaimBody(
     val v: Int = 2,
     val seen: Map<String, SeenClaims> = emptyMap(),
     val own: Map<String, LinkClaims.Own> = emptyMap(),
-    /** The Welcome each recently joined one-to-one was joined from, by
-     *  group id: a device that takes a request over forwards it. */
-    val joined: Map<String, JoinedWelcome> = emptyMap(),
+    /** The earliest link-founded note per request, by request key. */
+    val notes: Map<String, StoredNote> = emptyMap(),
+    /** The journal's epochs (ADR-0079 readability rule). */
+    val journal: StoredJournal? = null,
 )
 
 private val claimJson = Json { ignoreUnknownKeys = true }
@@ -348,20 +448,52 @@ public class LinkClaimRecord(private val accountIdB64: String, private val stora
         updateOwn(keyHex) { it.copy(wires = it.wires + wireHex) }
     }
 
-    /** A journal row (or a publish answer) carried these sealed bytes at
-     *  this id: if they are one of this device's recorded claims, file the
-     *  id as its own. `true` when they were. */
-    public fun recordOwnClaimRow(wireHex: String, messageId: Long): Boolean = synchronized(LOCK) {
+    /** A journal row carried these sealed bytes at this id, and [counts] is
+     *  the readability rule's answer for it (sealed at the journal's epoch at
+     *  its position). A claim of this device: filed as its own when it
+     *  counts, else dropped (straddled: the next pass claims again). This
+     *  device's note: confirmed when it counts, else dropped (posted again).
+     *  Returns `"claim"`, `"note"`, or `null`. */
+    public fun judgeOwnRow(wireHex: String, messageId: Long, counts: Boolean): String? = synchronized(LOCK) {
         val body = read()
-        val key = body.own.entries.firstOrNull { wireHex in it.value.wires }?.key ?: return false
-        val own = body.own.getValue(key)
-        val ids = if (messageId in own.ids) own.ids else (own.ids + messageId).sorted()
-        write(body.copy(own = body.own + (key to own.copy(wires = own.wires - wireHex, ids = ids))))
+        body.own.entries.firstOrNull { wireHex in it.value.wires }?.let { (key, own) ->
+            val ids = if (!counts || messageId in own.ids) own.ids else (own.ids + messageId).sorted()
+            write(body.copy(own = body.own + (key to own.copy(wires = own.wires - wireHex, ids = ids))))
+            return "claim"
+        }
+        body.own.entries.firstOrNull { it.value.noteWire == wireHex }?.let { (key, own) ->
+            write(body.copy(own = body.own + (key to own.copy(noteWire = null, noteConfirmed = own.noteConfirmed || counts))))
+            return "note"
+        }
+        null
     }
 
-    /** `true` when some sealed claim still waits for its row. */
+    /** `true` when some sealed claim or note still waits for its row. */
     public fun hasUnmatchedWires(): Boolean =
-        synchronized(LOCK) { read().own.values.any { it.wires.isNotEmpty() } }
+        synchronized(LOCK) { read().own.values.any { it.wires.isNotEmpty() || it.noteWire != null } }
+
+    /** Record the sealed note BEFORE its publish. `false` when the write
+     *  failed. */
+    public fun setNoteWire(keyHex: String, wireHex: String): Boolean = synchronized(LOCK) {
+        updateOwn(keyHex) { it.copy(noteWire = wireHex) }
+    }
+
+    /** After a read of the journal past the note: a sealed note no row
+     *  carried did not land; drop it (posted again). */
+    public fun dropUnlandedNote(keyHex: String): Unit = synchronized(LOCK) {
+        if (read().own[keyHex]?.noteWire == null) return
+        updateOwn(keyHex) { it.copy(noteWire = null) }
+    }
+
+    /** The journal's epochs held for the DeviceGroup [groupIdHex], or `null`
+     *  (none held, or held for another DeviceGroup). */
+    public fun journal(groupIdHex: String): StoredJournal? =
+        synchronized(LOCK) { read().journal?.takeIf { it.groupIdHex == groupIdHex } }
+
+    /** Keep the journal's epochs. */
+    public fun setJournal(journal: StoredJournal): Boolean = synchronized(LOCK) {
+        write(read().copy(journal = journal))
+    }
 
     /** After a read of the journal past every claim: sealed claims never
      *  matched to a row did not land; drop them. */
@@ -377,20 +509,23 @@ public class LinkClaimRecord(private val accountIdB64: String, private val stora
         updateOwn(keyHex) { it.copy(founded = founded) }
     }
 
-    /** Keep the Welcome a one-to-one was joined from (the newest
-     *  [MAX_JOINED_WELCOMES]). */
-    public fun recordJoinedWelcome(groupIdHex: String, welcomeB64: String, nowMs: Long): Boolean = synchronized(LOCK) {
+    /** Keep a link-founded note another device posted (the earliest per
+     *  request, the newest [MAX_NOTES] requests). `true` when the record
+     *  changed. */
+    public fun recordNote(keyHex: String, note: LinkClaims.HeldNote, nowMs: Long): Boolean = synchronized(LOCK) {
         val body = read()
-        var joined = body.joined + (groupIdHex to JoinedWelcome(welcomeB64, nowMs))
-        if (joined.size > MAX_JOINED_WELCOMES) {
-            val drop = joined.entries.sortedBy { it.value.at }.take(joined.size - MAX_JOINED_WELCOMES).map { it.key }
-            joined = joined - drop.toSet()
+        val held = body.notes[keyHex]
+        if (held != null && held.note.id <= note.id) return false
+        var notes = body.notes + (keyHex to StoredNote(note, nowMs))
+        if (notes.size > MAX_NOTES) {
+            val drop = notes.entries.sortedBy { it.value.at }.take(notes.size - MAX_NOTES).map { it.key }
+            notes = notes - drop.toSet()
         }
-        write(body.copy(joined = joined))
+        write(body.copy(notes = notes))
     }
 
-    /** The Welcome a held one-to-one was joined from, or `null`. */
-    public fun joinedWelcome(groupIdHex: String): String? = synchronized(LOCK) { read().joined[groupIdHex]?.welcomeB64 }
+    /** The earliest note held for the request, or `null`. */
+    public fun note(keyHex: String): LinkClaims.HeldNote? = synchronized(LOCK) { read().notes[keyHex]?.note }
 
     /** Decided lost: re-check later without reading the journal again. */
     public fun setSettled(keyHex: String): Boolean = synchronized(LOCK) {
@@ -410,9 +545,9 @@ public class LinkClaimRecord(private val accountIdB64: String, private val stora
     public companion object {
         private val LOCK = Any()
 
-        /** How many joined one-to-one Welcomes are kept. Chosen, not
-         *  measured (the web value). */
-        public const val MAX_JOINED_WELCOMES: Int = 32
+        /** How many link-founded notes are kept; past it the oldest go.
+         *  Chosen, not measured (the web value). */
+        public const val MAX_NOTES: Int = 64
 
         public fun onDevice(context: Context, accountIdB64: String): LinkClaimRecord =
             LinkClaimRecord(accountIdB64, PrefsLinkClaimStorage(context))

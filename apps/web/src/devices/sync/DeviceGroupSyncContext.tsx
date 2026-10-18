@@ -109,6 +109,8 @@ import {
 } from "../device-card-runtime";
 import { receiveDeviceCardEnvelope, senderKeyAtReceipt } from "../device-card-intake";
 import { linkClaimRecord, linkRequestKeyHex } from "../../contacts/link-claims";
+import { base64Encode } from "../../auth/account-id";
+import { journalReadability, type JournalReadability } from "../../contacts/journal-readability";
 import { sealKeyRotationAfterRemoval } from "../key-rotation";
 import { installKeyRotationPort, type JournalCatchUp } from "./key-rotation-port";
 import {
@@ -300,16 +302,26 @@ export interface DeviceGroupSyncApi {
   /** ADR-0079 (reworked 2026-10-17) - seal and post this device's claim of
    *  a link request into the account's DeviceGroup. `beforePublish` gets
    *  the sealed bytes (hex) and must record them durably (throwing aborts
-   *  the publish); `onPublished` gets them with the DS message id the
-   *  instant the publish answers, before the receive loop could skip the
-   *  row as an echo. Throws when the runtime is not ready or the publish
-   *  fails; a failed publish may still have landed, which the receive loop
+   *  the publish). The publish answer files nothing: the receive loop
+   *  judges the row at its position (it counts only when sealed at the
+   *  journal's epoch there). Throws when the runtime is not ready or the
+   *  publish fails; a failed publish may still have landed, which the loop
    *  then recognises by the recorded bytes. */
   postLinkClaim(
     linkId: Uint8Array,
     requesterKey: Uint8Array,
     beforePublish: (wireHex: string) => void,
-    onPublished: (wireHex: string, messageId: number) => void,
+  ): Promise<number>;
+  /** ADR-0079 (order of 2026-10-17) - publish the link-founded note (the
+   *  request, the one-to-one founded for it, its Welcome) into the
+   *  account's DeviceGroup, BEFORE any Welcome is written. Resolves once the
+   *  publish answered; throws when it failed. */
+  postLinkFounded(
+    linkId: Uint8Array,
+    requesterKey: Uint8Array,
+    groupId: Uint8Array,
+    welcome: Uint8Array,
+    beforePublish: (wireHex: string) => void,
   ): Promise<number>;
   /** ADR-0079: this device's DeviceGroup leaf key and the current roster's
    *  leaf keys, the inputs of the claim decision. `null` while not ready. */
@@ -1480,115 +1492,194 @@ export function DeviceGroupSyncProvider(props: {
       // ADR-0058 section 5.1 — who was here before this batch.
       const membersBefore = membersOf(g);
 
+      // ADR-0079 (order of 2026-10-17) — the journal readability rule for
+      // this batch: own claims and notes are judged at their rows, commits
+      // move the journal's epoch. Kept next to the claim record.
+      const wasmJ = await loadWasm();
+      if (signal.aborted) return;
+      let readability: JournalReadability | null = null;
+      try {
+        readability = journalReadability({
+          record: linkClaimRecord(accountIdB64),
+          groupIdHex: bytesToHex(g.groupId()),
+          epochOf: (m) => wasmJ.epochOfMessage(m),
+          epochAfter: (m) => wasmJ.epochAfterMessage(m),
+          groupEpoch: () => g.epoch(),
+          newEpochs: (base) => new wasmJ.JournalEpochs(base),
+          fromParts: (base, ids, afters) => wasmJ.JournalEpochs.fromParts(base, ids, afters),
+          hex: bytesToHex,
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("journal readability not loaded", err instanceof Error ? err.name : "");
+      }
+      const judgeOwnRow = (rowId: number, mls: Uint8Array): boolean => {
+        try {
+          if (readability?.judgeOwn(rowId, mls) == null) return false;
+          setLinkClaimsVersion((v) => v + 1);
+          return true;
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("own link row not judged", err instanceof Error ? err.name : "");
+          return false;
+        }
+      };
+      const observeRow = (rowId: number, mls: Uint8Array): void => {
+        try {
+          readability?.observe(rowId, mls);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("journal epoch not observed", err instanceof Error ? err.name : "");
+        }
+      };
+
       const batch = await applyDeviceJournalBatch(raw.messages, cursor, {
         isOwnEcho: (rowId) => ownPublishedIds.has(rowId),
         apply: async (message) => {
           // Unwrap the DeviceGroup journal envelope (the commit / message plus
           // any removal attestation that travelled with it).
           const entry = decodeJournalEntry(message.payload);
-          // ADR-0079: this device's own claim, recognised by the sealed
-          // bytes it recorded before the publish (its own application
-          // message cannot be decrypted here). Filed before the batch is
-          // persisted, so a crash that lost the publish answer loses
-          // nothing.
+          // ADR-0079 (order of 2026-10-17): this device's own claim or
+          // link-founded note, recognised by the sealed bytes it recorded
+          // before the publish (its own application message cannot be
+          // decrypted here), and judged by the readability rule at this
+          // row's position: it counts only when sealed at the journal's
+          // epoch here. Recorded before the batch is persisted.
+          if (judgeOwnRow(message.id, entry.message)) return;
           try {
-            const own = linkClaimRecord(accountIdB64);
-            if (own.hasUnmatchedWires() && own.recordOwnClaimRow(bytesToHex(entry.message), message.id)) {
-              setLinkClaimsVersion((v) => v + 1);
-              return;
-            }
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.warn("own link claim row not recorded", err instanceof Error ? err.name : "");
-          }
-          const attestation = entry.attestation ?? new Uint8Array(0);
-          // Refuse-to-apply an unattested removal under the policy. A throw —
-          // bad frame / wrong epoch / a removal refused for want of a valid
-          // attestation — is logged by `onApplyError` and the batch goes on.
-          const processed = g.processIncomingVerifyingRemovals(
-            id,
-            entry.message,
-            attestation,
-            attestVk,
-            BigInt(Math.floor(Date.now() / 1000)),
-          );
-          if (processed.kind === "Application") {
-            const data = processed.applicationData;
-            if (data === undefined) return;
-            try {
-              const wasm = await loadWasm();
-              // The fold `applyParsed` writes is the provider's current one.
-              // A loop stopped during the await above must not fold its row
-              // into it: after a sign-in it is another account's.
-              if (signal.aborted) return;
-              const parsed = wasm.parseDeviceGroupPayload(data);
+            const attestation = entry.attestation ?? new Uint8Array(0);
+            // Refuse-to-apply an unattested removal under the policy. A throw —
+            // bad frame / wrong epoch / a removal refused for want of a valid
+            // attestation — is logged by `onApplyError` and the batch goes on.
+            const processed = g.processIncomingVerifyingRemovals(
+              id,
+              entry.message,
+              attestation,
+              attestVk,
+              BigInt(Math.floor(Date.now() / 1000)),
+            );
+            if (processed.kind === "Application") {
+              const data = processed.applicationData;
+              if (data === undefined) return;
               try {
-                // ADR-0074 section 3.3: a `key-rotation` envelope means
-                // something here and nowhere else. Awaited, so a journal
-                // read "to the head" has stored it before it reports.
-                if (
-                  parsed.kind === "serviceEnvelope" &&
-                  (await auth.keyRotation.intake(parsed.serviceEnvelope))
-                ) {
-                  return;
-                }
-                // ADR-0080: a device card is kept under the sender's leaf
-                // key, resolved from the MLS-authenticated sender leaf HERE,
-                // against the roster this row was sealed under (C-68).
-                if (
-                  parsed.kind === "serviceEnvelope" &&
-                  receiveDeviceCardEnvelope(wasm, parsed.serviceEnvelope, processed.senderLeaf, membersOf(g))
-                ) {
-                  return;
-                }
-                // ADR-0079 (reworked 2026-10-17): another device's claim of
-                // a link request. Honoured only from a sender leaf the
-                // roster resolves at receipt (C-68); its DS id is recorded
-                // with that leaf key before the batch is persisted (one
-                // synchronous write, so a decision in progress reads it
-                // whole).
-                if (parsed.kind === "serviceEnvelope" && wasm.isLinkClaimEnvelope(parsed.serviceEnvelope)) {
-                  let claim;
-                  try {
-                    claim = wasm.decodeLinkClaimEnvelope(parsed.serviceEnvelope);
-                  } catch {
+                const wasm = await loadWasm();
+                // The fold `applyParsed` writes is the provider's current one.
+                // A loop stopped during the await above must not fold its row
+                // into it: after a sign-in it is another account's.
+                if (signal.aborted) return;
+                const parsed = wasm.parseDeviceGroupPayload(data);
+                try {
+                  // ADR-0074 section 3.3: a `key-rotation` envelope means
+                  // something here and nowhere else. Awaited, so a journal
+                  // read "to the head" has stored it before it reports.
+                  if (
+                    parsed.kind === "serviceEnvelope" &&
+                    (await auth.keyRotation.intake(parsed.serviceEnvelope))
+                  ) {
                     return;
                   }
-                  try {
-                    const author = senderKeyAtReceipt(processed.senderLeaf, membersOf(g));
-                    if (author === null) return;
-                    let changed = false;
-                    try {
-                      changed = linkClaimRecord(accountIdB64).recordSeen(
-                        linkRequestKeyHex(claim.linkId, claim.requesterAccountKey),
-                        message.id,
-                        author,
-                        Date.now(),
-                      );
-                    } catch (err) {
-                      // eslint-disable-next-line no-console
-                      console.warn("link claim not recorded", err instanceof Error ? err.name : "");
-                    }
-                    if (changed) setLinkClaimsVersion((v) => v + 1);
-                  } finally {
-                    claim.free();
+                  // ADR-0080: a device card is kept under the sender's leaf
+                  // key, resolved from the MLS-authenticated sender leaf HERE,
+                  // against the roster this row was sealed under (C-68).
+                  if (
+                    parsed.kind === "serviceEnvelope" &&
+                    receiveDeviceCardEnvelope(wasm, parsed.serviceEnvelope, processed.senderLeaf, membersOf(g))
+                  ) {
+                    return;
                   }
-                  return;
+                  // ADR-0079 (order of 2026-10-17): another device's
+                  // link-founded note. Kept (the earliest per request) only
+                  // from a sender leaf the roster resolves at receipt (C-68),
+                  // before the batch is persisted.
+                  if (parsed.kind === "serviceEnvelope" && wasm.isLinkFoundedEnvelope(parsed.serviceEnvelope)) {
+                    let note;
+                    try {
+                      note = wasm.decodeLinkFoundedEnvelope(parsed.serviceEnvelope);
+                    } catch {
+                      return;
+                    }
+                    try {
+                      if (senderKeyAtReceipt(processed.senderLeaf, membersOf(g)) === null) return;
+                      let changed = false;
+                      try {
+                        changed = linkClaimRecord(accountIdB64).recordNote(
+                          linkRequestKeyHex(note.linkId, note.requesterAccountKey),
+                          {
+                            id: message.id,
+                            groupIdB64: base64Encode(note.groupId),
+                            welcomeB64: base64Encode(note.welcome),
+                          },
+                          Date.now(),
+                        );
+                      } catch (err) {
+                        // eslint-disable-next-line no-console
+                        console.warn("link-founded note not recorded", err instanceof Error ? err.name : "");
+                      }
+                      if (changed) setLinkClaimsVersion((v) => v + 1);
+                    } finally {
+                      note.free();
+                    }
+                    return;
+                  }
+                  // ADR-0079 (reworked 2026-10-17): another device's claim of
+                  // a link request. Honoured only from a sender leaf the
+                  // roster resolves at receipt (C-68); its DS id is recorded
+                  // with that leaf key before the batch is persisted (one
+                  // synchronous write, so a decision in progress reads it
+                  // whole).
+                  if (parsed.kind === "serviceEnvelope" && wasm.isLinkClaimEnvelope(parsed.serviceEnvelope)) {
+                    let claim;
+                    try {
+                      claim = wasm.decodeLinkClaimEnvelope(parsed.serviceEnvelope);
+                    } catch {
+                      return;
+                    }
+                    try {
+                      const author = senderKeyAtReceipt(processed.senderLeaf, membersOf(g));
+                      if (author === null) return;
+                      let changed = false;
+                      try {
+                        changed = linkClaimRecord(accountIdB64).recordSeen(
+                          linkRequestKeyHex(claim.linkId, claim.requesterAccountKey),
+                          message.id,
+                          author,
+                          Date.now(),
+                        );
+                      } catch (err) {
+                        // eslint-disable-next-line no-console
+                        console.warn("link claim not recorded", err instanceof Error ? err.name : "");
+                      }
+                      if (changed) setLinkClaimsVersion((v) => v + 1);
+                    } finally {
+                      claim.free();
+                    }
+                    return;
+                  }
+                  applyParsed(parsed);
+                } finally {
+                  parsed.free();
                 }
-                applyParsed(parsed);
-              } finally {
-                parsed.free();
+              } catch (err) {
+                // A payload refused by the decoder (ADR-0058 section 4) or of a
+                // kind this build does not know is skipped; the next write of
+                // those registers from any device supersedes it.
+                // eslint-disable-next-line no-console
+                console.warn("parseDeviceGroupPayload failed", err);
               }
-            } catch (err) {
-              // A payload refused by the decoder (ADR-0058 section 4) or of a
-              // kind this build does not know is skipped; the next write of
-              // those registers from any device supersedes it.
-              // eslint-disable-next-line no-console
-              console.warn("parseDeviceGroupPayload failed", err);
             }
+            // Commit / Proposal / ExternalJoinProposal — no application-state
+            // effect; the ratchet already advanced inside the process call.
+          } finally {
+            // A commit that took effect moves the journal's epoch.
+            observeRow(message.id, entry.message);
           }
-          // Commit / Proposal / ExternalJoinProposal — no application-state
-          // effect; the ratchet already advanced inside the process call.
+        },
+        onOwnEcho: (message) => {
+          // ADR-0079: a row this device published is judged and observed
+          // at its position like any other.
+          const entry = decodeJournalEntry(message.payload);
+          judgeOwnRow(message.id, entry.message);
+          observeRow(message.id, entry.message);
         },
         // The snapshot and the position it has consumed, in one write. A
         // failure holds the cursor (the rows come back next poll) rather than
@@ -1612,6 +1703,12 @@ export function DeviceGroupSyncProvider(props: {
           );
         },
       });
+      try {
+        readability?.dispose();
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("journal epochs not saved", err instanceof Error ? err.name : "");
+      }
       // ADR-0057 obligation 6 — no heal on apply: the device that committed
       // registered the epoch with the account's root before publishing.
 
@@ -1919,10 +2016,7 @@ export function DeviceGroupSyncProvider(props: {
 
   // ----- Outbound send paths -------------------------------------
 
-  async function publishGroupMessage(
-    wireBytes: Uint8Array,
-    onPublished?: (messageId: number) => void,
-  ): Promise<number> {
+  async function publishGroupMessage(wireBytes: Uint8Array): Promise<number> {
     if (group === null || identity === null || activeAccountIdB64 === null || reloading) {
       throw new Error("DeviceGroupSyncProvider is not ready");
     }
@@ -1943,16 +2037,7 @@ export function DeviceGroupSyncProvider(props: {
       group.groupId(),
       encodeJournalEntry(wireBytes, null),
     );
-    // Before anything can await: the receive loop skips an id in the
-    // own-echo set, so whoever needs the id records it first.
-    if (onPublished !== undefined) {
-      try {
-        onPublished(published.id);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("published row not recorded", err instanceof Error ? err.name : "");
-      }
-    }
+
     // The session ended while the publish was out: its handles are freed and
     // its own-echo set was cleared. The row is on the journal; the snapshot
     // that sealed it went with the sign-out.
@@ -1977,7 +2062,6 @@ export function DeviceGroupSyncProvider(props: {
     linkId: Uint8Array,
     requesterKey: Uint8Array,
     beforePublish: (wireHex: string) => void,
-    onPublished: (wireHex: string, messageId: number) => void,
   ): Promise<number> {
     if (group === null || identity === null || reloading || deviceRemoved()) {
       throw new Error("DeviceGroupSyncProvider is not ready");
@@ -1988,9 +2072,30 @@ export function DeviceGroupSyncProvider(props: {
       throw new Error("DeviceGroupSyncProvider is not ready");
     }
     const wire = group.createServiceEnvelopeMessage(identity, envelope, mintHlc());
-    const wireHex = bytesToHex(wire);
-    beforePublish(wireHex);
-    return publishGroupMessage(wire, (id) => onPublished(wireHex, id));
+    beforePublish(bytesToHex(wire));
+    return publishGroupMessage(wire);
+  }
+
+  async function postLinkFoundedImpl(
+    linkId: Uint8Array,
+    requesterKey: Uint8Array,
+    groupId: Uint8Array,
+    welcome: Uint8Array,
+    beforePublish: (wireHex: string) => void,
+  ): Promise<number> {
+    if (group === null || identity === null || reloading || deviceRemoved()) {
+      throw new Error("DeviceGroupSyncProvider is not ready");
+    }
+    const wasm = await loadWasm();
+    const envelope = wasm.composeLinkFoundedEnvelope(linkId, requesterKey, groupId, welcome);
+    if (group === null || identity === null || reloading || deviceRemoved()) {
+      throw new Error("DeviceGroupSyncProvider is not ready");
+    }
+    const wire = group.createServiceEnvelopeMessage(identity, envelope, mintHlc());
+    // Recorded before the publish: the receive loop judges the row at its
+    // position by these bytes.
+    beforePublish(bytesToHex(wire));
+    return publishGroupMessage(wire);
   }
 
   function linkClaimRosterImpl(): { ownKey: Uint8Array; roster: Uint8Array[] } | null {
@@ -2184,6 +2289,7 @@ export function DeviceGroupSyncProvider(props: {
     linkAnswerVerdictNow: linkAnswerVerdictNowImpl,
     postLinkClaim: postLinkClaimImpl,
     linkClaimRoster: linkClaimRosterImpl,
+    postLinkFounded: postLinkFoundedImpl,
     catchUpJournal: catchUp,
     linkClaimsVersion,
     deviceRemoved,

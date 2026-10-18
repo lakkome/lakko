@@ -764,6 +764,9 @@ final class MultiJoinerCall {
             // ADR-0079 (reworked 2026-10-17) — a link-request claim is
             // meaningful ONLY in the account's own DeviceGroup; dropped.
             break
+        case .linkFounded:
+            // ADR-0079 (order of 2026-10-17) — a link-founded note, the same.
+            break
         }
     }
 

@@ -339,7 +339,11 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             // ADR-0079 (reworked 2026-10-17) — a link-request claim: a yes /
             // no from the slim FFI.
             isLinkClaim: { isLinkClaimEnvelope(plaintext: $0) },
-            linkClaimEnvelopeLen: Int(linkClaimEnvelopeLen())
+            linkClaimEnvelopeLen: Int(linkClaimEnvelopeLen()),
+            // ADR-0079 (order of 2026-10-17) — a link-founded note: a yes /
+            // no from the slim FFI.
+            isLinkFounded: { isLinkFoundedEnvelope(plaintext: $0) },
+            linkFoundedEnvelopeLens: Int(linkFoundedEnvelopeMinLen())...Int(linkFoundedEnvelopeMaxLen())
         ) {
             return nil
         }

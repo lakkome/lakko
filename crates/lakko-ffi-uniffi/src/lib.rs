@@ -53,10 +53,12 @@ pub mod ds_proof;
 pub mod ds_statement;
 pub mod email_vault;
 pub mod feed;
+pub mod journal_epoch;
 pub mod key_reset;
 pub mod key_rotation;
 pub mod l10n;
 pub mod link_claim;
+pub mod link_founded;
 pub mod mailbox;
 pub mod mnemonic;
 pub mod pairing;
@@ -3311,6 +3313,14 @@ impl DeviceGroup {
     ) -> Result<Arc<ds_proof::DsProofSigner>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         ds_proof::group_signer(g.as_group(), &identity.inner)
+    }
+
+    /// The DeviceGroup's current MLS epoch. ADR-0079: the journal
+    /// readability rule asks whether the group moved past a commit row's
+    /// epoch after the row.
+    pub fn epoch(&self) -> Result<u64, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.as_group().epoch())
     }
 
     /// The `group_id` of this DeviceGroup (its DS journal id): for a founded

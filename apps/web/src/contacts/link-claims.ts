@@ -63,7 +63,19 @@ export interface LinkFounded {
   readonly welcomeB64: string;
   /** In delivery order: this account's own mailbox first. */
   readonly targets: readonly LinkFoundedTarget[];
+  /** The link-founded note was published into the account's DeviceGroup;
+   *  no Welcome is written before it. */
+  readonly notePosted: boolean;
   readonly delivered: boolean;
+}
+
+/** A link-founded note another device of the account posted (ADR-0079):
+ *  the one-to-one it founded for a request, and that group's Welcome. */
+export interface HeldLinkNote {
+  /** The DS message id of the note's row: the earliest per request is kept. */
+  readonly id: number;
+  readonly groupIdB64: string;
+  readonly welcomeB64: string;
 }
 
 /** This device's own claims for one request. */
@@ -82,6 +94,22 @@ export interface OwnLinkClaims {
   readonly settled: boolean;
   /** The one-to-one founded for the request (won claims only). */
   readonly founded: LinkFounded | null;
+  /** The sealed link-founded note (hex), recorded BEFORE its publish and not
+   *  yet judged at its journal row. */
+  readonly noteWire: string | null;
+  /** The note's row counted: sealed at the journal's epoch at its position,
+   *  so every device of the account can read it. */
+  readonly noteConfirmed: boolean;
+}
+
+/** The journal's epochs as this device read them (ADR-0079): persisted
+ *  form of the core's `JournalEpochs`, for one DeviceGroup. Epochs and ids
+ *  as decimal strings (they are u64). */
+export interface StoredJournalEpochs {
+  readonly groupIdHex: string;
+  readonly base: string;
+  readonly commitRowIds: readonly string[];
+  readonly commitEpochsAfter: readonly string[];
 }
 
 /**
@@ -98,40 +126,96 @@ export function welcomeOrder<T extends { readonly isRecipient: boolean }>(target
 
 /** What a device that won a request does before it builds anything. */
 export type LinkBuildStep =
-  /** A one-to-one was founded for it already: deliver that one's Welcome. */
+  /** A one-to-one was founded for it here already: carry that one on. */
   | "resume"
-  /** The account mailbox could not be read past now: decide next pass. */
-  | "wait"
-  /** A one-to-one with the requester is held already: answered, build
-   *  nothing. */
-  | "answered"
+  /** Another device of the account founded it (its note is held): never
+   *  found; write the note's Welcome to the requester. */
+  | "forward"
   /** Found the one-to-one. */
   | "found";
 
 /**
- * Before any device builds a one-to-one for a request (the first winner,
- * or a device that took it over because the winner left the roster), it
- * reads its account mailbox past now and looks for a one-to-one with the
- * requester. Pure.
+ * Before any device builds a one-to-one for a request (the first winner, or
+ * a device that took it over because the winner left the roster): its own
+ * founding first, else a note from another device, else found. Pure.
  */
-export function linkBuildStep(input: {
-  readonly hasFounded: boolean;
-  readonly mailboxCaughtUp: boolean;
-  readonly holdsOneToOne: boolean;
-}): LinkBuildStep {
+export function linkBuildStep(input: { readonly hasFounded: boolean; readonly hasNote: boolean }): LinkBuildStep {
   if (input.hasFounded) return "resume";
-  if (!input.mailboxCaughtUp) return "wait";
-  return input.holdsOneToOne ? "answered" : "found";
+  return input.hasNote ? "forward" : "found";
 }
 
-/** Whether one of `conversations` is a one-to-one with the account whose
- *  key is `requesterKeyHex` (member account keys, lower-case hex). Pure. */
-export function holdsOneToOneWith(
-  conversations: readonly { readonly oneToOne: boolean; readonly memberAccountKeysHex: readonly string[] }[],
-  requesterKeyHex: string,
-): boolean {
-  const want = requesterKeyHex.toLowerCase();
-  return conversations.some((c) => c.oneToOne && c.memberAccountKeysHex.some((k) => k.toLowerCase() === want));
+/** What the build needs from the device, injected so the order is one
+ *  tested function (`runLinkBuild`). */
+export interface LinkBuildDeps {
+  /** This device's founding for the request, if any. */
+  founded(): LinkFounded | null;
+  /** The earliest note another device posted for the request, if any. */
+  note(): HeldLinkNote | null;
+  /** Found the one-to-one locally (ONE commit with every other own device,
+   *  the journal claimed, the state persisted); nothing is sent. */
+  prepare(): Promise<LinkFounded>;
+  /** Record the founding durably; throws when the write fails. */
+  record(founded: LinkFounded): void;
+  /** Publish the link-founded note into the account's DeviceGroup (once:
+   *  a sealed note already recorded is not published again), read the
+   *  journal past it, and answer whether its row COUNTS (sealed at the
+   *  journal's epoch at its position, so every device can read it). `false`
+   *  when it was straddled by a commit (the next pass posts it again) or
+   *  its row was not read yet; throws when the publish fails. */
+  postNote(founded: LinkFounded): Promise<boolean>;
+  /** Make the founded group a held conversation; its id, or `null`. */
+  hold(founded: LinkFounded): Promise<string | null>;
+  /** Write the Welcome: this account's mailbox first, then the requester's. */
+  deliver(founded: LinkFounded): Promise<void>;
+  /** Write a note's Welcome to the requester's mailbox (a duplicate is
+   *  ignored); the id of the group when this device holds it, else `null`. */
+  forward(note: HeldLinkNote): Promise<string | null>;
+  /** The contact row, the ack and the use count. */
+  finish(groupIdB64: string | null): Promise<void>;
+}
+
+/**
+ * The build of a won request, in its one order (ADR-0079, 2026-10-17):
+ *
+ *   - a founding of this device's own is carried on (a failed publish, a
+ *     restart): nothing is founded twice;
+ *   - else a note from another device means it founded already: its Welcome
+ *     is written to the requester and the request answered; never founded;
+ *   - else found, record the founding, publish the note, and only after the
+ *     note landed counting (its row sealed at the journal's epoch there, so
+ *     every device can read it) write the Welcome (own mailbox first).
+ *
+ * `false` when the group could not be held (the next pass tries again); a
+ * throw from any step leaves every record where it was, for the next pass.
+ */
+export async function runLinkBuild(d: LinkBuildDeps): Promise<boolean> {
+  let founded = d.founded();
+  const step = linkBuildStep({ hasFounded: founded !== null, hasNote: founded === null && d.note() !== null });
+  if (step === "forward") {
+    const note = d.note();
+    if (note === null) return false;
+    await d.finish(await d.forward(note));
+    return true;
+  }
+  if (founded === null) {
+    founded = await d.prepare();
+    d.record(founded);
+  }
+  if (!founded.notePosted) {
+    // No Welcome on the strength of a note the other devices cannot read.
+    if (!(await d.postNote(founded))) return false;
+    founded = { ...founded, notePosted: true };
+    d.record(founded);
+  }
+  const held = await d.hold(founded);
+  if (held === null) return false;
+  if (!founded.delivered) {
+    await d.deliver(founded);
+    founded = { ...founded, welcomeB64: "", delivered: true };
+    d.record(founded);
+  }
+  await d.finish(held);
+  return true;
 }
 
 /** What the device does with a request carrying a link answer, now. */
@@ -237,24 +321,20 @@ interface SeenEntry {
   readonly at: number;
 }
 
-interface JoinedWelcome {
-  readonly welcomeB64: string;
-  readonly at: number;
-}
-
 interface Persisted {
   readonly v: 2;
   readonly seen: Record<string, SeenEntry>;
   readonly own: Record<string, OwnLinkClaims>;
-  /** The Welcome each recently joined one-to-one was joined from, by group
-   *  id: a device that takes a request over forwards it to the requester. */
-  readonly joined: Record<string, JoinedWelcome>;
+  /** The earliest link-founded note per request, by request key. */
+  readonly notes: Record<string, HeldLinkNote & { readonly at: number }>;
+  /** The journal's epochs (ADR-0079 readability rule). */
+  readonly journal: StoredJournalEpochs | null;
 }
 
-/** How many joined one-to-one Welcomes are kept; past it the oldest go.
- *  Chosen, not measured: a Welcome matters only while a request it answers
- *  can still be taken over. */
-export const MAX_JOINED_WELCOMES = 32;
+/** How many link-founded notes are kept; past it the oldest go. Chosen, not
+ *  measured: a note matters only while its request can still be taken over,
+ *  and each holds a Welcome of a few KiB. */
+export const MAX_LINK_NOTES = 64;
 
 type StorageLike = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
@@ -292,9 +372,17 @@ function parseClaims(v: unknown): ObservedClaim[] | null {
 function parseFounded(v: unknown): LinkFounded | null | undefined {
   if (v === null) return null;
   if (typeof v !== "object") return undefined;
-  const f = v as { groupIdB64?: unknown; welcomeB64?: unknown; targets?: unknown; delivered?: unknown };
+  const f = v as {
+    groupIdB64?: unknown;
+    welcomeB64?: unknown;
+    targets?: unknown;
+    notePosted?: unknown;
+    delivered?: unknown;
+  };
   if (typeof f.groupIdB64 !== "string" || typeof f.welcomeB64 !== "string") return undefined;
-  if (typeof f.delivered !== "boolean" || !Array.isArray(f.targets)) return undefined;
+  if (typeof f.delivered !== "boolean" || typeof f.notePosted !== "boolean" || !Array.isArray(f.targets)) {
+    return undefined;
+  }
   const targets: LinkFoundedTarget[] = [];
   for (const t of f.targets) {
     const key = (t as { accountKeyB64?: unknown }).accountKeyB64;
@@ -302,29 +390,64 @@ function parseFounded(v: unknown): LinkFounded | null | undefined {
     if (typeof key !== "string" || typeof rec !== "boolean") return undefined;
     targets.push({ accountKeyB64: key, isRecipient: rec });
   }
-  return { groupIdB64: f.groupIdB64, welcomeB64: f.welcomeB64, targets, delivered: f.delivered };
+  return {
+    groupIdB64: f.groupIdB64,
+    welcomeB64: f.welcomeB64,
+    targets,
+    notePosted: f.notePosted,
+    delivered: f.delivered,
+  };
 }
 
 function parseOwn(v: unknown): OwnLinkClaims | null {
   if (typeof v !== "object" || v === null) return null;
-  const o = v as { wires?: unknown; ids?: unknown; won?: unknown; settled?: unknown; founded?: unknown };
+  const o = v as {
+    wires?: unknown;
+    ids?: unknown;
+    won?: unknown;
+    settled?: unknown;
+    founded?: unknown;
+    noteWire?: unknown;
+    noteConfirmed?: unknown;
+  };
   if (!Array.isArray(o.wires) || !o.wires.every(isHex)) return null;
   if (!Array.isArray(o.ids) || !o.ids.every(isId)) return null;
   if (o.won !== null && !isId(o.won)) return null;
   if (typeof o.settled !== "boolean") return null;
   const founded = parseFounded(o.founded);
   if (founded === undefined) return null;
+  if (o.noteWire !== null && !isHex(o.noteWire)) return null;
+  if (typeof o.noteConfirmed !== "boolean") return null;
   return {
     wires: o.wires as string[],
     ids: o.ids as number[],
     won: o.won as number | null,
     settled: o.settled,
     founded,
+    noteWire: o.noteWire as string | null,
+    noteConfirmed: o.noteConfirmed,
+  };
+}
+
+const isDecimal = (v: unknown): v is string => typeof v === "string" && /^[0-9]{1,20}$/.test(v);
+
+function parseJournal(v: unknown): StoredJournalEpochs | null {
+  if (typeof v !== "object" || v === null) return null;
+  const j = v as { groupIdHex?: unknown; base?: unknown; commitRowIds?: unknown; commitEpochsAfter?: unknown };
+  if (!isHex(j.groupIdHex) || !isDecimal(j.base)) return null;
+  if (!Array.isArray(j.commitRowIds) || !j.commitRowIds.every(isDecimal)) return null;
+  if (!Array.isArray(j.commitEpochsAfter) || !j.commitEpochsAfter.every(isDecimal)) return null;
+  if (j.commitRowIds.length !== j.commitEpochsAfter.length) return null;
+  return {
+    groupIdHex: j.groupIdHex,
+    base: j.base,
+    commitRowIds: j.commitRowIds as string[],
+    commitEpochsAfter: j.commitEpochsAfter as string[],
   };
 }
 
 function read(accountIdB64: string, storage: StorageLike | null): Persisted {
-  const empty: Persisted = { v: 2, seen: {}, own: {}, joined: {} };
+  const empty: Persisted = { v: 2, seen: {}, own: {}, notes: {}, journal: null };
   if (storage === null) return empty;
   let raw: string | null;
   try {
@@ -334,7 +457,7 @@ function read(accountIdB64: string, storage: StorageLike | null): Persisted {
   }
   if (raw === null) return empty;
   try {
-    const p = JSON.parse(raw) as { v?: unknown; seen?: unknown; own?: unknown; joined?: unknown };
+    const p = JSON.parse(raw) as { v?: unknown; seen?: unknown; own?: unknown; notes?: unknown; journal?: unknown };
     if (p.v !== 2 || typeof p.seen !== "object" || p.seen === null) return empty;
     const seen: Record<string, SeenEntry> = {};
     for (const [k, e] of Object.entries(p.seen as Record<string, unknown>)) {
@@ -349,15 +472,16 @@ function read(accountIdB64: string, storage: StorageLike | null): Persisted {
         if (parsed !== null) own[k] = parsed;
       }
     }
-    const joined: Record<string, JoinedWelcome> = {};
-    if (typeof p.joined === "object" && p.joined !== null) {
-      for (const [k, e] of Object.entries(p.joined as Record<string, unknown>)) {
-        const w = (e as { welcomeB64?: unknown }).welcomeB64;
-        const at = (e as { at?: unknown }).at;
-        if (typeof w === "string" && typeof at === "number") joined[k] = { welcomeB64: w, at };
+    const notes: Record<string, HeldLinkNote & { readonly at: number }> = {};
+    if (typeof p.notes === "object" && p.notes !== null) {
+      for (const [k, e] of Object.entries(p.notes as Record<string, unknown>)) {
+        const n = e as { id?: unknown; groupIdB64?: unknown; welcomeB64?: unknown; at?: unknown };
+        if (isId(n.id) && typeof n.groupIdB64 === "string" && typeof n.welcomeB64 === "string" && typeof n.at === "number") {
+          notes[k] = { id: n.id, groupIdB64: n.groupIdB64, welcomeB64: n.welcomeB64, at: n.at };
+        }
       }
     }
-    return { v: 2, seen, own, joined };
+    return { v: 2, seen, own, notes, journal: parseJournal(p.journal) };
   } catch {
     return empty;
   }
@@ -368,7 +492,15 @@ function write(accountIdB64: string, value: Persisted, storage: StorageLike | nu
   storage.setItem(KEY_PREFIX + accountIdB64, JSON.stringify(value));
 }
 
-const NO_OWN: OwnLinkClaims = { wires: [], ids: [], won: null, settled: false, founded: null };
+const NO_OWN: OwnLinkClaims = {
+  wires: [],
+  ids: [],
+  won: null,
+  settled: false,
+  founded: null,
+  noteWire: null,
+  noteConfirmed: false,
+};
 
 /** One account's claim record. Every write is one synchronous `setItem`, so
  *  a read-decide-write in one JS turn cannot interleave with the receive
@@ -383,20 +515,35 @@ export interface LinkClaimRecord {
   /** Record a sealed claim BEFORE its publish. Throws when the write fails:
    *  a claim must not be posted unrecorded. */
   addOwnWire(keyHex: string, wireHex: string): void;
-  /** A journal row (or a publish answer) carried these sealed bytes at this
-   *  id: if they are one of this device's recorded claims, file the id as
-   *  its own. Returns whether they were. Throws when the write fails. */
-  recordOwnClaimRow(wireHex: string, messageId: number): boolean;
-  /** `true` when some sealed claim still waits for its row. */
+  /** A journal row carried these sealed bytes at this id, and `counts` is
+   *  the readability rule's answer for it (sealed at the journal's epoch at
+   *  its position). A claim of this device: filed as its own when it
+   *  counts, else dropped (straddled: the next pass claims again). This
+   *  device's note: confirmed when it counts, else dropped (posted again).
+   *  Returns which it was, or `null`. Throws when the write fails. */
+  judgeOwnRow(wireHex: string, messageId: number, counts: boolean): "claim" | "note" | null;
+  /** `true` when some sealed claim or note still waits for its row. */
   hasUnmatchedWires(): boolean;
+  /** Record the sealed note BEFORE its publish. Throws when the write fails. */
+  setNoteWire(keyHex: string, wireHex: string): void;
+  /** After a read of the journal past the note: a sealed note no row
+   *  carried did not land; drop it (posted again). */
+  dropUnlandedNote(keyHex: string): void;
+  /** The journal's epochs held for the DeviceGroup `groupIdHex`, or `null`
+   *  (none held, or held for another DeviceGroup). */
+  journal(groupIdHex: string): StoredJournalEpochs | null;
+  /** Keep the journal's epochs. Throws when the write fails. */
+  setJournal(journal: StoredJournalEpochs): void;
   /** After a read of the journal past every claim: sealed claims never
    *  matched to a row did not land; drop them. */
   dropUnlanded(keyHex: string): void;
   setWon(keyHex: string, messageId: number): void;
-  /** Keep the Welcome a one-to-one was joined from (bounded). */
-  recordJoinedWelcome(groupIdB64: string, welcomeB64: string, nowMs: number): void;
-  /** The Welcome a held one-to-one was joined from, or `null`. */
-  joinedWelcome(groupIdB64: string): string | null;
+  /** Keep a link-founded note another device posted (the earliest per
+   *  request). Returns whether the record changed. Throws when the write
+   *  fails. */
+  recordNote(keyHex: string, note: HeldLinkNote, nowMs: number): boolean;
+  /** The earliest note held for the request, or `null`. */
+  note(keyHex: string): HeldLinkNote | null;
   /** Decided lost: re-check later without reading the journal again. */
   setSettled(keyHex: string): void;
   /** Record the founded one-to-one (before any Welcome is posted), or its
@@ -441,22 +588,41 @@ export function linkClaimRecord(
     addOwnWire(keyHex, wireHex) {
       updateOwn(keyHex, (o) => ({ ...o, wires: [...o.wires, wireHex] }));
     },
-    recordOwnClaimRow(wireHex, messageId) {
+    judgeOwnRow(wireHex, messageId, counts) {
       const cur = read(accountIdB64, storage);
       for (const [k, o] of Object.entries(cur.own)) {
-        if (!o.wires.includes(wireHex)) continue;
-        const ids = o.ids.includes(messageId) ? o.ids : [...o.ids, messageId].sort((a, b) => a - b);
-        write(
-          accountIdB64,
-          { ...cur, own: { ...cur.own, [k]: { ...o, wires: o.wires.filter((w) => w !== wireHex), ids } } },
-          storage,
-        );
-        return true;
+        if (o.wires.includes(wireHex)) {
+          const wires = o.wires.filter((w) => w !== wireHex);
+          const ids =
+            !counts || o.ids.includes(messageId) ? o.ids : [...o.ids, messageId].sort((a, b) => a - b);
+          write(accountIdB64, { ...cur, own: { ...cur.own, [k]: { ...o, wires, ids } } }, storage);
+          return "claim";
+        }
+        if (o.noteWire === wireHex) {
+          const next = { ...o, noteWire: null, noteConfirmed: o.noteConfirmed || counts };
+          write(accountIdB64, { ...cur, own: { ...cur.own, [k]: next } }, storage);
+          return "note";
+        }
       }
-      return false;
+      return null;
     },
     hasUnmatchedWires() {
-      return Object.values(read(accountIdB64, storage).own).some((o) => o.wires.length > 0);
+      return Object.values(read(accountIdB64, storage).own).some((o) => o.wires.length > 0 || o.noteWire !== null);
+    },
+    setNoteWire(keyHex, wireHex) {
+      updateOwn(keyHex, (o) => ({ ...o, noteWire: wireHex }));
+    },
+    dropUnlandedNote(keyHex) {
+      if ((read(accountIdB64, storage).own[keyHex]?.noteWire ?? null) === null) return;
+      updateOwn(keyHex, (o) => ({ ...o, noteWire: null }));
+    },
+    journal(groupIdHex) {
+      const j = read(accountIdB64, storage).journal;
+      return j !== null && j.groupIdHex === groupIdHex ? j : null;
+    },
+    setJournal(journal) {
+      const cur = read(accountIdB64, storage);
+      write(accountIdB64, { ...cur, journal }, storage);
     },
     dropUnlanded(keyHex) {
       if ((read(accountIdB64, storage).own[keyHex]?.wires.length ?? 0) === 0) return;
@@ -465,18 +631,22 @@ export function linkClaimRecord(
     setWon(keyHex, messageId) {
       updateOwn(keyHex, (o) => ({ ...o, won: messageId }));
     },
-    recordJoinedWelcome(groupIdB64, welcomeB64, nowMs) {
+    recordNote(keyHex, note, nowMs) {
       const cur = read(accountIdB64, storage);
-      const joined: Record<string, JoinedWelcome> = { ...cur.joined, [groupIdB64]: { welcomeB64, at: nowMs } };
-      const keys = Object.keys(joined);
-      if (keys.length > MAX_JOINED_WELCOMES) {
-        keys.sort((a, b) => (joined[a]?.at ?? 0) - (joined[b]?.at ?? 0));
-        for (const k of keys.slice(0, keys.length - MAX_JOINED_WELCOMES)) delete joined[k];
+      const held = cur.notes[keyHex];
+      if (held !== undefined && held.id <= note.id) return false;
+      const notes = { ...cur.notes, [keyHex]: { ...note, at: nowMs } };
+      const keys = Object.keys(notes);
+      if (keys.length > MAX_LINK_NOTES) {
+        keys.sort((x, y) => (notes[x]?.at ?? 0) - (notes[y]?.at ?? 0));
+        for (const k of keys.slice(0, keys.length - MAX_LINK_NOTES)) delete notes[k];
       }
-      write(accountIdB64, { ...cur, joined }, storage);
+      write(accountIdB64, { ...cur, notes }, storage);
+      return true;
     },
-    joinedWelcome(groupIdB64) {
-      return read(accountIdB64, storage).joined[groupIdB64]?.welcomeB64 ?? null;
+    note(keyHex) {
+      const n = read(accountIdB64, storage).notes[keyHex];
+      return n === undefined ? null : { id: n.id, groupIdB64: n.groupIdB64, welcomeB64: n.welcomeB64 };
     },
     setSettled(keyHex) {
       updateOwn(keyHex, (o) => ({ ...o, settled: true }));

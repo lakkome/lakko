@@ -14,6 +14,8 @@ import LakkoCore
 ///      the returned founding durably BEFORE step 3;
 ///   2. ``holdLinkOneToOne(groupIdB64:)`` makes it a held conversation
 ///      (after a restart, from the MLS snapshot step 1 persisted);
+///   (the caller publishes the link-founded note between 1 and 3, and 3 runs
+///   only after that publish succeeded);
 ///   3. ``deliverLinkWelcome(_:)`` writes the Welcome to this account's own
 ///      mailbox FIRST and to the requester's only after that write
 ///      succeeded, so whenever the requester holds the Welcome every own
@@ -90,6 +92,7 @@ extension ChatRepository {
             groupIdB64: groupIdB64,
             welcomeB64: base64Encode(welcome),
             targets: LinkClaims.welcomeOrder(targets, isRecipient: \.isRecipient),
+            notePosted: false,
             delivered: false)
     }
 
@@ -140,32 +143,19 @@ extension ChatRepository {
         }
     }
 
-    /// Every held conversation with its kind and member account keys (hex):
-    /// the input of ``LinkClaims/holdsOneToOneWith(_:requesterKeyHex:)``.
-    func heldConversationsByAccount() -> [LinkClaims.HeldConversation] {
-        groups.values.map { record in
-            let oneToOne = (try? record.group.groupKind()) == .oneToOne
-            let members = (try? record.group.members()) ?? []
-            return LinkClaims.HeldConversation(
-                oneToOne: oneToOne,
-                memberAccountKeysHex: members.map {
-                    LinkClaims.hex($0.accountKey.count == 32 ? $0.accountKey : $0.signaturePublicKey)
-                })
+    /// Write a link-founded note's Welcome to the requester's mailbox: the
+    /// founding device may have written this account's mailbox and left
+    /// before writing the requester's. The Welcome is the same bytes for
+    /// every added leaf, and the requester ignores a duplicate. Returns the
+    /// group's hex id when this device holds it, else `nil`.
+    func forwardLinkWelcome(_ note: LinkClaims.HeldNote, toRequester requesterKey: Data) async throws -> String? {
+        guard let welcome = base64Decode(note.welcomeB64), let groupId = base64Decode(note.groupIdB64) else {
+            throw ChatError.argument("the note is malformed")
         }
-    }
-
-    /// The hex id of a held one-to-one with the account whose key is
-    /// `accountKey`, if any.
-    func heldOneToOneHex(withAccountKey accountKey: Data) -> String? {
-        let want = LinkClaims.hex(accountKey)
-        return groups.first { _, record in
-            LinkClaims.holdsOneToOneWith(
-                [LinkClaims.HeldConversation(
-                    oneToOne: (try? record.group.groupKind()) == .oneToOne,
-                    memberAccountKeysHex: ((try? record.group.members()) ?? []).map {
-                        LinkClaims.hex($0.accountKey.count == 32 ? $0.accountKey : $0.signaturePublicKey)
-                    })],
-                requesterKeyHex: want)
-        }?.key
+        try await deliverWelcome(
+            welcome: welcome, toAccountKey: requesterKey,
+            plan: ReachCenter.shared.writePlan(toAccountKey: requesterKey))
+        let groupIdHex = DsClient.pseudonymHex(groupId)
+        return groups[groupIdHex] != nil ? groupIdHex : nil
     }
 }

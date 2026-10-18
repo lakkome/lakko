@@ -7,6 +7,7 @@ import XCTest
 
 /// ADR-0079 (reworked 2026-10-17) — the claim-then-build rule and its record,
 /// the mirror of `apps/web/src/contacts/link-claims.test.ts`.
+@MainActor
 final class LinkClaimsTests: XCTestCase {
 
     private func suite() -> UserDefaults {
@@ -102,55 +103,113 @@ final class LinkClaimsTests: XCTestCase {
         XCTAssertEqual(LinkClaims.welcomeOrder([targets[0]], isRecipient: \.isRecipient).count, 1)
     }
 
-    func testATakeoverDeviceThatAlreadyHoldsAOneToOneWithTheRequesterDoesNotBuild() {
-        let requester = String(repeating: "ab", count: 32)
-        let held = [
-            LinkClaims.HeldConversation(
-                oneToOne: false, memberAccountKeysHex: [requester, String(repeating: "cd", count: 32)]),
-            LinkClaims.HeldConversation(
-                oneToOne: true, memberAccountKeysHex: [String(repeating: "ef", count: 32), requester.uppercased()]),
-        ]
-        XCTAssertTrue(LinkClaims.holdsOneToOneWith(held, requesterKeyHex: requester))
-        XCTAssertEqual(LinkClaims.buildStep(hasFounded: false, mailboxCaughtUp: true, holdsOneToOne: true), .answered)
-        // A group (not a one-to-one) with the requester does not answer it.
-        XCTAssertFalse(LinkClaims.holdsOneToOneWith([held[0]], requesterKeyHex: requester))
-        XCTAssertEqual(LinkClaims.buildStep(hasFounded: false, mailboxCaughtUp: true, holdsOneToOne: false), .found)
+    func testATakeoverDeviceNotInTheFoundedGroupThatSeesANoteForwardsAndNeverFounds() async {
+        let note = LinkClaims.HeldNote(id: 7, groupIdB64: "theirs", welcomeB64: "w")
+        let device = BuildFake(note: note, holdsNotedGroup: false)
+        let built = await LinkClaims.runBuild(device.deps())
+        XCTAssertTrue(built)
+        XCTAssertEqual(device.log, ["forward:theirs", "finish:none"])
+        XCTAssertEqual(LinkClaims.buildStep(hasFounded: false, hasNote: true), .forward)
     }
 
-    func testATakeoverForwardsTheWelcomeItJoinedFromKeptPerOneToOneAndBounded() {
+    func testTheNoteIsPostedBeforeAnyWelcomeAndEachStepIsRecordedFirst() async {
+        let device = BuildFake()
+        let built = await LinkClaims.runBuild(device.deps())
+        XCTAssertTrue(built)
+        XCTAssertEqual(device.log, [
+            "prepare", "record:-:-", "postNote", "record:note:-", "hold", "deliver",
+            "record:note:delivered", "finish:g",
+        ])
+    }
+
+    func testNoWelcomeLeavesWhenTheNotesPublishFails() async {
+        let device = BuildFake(failNote: true)
+        let built = await LinkClaims.runBuild(device.deps())
+        XCTAssertFalse(built)
+        XCTAssertFalse(device.log.contains("deliver"))
+        XCTAssertEqual(device.founded?.notePosted, false)
+    }
+
+    func testARecordedFoundingIsResumedNeverFoundedAgainEvenWithANoteHeld() async {
+        var founded = BuildFake.founding
+        founded.notePosted = true
+        let device = BuildFake(
+            founded: founded, note: LinkClaims.HeldNote(id: 7, groupIdB64: "theirs", welcomeB64: "w"))
+        let built = await LinkClaims.runBuild(device.deps())
+        XCTAssertTrue(built)
+        XCTAssertFalse(device.log.contains("prepare"))
+        XCTAssertFalse(device.log.contains("postNote"))
+        XCTAssertFalse(device.log.contains("forward:theirs"))
+        XCTAssertEqual(LinkClaims.buildStep(hasFounded: true, hasNote: true), .resume)
+        XCTAssertEqual(LinkClaims.buildStep(hasFounded: false, hasNote: false), .found)
+    }
+
+    func testAStraddledOwnClaimDoesNotCountForItsAuthorEither() {
         let record = LinkClaims.Record(accountIdB64: "acct", defaults: suite())
-        XCTAssertNil(record.joinedWelcome("g"))
-        XCTAssertTrue(record.recordJoinedWelcome("g", welcomeB64: "w", nowMs: 1))
-        XCTAssertEqual(record.joinedWelcome("g"), "w")
-        let max = LinkClaims.Record.maxJoinedWelcomes
-        for i in 0...max {
-            record.recordJoinedWelcome("g\(i)", welcomeB64: "w\(i)", nowMs: Int64(i + 2))
-        }
-        XCTAssertNil(record.joinedWelcome("g"))
-        XCTAssertEqual(record.joinedWelcome("g\(max)"), "w\(max)")
+        record.addOwnWire("k", wireHex: "c0ffee")
+        XCTAssertEqual(record.judgeOwnRow(wireHex: "c0ffee", messageId: 10, counts: false), "claim")
+        XCTAssertEqual(record.own("k")?.ids, [])
+        XCTAssertEqual(record.own("k")?.wires, [])
+        XCTAssertEqual(LinkClaims.step(own: record.own("k"), answeredElsewhere: false, verdict: .accept), .postClaim)
     }
 
-    func testNeverBuildsBlindAndNeverFoundsTwice() {
-        XCTAssertEqual(LinkClaims.buildStep(hasFounded: false, mailboxCaughtUp: false, holdsOneToOne: false), .wait)
-        XCTAssertEqual(LinkClaims.buildStep(hasFounded: false, mailboxCaughtUp: false, holdsOneToOne: true), .wait)
-        XCTAssertEqual(LinkClaims.buildStep(hasFounded: true, mailboxCaughtUp: false, holdsOneToOne: true), .resume)
+    func testANoteIsConfirmedOnlyWhenItsRowCounts() {
+        let record = LinkClaims.Record(accountIdB64: "acct", defaults: suite())
+        record.setNoteWire("k", wireHex: "abcd")
+        XCTAssertTrue(record.hasUnmatchedWires())
+        XCTAssertEqual(record.judgeOwnRow(wireHex: "abcd", messageId: 20, counts: false), "note")
+        XCTAssertEqual(record.own("k")?.noteConfirmed, false)
+        XCTAssertNil(record.own("k")?.noteWire)
+        record.setNoteWire("k", wireHex: "ef01")
+        XCTAssertEqual(record.judgeOwnRow(wireHex: "ef01", messageId: 22, counts: true), "note")
+        XCTAssertEqual(record.own("k")?.noteConfirmed, true)
+        record.setNoteWire("k", wireHex: "aa")
+        record.dropUnlandedNote("k")
+        XCTAssertNil(record.own("k")?.noteWire)
+    }
+
+    func testNoWelcomeIsDeliveredOnAStraddledNote() async {
+        let device = BuildFake(noteCounts: false)
+        let built = await LinkClaims.runBuild(device.deps())
+        XCTAssertFalse(built)
+        XCTAssertEqual(device.log, ["prepare", "record:-:-", "postNote"])
+        XCTAssertEqual(device.founded?.notePosted, false)
+    }
+
+    /// Through the core: a claim straddled by another device's commit does
+    /// not count, one sealed at the journal's epoch does, and an own commit
+    /// merged before the loop reaches the claim does not straddle it.
+    func testTheReadabilityRuleThroughTheCore() {
+        var j = journalEpochsStartingAt(base: 5)
+        XCTAssertTrue(journalRowCounts(epochs: j, rowId: 20, sealedEpoch: 5))
+        j = journalEpochsObserve(epochs: j, rowId: 21, sealedEpoch: 5, epochAfter: 6, groupEpochAfter: 6)
+        XCTAssertFalse(journalRowCounts(epochs: j, rowId: 22, sealedEpoch: 5))
+        XCTAssertTrue(journalRowCounts(epochs: j, rowId: 22, sealedEpoch: 6))
+        XCTAssertTrue(journalRowCounts(epochs: j, rowId: 20, sealedEpoch: 5))
+        // A refused commit leaves it unchanged.
+        XCTAssertEqual(
+            journalEpochsObserve(epochs: j, rowId: 23, sealedEpoch: 6, epochAfter: 7, groupEpochAfter: 6), j)
+        let record = LinkClaims.Record(accountIdB64: "acct", defaults: suite())
+        record.setJournal(.init(groupIdHex: "aa", base: j.base, commitRowIds: j.commitRowIds,
+                                commitEpochsAfter: j.commitEpochsAfter))
+        XCTAssertEqual(record.journal(groupIdHex: "aa")?.commitRowIds, [21])
+        XCTAssertNil(record.journal(groupIdHex: "bb"))
+    }
+
+    func testTheRecordKeepsTheEarliestNotePerRequestBoundedAcrossInstances() {
         let defaults = suite()
         let record = LinkClaims.Record(accountIdB64: "acct", defaults: defaults)
-        let founded = LinkClaims.Founded(
-            groupIdB64: "g", welcomeB64: "w",
-            targets: [
-                LinkClaims.FoundedTarget(accountKeyB64: "own", isRecipient: false),
-                LinkClaims.FoundedTarget(accountKeyB64: "requester", isRecipient: true),
-            ],
-            delivered: false)
-        record.setWon("k", messageId: 3)
-        XCTAssertTrue(record.setFounded("k", founded))
-        XCTAssertEqual(LinkClaims.Record(accountIdB64: "acct", defaults: defaults).own("k")?.founded, founded)
-        var done = founded
-        done.delivered = true
-        done.welcomeB64 = ""
-        record.setFounded("k", done)
-        XCTAssertEqual(record.own("k")?.founded?.delivered, true)
+        XCTAssertNil(record.note("k"))
+        XCTAssertTrue(record.recordNote("k", note: .init(id: 9, groupIdB64: "a", welcomeB64: "w"), nowMs: 1))
+        XCTAssertFalse(record.recordNote("k", note: .init(id: 12, groupIdB64: "b", welcomeB64: "w"), nowMs: 2))
+        XCTAssertTrue(record.recordNote("k", note: .init(id: 4, groupIdB64: "c", welcomeB64: "w"), nowMs: 3))
+        XCTAssertEqual(LinkClaims.Record(accountIdB64: "acct", defaults: defaults).note("k")?.groupIdB64, "c")
+        for i in 0...LinkClaims.Record.maxNotes {
+            record.recordNote("k\(i)", note: .init(id: 1, groupIdB64: "g", welcomeB64: "w"), nowMs: Int64(i + 10))
+        }
+        XCTAssertNil(record.note("k"))
+        LinkClaims.Record.clear(accountIdB64: "acct", defaults: defaults)
+        XCTAssertNil(record.note("k\(LinkClaims.Record.maxNotes)"))
     }
 
     func testTheRecordKeepsEverySeenClaimWithItsAuthorAcrossInstances() {
@@ -174,12 +233,12 @@ final class LinkClaimsTests: XCTestCase {
         XCTAssertTrue(record.addOwnWire("k", wireHex: "c0ffee"))
         XCTAssertTrue(record.hasUnmatchedWires())
         let later = LinkClaims.Record(accountIdB64: "acct", defaults: defaults)
-        XCTAssertFalse(later.recordOwnClaimRow(wireHex: "beef", messageId: 10))
-        XCTAssertTrue(later.recordOwnClaimRow(wireHex: "c0ffee", messageId: 10))
+        XCTAssertNil(later.judgeOwnRow(wireHex: "beef", messageId: 10, counts: true))
+        XCTAssertEqual(later.judgeOwnRow(wireHex: "c0ffee", messageId: 10, counts: true), "claim")
         XCTAssertEqual(record.own("k"), LinkClaims.Own(ids: [10]))
         XCTAssertFalse(record.hasUnmatchedWires())
         record.addOwnWire("k", wireHex: "d00d")
-        record.recordOwnClaimRow(wireHex: "d00d", messageId: 14)
+        record.judgeOwnRow(wireHex: "d00d", messageId: 14, counts: true)
         XCTAssertEqual(record.own("k")?.ids, [10, 14])
         record.addOwnWire("k", wireHex: "aa")
         record.dropUnlanded("k")
@@ -222,5 +281,66 @@ final class LinkClaimsTests: XCTestCase {
             from: try JSONEncoder().encode(PersistedContactsInbox(cursor: 3, pending: [request])))
         XCTAssertEqual(back.pending.first?.viaDeadLink, true)
         XCTAssertEqual(back.pending.first?.deadLinkId, Data(repeating: 1, count: 16))
+    }
+}
+
+/// A device for ``LinkClaims/runBuild(_:)``: recorded state, and every step
+/// logs its name in order.
+@MainActor
+private final class BuildFake {
+    static let founding = LinkClaims.Founded(
+        groupIdB64: "g", welcomeB64: "w",
+        targets: [
+            LinkClaims.FoundedTarget(accountKeyB64: "own", isRecipient: false),
+            LinkClaims.FoundedTarget(accountKeyB64: "requester", isRecipient: true),
+        ],
+        notePosted: false, delivered: false)
+
+    var log: [String] = []
+    var founded: LinkClaims.Founded?
+    let note: LinkClaims.HeldNote?
+    let holdsNotedGroup: Bool
+    let failNote: Bool
+    let noteCounts: Bool
+
+    init(
+        founded: LinkClaims.Founded? = nil, note: LinkClaims.HeldNote? = nil,
+        holdsNotedGroup: Bool = false, failNote: Bool = false, noteCounts: Bool = true
+    ) {
+        self.founded = founded
+        self.note = note
+        self.holdsNotedGroup = holdsNotedGroup
+        self.failNote = failNote
+        self.noteCounts = noteCounts
+    }
+
+    func deps() -> LinkClaims.BuildDeps {
+        LinkClaims.BuildDeps(
+            founded: { self.founded },
+            note: { self.note },
+            prepare: {
+                self.log.append("prepare")
+                return BuildFake.founding
+            },
+            record: { f in
+                self.founded = f
+                self.log.append("record:\(f.notePosted ? "note" : "-"):\(f.delivered ? "delivered" : "-")")
+                return true
+            },
+            postNote: { _ in
+                if self.failNote { throw NSError(domain: "test", code: 1) }
+                self.log.append("postNote")
+                return self.noteCounts
+            },
+            hold: { f in
+                self.log.append("hold")
+                return f.groupIdB64
+            },
+            deliver: { _ in self.log.append("deliver") },
+            forward: { n in
+                self.log.append("forward:\(n.groupIdB64)")
+                return self.holdsNotedGroup ? n.groupIdB64 : nil
+            },
+            finish: { g in self.log.append("finish:\(g ?? "none")") })
     }
 }

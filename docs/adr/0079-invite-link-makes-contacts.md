@@ -196,6 +196,20 @@ build departs from or adds to the text above, it is recorded here.
   with exactly one builder; a removed device's earliest claim hands the
   request to the next current claim. The fuzz target `link_claim_decode`
   asserts the same over arbitrary claim sets.
+- `lakko-contacts::link_founded` (2026-10-17): the note the winner posts into
+  its own DeviceGroup after founding and BEFORE any Welcome leaves.
+  `lakko/link-founded/v1\0 ‖ version(1)=0x01 ‖ link_id(16) ‖
+  requester_account_key(32) ‖ group_id(32) ‖ welcome_len(2, BE) ‖ welcome`,
+  the Welcome 1 to `LINK_FOUNDED_MAX_WELCOME_LEN` = 32 768 bytes (the note
+  106 to 32 873 bytes), version checked before any length,
+  `compose_link_founded` refusing exactly what `decode_link_founded`
+  refuses, its own `IncomingEnvelope::LinkFounded` kind (never a chat
+  bubble), unit tests (round trip, every refusal, sibling domains) and
+  proptests (total and canonical decode; every encodable note round-trips),
+  fuzz target `link_founded_decode`. The bound is about four times a
+  measured maximal one-to-one Welcome: `a_maximal_one_to_one_welcome_fits_the_note`
+  in `lakko-ffi-uniffi` founds a one-to-one with 8 bound devices on each side
+  (15 added leaves) and measured 7 846 bytes.
 - `lakko-sync::synced::link_record`: the register entry carries more than
   section 4 lists: the ledger id (0 or 6 bytes, so another device can name
   the row and the list can link to it), the ledger row's **revocation seed**
@@ -232,6 +246,12 @@ build departs from or adds to the text above, it is recorded here.
   rosterKeys)`, `linkClaimEnvelopeLen`, and the appended dispatch kind
   `LinkClaim` with its `linkClaim` field. wasm the same, with the link answer
   as two byte arrays (empty for none), the verdict as a string, the
+  The note: `composeLinkFoundedEnvelope(linkId, requesterAccountKey, groupId,
+  welcome)`, `decodeLinkFoundedEnvelope` (→ `FfiLinkFounded { linkId,
+  requesterAccountKey, requestKey, groupId, welcome }`),
+  `isLinkFoundedEnvelope`, `linkFoundedEnvelopeMinLen` / `MaxLen`, and the
+  appended dispatch kind `LinkFounded` with its `linkFounded` field, on
+  UniFFI and wasm; the NSE extension recognises a note only to suppress it.
   `LinkRecord` constructor taking the seed after the ledger id, and
   `linkClaimOutcome(ownKey, claimIds, claimAuthors, rosterKeys)` (authors and
   roster as concatenated 32-byte keys) returning a `LinkClaimDecision` with
@@ -293,11 +313,12 @@ change.
   1. `accept` → seal a claim, record the sealed bytes durably, then publish
      them into the account's DeviceGroup, building nothing. A device cannot
      decrypt its own MLS application messages, so it recognises its OWN
-     claim rows by those bytes: the publish answer files the row's id at
-     once (web before the id enters the own-echo set), and the DeviceGroup
-     receive loop matches every row against the recorded bytes before it
-     processes the row, filing the id before the batch persists. A crash
-     between the publish and the recording of its id therefore loses
+     claim rows by those bytes: the DeviceGroup receive loop matches every
+     row against the recorded bytes (web: also the rows its own-echo set
+     skips) and judges the row at its position by the **readability rule**
+     below, filing the id only when the row counts, before the batch
+     persists. The publish answer files nothing (it does not know the
+     row's position). A crash between the publish and the read loses
      nothing: the row is still recognised as this device's on the next
      read;
   2. wait until a DeviceGroup fetch that STARTED after the publish has read
@@ -308,7 +329,9 @@ change.
      waits again (web: after every poll tick; iOS: at every inbox refresh
      while undecided requests are held; Android: after every poll; and on
      each client when the synced state loads or a claim arrives). Then the
-     sealed claims no row carried are dropped (they did not land), and the
+     sealed claims no row carried are dropped (they did not land), and so
+     are this device's claims whose row did not count (straddled, below;
+     the next pass claims again at the current epoch), and the
      core decides over every claim held for the request — this device's own
      under its own leaf key, the others under the leaf key resolved at
      receipt — against the CURRENT DeviceGroup roster: the earliest roster
@@ -324,43 +347,58 @@ change.
      current claim wins — this device's when it is next;
   3. only the winner builds, and in this order (2026-10-17, so that a
      winner removed after building can never be followed by a second
-     one-to-one):
+     one-to-one, and a requester is never left without the Welcome):
      a. **before any device builds** — the first winner and any device that
-        took the request over because the winner left the roster — it reads
-        its account mailbox past now (zero-wait passes that join every
-        pending Welcome, until one that started after the call found no row
-        past the cursor: web `mailboxCatchUp`, iOS `catchUpMailboxPastNow`,
-        Android `catchUpMailboxPastNow`) and looks for a held one-to-one
-        with the requester's account; if one is held, the request is
-        answered (the use is recorded in the register, the contact row
-        written, the ack sent) and nothing is built. Before that, when this
-        device joined that one-to-one from a Welcome it still keeps (each
-        client keeps the Welcome of every one-to-one it joins, the newest 32,
-        in the claim record), it writes those same bytes to the requester's
-        mailbox with the request's reply grant: the founder may have written
-        this account's mailbox and left before writing the requester's, and
-        the Welcome is byte-identical for every added leaf, so the requester
-        joins (or ignores a duplicate). A failed write leaves the request for
-        the next pass. A catch-up that times out leaves the request
-        undecided for the next pass: never built blind, never dropped;
-     b. the one-to-one is founded in ONE commit adding the requester's
-        devices AND every other current device of this account (ADR-0050
-        section 2; it was already one commit on all three), the journal
-        claimed and the founder's state persisted, and the founding (group
-        id, the Welcome, its targets in delivery order) is recorded durably
-        in the won record BEFORE any Welcome leaves;
-     c. the Welcome is written to this account's own mailbox FIRST and to
-        the requester's only after that write succeeded (`welcomeOrder` on
-        all three; the ordinary `startGroupWith` / `deliverPreparedWelcomes`
-        follow the same order now). So whenever the requester holds the
-        Welcome, every own device's mailbox holds it too, and step a finds
-        the one-to-one on any device that takes over;
-     d. the contact row, the ack and the use count.
+        took the request over because the winner left the roster — it looks
+        for a **link-founded note** for the request (below). If one is held
+        it never founds: it writes the note's Welcome to the requester's
+        mailbox with the request's reply grant (the Welcome is
+        byte-identical for every added leaf, and the requester ignores a
+        duplicate), then the contact row, the ack and the use count, and the
+        request is removed. This holds whether or not this device is a
+        member of the founded group or ever joined it. A failed write leaves
+        the request for the next pass;
+     b. otherwise the one-to-one is founded in ONE commit adding the
+        requester's devices AND every other current device of this account
+        (ADR-0050 section 2; it was already one commit on all three), the
+        journal claimed and the founder's state persisted, and the founding
+        (group id, the Welcome, its targets in delivery order) is recorded
+        durably in the won record;
+     c. the founder publishes the note into the account's own DeviceGroup —
+        `lakko-contacts::link_founded`: `lakko/link-founded/v1\0 ‖ 0x01 ‖
+        link_id(16) ‖ requester_account_key(32) ‖ group_id(32) ‖
+        welcome_len(u16 BE) ‖ welcome`, the Welcome 1 to 32 768 bytes (a
+        maximal one-to-one, 8 devices on each side, measured at 7 846 bytes
+        by `a_maximal_one_to_one_welcome_fits_the_note` in `lakko-ffi-uniffi`)
+        — recording the sealed note before the publish and publishing it
+        once, then reads the DeviceGroup journal past it and continues only
+        when the note's row COUNTS (the readability rule): recorded as
+        posted, BEFORE any Welcome is written to anyone. A failed publish, a
+        note no row carried, or a straddled note writes no Welcome; the
+        sealed note is dropped and the next pass publishes it again at the
+        current epoch;
+     d. only then the Welcome is written to this account's own mailbox FIRST
+        and to the requester's only after that write succeeded
+        (`welcomeOrder` on all three; the ordinary `startGroupWith` /
+        `deliverPreparedWelcomes` follow the same order);
+     e. the contact row, the ack and the use count.
      A retry (a failed publish, a restart) finds the founding in the won
-     record and resumes it: the same group is made a held conversation
-     (from the MLS snapshot after a restart) and its Welcome written again
-     in the same order (receivers ignore a duplicate); nothing is founded
-     twice.
+     record and resumes it from the step it reached: the same group is made
+     a held conversation (from the MLS snapshot after a restart) and its
+     Welcome written again in the same order (receivers ignore a duplicate);
+     nothing is founded twice. One function per client holds this order
+     with the device's steps injected (web `runLinkBuild`, iOS
+     `LinkClaims.runBuild`, Android `LinkClaims.runBuild`), so the order is
+     unit-tested.
+  Every device keeps the earliest note per request (journal order) from a
+  sender leaf the DeviceGroup roster resolves at receipt (C-68), at most 64
+  notes, in the claim record (cleared by Forget device). The account
+  mailbox catch-up and the store of joined Welcomes that an earlier round of
+  this rework put before the build are removed: with the note, the only
+  case a held one-to-one without a note could arise is a note the other
+  devices could not read, and there answering without forwarding could
+  leave the requester with nothing, which is worse than a second
+  one-to-one.
   A claim from another device is honoured only from a sender leaf the
   DeviceGroup roster resolves at receipt (C-68) and recorded with that
   leaf's key (at most 16 per request, the lowest ids) before the batch
@@ -390,18 +428,50 @@ change.
   holds them; an account with neither mints a link whose page reads "this
   person".
 
+- **The readability rule (order of 2026-10-17).** A DeviceGroup message
+  published while another DeviceGroup commit is in flight can land on the
+  journal after that commit; every other device is then at the next epoch
+  and cannot read it (OpenMLS keeps no past epochs; `max_past_epochs` stays
+  unset and `lakko-mls` is untouched). Every row's epoch is in its public
+  framing, so every device computes the same answer: a claim or note row
+  **counts only if the epoch it was sealed at equals the journal's epoch at
+  that row's position**, the epoch after the last commit before it that
+  took effect. A commit takes effect when it was sealed at the journal's
+  epoch at its row and the device's group moved past that epoch after the
+  row (another device's applied commit, or this device's own commit merged
+  early); a commit everyone refuses, or the losing one of two commits at the
+  same epoch, does not move it. The rule is `lakko-contacts::journal_epoch`
+  (`JournalEpochs`: `epoch_at`, `row_counts`, `observe`; at most 64 commits
+  kept, older ones folded into the base) on both FFI surfaces
+  (`journalEpochsStartingAt` / `journalRowCounts` / `journalEpochsObserve`
+  on UniFFI, the `JournalEpochs` class on wasm, and `DeviceGroup.epoch()`
+  read through `as_group()`), so no client re-derives it. Each client keeps
+  the record next to the claim record, per DeviceGroup id (a re-founded
+  group starts again), starting at the group's epoch when none is held, and
+  observes every row it reads (web `journal-readability.ts`, called from the
+  apply path and the own-echo path; iOS and Android in the DeviceGroup poll
+  loop). Because a device that merged its own commit is ahead of the journal
+  until its loop reaches that commit's row, the rule reads the journal, not
+  the device's current epoch: judging by the current epoch would make an
+  own claim sealed before that commit look straddled while every other
+  device reads it, and nobody would build. Consequences: a straddled claim
+  never wins, for its author too (it is dropped and claimed again); a
+  straddled note never counts (the founder posts it again before any
+  Welcome); another device's claim or note that decrypts counts by
+  definition. Property tests: `a_straddled_claim_never_wins_and_one_device_builds`
+  (exactly one builder across interleavings of claims and commits, every
+  device holding exactly the counting claims) and `a_straddled_note_never_counts`.
+
 **Residuals.**
 
-- A device of the account that is not in the founded one-to-one (paired
-  after the founding, or whose KeyPackage the founder did not find in the
-  directory when it founded) does not hold it after step a; if it then takes
-  the request over because the founder left the roster, it founds a second
-  one-to-one. The same happens when such a device's join of the own Welcome
-  fails.
-- The forward in step a needs the joined Welcome to be kept: a device that
-  joined more than 32 other one-to-ones since, or whose kept copy was lost,
-  answers without forwarding; if the founder had left between its two
-  writes, the requester then gets no Welcome.
+- The readability rule assumes the DeviceGroup did not fork: two of this
+  account's devices committing at the same epoch with both commits taking
+  effect on different devices is the ADR-0045 hazard on the DeviceGroup and
+  is not addressed here.
+- A device that holds no journal record (its first run, or the first after
+  a re-founding) starts at the group's epoch when its batch starts; a claim
+  or note of its own published before an own commit it had already merged
+  when that batch started is judged at that epoch.
 - A request a device lost (or saw another device claim) leaves the store
   only when the register says it was answered or the link is dead. If the
   winner's use never reaches the register while the winner stays in the

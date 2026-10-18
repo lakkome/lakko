@@ -56,6 +56,11 @@ export interface DeviceJournalBatchDeps {
   /** Persist the DeviceGroup snapshot together with `cursor`. MUST reject on a
    *  failed write. */
   readonly persist: (cursor: number) => Promise<void>;
+  /** Observes a row skipped as this device's own echo (ADR-0079: its
+   *  position on the journal decides whether its own claim or note counts,
+   *  and its own commits move the journal's epoch). May throw; the batch
+   *  continues. */
+  readonly onOwnEcho?: (row: DeviceJournalRow) => Promise<void> | void;
   /** Observes a row `apply` threw on. */
   readonly onApplyError?: (row: DeviceJournalRow, err: unknown) => void;
   /** Observes a failed persist. */
@@ -92,6 +97,11 @@ export async function applyDeviceJournalBatch(
     if (row.id > cursor) cursor = row.id;
     if (deps.isOwnEcho(row.id)) {
       skippedOwnEchoes.push(row.id);
+      try {
+        await deps.onOwnEcho?.(row);
+      } catch (err) {
+        deps.onApplyError?.(row, err);
+      }
       continue;
     }
     applied += 1;

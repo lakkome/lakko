@@ -4,11 +4,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type HeldLinkNote,
+  type LinkBuildDeps,
   type LinkFounded,
   MAX_CLAIMS_PER_REQUEST,
-  MAX_JOINED_WELCOMES,
-  holdsOneToOneWith,
+  MAX_LINK_NOTES,
   linkBuildStep,
+  runLinkBuild,
   welcomeOrder,
   MAX_SEEN_LINK_CLAIMS,
   claimsToDecide,
@@ -33,9 +35,9 @@ function memoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
 }
 
 const B = "bb".repeat(32);
-const posted = { wires: [], ids: [9], won: null, settled: false, founded: null };
-const posting = { wires: ["aa"], ids: [], won: null, settled: false, founded: null };
-const lost = { wires: [], ids: [9], won: null, settled: true, founded: null };
+const posted = { wires: [], ids: [9], won: null, settled: false, founded: null, noteWire: null, noteConfirmed: false };
+const posting = { wires: ["aa"], ids: [], won: null, settled: false, founded: null, noteWire: null, noteConfirmed: false };
+const lost = { wires: [], ids: [9], won: null, settled: true, founded: null, noteWire: null, noteConfirmed: false };
 
 describe("linkRequestStep (ADR-0079, reworked 2026-10-17)", () => {
   it("waits, with no timer, while the synced state is not loaded", () => {
@@ -53,7 +55,7 @@ describe("linkRequestStep (ADR-0079, reworked 2026-10-17)", () => {
     expect(linkRequestStep({ own: null, answeredElsewhere: true, verdict: null })).toBe("wait");
     expect(linkRequestStep({ own: null, answeredElsewhere: true, verdict: "answered" })).toBe("drop");
     expect(linkRequestStep({ own: null, answeredElsewhere: true, verdict: "dead" })).toBe("drop");
-    const none = { wires: [], ids: [], won: null, settled: false, founded: null };
+    const none = { wires: [], ids: [], won: null, settled: false, founded: null, noteWire: null, noteConfirmed: false };
     expect(linkRequestStep({ own: none, answeredElsewhere: true, verdict: "accept" })).toBe("wait");
   });
 
@@ -70,7 +72,7 @@ describe("linkRequestStep (ADR-0079, reworked 2026-10-17)", () => {
   });
 
   it("builds a won claim even after the link was used up or answered meanwhile", () => {
-    const won = { wires: [], ids: [9], won: 9, settled: false, founded: null };
+    const won = { wires: [], ids: [9], won: 9, settled: false, founded: null, noteWire: null, noteConfirmed: false };
     expect(linkRequestStep({ own: won, answeredElsewhere: true, verdict: "dead" })).toBe("build");
     expect(linkRequestStep({ own: won, answeredElsewhere: true, verdict: "answered" })).toBe("build");
   });
@@ -91,61 +93,133 @@ describe("linkRequestStep (ADR-0079, reworked 2026-10-17)", () => {
 });
 
 describe("the build of a won request (ADR-0079 ordering, 2026-10-17)", () => {
+  const founding: LinkFounded = {
+    groupIdB64: "g",
+    welcomeB64: "w",
+    targets: [
+      { accountKeyB64: "own", isRecipient: false },
+      { accountKeyB64: "requester", isRecipient: true },
+    ],
+    notePosted: false,
+    delivered: false,
+  };
+
+  /** A device with recorded state; every step logs its name in order. */
+  function device(
+    initial: { founded?: LinkFounded | null; note?: HeldLinkNote | null; heldNote?: boolean; noteCounts?: boolean } = {},
+  ) {
+    const log: string[] = [];
+    let founded = initial.founded ?? null;
+    const deps: LinkBuildDeps = {
+      founded: () => founded,
+      note: () => initial.note ?? null,
+      prepare: async () => {
+        log.push("prepare");
+        return founding;
+      },
+      record: (f) => {
+        founded = f;
+        log.push(`record:${f.notePosted ? "note" : "-"}:${f.delivered ? "delivered" : "-"}`);
+      },
+      postNote: async () => {
+        log.push("postNote");
+        return initial.noteCounts ?? true;
+      },
+      hold: async (f) => {
+        log.push("hold");
+        return f.groupIdB64;
+      },
+      deliver: async () => {
+        log.push("deliver");
+      },
+      forward: async (n) => {
+        log.push(`forward:${n.groupIdB64}`);
+        return initial.heldNote === true ? n.groupIdB64 : null;
+      },
+      finish: async (g) => {
+        log.push(`finish:${g ?? "none"}`);
+      },
+    };
+    return { deps, log, founded: () => founded };
+  }
+
   it("writes this account's own mailbox first and the requester's after", () => {
     const targets = [
       { accountKeyB64: "requester", isRecipient: true },
       { accountKeyB64: "own", isRecipient: false },
     ];
     expect(welcomeOrder(targets).map((t) => t.accountKeyB64)).toEqual(["own", "requester"]);
-    expect(welcomeOrder([{ accountKeyB64: "requester", isRecipient: true }])).toHaveLength(1);
   });
 
-  it("a takeover device that already holds a one-to-one with the requester does not build", () => {
-    const requester = "ab".repeat(32);
-    const held = [
-      { oneToOne: false, memberAccountKeysHex: [requester, "cd".repeat(32)] },
-      { oneToOne: true, memberAccountKeysHex: ["ef".repeat(32), requester.toUpperCase()] },
-    ];
-    expect(holdsOneToOneWith(held, requester)).toBe(true);
-    expect(linkBuildStep({ hasFounded: false, mailboxCaughtUp: true, holdsOneToOne: true })).toBe("answered");
-    // A group (not a one-to-one) with the requester does not answer it.
-    expect(holdsOneToOneWith([held[0]!], requester)).toBe(false);
-    expect(linkBuildStep({ hasFounded: false, mailboxCaughtUp: true, holdsOneToOne: false })).toBe("found");
+  it("posts the note before any Welcome, and records each step before the next", async () => {
+    const d = device();
+    expect(await runLinkBuild(d.deps)).toBe(true);
+    expect(d.log).toEqual([
+      "prepare",
+      "record:-:-",
+      "postNote",
+      "record:note:-",
+      "hold",
+      "deliver",
+      "record:note:delivered",
+      "finish:g",
+    ]);
+    expect(d.log.indexOf("postNote")).toBeLessThan(d.log.indexOf("deliver"));
   });
 
-  it("a takeover forwards the Welcome it joined from, kept per one-to-one and bounded", () => {
-    const r = linkClaimRecord("acct", memoryStorage());
-    expect(r.joinedWelcome("g")).toBeNull();
-    r.recordJoinedWelcome("g", "w", 1);
-    expect(r.joinedWelcome("g")).toBe("w");
-    for (let i = 0; i <= MAX_JOINED_WELCOMES; i += 1) r.recordJoinedWelcome(`g${i}`, `w${i}`, i + 2);
-    expect(r.joinedWelcome("g")).toBeNull();
-    expect(r.joinedWelcome(`g${MAX_JOINED_WELCOMES}`)).toBe(`w${MAX_JOINED_WELCOMES}`);
-  });
-
-  it("never builds blind: an unread mailbox keeps the request for the next pass", () => {
-    expect(linkBuildStep({ hasFounded: false, mailboxCaughtUp: false, holdsOneToOne: false })).toBe("wait");
-    expect(linkBuildStep({ hasFounded: false, mailboxCaughtUp: false, holdsOneToOne: true })).toBe("wait");
-  });
-
-  it("a founding already recorded is resumed, never founded again", () => {
-    expect(linkBuildStep({ hasFounded: true, mailboxCaughtUp: false, holdsOneToOne: true })).toBe("resume");
-    const storage = memoryStorage();
-    const key = "k";
-    const founded: LinkFounded = {
-      groupIdB64: "g",
-      welcomeB64: "w",
-      targets: [
-        { accountKeyB64: "own", isRecipient: false },
-        { accountKeyB64: "requester", isRecipient: true },
-      ],
-      delivered: false,
+  it("delivers no Welcome when the note's publish fails", async () => {
+    const d = device();
+    d.deps.postNote = async () => {
+      throw new Error("offline");
     };
-    linkClaimRecord("acct", storage).setWon(key, 3);
-    linkClaimRecord("acct", storage).setFounded(key, founded);
-    expect(linkClaimRecord("acct", storage).own(key)?.founded).toEqual(founded);
-    linkClaimRecord("acct", storage).setFounded(key, { ...founded, welcomeB64: "", delivered: true });
-    expect(linkClaimRecord("acct", storage).own(key)?.founded?.delivered).toBe(true);
+    await expect(runLinkBuild(d.deps)).rejects.toThrow();
+    expect(d.log).not.toContain("deliver");
+    // The founding is recorded; the next pass resumes it, never founds again.
+    expect(d.founded()?.notePosted).toBe(false);
+  });
+
+  it("delivers no Welcome on a note that landed straddled (it did not count)", async () => {
+    const d = device({ noteCounts: false });
+    expect(await runLinkBuild(d.deps)).toBe(false);
+    expect(d.log).toEqual(["prepare", "record:-:-", "postNote"]);
+    expect(d.founded()?.notePosted).toBe(false);
+  });
+
+  it("a takeover device that is not a member of the founded group and sees a note does not found and forwards", async () => {
+    const d = device({ note: { id: 7, groupIdB64: "theirs", welcomeB64: "w" }, heldNote: false });
+    expect(await runLinkBuild(d.deps)).toBe(true);
+    expect(d.log).toEqual(["forward:theirs", "finish:none"]);
+    expect(linkBuildStep({ hasFounded: false, hasNote: true })).toBe("forward");
+  });
+
+  it("a founding already recorded is resumed, never founded again, even with a note held", async () => {
+    const d = device({ founded: { ...founding, notePosted: true }, note: { id: 7, groupIdB64: "theirs", welcomeB64: "w" } });
+    expect(await runLinkBuild(d.deps)).toBe(true);
+    expect(d.log).not.toContain("prepare");
+    expect(d.log).not.toContain("postNote");
+    expect(d.log).not.toContain("forward:theirs");
+    expect(linkBuildStep({ hasFounded: true, hasNote: true })).toBe("resume");
+    expect(linkBuildStep({ hasFounded: false, hasNote: false })).toBe("found");
+  });
+
+  it("keeps the earliest note per request, bounded, across a restart", () => {
+    const storage = memoryStorage();
+    const r = linkClaimRecord("acct", storage);
+    expect(r.note("k")).toBeNull();
+    expect(r.recordNote("k", { id: 9, groupIdB64: "a", welcomeB64: "w" }, 1)).toBe(true);
+    expect(r.recordNote("k", { id: 12, groupIdB64: "b", welcomeB64: "w" }, 2)).toBe(false);
+    expect(r.recordNote("k", { id: 4, groupIdB64: "c", welcomeB64: "w" }, 3)).toBe(true);
+    expect(linkClaimRecord("acct", storage).note("k")?.groupIdB64).toBe("c");
+    for (let i = 0; i <= MAX_LINK_NOTES; i += 1) r.recordNote(`k${i}`, { id: 1, groupIdB64: "g", welcomeB64: "w" }, i + 10);
+    expect(r.note("k")).toBeNull();
+    clearLinkClaims("acct", storage);
+    expect(linkClaimRecord("acct", storage).note(`k${MAX_LINK_NOTES}`)).toBeNull();
+  });
+
+  it("records the founding with its note flag", () => {
+    const storage = memoryStorage();
+    linkClaimRecord("acct", storage).setFounded("k", founding);
+    expect(linkClaimRecord("acct", storage).own("k")?.founded).toEqual(founding);
   });
 });
 
@@ -181,22 +255,63 @@ describe("linkClaimRecord", () => {
     const r = linkClaimRecord("acct", storage);
     r.addOwnWire(key, "c0ffee");
     expect(r.hasUnmatchedWires()).toBe(true);
-    // A crash lost the publish answer; the receive loop meets the row later.
-    expect(linkClaimRecord("acct", storage).recordOwnClaimRow("beef", 10)).toBe(false);
-    expect(linkClaimRecord("acct", storage).recordOwnClaimRow("c0ffee", 10)).toBe(true);
-    expect(r.own(key)).toEqual({ wires: [], ids: [10], won: null, settled: false, founded: null });
+    // A crash lost the publish answer; the receive loop meets the row later
+    // and judges it at its position.
+    expect(linkClaimRecord("acct", storage).judgeOwnRow("beef", 10, true)).toBeNull();
+    expect(linkClaimRecord("acct", storage).judgeOwnRow("c0ffee", 10, true)).toBe("claim");
+    expect(r.own(key)).toEqual({
+      wires: [],
+      ids: [10],
+      won: null,
+      settled: false,
+      founded: null,
+      noteWire: null,
+      noteConfirmed: false,
+    });
     expect(r.hasUnmatchedWires()).toBe(false);
     // A later duplicate claim lands as a second own id; the earlier stays.
     r.addOwnWire(key, "d00d");
-    r.recordOwnClaimRow("d00d", 14);
+    r.judgeOwnRow("d00d", 14, true);
     expect(r.own(key)?.ids).toEqual([10, 14]);
+  });
+
+  it("a straddled own claim does not count for its author either: dropped, claimed again", () => {
+    const r = linkClaimRecord("acct", memoryStorage());
+    r.addOwnWire(key, "c0ffee");
+    expect(r.judgeOwnRow("c0ffee", 10, false)).toBe("claim");
+    expect(r.own(key)?.ids).toEqual([]);
+    expect(r.own(key)?.wires).toEqual([]);
+    expect(linkRequestStep({ own: r.own(key), answeredElsewhere: false, verdict: "accept" })).toBe("post-claim");
+  });
+
+  it("confirms this device's note only when its row counts", () => {
+    const r = linkClaimRecord("acct", memoryStorage());
+    r.setNoteWire(key, "abcd");
+    expect(r.hasUnmatchedWires()).toBe(true);
+    expect(r.judgeOwnRow("abcd", 20, false)).toBe("note");
+    expect(r.own(key)?.noteConfirmed).toBe(false);
+    expect(r.own(key)?.noteWire).toBeNull();
+    r.setNoteWire(key, "ef01");
+    expect(r.judgeOwnRow("ef01", 22, true)).toBe("note");
+    expect(r.own(key)?.noteConfirmed).toBe(true);
+    r.setNoteWire(key, "aa");
+    r.dropUnlandedNote(key);
+    expect(r.own(key)?.noteWire).toBeNull();
+  });
+
+  it("keeps the journal's epochs for one DeviceGroup only", () => {
+    const r = linkClaimRecord("acct", memoryStorage());
+    expect(r.journal("aa")).toBeNull();
+    r.setJournal({ groupIdHex: "aa", base: "5", commitRowIds: ["11"], commitEpochsAfter: ["6"] });
+    expect(r.journal("aa")?.base).toBe("5");
+    expect(r.journal("bb")).toBeNull();
   });
 
   it("drops sealed claims that never landed, and records a win across a restart", () => {
     const storage = memoryStorage();
     linkClaimRecord("acct", storage).addOwnWire(key, "aa");
     linkClaimRecord("acct", storage).dropUnlanded(key);
-    expect(linkClaimRecord("acct", storage).own(key)).toEqual({ wires: [], ids: [], won: null, settled: false, founded: null });
+    expect(linkClaimRecord("acct", storage).own(key)).toEqual({ wires: [], ids: [], won: null, settled: false, founded: null, noteWire: null, noteConfirmed: false });
     linkClaimRecord("acct", storage).setSettled(key);
     expect(linkClaimRecord("acct", storage).own(key)?.settled).toBe(true);
     linkClaimRecord("acct", storage).setWon(key, 5);
@@ -229,7 +344,7 @@ describe("linkClaimRecord", () => {
     expect(linkClaimRecord("acct", storage).own(key)).toBeNull();
     storage.setItem(
       "lakko.link-claims.v1.acct",
-      JSON.stringify({ v: 2, seen: {}, own: { [key]: { wires: [], ids: [0], won: null, settled: false, founded: null } } }),
+      JSON.stringify({ v: 2, seen: {}, own: { [key]: { wires: [], ids: [0], won: null, settled: false, founded: null, noteWire: null, noteConfirmed: false } } }),
     );
     expect(linkClaimRecord("acct", storage).own(key)).toBeNull();
   });

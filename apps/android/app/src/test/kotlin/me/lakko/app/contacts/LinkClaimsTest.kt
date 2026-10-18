@@ -4,6 +4,7 @@
 package me.lakko.app.contacts
 
 import me.lakko.app.auth.SealedBlobStorage
+import kotlinx.coroutines.runBlocking
 import me.lakko.app.auth.base64Encode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -110,52 +111,128 @@ class LinkClaimsTest {
         assertEquals(1, LinkClaims.welcomeOrder(listOf(targets[0])) { it.isRecipient }.size)
     }
 
+    /** A device for [LinkClaims.runBuild]: recorded state, and every step
+     *  logs its name in order. */
+    private class BuildFake(
+        var founded: LinkClaims.Founded? = null,
+        val heldNote: LinkClaims.HeldNote? = null,
+        val holdsNotedGroup: Boolean = false,
+        val failNote: Boolean = false,
+        val noteCounts: Boolean = true,
+    ) : LinkClaims.BuildDeps {
+        val log = mutableListOf<String>()
+
+        override fun founded(): LinkClaims.Founded? = founded
+
+        override fun note(): LinkClaims.HeldNote? = heldNote
+
+        override suspend fun prepare(): LinkClaims.Founded {
+            log += "prepare"
+            return FOUNDING
+        }
+
+        override fun record(founded: LinkClaims.Founded): Boolean {
+            this.founded = founded
+            log += "record:${if (founded.notePosted) "note" else "-"}:${if (founded.delivered) "delivered" else "-"}"
+            return true
+        }
+
+        override suspend fun postNote(founded: LinkClaims.Founded): Boolean {
+            if (failNote) throw IllegalStateException("offline")
+            log += "postNote"
+            return noteCounts
+        }
+
+        override suspend fun hold(founded: LinkClaims.Founded): Boolean {
+            log += "hold"
+            return true
+        }
+
+        override suspend fun deliver(founded: LinkClaims.Founded) {
+            log += "deliver"
+        }
+
+        override suspend fun forward(note: LinkClaims.HeldNote): String? {
+            log += "forward:${note.groupIdHex}"
+            return note.groupIdHex.takeIf { holdsNotedGroup }
+        }
+
+        override suspend fun finish(groupIdHex: String?) {
+            log += "finish:${groupIdHex ?: "none"}"
+        }
+
+        companion object {
+            val FOUNDING = LinkClaims.Founded(
+                groupIdHex = "aa",
+                welcomeB64 = "w",
+                targets = listOf(
+                    LinkClaims.FoundedTarget("own", isRecipient = false),
+                    LinkClaims.FoundedTarget("requester", isRecipient = true),
+                ),
+                notePosted = false,
+                delivered = false,
+            )
+        }
+    }
+
     @Test
-    fun `a takeover device that already holds a one-to-one with the requester does not build`() {
-        val requester = "ab".repeat(32)
-        val held = listOf(
-            LinkClaims.HeldConversation(oneToOne = false, memberAccountKeysHex = listOf(requester, "cd".repeat(32))),
-            LinkClaims.HeldConversation(oneToOne = true, memberAccountKeysHex = listOf("ef".repeat(32), requester.uppercase())),
+    fun `a takeover device not in the founded group that sees a note forwards and never founds`() = runBlocking {
+        val device = BuildFake(heldNote = LinkClaims.HeldNote(7, "theirs", "w"), holdsNotedGroup = false)
+        assertTrue(LinkClaims.runBuild(device))
+        assertEquals(listOf("forward:theirs", "finish:none"), device.log)
+        assertEquals(LinkClaims.BuildStep.FORWARD, LinkClaims.buildStep(hasFounded = false, hasNote = true))
+    }
+
+    @Test
+    fun `the note is posted before any Welcome and each step is recorded first`() = runBlocking {
+        val device = BuildFake()
+        assertTrue(LinkClaims.runBuild(device))
+        assertEquals(
+            listOf("prepare", "record:-:-", "postNote", "record:note:-", "hold", "deliver", "record:note:delivered", "finish:aa"),
+            device.log,
         )
-        assertTrue(LinkClaims.holdsOneToOneWith(held, requester))
-        assertEquals(LinkClaims.BuildStep.ANSWERED, LinkClaims.buildStep(false, mailboxCaughtUp = true, holdsOneToOne = true))
-        // A group (not a one-to-one) with the requester does not answer it.
-        assertFalse(LinkClaims.holdsOneToOneWith(listOf(held[0]), requester))
-        assertEquals(LinkClaims.BuildStep.FOUND, LinkClaims.buildStep(false, mailboxCaughtUp = true, holdsOneToOne = false))
     }
 
     @Test
-    fun `a takeover forwards the Welcome it joined from, kept per one-to-one and bounded`() {
-        val record = LinkClaimRecord("acct", InMemoryLinkClaimStorage())
-        assertNull(record.joinedWelcome("g"))
-        assertTrue(record.recordJoinedWelcome("g", "w", 1))
-        assertEquals("w", record.joinedWelcome("g"))
-        for (i in 0..LinkClaimRecord.MAX_JOINED_WELCOMES) record.recordJoinedWelcome("g$i", "w$i", (i + 2).toLong())
-        assertNull(record.joinedWelcome("g"))
-        assertEquals("w${LinkClaimRecord.MAX_JOINED_WELCOMES}", record.joinedWelcome("g${LinkClaimRecord.MAX_JOINED_WELCOMES}"))
+    fun `no Welcome leaves when the note's publish fails`() = runBlocking {
+        val device = BuildFake(failNote = true)
+        assertTrue(runCatching { LinkClaims.runBuild(device) }.isFailure)
+        assertFalse(device.log.contains("deliver"))
+        assertEquals(false, device.founded?.notePosted)
     }
 
     @Test
-    fun `never builds blind and never founds twice`() {
-        assertEquals(LinkClaims.BuildStep.WAIT, LinkClaims.buildStep(false, mailboxCaughtUp = false, holdsOneToOne = false))
-        assertEquals(LinkClaims.BuildStep.WAIT, LinkClaims.buildStep(false, mailboxCaughtUp = false, holdsOneToOne = true))
-        assertEquals(LinkClaims.BuildStep.RESUME, LinkClaims.buildStep(true, mailboxCaughtUp = false, holdsOneToOne = true))
+    fun `a recorded founding is resumed, never founded again, even with a note held`() = runBlocking {
+        val device = BuildFake(
+            founded = BuildFake.FOUNDING.copy(notePosted = true),
+            heldNote = LinkClaims.HeldNote(7, "theirs", "w"),
+        )
+        assertTrue(LinkClaims.runBuild(device))
+        assertFalse(device.log.contains("prepare"))
+        assertFalse(device.log.contains("postNote"))
+        assertFalse(device.log.contains("forward:theirs"))
+        assertEquals(LinkClaims.BuildStep.RESUME, LinkClaims.buildStep(hasFounded = true, hasNote = true))
+        assertEquals(LinkClaims.BuildStep.FOUND, LinkClaims.buildStep(hasFounded = false, hasNote = false))
+    }
+
+    @Test
+    fun `the record keeps the earliest note per request, bounded, across instances`() {
         val storage = InMemoryLinkClaimStorage()
         val record = LinkClaimRecord("acct", storage)
-        val founded = LinkClaims.Founded(
-            groupIdHex = "aa",
-            welcomeB64 = "w",
-            targets = listOf(
-                LinkClaims.FoundedTarget("own", isRecipient = false),
-                LinkClaims.FoundedTarget("requester", isRecipient = true),
-            ),
-            delivered = false,
-        )
-        assertTrue(record.setWon("k", 3))
-        assertTrue(record.setFounded("k", founded))
-        assertEquals(founded, LinkClaimRecord("acct", storage).own("k")?.founded)
-        record.setFounded("k", founded.copy(welcomeB64 = "", delivered = true))
-        assertEquals(true, LinkClaimRecord("acct", storage).own("k")?.founded?.delivered)
+        assertNull(record.note("k"))
+        assertTrue(record.recordNote("k", LinkClaims.HeldNote(9, "a", "w"), 1))
+        assertFalse(record.recordNote("k", LinkClaims.HeldNote(12, "b", "w"), 2))
+        assertTrue(record.recordNote("k", LinkClaims.HeldNote(4, "c", "w"), 3))
+        assertEquals("c", LinkClaimRecord("acct", storage).note("k")?.groupIdHex)
+        for (i in 0..LinkClaimRecord.MAX_NOTES) record.recordNote("k$i", LinkClaims.HeldNote(1, "g", "w"), (i + 10).toLong())
+        assertNull(record.note("k"))
+    }
+
+    @Test
+    fun `the founding is recorded with its note flag`() {
+        val storage = InMemoryLinkClaimStorage()
+        assertTrue(LinkClaimRecord("acct", storage).setFounded("k", BuildFake.FOUNDING))
+        assertEquals(BuildFake.FOUNDING, LinkClaimRecord("acct", storage).own("k")?.founded)
     }
 
     @Test
@@ -177,12 +254,12 @@ class LinkClaimsTest {
         assertTrue(record.addOwnWire("k", "c0ffee"))
         assertTrue(record.hasUnmatchedWires())
         val later = LinkClaimRecord("acct", storage)
-        assertFalse(later.recordOwnClaimRow("beef", 10))
-        assertTrue(later.recordOwnClaimRow("c0ffee", 10))
+        assertNull(later.judgeOwnRow("beef", 10, counts = true))
+        assertEquals("claim", later.judgeOwnRow("c0ffee", 10, counts = true))
         assertEquals(LinkClaims.Own(ids = listOf(10L)), record.own("k"))
         assertFalse(record.hasUnmatchedWires())
         record.addOwnWire("k", "d00d")
-        record.recordOwnClaimRow("d00d", 14)
+        record.judgeOwnRow("d00d", 14, counts = true)
         assertEquals(listOf(10L, 14L), record.own("k")?.ids)
         record.addOwnWire("k", "aa")
         record.dropUnlanded("k")
@@ -193,6 +270,55 @@ class LinkClaimsTest {
         assertEquals(10L, LinkClaimRecord("acct", storage).own("k")?.won)
         record.forgetOwn("k")
         assertNull(record.own("k"))
+    }
+
+    @Test
+    fun `a straddled own claim does not count for its author either`() {
+        val record = LinkClaimRecord("acct", InMemoryLinkClaimStorage())
+        record.addOwnWire("k", "c0ffee")
+        assertEquals("claim", record.judgeOwnRow("c0ffee", 10, counts = false))
+        assertEquals(emptyList<Long>(), record.own("k")?.ids)
+        assertEquals(emptyList<String>(), record.own("k")?.wires)
+        assertEquals(
+            LinkClaims.Step.POST_CLAIM,
+            LinkClaims.step(record.own("k"), false, LinkClaims.Verdict.ACCEPT),
+        )
+    }
+
+    @Test
+    fun `a note is confirmed only when its row counts`() {
+        val storage = InMemoryLinkClaimStorage()
+        val record = LinkClaimRecord("acct", storage)
+        assertTrue(record.setNoteWire("k", "abcd"))
+        assertTrue(record.hasUnmatchedWires())
+        assertEquals("note", record.judgeOwnRow("abcd", 20, counts = false))
+        assertEquals(false, record.own("k")?.noteConfirmed)
+        assertNull(record.own("k")?.noteWire)
+        record.setNoteWire("k", "ef01")
+        assertEquals("note", LinkClaimRecord("acct", storage).judgeOwnRow("ef01", 22, counts = true))
+        assertEquals(true, record.own("k")?.noteConfirmed)
+        record.setNoteWire("k", "aa")
+        record.dropUnlandedNote("k")
+        assertNull(record.own("k")?.noteWire)
+        assertFalse(record.hasUnmatchedWires())
+    }
+
+    @Test
+    fun `no Welcome is delivered on a straddled note`() = runBlocking {
+        val device = BuildFake(noteCounts = false)
+        assertFalse(LinkClaims.runBuild(device))
+        assertEquals(listOf("prepare", "record:-:-", "postNote"), device.log)
+        assertEquals(false, device.founded?.notePosted)
+    }
+
+    @Test
+    fun `the journal record is kept per DeviceGroup`() {
+        val storage = InMemoryLinkClaimStorage()
+        val record = LinkClaimRecord("acct", storage)
+        assertNull(record.journal("aa"))
+        assertTrue(record.setJournal(StoredJournal("aa", 5, listOf(21L), listOf(6L))))
+        assertEquals(listOf(21L), LinkClaimRecord("acct", storage).journal("aa")?.commitRowIds)
+        assertNull(record.journal("bb"))
     }
 
     @Test

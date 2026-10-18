@@ -111,6 +111,7 @@ pub mod group_closed;
 pub mod group_name;
 pub mod key_rotation;
 pub mod link_claim;
+pub mod link_founded;
 pub mod pin;
 pub mod profile;
 pub mod profile_request;

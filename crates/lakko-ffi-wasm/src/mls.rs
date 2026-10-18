@@ -2583,6 +2583,18 @@ impl DeviceGroup {
         Ok(g.group_id())
     }
 
+    /// The DeviceGroup's current MLS epoch (`bigint`). ADR-0079: the
+    /// journal readability rule asks whether the group moved past a commit
+    /// row's epoch after the row.
+    #[wasm_bindgen(js_name = epoch)]
+    pub fn epoch(&self) -> Result<u64, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.as_group().epoch())
+    }
+
     /// Snapshot of every device leaf currently in the
     /// DeviceGroup (Phase 2a3c). One [`GroupMember`] per row —
     /// the JS layer renders the list, marks the row whose

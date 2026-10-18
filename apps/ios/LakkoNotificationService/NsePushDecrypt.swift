@@ -1308,9 +1308,18 @@ public func nseIsServiceEnvelope(
     // on. A yes / no from the slim FFI (`isLinkClaimEnvelope`). Defaulted for
     // the reason above.
     isLinkClaim: (Data) -> Bool = { _ in false },
-    linkClaimEnvelopeLen: Int = 0
+    linkClaimEnvelopeLen: Int = 0,
+    // ADR-0079 (order of 2026-10-17) — the thirteenth, a link-founded note.
+    // Rides the account's own DeviceGroup; recognised and suppressed, never
+    // acted on. A yes / no from the slim FFI (`isLinkFoundedEnvelope`).
+    // Defaulted for the reason above.
+    isLinkFounded: (Data) -> Bool = { _ in false },
+    linkFoundedEnvelopeLens: ClosedRange<Int> = 0...0
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
+    if nseLooksLikeLinkFounded(bytes, envelopeLens: linkFoundedEnvelopeLens), isLinkFounded(bytes) {
+        return true
+    }
     if nseLooksLikeDeviceCard(bytes, envelopeLens: deviceCardEnvelopeLens), isDeviceCard(bytes) {
         return true
     }
@@ -1381,6 +1390,19 @@ private let linkClaimEnvelopeFirstByte: UInt8 = 0x6C
 /// `isLinkClaimEnvelope` is the verdict.
 public func nseLooksLikeLinkClaim(_ bytes: Data, envelopeLen: Int) -> Bool {
     envelopeLen > 0 && bytes.count == envelopeLen && bytes.first == linkClaimEnvelopeFirstByte
+}
+
+/// First byte of the ADR-0079 link-founded domain separator
+/// (`"lakko/link-founded/v1\0"`).
+private let linkFoundedEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for an ADR-0079 link-founded note: a length within the
+/// range injected from the slim FFI (`linkFoundedEnvelopeMinLen()` /
+/// `linkFoundedEnvelopeMaxLen()`) plus the first domain byte. The peek
+/// decides nothing; `isLinkFoundedEnvelope` is the verdict.
+public func nseLooksLikeLinkFounded(_ bytes: Data, envelopeLens: ClosedRange<Int>) -> Bool {
+    envelopeLens.lowerBound > 0 && envelopeLens.contains(bytes.count)
+        && bytes.first == linkFoundedEnvelopeFirstByte
 }
 
 /// First byte of the ADR-0057 registrar-seed domain separator — the same ASCII

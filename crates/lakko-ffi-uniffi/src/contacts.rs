@@ -2381,6 +2381,12 @@ pub enum FfiIncomingEnvelopeKind {
     /// Meaningful ONLY in the account's own DeviceGroup: met anywhere else,
     /// drop it.
     LinkClaim,
+    /// The device that won an invite-link request names the one-to-one it
+    /// founded, with the founding Welcome (ADR-0079, ordering of 2026-10-17).
+    /// The decoded note rides the `link_founded` field; `payload` is empty.
+    /// Never render it. Appended last so every earlier variant keeps its
+    /// ordinal. Meaningful ONLY in the account's own DeviceGroup.
+    LinkFounded,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -2457,6 +2463,10 @@ pub struct FfiIncomingEnvelope {
     /// every other kind. Defaults to `None` so existing initialisers compile.
     #[uniffi(default = None)]
     pub link_claim: Option<crate::link_claim::FfiLinkClaim>,
+    /// Set only for `LinkFounded` (ADR-0079): the decoded note. `None` for
+    /// every other kind. Defaults to `None` so existing initialisers compile.
+    #[uniffi(default = None)]
+    pub link_founded: Option<crate::link_founded::FfiLinkFounded>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -2556,6 +2566,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             device_card: Some(card.into()),
             ..FfiIncomingEnvelope::of(K::DeviceCard)
         },
+        IncomingEnvelope::LinkFounded(note) => FfiIncomingEnvelope {
+            link_founded: Some(note.into()),
+            ..FfiIncomingEnvelope::of(K::LinkFounded)
+        },
         IncomingEnvelope::LinkClaim(claim) => FfiIncomingEnvelope {
             link_claim: Some(claim.into()),
             ..FfiIncomingEnvelope::of(K::LinkClaim)
@@ -2589,6 +2603,7 @@ impl FfiIncomingEnvelope {
             key_rotation: None,
             device_card: None,
             link_claim: None,
+            link_founded: None,
         }
     }
 }

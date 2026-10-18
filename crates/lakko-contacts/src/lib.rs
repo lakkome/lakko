@@ -113,8 +113,10 @@ pub mod group_name;
 pub mod incoming_envelope;
 pub mod introduction;
 pub mod invite;
+pub mod journal_epoch;
 pub mod key_rotation;
 pub mod link_claim;
+pub mod link_founded;
 pub mod link_seal;
 pub mod mailbox;
 pub mod media_state;
@@ -212,6 +214,7 @@ pub use invite::{
     OWNER_LIST_DOMAIN_V1, REVOCATION_KEY_LEN, REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS,
     SINGLE_USE,
 };
+pub use journal_epoch::{JournalEpochs, JOURNAL_EPOCHS_MAX_COMMITS};
 pub use key_rotation::{
     compose_key_rotation, decode_key_rotation, try_unwrap_key_rotation, KeyRotation,
     KeyRotationError, KEY_ROTATION_ENTROPY_LEN, KEY_ROTATION_ENVELOPE_DOMAIN_V1,
@@ -224,6 +227,12 @@ pub use link_claim::{
     ObservedLinkClaim, LINK_CLAIM_AUTHOR_KEY_LEN, LINK_CLAIM_ENVELOPE_DOMAIN_V1,
     LINK_CLAIM_ENVELOPE_LEN, LINK_CLAIM_REQUESTER_KEY_LEN, LINK_CLAIM_REQUEST_KEY_LEN,
     LINK_CLAIM_VERSION_V1,
+};
+pub use link_founded::{
+    compose_link_founded, decode_link_founded, try_unwrap_link_founded, LinkFounded,
+    LinkFoundedError, LINK_FOUNDED_ENVELOPE_DOMAIN_V1, LINK_FOUNDED_ENVELOPE_MAX_LEN,
+    LINK_FOUNDED_ENVELOPE_MIN_LEN, LINK_FOUNDED_GROUP_ID_LEN, LINK_FOUNDED_MAX_WELCOME_LEN,
+    LINK_FOUNDED_VERSION_V1,
 };
 pub use mailbox::{
     bucket_for as mailbox_bucket_for, is_well_formed_row as is_well_formed_mailbox_row,
@@ -417,5 +426,26 @@ pub mod fuzz_api {
             Ok(crate::incoming_envelope::IncomingEnvelope::LinkClaim(c)) if c == claim
         );
         Some(recomposed && dispatched)
+    }
+
+    /// `None` when `bytes` is not a well-formed link-founded note (ADR-0079);
+    /// else `Some(true)` when it re-composes to exactly `bytes`, lies within
+    /// the advertised lengths, and the dispatcher classifies it as the same
+    /// note, `Some(false)` on a disagreement (a bug).
+    #[must_use]
+    pub fn link_founded_decode(bytes: &[u8]) -> Option<bool> {
+        let note = crate::link_founded::decode_link_founded(bytes).ok()?;
+        let recomposed = crate::link_founded::compose_link_founded(&note)
+            .ok()
+            .as_deref()
+            == Some(bytes);
+        let within = (crate::link_founded::LINK_FOUNDED_ENVELOPE_MIN_LEN
+            ..=crate::link_founded::LINK_FOUNDED_ENVELOPE_MAX_LEN)
+            .contains(&bytes.len());
+        let dispatched = matches!(
+            crate::incoming_envelope::dispatch_incoming_envelope(bytes),
+            Ok(crate::incoming_envelope::IncomingEnvelope::LinkFounded(n)) if n == note
+        );
+        Some(recomposed && within && dispatched)
     }
 }

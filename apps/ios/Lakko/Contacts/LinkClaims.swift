@@ -69,12 +69,19 @@ public enum LinkClaims {
         public var welcomeB64: String
         /// In delivery order: this account's own mailbox first.
         public let targets: [FoundedTarget]
+        /// The link-founded note was published into the account's
+        /// DeviceGroup; no Welcome is written before it.
+        public var notePosted: Bool
         public var delivered: Bool
 
-        public init(groupIdB64: String, welcomeB64: String, targets: [FoundedTarget], delivered: Bool) {
+        public init(
+            groupIdB64: String, welcomeB64: String, targets: [FoundedTarget],
+            notePosted: Bool = false, delivered: Bool
+        ) {
             self.groupIdB64 = groupIdB64
             self.welcomeB64 = welcomeB64
             self.targets = targets
+            self.notePosted = notePosted
             self.delivered = delivered
         }
     }
@@ -90,44 +97,136 @@ public enum LinkClaims {
 
     /// What a device that won a request does before it builds anything.
     public enum BuildStep: Equatable {
-        /// A one-to-one was founded for it already: deliver that one's Welcome.
+        /// A one-to-one was founded for it here already: carry that one on.
         case resume
-        /// The account mailbox could not be read past now: decide next pass.
-        case wait
-        /// A one-to-one with the requester is held already: answered, build
-        /// nothing.
-        case answered
+        /// Another device of the account founded it (its note is held): never
+        /// found; write the note's Welcome to the requester.
+        case forward
         /// Found the one-to-one.
         case found
     }
 
     /// Before any device builds a one-to-one for a request (the first winner,
-    /// or a device that took it over because the winner left the roster), it
-    /// reads its account mailbox past now and looks for a one-to-one with the
-    /// requester.
-    public static func buildStep(hasFounded: Bool, mailboxCaughtUp: Bool, holdsOneToOne: Bool) -> BuildStep {
+    /// or a device that took it over because the winner left the roster): its
+    /// own founding first, else a note from another device, else found.
+    public static func buildStep(hasFounded: Bool, hasNote: Bool) -> BuildStep {
         if hasFounded { return .resume }
-        if !mailboxCaughtUp { return .wait }
-        return holdsOneToOne ? .answered : .found
+        return hasNote ? .forward : .found
     }
 
-    /// A held conversation as the one-to-one check reads it.
-    public struct HeldConversation: Equatable {
-        public let oneToOne: Bool
-        public let memberAccountKeysHex: [String]
+    /// A link-founded note another device of the account posted (ADR-0079):
+    /// the one-to-one it founded for a request, and that group's Welcome.
+    public struct HeldNote: Equatable, Codable {
+        /// The DS message id of the note's row: the earliest per request is
+        /// kept.
+        public let id: Int64
+        public let groupIdB64: String
+        public let welcomeB64: String
 
-        public init(oneToOne: Bool, memberAccountKeysHex: [String]) {
-            self.oneToOne = oneToOne
-            self.memberAccountKeysHex = memberAccountKeysHex
+        public init(id: Int64, groupIdB64: String, welcomeB64: String) {
+            self.id = id
+            self.groupIdB64 = groupIdB64
+            self.welcomeB64 = welcomeB64
         }
     }
 
-    /// Whether one of `conversations` is a one-to-one with the account whose
-    /// key is `requesterKeyHex`.
-    public static func holdsOneToOneWith(_ conversations: [HeldConversation], requesterKeyHex: String) -> Bool {
-        let want = requesterKeyHex.lowercased()
-        return conversations.contains { c in
-            c.oneToOne && c.memberAccountKeysHex.contains { $0.lowercased() == want }
+    /// What the build needs from the device, injected so the order is one
+    /// tested function (``runBuild(_:)``).
+    public struct BuildDeps {
+        /// This device's founding for the request, if any.
+        public var founded: () -> Founded?
+        /// The earliest note another device posted for the request, if any.
+        public var note: () -> HeldNote?
+        /// Found the one-to-one locally (ONE commit with every other own
+        /// device, the journal claimed, the state persisted); nothing is sent.
+        public var prepare: () async throws -> Founded
+        /// Record the founding durably; `false` when the write failed.
+        public var record: (Founded) -> Bool
+        /// Publish the link-founded note into the account's DeviceGroup (once:
+        /// a sealed note already recorded is not published again), read the
+        /// journal past it, and answer whether its row COUNTS (sealed at the
+        /// journal's epoch at its position, so every device can read it).
+        /// `false` when it was straddled (posted again next pass) or not yet
+        /// read.
+        public var postNote: (Founded) async throws -> Bool
+        /// Make the founded group a held conversation; its hex id, or `nil`.
+        public var hold: (Founded) async -> String?
+        /// Write the Welcome: this account's mailbox first, then the
+        /// requester's.
+        public var deliver: (Founded) async throws -> Void
+        /// Write a note's Welcome to the requester's mailbox (a duplicate is
+        /// ignored); the group's hex id when this device holds it, else `nil`.
+        public var forward: (HeldNote) async throws -> String?
+        /// The contact row, the ack and the use count.
+        public var finish: (String?) async -> Void
+
+        public init(
+            founded: @escaping () -> Founded?,
+            note: @escaping () -> HeldNote?,
+            prepare: @escaping () async throws -> Founded,
+            record: @escaping (Founded) -> Bool,
+            postNote: @escaping (Founded) async throws -> Bool,
+            hold: @escaping (Founded) async -> String?,
+            deliver: @escaping (Founded) async throws -> Void,
+            forward: @escaping (HeldNote) async throws -> String?,
+            finish: @escaping (String?) async -> Void
+        ) {
+            self.founded = founded
+            self.note = note
+            self.prepare = prepare
+            self.record = record
+            self.postNote = postNote
+            self.hold = hold
+            self.deliver = deliver
+            self.forward = forward
+            self.finish = finish
+        }
+    }
+
+    /// The build of a won request, in its one order (ADR-0079, 2026-10-17):
+    /// a founding of this device's own is carried on (nothing is founded
+    /// twice); else a note from another device means it founded already, so
+    /// its Welcome is written to the requester and the request answered,
+    /// never founded; else found, record the founding, publish the note, and
+    /// only after the note landed counting (its row sealed at the journal's
+    /// epoch there, so every device can read it) write the Welcome (own
+    /// mailbox first). `false` when a step did not complete (a throw included): every
+    /// record stays, for the next pass.
+    @MainActor
+    public static func runBuild(_ d: BuildDeps) async -> Bool {
+        do {
+            var founded = d.founded()
+            switch buildStep(hasFounded: founded != nil, hasNote: founded == nil && d.note() != nil) {
+            case .forward:
+                guard let note = d.note() else { return false }
+                await d.finish(try await d.forward(note))
+                return true
+            case .found:
+                let made = try await d.prepare()
+                guard d.record(made) else { return false }
+                founded = made
+            case .resume:
+                break
+            }
+            guard var current = founded else { return false }
+            if !current.notePosted {
+                // No Welcome on the strength of a note the other devices
+                // cannot read.
+                guard try await d.postNote(current) else { return false }
+                current.notePosted = true
+                guard d.record(current) else { return false }
+            }
+            guard let held = await d.hold(current) else { return false }
+            if !current.delivered {
+                try await d.deliver(current)
+                current.delivered = true
+                current.welcomeB64 = ""
+                _ = d.record(current)
+            }
+            await d.finish(held)
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -147,6 +246,12 @@ public enum LinkClaims {
         public var settled: Bool = false
         /// The one-to-one founded for the request (won claims only).
         public var founded: Founded?
+        /// The sealed link-founded note (hex), recorded BEFORE its publish
+        /// and not yet judged at its journal row.
+        public var noteWire: String?
+        /// The note's row counted: sealed at the journal's epoch at its
+        /// position, so every device of the account can read it.
+        public var noteConfirmed: Bool = false
 
         public init(
             wires: [String] = [], ids: [Int64] = [], won: Int64? = nil, settled: Bool = false,
@@ -275,23 +380,39 @@ public enum LinkClaims {
             var at: Int64
         }
 
-        private struct JoinedWelcome: Codable, Equatable {
-            var welcomeB64: String
+        private struct StoredNote: Codable, Equatable {
+            var note: HeldNote
             var at: Int64
+        }
+
+        /// The journal's epochs as this device read them (ADR-0079): the
+        /// persisted form of the core's `JournalEpochs`, for one DeviceGroup.
+        public struct StoredJournal: Codable, Equatable {
+            public let groupIdHex: String
+            public let base: UInt64
+            public let commitRowIds: [UInt64]
+            public let commitEpochsAfter: [UInt64]
+
+            public init(groupIdHex: String, base: UInt64, commitRowIds: [UInt64], commitEpochsAfter: [UInt64]) {
+                self.groupIdHex = groupIdHex
+                self.base = base
+                self.commitRowIds = commitRowIds
+                self.commitEpochsAfter = commitEpochsAfter
+            }
         }
 
         private struct Body: Codable, Equatable {
             var v: Int = 2
+            var journal: StoredJournal?
             var seen: [String: Seen] = [:]
             var own: [String: Own] = [:]
-            /// The Welcome each recently joined one-to-one was joined from,
-            /// by group id: a device that takes a request over forwards it.
-            var joined: [String: JoinedWelcome]? = [:]
+            /// The earliest link-founded note per request, by request key.
+            var notes: [String: StoredNote]? = [:]
         }
 
-        /// How many joined one-to-one Welcomes are kept. Chosen, not
-        /// measured (the web value).
-        public static let maxJoinedWelcomes = 32
+        /// How many link-founded notes are kept; past it the oldest go.
+        /// Chosen, not measured (the web value).
+        public static let maxNotes = 64
 
         static let prefix = "me.lakko.contacts.link-claims.v1."
         private static let lock = NSLock()
@@ -376,30 +497,86 @@ public enum LinkClaims {
             }
         }
 
-        /// A journal row (or a publish answer) carried these sealed bytes at
-        /// this id: if they are one of this device's recorded claims, file
-        /// the id as its own. `true` when they were.
+        /// A journal row carried these sealed bytes at this id, and `counts`
+        /// is the readability rule's answer for it (sealed at the journal's
+        /// epoch at its position). A claim of this device: filed as its own
+        /// when it counts, else dropped (straddled: the next pass claims
+        /// again). This device's note: confirmed when it counts, else dropped
+        /// (posted again). Returns `"claim"`, `"note"`, or `nil`.
         @discardableResult
-        public func recordOwnClaimRow(wireHex: String, messageId: Int64) -> Bool {
-            update { body in
-                guard let key = body.own.first(where: { $0.value.wires.contains(wireHex) })?.key,
-                      var own = body.own[key]
-                else { return false }
-                own.wires.removeAll { $0 == wireHex }
-                if !own.ids.contains(messageId) {
-                    own.ids.append(messageId)
-                    own.ids.sort()
+        public func judgeOwnRow(wireHex: String, messageId: Int64, counts: Bool) -> String? {
+            var kind: String?
+            _ = update { body in
+                if let key = body.own.first(where: { $0.value.wires.contains(wireHex) })?.key,
+                   var own = body.own[key] {
+                    own.wires.removeAll { $0 == wireHex }
+                    if counts, !own.ids.contains(messageId) {
+                        own.ids.append(messageId)
+                        own.ids.sort()
+                    }
+                    body.own[key] = own
+                    kind = "claim"
+                    return true
                 }
-                body.own[key] = own
+                if let key = body.own.first(where: { $0.value.noteWire == wireHex })?.key,
+                   var own = body.own[key] {
+                    own.noteWire = nil
+                    own.noteConfirmed = own.noteConfirmed || counts
+                    body.own[key] = own
+                    kind = "note"
+                    return true
+                }
+                return false
+            }
+            return kind
+        }
+
+        /// `true` when some sealed claim or note still waits for its row.
+        public func hasUnmatchedWires() -> Bool {
+            Self.lock.lock()
+            defer { Self.lock.unlock() }
+            return read().own.values.contains { !$0.wires.isEmpty || $0.noteWire != nil }
+        }
+
+        /// Record the sealed note BEFORE its publish. `false` when the write
+        /// failed.
+        @discardableResult
+        public func setNoteWire(_ keyHex: String, wireHex: String) -> Bool {
+            update { body in
+                var own = body.own[keyHex] ?? Own()
+                own.noteWire = wireHex
+                body.own[keyHex] = own
                 return true
             }
         }
 
-        /// `true` when some sealed claim still waits for its row.
-        public func hasUnmatchedWires() -> Bool {
+        /// After a read of the journal past the note: a sealed note no row
+        /// carried did not land; drop it (posted again).
+        public func dropUnlandedNote(_ keyHex: String) {
+            _ = update { body in
+                guard var own = body.own[keyHex], own.noteWire != nil else { return false }
+                own.noteWire = nil
+                body.own[keyHex] = own
+                return true
+            }
+        }
+
+        /// The journal's epochs held for the DeviceGroup `groupIdHex`, or
+        /// `nil` (none held, or held for another DeviceGroup).
+        public func journal(groupIdHex: String) -> StoredJournal? {
             Self.lock.lock()
             defer { Self.lock.unlock() }
-            return read().own.values.contains { !$0.wires.isEmpty }
+            guard let j = read().journal, j.groupIdHex == groupIdHex else { return nil }
+            return j
+        }
+
+        /// Keep the journal's epochs.
+        @discardableResult
+        public func setJournal(_ journal: StoredJournal) -> Bool {
+            update { body in
+                body.journal = journal
+                return true
+            }
         }
 
         /// After a read of the journal past every claim: sealed claims never
@@ -426,27 +603,28 @@ public enum LinkClaims {
             }
         }
 
-        /// Keep the Welcome a one-to-one was joined from (the newest
-        /// ``maxJoinedWelcomes``).
+        /// Keep a link-founded note another device posted (the earliest per
+        /// request). `true` when the record changed.
         @discardableResult
-        public func recordJoinedWelcome(_ groupIdHex: String, welcomeB64: String, nowMs: Int64) -> Bool {
+        public func recordNote(_ keyHex: String, note: HeldNote, nowMs: Int64) -> Bool {
             update { body in
-                var joined = body.joined ?? [:]
-                joined[groupIdHex] = JoinedWelcome(welcomeB64: welcomeB64, at: nowMs)
-                if joined.count > Self.maxJoinedWelcomes {
-                    let oldest = joined.sorted { $0.value.at < $1.value.at }
-                    for (k, _) in oldest.prefix(joined.count - Self.maxJoinedWelcomes) { joined[k] = nil }
+                var notes = body.notes ?? [:]
+                if let held = notes[keyHex], held.note.id <= note.id { return false }
+                notes[keyHex] = StoredNote(note: note, at: nowMs)
+                if notes.count > Self.maxNotes {
+                    let oldest = notes.sorted { $0.value.at < $1.value.at }
+                    for (k, _) in oldest.prefix(notes.count - Self.maxNotes) { notes[k] = nil }
                 }
-                body.joined = joined
+                body.notes = notes
                 return true
             }
         }
 
-        /// The Welcome a held one-to-one was joined from, or `nil`.
-        public func joinedWelcome(_ groupIdHex: String) -> String? {
+        /// The earliest note held for the request, or `nil`.
+        public func note(_ keyHex: String) -> HeldNote? {
             Self.lock.lock()
             defer { Self.lock.unlock() }
-            return read().joined?[groupIdHex]?.welcomeB64
+            return read().notes?[keyHex]?.note
         }
 
         /// Decided lost: re-check later without reading the journal again.
