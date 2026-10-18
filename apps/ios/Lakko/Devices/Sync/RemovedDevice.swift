@@ -80,11 +80,11 @@ enum RemovedDevice {
         isRemoved(active) ? .stopRemoved : .continue
     }
 
-    /// Whether the ADR-0057 fork repair may run on this handle. The repair
-    /// re-founds the account's DeviceGroup, so it runs only on a group known
-    /// to be active: never on a removed device (it is not forked, it is out),
-    /// and not on a handle whose state could not be read.
-    static func forkRepairAllowed(_ active: Bool?) -> Bool {
+    /// Whether a device that is behind may drop its DeviceGroup state and
+    /// rejoin through a sibling (ADR-0081 decision 4): only on a group known
+    /// to be active — never on a removed device (it is not behind, it is
+    /// out), and not on a handle whose state could not be read.
+    static func rejoinAllowed(_ active: Bool?) -> Bool {
         active == true
     }
 }

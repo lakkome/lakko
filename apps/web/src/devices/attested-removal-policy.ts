@@ -12,15 +12,9 @@
  * Idempotent: a no-op when the policy is already on. Called after a successful
  * passkey registration (`PasskeysSection`).
  */
-import {
-  ensureDeviceGroup,
-  persistDeviceGroupSnapshot,
-  registerDeviceGroupEpochOrThrow,
-} from "./lifecycle";
-import { takeSigner } from "../ds/access";
+import { ensureDeviceGroup } from "./lifecycle";
 import { encodeJournalEntry } from "./journal-envelope";
-import { announceDeviceGroupChangedHere } from "./sync/growth";
-import { DsClient } from "../ds/client";
+import { commitDeviceGroupChange } from "./device-group-commit-runtime";
 
 /**
  * Enable attested removals on the local DeviceGroup if not already on.
@@ -48,26 +42,19 @@ export async function enableAttestedRemovalsIfNeeded(args: {
     if (ensured.group.requireAttestedRemovals()) {
       return; // already on — nothing to do.
     }
-    // ADR-0053 — the key of the epoch the policy commit leaves.
-    const signerN = takeSigner(() => ensured.group.dsAccessSigner(ensured.identity));
-    try {
-      const commit = ensured.group.setRequireAttestedRemovals(ensured.identity);
-      const groupId = ensured.group.groupId();
-      const ds = new DsClient();
-      // ADR-0053 contract point 3 — register before the publish.
-      await registerDeviceGroupEpochOrThrow(ds, ensured.group, ensured.identity, signerN);
-      // G-7 — on disk before the publish, and the sync runtime's long-lived
-      // handle (now an epoch behind) reloaded before it can see the commit
-      // and write its stale state over this one (see `remove.ts`).
-      await persistDeviceGroupSnapshot(ensured.identity, args.accountIdB64, args.deviceKey);
-      announceDeviceGroupChangedHere({});
-      // The policy commit removes nothing, so it carries no attestation.
-      await ds.publishGroup(groupId, encodeJournalEntry(commit, null), { signer: signerN });
-    } finally {
-      signerN?.free();
-    }
   } finally {
     ensured.group.free();
     ensured.identity.free();
   }
+  // ADR-0081 decision 2 — through the DeviceGroup commit outbox. The policy
+  // commit removes nothing, so its row carries no attestation. A lost epoch
+  // leaves the policy off; the next passkey action enables it.
+  await commitDeviceGroupChange(
+    { accountIdBytes: args.accountIdBytes, accountIdB64: args.accountIdB64, deviceKey: args.deviceKey },
+    (fresh) =>
+      fresh.group.requireAttestedRemovals()
+        ? null
+        : { kind: "policy", row: encodeJournalEntry(fresh.group.setRequireAttestedRemovals(fresh.identity), null) },
+    async () => undefined,
+  );
 }

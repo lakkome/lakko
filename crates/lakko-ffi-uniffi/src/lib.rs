@@ -1989,6 +1989,54 @@ impl Group {
         Ok(group::encode_message(&commit)?)
     }
 
+    /// ADR-0081 staged twins of the direct commits. Each builds the same
+    /// commit (and, for an add, the same Welcome) as its eager twin but leaves
+    /// the group at epoch N holding it as pending, exactly as
+    /// [`Self::stage_pending_proposals`] leaves a sweep. Record it durably,
+    /// send it with [`Self::ds_staged_access_signer`], then
+    /// [`Self::merge_staged_sweep`] on the Delivery Service's acceptance or
+    /// [`Self::abandon_staged_sweep`] on its `409`. While it is staged every
+    /// membership operation is refused with
+    /// [`FfiError::SweepAlreadyStaged`]. The staged commit is persisted with
+    /// the group, so it survives `snapshotStorage` and a restart.
+    pub fn stage_add_member_from_wire(
+        &self,
+        identity: &Identity,
+        key_package: Vec<u8>,
+    ) -> Result<AddMember, FfiError> {
+        self.stage_add_members_from_wire(identity, vec![key_package])
+    }
+
+    /// The several-leaf form of [`Self::stage_add_member_from_wire`] (one
+    /// commit, one Welcome; see [`Self::add_members_from_wire`]).
+    pub fn stage_add_members_from_wire(
+        &self,
+        identity: &Identity,
+        key_packages: Vec<Vec<u8>>,
+    ) -> Result<AddMember, FfiError> {
+        let borrowed: Vec<&[u8]> = key_packages.iter().map(Vec::as_slice).collect();
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let MemberAddition { commit, welcome } =
+            g.stage_add_members_from_wire(&identity.inner, &borrowed)?;
+        Ok(AddMember {
+            commit: group::encode_message(&commit)?,
+            welcome: group::encode_message(&welcome)?,
+        })
+    }
+
+    /// [`Self::remove_member`], staged (ADR-0081; see
+    /// [`Self::stage_add_member_from_wire`]). Returns the commit to send.
+    pub fn stage_remove_member(
+        &self,
+        identity: &Identity,
+        leaf_index: u32,
+    ) -> Result<Vec<u8>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let commit =
+            g.stage_remove_member(&identity.inner, lakko_mls::LeafNodeIndex::new(leaf_index))?;
+        Ok(group::encode_message(&commit)?)
+    }
+
     /// Approve a retained external-join request — **proposes** adding the
     /// joiner (ADR-0027 G-3, on the ADR-0045 proposal path since S7).
     /// `proposal_ref` is the joiner's signature key from a
@@ -2661,6 +2709,19 @@ impl Group {
         Ok(g.set_group_roles(&identity.inner, &table)?)
     }
 
+    /// [`Self::set_group_roles`], staged (ADR-0081; see
+    /// [`Self::stage_add_member_from_wire`]). Returns the commit to send.
+    pub fn stage_set_group_roles(
+        &self,
+        identity: &Identity,
+        owner: Vec<u8>,
+        admins: Vec<Vec<u8>>,
+    ) -> Result<Vec<u8>, FfiError> {
+        let table = role_table_from_parts(owner, admins)?;
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.stage_set_group_roles(&identity.inner, &table)?)
+    }
+
     /// Process one row read from this journal's **knock** queue (ADR-0053).
     /// Anything that is not a stranger's external-join proposal for this group
     /// is refused BEFORE it is processed - a knock row is an unauthenticated
@@ -2898,6 +2959,16 @@ impl PublisherGroup {
     ) -> Result<Arc<ds_proof::DsProofSigner>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         ds_proof::group_signer(g.inner(), &identity.inner)
+    }
+
+    /// ADR-0081 - the 32-byte access seed of the current epoch, to record
+    /// with a commit before it merges (a rotation, an approve) so a re-send
+    /// after a restart can prove the epoch the commit left
+    /// ([`ds_proof::DsProofSigner::for_group`]). Treat it like the signer:
+    /// keep it only in the device-key-encrypted record of that commit.
+    pub fn ds_access_seed(&self, identity: &Identity) -> Result<Vec<u8>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        ds_proof::group_access_seed(g.inner(), &identity.inner)
     }
 
     /// ADR-0028 OQ3 — the underlying MLS `group_id`. A co-publisher invite-link

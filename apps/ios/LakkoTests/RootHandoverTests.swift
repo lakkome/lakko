@@ -27,9 +27,9 @@ private final class RecordingSigner: DsStatementSignerProtocol, @unchecked Senda
     func pushBinding(journalId: Data, pushGid: Data) throws -> DsStatementRequest {
         calls.append("push-binding"); return req("push-binding")
     }
-    func registerEpoch(journalId: Data, epoch: UInt64, epochKey: Data, revoke: [Data]) throws
+    func commit(journalId: Data, epoch: UInt64, epochKey: Data, revoke: [Data], row: Data) throws
         -> DsStatementRequest {
-        calls.append("access"); return req("access")
+        calls.append("commit"); return req("commit")
     }
     func registrars(journalId: Data, changes: [DsRegistrarChange]) throws -> DsStatementRequest {
         calls.append("registrars")

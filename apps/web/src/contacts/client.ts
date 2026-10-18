@@ -156,7 +156,7 @@ import { scanJournal } from "../chat/journal-head-epoch";
 import {
   dsAccess,
   knockToJoin,
-  registerBeforePublish,
+  commitWithNextEpoch,
   takeSigner,
   type ProofSigner,
 } from "../ds/access";
@@ -166,6 +166,7 @@ import {
   JournalClaimFailedError,
   claimAtCreation,
   evicteeAccountKeys,
+  isCommitConflict,
   releaseAuthority,
   revocationKeys,
   type OwnershipRosterMember,
@@ -921,7 +922,60 @@ function sweepPortsFor(
           createdAt: m.createdAt,
         }));
       },
-      publishGroup: async (bytes) => (await ds.publishGroup(groupIdBytes, bytes)).id,
+      // ADR-0081 decision 1 + ADR-0053 contract point 3 + ADR-0057
+      // obligation 5 — the staged epoch's key, registered with this device's
+      // root or registrar key, AND the commit row, in one request proven under
+      // the current epoch's key. The owner revokes the registrar keys of the
+      // accounts this sweep evicts in the same statement; an admin revokes the
+      // lower-rank keys it collected, and on the restart path (where the
+      // removed leaves are no longer known) nothing is revoked - the owner's
+      // next reconcile removes them.
+      commitStaged: async (bytes) => {
+        const staged = takeSigner(() => {
+          const next = group.dsStagedAccessSigner(identity);
+          if (next === undefined) throw new Error("no staged sweep");
+          return next;
+        });
+        const proof = takeSigner(() => group.dsAccessSigner(identity));
+        const authority = dsAccess.journalAuthority(groupIdBytes);
+        // Read BEFORE the network: the backoff is keyed on the membership the
+        // refusal was about.
+        const fingerprint = membershipFingerprint(group);
+        try {
+          const evictees = evicteeAccountKeys(
+            rosterOf(group) as unknown as OwnershipRosterMember[],
+            stagedRemovedLeaves,
+          );
+          // ADR-0057 (amended 2026-10-01) item 1 - the owner derives the
+          // evictees' registrar keys; an admin revokes the ones it collected
+          // from the owner's envelopes, lower ranks only.
+          const revoke = revocationKeys(
+            authority,
+            evictees,
+            wasmRegistrarDerivation(wasm),
+            registrarListFor(groupIdB64),
+          );
+          releaseAuthority(authority);
+          // The DS client signs with the same authority it resolves itself.
+          const answer = await commitWithNextEpoch(ds, groupIdBytes, staged, proof, bytes, revoke);
+          sweepBackoff.reset(groupIdB64);
+          return answer.id;
+        } catch (err) {
+          // A refusal that will not change by the next poll: back off the next
+          // sweep start (`chat/sweep-backoff.ts`). The sweep abandons; nothing
+          // is on the DS.
+          if (!isCommitConflict(err) && isBackoffRefusal(err)) {
+            const waitMs = sweepBackoff.noteRefused(groupIdB64, Date.now(), fingerprint);
+            // eslint-disable-next-line no-console
+            console.warn(`ds: staged commit refused; next sweep in ${Math.round(waitMs / 1000)} s`);
+          }
+          throw err;
+        } finally {
+          releaseAuthority(authority);
+          staged?.free();
+          proof?.free();
+        }
+      },
       // ADR-0060 section 6 — the sweep records each added LEAF's signature key
       // (`welcomeMailbox` below); the Welcome is written, once per account,
       // to the account mailbox that leaf's binding names, read off the roster
@@ -1040,62 +1094,16 @@ function sweepPortsFor(
     // ADR-0078 — the outbox keeps the RAW Welcome: a row is sealed to the
     // mailbox key the write resolves, which is only known at publish.
     wrapWelcome: (welcome) => welcome,
-    // ADR-0053 contract point 3 + ADR-0057 obligation 5 — the staged epoch's
-    // key, registered with this device's root or registrar key before the
-    // sweep is published. The owner revokes the registrar keys of the
-    // accounts this sweep evicts in the same statement; an admin cannot
-    // derive them and sends none (the owner's next reconcile removes them).
-    registerStagedEpoch: async () => {
-      const staged = takeSigner(() => {
-        const next = group.dsStagedAccessSigner(identity);
-        if (next === undefined) throw new Error("no staged sweep");
-        return next;
-      });
-      const authority = dsAccess.journalAuthority(groupIdBytes);
-      // Read BEFORE the network: the backoff is keyed on the membership the
-      // refusal was about.
-      const fingerprint = membershipFingerprint(group);
-      try {
-        const evictees = evicteeAccountKeys(
-          rosterOf(group) as unknown as OwnershipRosterMember[],
-          stagedRemovedLeaves,
-        );
-        // ADR-0057 (amended 2026-10-01) item 1 - the owner derives the
-        // evictees' registrar keys; an admin revokes the ones it collected
-        // from the owner's envelopes, lower ranks only.
-        const revoke = revocationKeys(
-          authority,
-          evictees,
-          wasmRegistrarDerivation(wasm),
-          registrarListFor(groupIdB64),
-        );
-        releaseAuthority(authority);
-        // The DS client signs with the same authority it resolves itself.
-        await registerBeforePublish(ds, groupIdBytes, staged, revoke);
-        sweepBackoff.reset(groupIdB64);
-      } catch (err) {
-        // A refusal that will not change by the next poll: back off the next
-        // sweep start (`chat/sweep-backoff.ts`). The sweep itself abandons as
-        // before; nothing is published.
-        if (isBackoffRefusal(err)) {
-          const waitMs = sweepBackoff.noteRefused(groupIdB64, Date.now(), fingerprint);
-          // eslint-disable-next-line no-console
-          console.warn(`ds: staged epoch registration refused; next sweep in ${Math.round(waitMs / 1000)} s`);
-        }
-        throw err;
-      } finally {
-        releaseAuthority(authority);
-        staged?.free();
-      }
-    },
+    // ADR-0081: a 409 is a lost commit, a 400 / 401 / 403 (or no authority)
+    // a definitive refusal; anything else (the network) leaves it unknown.
+    classifyCommitFailure: (err) =>
+      isCommitConflict(err) ? "lost" : isBackoffRefusal(err) ? "refused" : "unknown",
     mayStartSweep: () =>
       sweepBackoff.mayStart(groupIdB64, Date.now(), membershipFingerprint(group)),
     mayRegister: () => dsAccess.mayRegister(groupIdBytes),
-    // After a lost verdict nothing is re-registered (ADR-0057): the winner
-    // registered its own epoch before publishing, and every registration is
-    // an APPEND now (the second security pass), so this device's registration
-    // could not have displaced the winner's - it met 409 or landed first and
-    // the winner's met 409. A Replace is never sent from a commit path; a
+    // After a lost verdict nothing is re-registered (ADR-0057, ADR-0081): the
+    // winner's epoch arrived with its commit, and this device's commit met
+    // 409 or was never sent. A Replace is never sent from a commit path; a
     // journal a lower rank pushed ahead is the repair's (`ds/journal-repair`).
     beginApply: () => async () => {},
     markOwnPublished,
@@ -1410,34 +1418,95 @@ export class ContactsClient {
     }
   }
 
+  /**
+   * ADR-0081 + ADR-0040 for a DIRECT commit (a group with no role table: a
+   * one-to-one, a legacy group). The commit was STAGED by the caller
+   * (`stageAddMember` / `stageRemoveMember` / `stageSetGroupRoles`), so the
+   * group is still at epoch N holding it as pending. The order is ADR-0040's:
+   *
+   *   1. the entry (commit, Welcome) and the snapshot that carries the staged
+   *      commit are written in ONE atomic write, FAIL-CLOSED: a failure
+   *      abandons the staged commit (per group, nothing else touched) and
+   *      throws, so nothing was sent and the group is at N;
+   *   2. the commit and the N+1 registration go to the DS together
+   *      (`POST .../commit`, the N+1 key from `dsStagedAccessSigner`, proven
+   *      under `signerN`, the key of N);
+   *   3. on 201 / 200 (a re-send the DS recognises) the staged commit is
+   *      merged and the merge persisted, fail-closed: a failed write leaves
+   *      the durable N + staged + entry, which the owed-verdict path re-sends
+   *      (200) and merges;
+   *      on 409 (another commit took the epoch) or a definitive refusal it is
+   *      abandoned, the abandon persisted and the entry dropped;
+   *      on anything else (the network) the entry and the staged commit stay
+   *      for the next pass: `sweepIfCommitter` at the next poll and
+   *      `sweepPendingCommits` at the next open re-send it through
+   *      `resolveOwedVerdict`, which owns an entry with `sweepVerdictPending`.
+   *
+   * There is no point at which this device is ahead of the DS or below its
+   * own commit: the epoch advances only after the DS took the commit, and
+   * the commit is recorded before it is sent.
+   */
+  private async commitStagedDirect(
+    group: WasmGroup,
+    myIdentity: WasmIdentity,
+    signerN: ProofSigner | null,
+    commitBytes: Uint8Array,
+    entry: Omit<NewCommitEntry, "id" | "sweepVerdictPending">,
+  ): Promise<{ readonly entryId: string; readonly commitId: number }> {
+    const entryId = newOutboxEntryId();
+    try {
+      await this.persistCommitOrThrow({ id: entryId, ...entry, sweepVerdictPending: true });
+    } catch (err) {
+      await this.abandonStagedOrReset(group, myIdentity);
+      throw err;
+    }
+    let commitId: number;
+    const staged = takeSigner(() => {
+      const next = group.dsStagedAccessSigner(myIdentity);
+      if (next === undefined) throw new Error("ds: no staged commit to register");
+      return next;
+    });
+    try {
+      commitId = (await commitWithNextEpoch(this.ds, group.groupId, staged, signerN, commitBytes)).id;
+    } catch (err) {
+      if (isCommitConflict(err) || isBackoffRefusal(err)) {
+        // Nothing of this commit is on the DS: abandon it at N.
+        await this.abandonStagedOrReset(group, myIdentity);
+        await this.persistBestEffort();
+        try {
+          await deleteEntry(entryId);
+        } catch (discardErr) {
+          // The owed-verdict path finds nothing staged and drops it.
+          // eslint-disable-next-line no-console
+          console.warn("ContactsClient: lost direct commit entry not discarded", discardErr);
+        }
+      }
+      throw err;
+    } finally {
+      staged?.free();
+    }
+    group.mergeStagedSweep(myIdentity);
+    await this.persistDurableOrThrow();
+    return { entryId, commitId };
+  }
+
+  /** Abandon a staged commit; when the abandon itself fails, reload the
+   *  group from its durable snapshot (ADR-0040 F1) so no un-recorded staged
+   *  commit stays in memory. */
+  private async abandonStagedOrReset(group: WasmGroup, myIdentity: WasmIdentity): Promise<void> {
+    try {
+      group.abandonStagedSweep(myIdentity);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ContactsClient: abandoning a staged commit failed; resetting the group", err);
+      await this.resetGroupAfterPersistAbort(group);
+    }
+  }
+
   /** ADR-0040 (G-35) — mark an outbox entry acked after BOTH artifacts have
    *  published. Best-effort: a failure here just leaves an acked-worthy entry
    *  un-acked, so the next restart sweep re-publishes it idempotently (peers
    *  drop the wrong-epoch duplicate; the committer's echo filter is re-armed). */
-  /**
-   * ADR-0053 contract point 3 — register the key of the epoch a direct commit
-   * just moved this group to, proven under `signerN` (the key of the epoch it
-   * left, taken BEFORE the create call). Called inside each commit path's
-   * fail-closed region, before the ADR-0040 outbox write: a refusal throws, and
-   * the caller resets the group to N exactly as for a failed outbox write, so a
-   * commit is never on the wire before the server knows its epoch.
-   */
-  private async registerNextEpochOrThrow(
-    group: WasmGroup,
-    myIdentity: WasmIdentity,
-    signerN: ProofSigner | null,
-  ): Promise<void> {
-    // ADR-0057 — the new epoch is registered with this device's root or
-    // registrar key; the key of the epoch it left proves nothing any more.
-    void signerN;
-    const signerN1 = takeSigner(() => group.dsAccessSigner(myIdentity));
-    try {
-      await registerBeforePublish(this.ds, group.groupId, signerN1);
-    } finally {
-      signerN1?.free();
-    }
-  }
-
   private async ackCommitBestEffort(
     id: string,
     commitMessageId?: number,
@@ -1519,7 +1588,30 @@ export class ContactsClient {
     // a sweep on it outright. Short-circuit before resolving an identity or
     // loading wasm, so the poll tail costs nothing at all on a legacy group.
     if (!usesProposalPath(group)) {
-      return { kind: "not-committer", rank: undefined };
+      // ADR-0081 — a table-less group commits directly, and a direct commit
+      // is staged until the DS took it. One whose send did not get an answer
+      // owes a verdict, which is finished here at the tail of every poll (it
+      // freezes the group's membership operations until then).
+      if (!group.hasStagedSweep()) return { kind: "not-committer", rank: undefined };
+      const owedIdentity = await this.resolveIdentity(identity);
+      const owedWasm = await loadWasm();
+      return withGroupMlsLock(base64Encode(group.groupId), async () =>
+        resolveOwedVerdict(
+          sweepPortsFor(
+            owedWasm,
+            owedIdentity,
+            group,
+            cursor,
+            markOwnPublished,
+            this.ds,
+            this.onPersistWithCommit,
+            () => this.persistBestEffort(),
+            () => this.persistDurableOrThrow(),
+            actingCommitter,
+            onSweptEvent,
+          ),
+        ),
+      );
     }
     const myIdentity = await this.resolveIdentity(identity);
     const wasm = await loadWasm();
@@ -1645,12 +1737,11 @@ export class ContactsClient {
       // verdict says the commit won. `resolveOwedVerdict` above owns it.
       if (entry.sweepVerdictPending === true) continue;
       try {
-        const commitBytes = base64Decode(entry.commitB64);
-        const commitPub = await this.ds.publishGroup(groupIdBytes, commitBytes);
-        // Echo re-arm: the device is durably at N+1, so feeding its own
-        // re-fetched commit into processIncoming would raise
-        // CannotDecryptOwnMessage. Suppress it on the very next poll.
-        markOwnPublished(commitPub.id);
+        // ADR-0081: a direct-path entry is written only after the commit
+        // route took the commit, so the commit is on the journal already and
+        // is not sent again; only its Welcome may still be owed. The device's
+        // own commit read back at N+1 is dropped by the receive loop
+        // (`CannotDecryptOwnMessage`, ADR-0040 open question 2).
 
         // ADR-0045 S7 — a direct-path second artifact is ALWAYS a mailbox
         // Welcome. The rendezvous arm this loop used to carry belonged to the
@@ -1680,7 +1771,7 @@ export class ContactsClient {
           );
           secondMessageId = pub2.id;
         }
-        await this.ackCommitBestEffort(entry.id, commitPub.id, secondMessageId);
+        await this.ackCommitBestEffort(entry.id, undefined, secondMessageId);
       } catch (err) {
         // Offline / DS down -> leave un-acked; the next sweep retries. Safe.
         // eslint-disable-next-line no-console
@@ -3727,12 +3818,12 @@ export class ContactsClient {
     //    commit is the wire bytes existing members process to
     //    advance their tree; the welcome is what the new member
     //    decodes via `joinFromWelcome`.
-    // ADR-0053 — the key of the epoch this commit leaves, taken BEFORE the
-    // create call eager-merges N -> N+1.
+    // ADR-0053 — the key of epoch N, the one the commit leaves. ADR-0081 —
+    // the commit is STAGED: the group stays at N until the DS took it.
     const signerN = takeSigner(() => group.dsAccessSigner(myIdentity));
     let added;
     try {
-      added = group.addMember(myIdentity, keyPackageBytes);
+      added = group.stageAddMember(myIdentity, keyPackageBytes);
     } catch (err) {
       signerN?.free();
       throw ContactsError.wrap(err);
@@ -3756,45 +3847,53 @@ export class ContactsClient {
     //    is at N with no entry, clean, as if the op never happened. Publish stays
     //    OUTSIDE this region: a publish failure must NOT reset (the durable entry
     //    is re-published idempotently by `sweepPendingCommits`).
-    let groupIdBytes: Uint8Array;
+    const groupIdBytes = group.groupId;
     let welcomeAccountKey: Uint8Array;
-    let entryId: string;
+    let welcomeLeafKey: Uint8Array;
     try {
-      groupIdBytes = group.groupId;
       // ADR-0060 section 6 (amending ADR-0050 section 2.7): the Welcome is
       // sealed to THIS leaf's KeyPackage but addressed to the ACCOUNT mailbox
       // the leaf's binding names — one inbound mailbox per person.
       welcomeAccountKey = await accountKeyOfKeyPackage(keyPackageBytes);
-      // ADR-0078 - the outbox keeps the RAW Welcome and the account key; the
-      // row is sealed at publish to the mailbox key a grant held for that
-      // account binds (verified then), which is also what a replay does.
-      // ADR-0053 contract point 3 — register N+1 before anything durable says
-      // the commit exists. A refusal lands in the catch below: reset, no publish.
-      await this.registerNextEpochOrThrow(group, myIdentity, signerN);
-      entryId = newOutboxEntryId();
-      await this.persistCommitOrThrow({
-        id: entryId,
+      welcomeLeafKey = (await loadWasm()).keyPackageSignatureKey(keyPackageBytes);
+    } catch (err) {
+      signerN?.free();
+      await this.abandonStagedOrReset(group, myIdentity);
+      throw ContactsError.wrap(err);
+    }
+    // 6. ADR-0081 + ADR-0040 — the entry (commit + RAW Welcome, addressed
+    //    by the added leaf's key; ADR-0078: the row is sealed at publish to
+    //    the mailbox key a grant held for that account binds) and the
+    //    snapshot carrying the staged commit are written first; then the
+    //    commit and the N+1 registration reach the DS; then the merge
+    //    (`commitStagedDirect`).
+    let recorded: { readonly entryId: string; readonly commitId: number };
+    try {
+      recorded = await this.commitStagedDirect(group, myIdentity, signerN, commitBytes, {
         groupId: base64Encode(groupIdBytes),
+        // The epoch the commit was built against (N): it is staged.
         targetEpoch: group.epoch.toString(),
         commitB64: base64Encode(commitBytes),
         secondArtifactB64: base64Encode(welcomeBytes),
         secondArtifactKind: "welcome",
         secondArtifactAccountKeyB64: base64Encode(welcomeAccountKey),
+        welcomeMailboxesB64: [base64Encode(welcomeLeafKey)],
       });
     } catch (err) {
-      await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
     } finally {
       signerN?.free();
     }
-
-    // 6. Publish artifact 1 — the commit to the DS group journal. Without it the
-    //    existing members' local state never moves past the pre-add epoch.
-    let commitPublish;
+    const entryId = recorded.entryId;
+    const commitPublish = { id: recorded.commitId };
+    // The verdict is in and merged; only the Welcome is owed. Said durably
+    // before the write so a failure below is retried by
+    // `resolveOwedWelcomes` (best effort: the write runs either way).
     try {
-      commitPublish = await this.ds.publishGroup(groupIdBytes, commitBytes);
+      await markWelcomesOwed(entryId, commitPublish.id);
     } catch (err) {
-      throw ContactsError.wrap(err);
+      // eslint-disable-next-line no-console
+      console.warn("ContactsClient: owed Welcome not recorded", err);
     }
 
     // 7. Publish artifact 2 — the Welcome to the new member's stranger inbox
@@ -4096,57 +4195,34 @@ export class ContactsClient {
     group: WasmGroup,
     leafIndex: number,
   ): Promise<MembershipOutcome> {
-    // ADR-0053 — the key of the epoch this commit leaves, taken BEFORE the
-    // create call eager-merges N -> N+1.
+    // ADR-0053 — the key of epoch N, the one the commit leaves. ADR-0081 —
+    // the commit is STAGED: the group stays at N until the DS took it.
     const signerN = takeSigner(() => group.dsAccessSigner(myIdentity));
     let commitBytes: Uint8Array;
     try {
-      commitBytes = group.removeMember(myIdentity, leafIndex);
+      commitBytes = group.stageRemoveMember(myIdentity, leafIndex);
     } catch (err) {
       signerN?.free();
       throw ContactsError.wrap(err);
     }
-    // ADR-0040 (G-35) + F1 — from just after the eager-merge above through the
-    // successful atomic persist is ONE fail-closed region: the core `removeMember`
-    // eager-merged epoch N -> N+1, and although a remove has no throwing
-    // pre-persist artifact, the reset-guarded try starts right after the
-    // create-commit (uniform with `addMemberToGroup` / `approveExternalJoin`) so
-    // the invariant — ANY throw before the publish resets the in-memory group back
-    // to the durable N snapshot — holds identically on all four commit paths and
-    // cannot be reintroduced by a future pre-persist addition. Persist the outbox
-    // entry (commit only; remove has no Welcome) + the N+1 snapshot atomically,
-    // FAIL-CLOSED. A throw ABORTS: no publish, group reset to N. Publish stays
-    // OUTSIDE this region (a publish failure must NOT reset — the durable entry is
-    // re-published by `sweepPendingCommits`).
-    let groupIdBytes: Uint8Array;
-    let entryId: string;
+    // ADR-0081 + ADR-0040 — record (entry + snapshot with the staged commit),
+    // then send, then merge (`commitStagedDirect`). A remove has no Welcome.
+    const groupIdBytes = group.groupId;
+    let recorded: { readonly entryId: string; readonly commitId: number };
     try {
-      groupIdBytes = group.groupId;
-      // ADR-0053 contract point 3 — register N+1 before the outbox write; a
-      // refusal lands in the catch below: reset, no publish.
-      await this.registerNextEpochOrThrow(group, myIdentity, signerN);
-      entryId = newOutboxEntryId();
-      await this.persistCommitOrThrow({
-        id: entryId,
+      recorded = await this.commitStagedDirect(group, myIdentity, signerN, commitBytes, {
         groupId: base64Encode(groupIdBytes),
         targetEpoch: group.epoch.toString(),
         commitB64: base64Encode(commitBytes),
       });
     } catch (err) {
-      await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
     } finally {
       signerN?.free();
     }
+    const commitPublish = { id: recorded.commitId };
 
-    let commitPublish;
-    try {
-      commitPublish = await this.ds.publishGroup(groupIdBytes, commitBytes);
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-
-    await this.ackCommitBestEffort(entryId, commitPublish.id);
+    await this.ackCommitBestEffort(recorded.entryId, commitPublish.id);
 
     return {
       kind: "committed",
@@ -4296,56 +4372,34 @@ export class ContactsClient {
       return { kind: "proposed", proposalMessageId: publish.id };
     }
 
-    // ADR-0053 — the key of the epoch this commit leaves, taken BEFORE the
-    // create call eager-merges N -> N+1.
+    // ADR-0053 — the key of epoch N, the one the commit leaves. ADR-0081 —
+    // the commit is STAGED: the group stays at N until the DS took it.
     const signerN = takeSigner(() => group.dsAccessSigner(myIdentity));
     let commitBytes: Uint8Array;
     try {
-      commitBytes = group.setGroupRoles(myIdentity, owner, adminsFlat);
+      commitBytes = group.stageSetGroupRoles(myIdentity, owner, adminsFlat);
     } catch (err) {
       signerN?.free();
       throw ContactsError.wrap(err);
     }
-    // ADR-0040 (G-35) + F1 — from just after the eager-merge above through the
-    // successful atomic persist is ONE fail-closed region: the core `setGroupRoles`
-    // eager-merged epoch N -> N+1, and although a role change has no throwing
-    // pre-persist artifact, the reset-guarded try starts right after the
-    // create-commit (uniform with `addMemberToGroup` / `approveExternalJoin`) so
-    // the invariant — ANY throw before the publish resets the in-memory group back
-    // to the durable N snapshot — holds identically on all four commit paths and
-    // cannot be reintroduced by a future pre-persist addition. Persist the outbox
-    // entry (commit only; a role change has no Welcome) + the N+1 snapshot
-    // atomically, FAIL-CLOSED. A throw ABORTS: no publish, group reset to N.
-    // Publish stays OUTSIDE this region (a publish failure must NOT reset).
-    let groupIdBytes: Uint8Array;
-    let entryId: string;
+    // ADR-0081 + ADR-0040 — record (entry + snapshot with the staged commit),
+    // then send, then merge (`commitStagedDirect`). No Welcome.
+    const groupIdBytes = group.groupId;
+    let recorded: { readonly entryId: string; readonly commitId: number };
     try {
-      groupIdBytes = group.groupId;
-      // ADR-0053 contract point 3 — register N+1 before the outbox write; a
-      // refusal lands in the catch below: reset, no publish.
-      await this.registerNextEpochOrThrow(group, myIdentity, signerN);
-      entryId = newOutboxEntryId();
-      await this.persistCommitOrThrow({
-        id: entryId,
+      recorded = await this.commitStagedDirect(group, myIdentity, signerN, commitBytes, {
         groupId: base64Encode(groupIdBytes),
         targetEpoch: group.epoch.toString(),
         commitB64: base64Encode(commitBytes),
       });
     } catch (err) {
-      await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
     } finally {
       signerN?.free();
     }
+    const commitPublish = { id: recorded.commitId };
 
-    let commitPublish;
-    try {
-      commitPublish = await this.ds.publishGroup(groupIdBytes, commitBytes);
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-
-    await this.ackCommitBestEffort(entryId, commitPublish.id);
+    await this.ackCommitBestEffort(recorded.entryId, commitPublish.id);
 
     return {
       kind: "committed",

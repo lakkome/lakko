@@ -35,12 +35,16 @@
  *
  * ## Append and Replace (the second security pass, 2026-09-28)
  *
- * Every commit path registers its next epoch in APPEND mode
- * (`registerEpoch`): accepted only at the journal's `latest + 1` (an
- * identical re-send is 204), and a member-rank signer only one epoch past
- * the newest admin or root registration. A 409 there means someone
- * registered that epoch first: the commit is abandoned exactly like a lost
- * publish race and is never retried as a Replace. REPLACE
+ * Every commit path registers its next epoch in APPEND mode, and since
+ * ADR-0081 it does so in the same request that appends the commit
+ * (`commit`, `POST /ds/group/<hex>/commit`, {@link commitEpochWith}): the DS
+ * accepts the registration only at the journal's `latest + 1` and only
+ * together with the row, so a registered epoch without its commit cannot
+ * exist. Re-sending the same row is idempotent (it answers the original
+ * id). A 409 means another commit owns that epoch: the commit is abandoned
+ * exactly like a lost publish race and is never retried as a Replace. No
+ * client sends a plain `registerEpoch` any more (ADR-0081 open question 1
+ * asks whether the DS should refuse one). REPLACE
  * (`replaceEpoch`) is only the owner's or an admin's repair of a journal a
  * lower rank pushed ahead (`journal-repair.ts`); the server permits it when
  * everything above the epoch was registered by a strictly lower rank, with
@@ -66,12 +70,6 @@ export interface StatementRequestLike {
 export interface StatementSignerLike {
   claim(journalId: Uint8Array, epoch: bigint, epochKey: Uint8Array): StatementRequestLike;
   reset(journalId: Uint8Array, epoch: bigint, epochKey: Uint8Array): StatementRequestLike;
-  registerEpoch(
-    journalId: Uint8Array,
-    epoch: bigint,
-    epochKey: Uint8Array,
-    revokeKeys: Uint8Array,
-  ): StatementRequestLike;
   replaceEpoch(
     journalId: Uint8Array,
     epoch: bigint,
@@ -84,6 +82,15 @@ export interface StatementSignerLike {
   /** `PUT .../root`. Naming the signer's own key is the "am I still the
    *  root?" probe: 204 while it is, the uniform 401 once it is not. */
   rootTransfer(journalId: Uint8Array, newRoot: Uint8Array): StatementRequestLike;
+  /** ADR-0081 - `POST .../commit`: the append-mode registration of
+   *  `epochKey` at `epoch` and the commit `row`, one request. */
+  commit(
+    journalId: Uint8Array,
+    epoch: bigint,
+    epochKey: Uint8Array,
+    revokeKeys: Uint8Array,
+    row: Uint8Array,
+  ): StatementRequestLike;
   publicKey(): Uint8Array;
   free(): void;
 }
@@ -191,27 +198,85 @@ export function concatKeys(keys: readonly Uint8Array[]): Uint8Array {
   return out;
 }
 
+// ----------------------------------------------------------------------------
+// ADR-0081: register an epoch and append its commit in one request
+// ----------------------------------------------------------------------------
+
+/** How the DS answered a commit: the journal row id the commit has, and
+ *  whether this request was an identical re-send of one it already took
+ *  (`200`) rather than a new append (`201`). */
+export interface CommitAnswer {
+  readonly id: number;
+  readonly createdAt: string;
+  readonly resent: boolean;
+}
+
+/** The request proof signer of the epoch the commit leaves (structural: the
+ *  wasm `DsProofSigner`). */
+export interface CommitProofSigner {
+  readonly epoch: bigint;
+  sign(method: string, path: string, query: string, body: Uint8Array): string;
+}
+
+/** The one network call a commit needs: `POST <path>` with `bodyJson`,
+ *  proven by `proof`. Throws the DS client's HTTP error (numeric `status`). */
+export interface CommitSender {
+  postCommit(path: string, bodyJson: string, proof: CommitProofSigner): Promise<CommitAnswer>;
+}
+
+/** The DS refused the commit with 409 twice: another commit owns the epoch.
+ *  Nothing of this commit is on the DS. */
+export class CommitConflictError extends Error {
+  override name = "CommitConflictError";
+  readonly status = 409;
+  constructor(public readonly cause: unknown) {
+    super("ds: another commit already moved the journal to this epoch");
+  }
+}
+
+/** `true` when `err` is (or wraps) a lost commit: {@link CommitConflictError}
+ *  or a bare 409 from the commit route. */
+export function isCommitConflict(err: unknown): boolean {
+  return err instanceof CommitConflictError || isStatus(err, 409);
+}
+
 /**
- * Obligation 5 - register `epochKey` at `epoch` in APPEND mode with this
- * device's authority, revoking `revokeKeys` (registrar public keys) in the
- * same transaction. Throws {@link NoJournalAuthorityError} without an
- * authority, and the DS refusal on anything else (409: another committer
- * registered that epoch first); the caller aborts before publishing and never
- * retries as a Replace.
+ * ADR-0081 decision 1 - register `epochKey` at `epoch` (APPEND, signed with
+ * this device's authority, revoking `revokeKeys`) and append `row` in ONE
+ * request, proven under `proof` (the key of epoch `epoch - 1`). A 409 is
+ * retried ONCE with a freshly signed statement (it may be the server's lock
+ * race; re-sending this same row is idempotent), then thrown as
+ * {@link CommitConflictError}. Every attempt signs a new statement: a
+ * statement's nonce is spent and its window is two minutes.
  */
-export async function registerEpochWith(
-  sender: StatementSender,
+export async function commitEpochWith(
+  sender: CommitSender,
   journalId: Uint8Array,
   authority: JournalAuthority,
   epoch: bigint,
   epochKey: Uint8Array,
-  revokeKeys: readonly Uint8Array[] = [],
-): Promise<void> {
+  revokeKeys: readonly Uint8Array[],
+  row: Uint8Array,
+  proof: CommitProofSigner,
+): Promise<CommitAnswer> {
   if (authority.kind === "none") throw new NoJournalAuthorityError();
+  if (row.length === 0) throw new Error("ds: a commit row must be non-empty");
   const flat = concatKeys(revokeKeys);
-  await sendStatement(sender, () =>
-    authority.signer.registerEpoch(journalId, epoch, epochKey, flat),
-  );
+  const once = async (): Promise<CommitAnswer> => {
+    const [path, body] = readRequest(authority.signer.commit(journalId, epoch, epochKey, flat, row));
+    return sender.postCommit(path, body, proof);
+  };
+  try {
+    return await once();
+  } catch (err) {
+    if (!isStatus(err, 409)) throw err;
+  }
+  try {
+    return await once();
+  } catch (err) {
+    if (isStatus(err, 409)) throw new CommitConflictError(err);
+    throw err;
+  }
 }
 
 /**

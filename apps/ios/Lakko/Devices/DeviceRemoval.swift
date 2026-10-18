@@ -121,56 +121,33 @@ public enum DeviceRemoval {
         // G-13 (ADR-0015): the removal attestation from `/auth/action/finish`,
         // carried in the journal envelope so peers can verify the removal when
         // the DeviceGroup policy requires it. `nil` for OPAQUE-only accounts.
-        attestation: Data? = nil
+        attestation: Data? = nil,
+        // ADR-0081 decision 4 — the removal of a rejoining device's previous
+        // leaf (diagnostics only).
+        rejoin: Bool = false
     ) async throws {
-        let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(
-            accountIdB64: accountIdB64
-        )
-        let ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
+        // ADR-0081 decision 2 — through the DeviceGroup commit outbox: the
+        // entry (the ADR-0015 envelope around the Remove, with the
+        // attestation) beside the N snapshot, the commit and the N+1
+        // registration in one request, then N+1 made current. Nothing that
+        // reads the snapshot can see N+1 before the DS has the commit.
+        let result = try await DeviceGroupCommits.commitChange(
             accountIdBytes: accountIdBytes,
             accountIdB64: accountIdB64,
-            deviceIdentitySeed: seed
-        )
-
-        let groupId = try ensured.group.groupId()
-        let ds = DsClient()
-        await DeviceGroupDsAccess.claim(
-            group: ensured.group, identity: ensured.identity, accountIdB64: accountIdB64, ds: ds)
-
-        // ADR-0053 point 3 — register N+1 proven under N before the publish.
-        // Broadcast to the DeviceGroup journal. The DS treats the
-        // deterministic 32-byte group_id as opaque bytes. G-13 (ADR-0015):
-        // wrap the commit + removal attestation in the journal envelope so
-        // peers can verify the removal under the policy.
-        _ = try await DeviceGroupDsAccess.directCommit(
-            group: ensured.group,
-            identity: ensured.identity,
-            accountIdB64: accountIdB64,
-            ds: ds,
-            create: {
-                try ensured.group.removeDeviceAt(
+            build: { ensured in
+                let commit = try ensured.group.removeDeviceAt(
                     identity: ensured.identity,
                     leafIndex: leafIndex
                 )
+                return DeviceGroupCommits.Built(
+                    kind: rejoin ? .rejoinRemove : .remove,
+                    row: DeviceGroupJournalEnvelope.encode(message: commit, attestation: attestation))
             },
-            // G-7 — the advanced state is on disk before the commit is
-            // published, so nothing that reads the snapshot (the sync
-            // runtime's reload, the next add) can see the pre-removal epoch.
-            prepare: { commitBytes in
-                try DeviceGroupLifecycle.persistSnapshotOrThrow(
-                    identity: ensured.identity,
-                    accountIdB64: accountIdB64
-                )
-                return commitBytes
-            },
-            publish: { commitBytes, auth in
-                let envelope = DeviceGroupJournalEnvelope.encode(
-                    message: commitBytes,
-                    attestation: attestation
-                )
-                return try await ds.publishGroup(groupId: groupId, payload: envelope, auth: auth)
-            }
+            after: { _ in () }
         )
+        if let result, case .lost = result.outcome {
+            throw DeviceGroupCommits.Lost()
+        }
     }
 
     /// ADR-0074 section 2.3 step 4 — remove the leaf holding `deviceKey` from
@@ -238,30 +215,23 @@ public enum DeviceRemoval {
         if try ensured.group.requireAttestedRemovals() {
             return
         }
-        let groupId = try ensured.group.groupId()
-        let ds = DsClient()
-        await DeviceGroupDsAccess.claim(
-            group: ensured.group, identity: ensured.identity, accountIdB64: accountIdB64, ds: ds)
-        // ADR-0053 point 3 — register N+1 proven under N before the publish.
-        _ = try await DeviceGroupDsAccess.directCommit(
-            group: ensured.group,
-            identity: ensured.identity,
+        // ADR-0081 decision 2 — through the DeviceGroup commit outbox.
+        let result = try await DeviceGroupCommits.commitChange(
+            accountIdBytes: accountIdBytes,
             accountIdB64: accountIdB64,
-            ds: ds,
-            create: { try ensured.group.setRequireAttestedRemovals(identity: ensured.identity) },
-            // G-7 — on disk before the publish (see `removeDeviceAt`).
-            prepare: { commit in
-                try DeviceGroupLifecycle.persistSnapshotOrThrow(
-                    identity: ensured.identity,
-                    accountIdB64: accountIdB64
-                )
-                return commit
-            },
-            publish: { commit, auth in
+            build: { fresh in
+                // Another device enabled it meanwhile.
+                if try fresh.group.requireAttestedRemovals() { return nil }
+                let commit = try fresh.group.setRequireAttestedRemovals(identity: fresh.identity)
                 // The policy commit removes nothing, so it carries no attestation.
-                let envelope = DeviceGroupJournalEnvelope.encode(message: commit, attestation: nil)
-                return try await ds.publishGroup(groupId: groupId, payload: envelope, auth: auth)
-            }
+                return DeviceGroupCommits.Built(
+                    kind: .policy,
+                    row: DeviceGroupJournalEnvelope.encode(message: commit, attestation: nil))
+            },
+            after: { _ in () }
         )
+        if let result, case .lost = result.outcome {
+            throw DeviceGroupCommits.Lost()
+        }
     }
 }

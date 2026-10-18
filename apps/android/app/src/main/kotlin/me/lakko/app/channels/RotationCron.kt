@@ -158,8 +158,12 @@ public class RotationCron(
         //    provider snapshot, durably, before any of its
         //    steps runs. A refused record runs nothing and
         //    rolls the provider back.
+        // ADR-0081 — the proof of the epoch the rotation leaves, taken
+        // before the eager merge and recorded with the rotation.
         val entry = CoPublisher.recordCommit(identity, accountIdB64, store, persistNow) {
-            publisherGroup.rotate(identity)
+            val proofEpoch = publisherGroup.epoch().toLong()
+            val proofSeed = publisherGroup.dsAccessSeed(identity)
+            val commit = publisherGroup.rotate(identity)
             PublisherCommitEntry(
                 id = PublisherCommitEntry.newId(),
                 kind = PublisherCommitEntry.Kind.ROTATION,
@@ -167,19 +171,25 @@ public class RotationCron(
                 groupIdHex = me.lakko.app.ds.DsClient.pseudonymHex(publisherGroup.groupId()),
                 targetEpoch = publisherGroup.epoch().toLong(),
                 serverTargetEpoch = newServerEpoch.toLong(),
-            )
+                commitB64 = java.util.Base64.getEncoder().encodeToString(commit),
+                proofEpoch = proofEpoch,
+                proofSeedB64 = java.util.Base64.getEncoder().encodeToString(proofSeed),
+            ).also { proofSeed.fill(0) }
         }
 
-        // 3. The steps: register the N+1 epoch key on the DS
-        //    with the channel's root (ADR-0057, best effort for
-        //    a rotation), reseal the N+1 seed to every
-        //    subscriber and commit the rotation on the channels
-        //    service with the ADR-0030 chunked fanout (C-42:
-        //    the commit is the one atomic point).
+        // 3. The steps: the N+1 epoch key and the rotation
+        //    commit on the DS in one request (ADR-0057,
+        //    ADR-0081; best effort for a rotation), reseal the
+        //    N+1 seed to every subscriber and commit the
+        //    rotation on the channels service with the ADR-0030
+        //    chunked fanout (C-42: the commit is the one atomic
+        //    point).
         me.lakko.app.ds.DsClient().use { ds ->
             runPublisherCommit(
                 entry,
-                CoPublisher.commitPorts(ds, channelsClient, identity, publisherGroup, channelIdHex, accountIdB64, store),
+                CoPublisher.commitPorts(
+                    ds, channelsClient, identity, publisherGroup, channelIdHex, accountIdB64, store,
+                ),
             )
         }
 

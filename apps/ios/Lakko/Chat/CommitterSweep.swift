@@ -264,8 +264,13 @@ public struct SweepGroupPort {
 public struct SweepJournalPort {
     /// Rows strictly after `after`, in ascending id order.
     public var fetch: (Int64) async throws -> [SweepJournalRow]
-    /// Publish to this group's journal; resolves to the DS-assigned id.
-    public var publishGroup: (Data) async throws -> Int64
+    /// ADR-0081 decision 1 — send the staged commit with the registration of
+    /// the epoch it moves to (`dsStagedAccessSigner`) in ONE request,
+    /// `POST .../commit`, proven under the epoch the group still sits at;
+    /// resolves to the commit row's DS id. The identical re-send of a commit
+    /// that landed answers its original id, so the owed verdict re-sends. A
+    /// throw is classified by ``SweepPorts/classifyCommitFailure``.
+    public var commitStaged: (Data) async throws -> Int64
     /// Publish to a member's mailbox pseudonym; resolves to the DS id.
     ///
     /// ADR-0050 2.5a item 7 — throws ``SweepWelcomeUndeliverable`` when this
@@ -273,12 +278,6 @@ public struct SweepJournalPort {
     /// and the Welcome stays owed to that mailbox (``publishWelcomes``) without
     /// blocking the group's later sweeps. Any other throw is transient.
     public var publishMailbox: (Data, Data) async throws -> Int64
-    /// ADR-0053 client contract point 3, staged shape — register the access key
-    /// of the epoch the staged sweep moves to (`dsStagedAccessSigner`), proven
-    /// under the epoch the group still sits at. Runs after the stage and before
-    /// anything is recorded or published: a commit is never on the wire before
-    /// the server knows its epoch. A throw on the first run abandons the sweep.
-    public var registerStagedEpoch: () async throws -> Void
     /// ADR-0057 obligation 5 — whether this device holds a key the DS accepts
     /// an epoch registration from (the journal root, or a registrar seed the
     /// owner sent). Without one a commit could never be registered, so the
@@ -292,16 +291,14 @@ public struct SweepJournalPort {
 
     public init(
         fetch: @escaping (Int64) async throws -> [SweepJournalRow],
-        publishGroup: @escaping (Data) async throws -> Int64,
+        commitStaged: @escaping (Data) async throws -> Int64,
         publishMailbox: @escaping (Data, Data) async throws -> Int64,
-        registerStagedEpoch: @escaping () async throws -> Void,
         canRegister: @escaping () -> Bool = { true },
         registrationDue: @escaping () -> Bool = { true }
     ) {
         self.fetch = fetch
-        self.publishGroup = publishGroup
+        self.commitStaged = commitStaged
         self.publishMailbox = publishMailbox
-        self.registerStagedEpoch = registerStagedEpoch
         self.canRegister = canRegister
         self.registrationDue = registrationDue
     }
@@ -437,6 +434,19 @@ public struct SweepPorts {
     /// obeys: the cursor may lag the durable MLS state, never lead it. See
     /// `Chat/DurableCursor.swift`.
     public var persistApplied: () throws -> Void
+    /// ADR-0081 — what a failed ``SweepJournalPort/commitStaged`` means:
+    ///
+    /// - ``SweepCommitFailure/lost``: the commit route answered `409` —
+    ///   another commit owns the staged epoch, nothing of this commit is on
+    ///   the DS. The sweep abandons exactly like a lost verdict;
+    /// - ``SweepCommitFailure/refused``: a definitive refusal (the
+    ///   registration was refused, the proof did not verify): nothing is on
+    ///   the DS either; the sweep abandons, drops its entry and throws;
+    /// - ``SweepCommitFailure/unknown``: the DS could not be reached, or
+    ///   answered in a way that does not say whether the commit landed. The
+    ///   sweep stays staged with its entry; the owed verdict re-sends it
+    ///   (idempotent on the DS).
+    public var classifyCommitFailure: (Error) -> SweepCommitFailure
 
     public init(
         group: SweepGroupPort,
@@ -448,7 +458,8 @@ public struct SweepPorts {
         wrapWelcome: @escaping (Data) -> Data,
         markOwnPublished: @escaping (Int64) -> Void,
         persist: @escaping () -> Void,
-        persistApplied: @escaping () throws -> Void
+        persistApplied: @escaping () throws -> Void,
+        classifyCommitFailure: @escaping (Error) -> SweepCommitFailure = { _ in .unknown }
     ) {
         self.group = group
         self.actingCommitter = actingCommitter
@@ -460,7 +471,15 @@ public struct SweepPorts {
         self.markOwnPublished = markOwnPublished
         self.persist = persist
         self.persistApplied = persistApplied
+        self.classifyCommitFailure = classifyCommitFailure
     }
+}
+
+/// What a failed commit of a staged sweep means (``SweepPorts/classifyCommitFailure``).
+public enum SweepCommitFailure: Equatable {
+    case lost
+    case refused
+    case unknown
 }
 
 /// What one sweep attempt did.
@@ -494,8 +513,10 @@ public enum SweepOutcome: Equatable {
     /// Won the journal order: merged, and the Welcome (if any) published.
     case committed(commitMessageId: Int64, welcomeMessageIds: [Int64], addedCount: Int)
     /// Lost the journal order: abandoned, no Welcome published, the proposals
-    /// survive for the winner's next sweep.
-    case lost(commitMessageId: Int64)
+    /// survive for the winner's next sweep. `commitMessageId` is `nil` when
+    /// the commit route refused the commit outright (ADR-0081: another commit
+    /// owns the epoch, so nothing of this one is on the DS).
+    case lost(commitMessageId: Int64?)
     /// A previous run merged a winning sweep but could not get its Welcome onto
     /// the wire. The fan-out has now been retried and acked.
     case welcomesRepublished(welcomeMessageIds: [Int64], addedCount: Int)
@@ -858,19 +879,18 @@ private func publishAndAdjudicate(
 
     let entry: SweepDurableEntry
     if let owed {
-        // ADR-0057 — nothing is re-registered for an owed verdict. The first
-        // run registered the next epoch before it wrote this entry; if the
-        // sweep then LOST, a re-registration (by the root, which replaces every
-        // epoch at and above it) would replace the winner's epoch and cut the
-        // group off. The verdict is resolved only.
+        // ADR-0081 — the restart half: the commit call below re-sends the
+        // same row with a freshly signed registration. The DS answers the
+        // original id when the first send landed, `409` when another commit
+        // took the epoch; it never replaces the winner's epoch.
         entry = owed
     } else {
-        // ADR-0053 point 3 — register the next epoch, then obligation 4 —
-        // durably record the artifacts before ANY publish. The Welcome is
-        // wrapped and addressed HERE, so the bytes the restart sweep would
-        // publish are the very bytes computed now; nothing can drift.
+        // Obligation 4 — durably record the artifacts before ANY publish; the
+        // staged epoch's key and the commit row then reach the DS together,
+        // in the commit call below (ADR-0081). The Welcome is wrapped and
+        // addressed HERE, so the bytes the restart sweep would publish are the
+        // very bytes computed now; nothing can drift.
         do {
-            try await ports.journal.registerStagedEpoch()
             var mailboxes: [String] = []
             for key in staged.addedSignatureKeys {
                 mailboxes.append(base64Encode(try ports.welcomeMailbox(key)))
@@ -905,7 +925,21 @@ private func publishAndAdjudicate(
         return .abandonedOrphan
     }
 
-    let commitMessageId = try await ports.journal.publishGroup(commitBytes)
+    let commitMessageId: Int64
+    do {
+        commitMessageId = try await ports.journal.commitStaged(commitBytes)
+    } catch {
+        let meaning = ports.classifyCommitFailure(error)
+        if meaning == .unknown { throw error }
+        // Nothing of this commit is on the DS: abandon like a lost verdict.
+        // The proposals stay pending for the next sweep (the winner's, or this
+        // device's after a backoff).
+        try? group.abandonStagedSweep()
+        ports.persist()
+        ports.outbox.discard(entry.id)
+        if meaning == .refused { throw error }
+        return .lost(commitMessageId: nil)
+    }
     ports.markOwnPublished(commitMessageId)
 
     let verdict = try await adjudicate(

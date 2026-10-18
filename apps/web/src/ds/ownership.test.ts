@@ -25,7 +25,8 @@ import {
   JournalClaimFailedError,
   claimAtCreation,
   probeRoot,
-  registerEpochWith,
+  commitEpochWith,
+  isCommitConflict,
   replaceEpochWith,
   revocationKeys,
   sendStatement,
@@ -68,7 +69,7 @@ describe("statements on the wire", () => {
     let builds = 0;
     await sendStatement(s, () => {
       builds += 1;
-      return fakeStatementSigner("r").registerEpoch(GID, 3n, new Uint8Array(32), new Uint8Array(0));
+      return fakeStatementSigner("r").replaceEpoch(GID, 3n, new Uint8Array(32), new Uint8Array(0));
     });
     expect(builds).toBe(2);
     const t = scriptedSender([409, 409]);
@@ -86,32 +87,72 @@ describe("statements on the wire", () => {
   });
 });
 
-describe("obligation 5 — register with the root or a registrar, never without", () => {
-  it("the root signs the register-epoch statement, revoke list included", async () => {
-    const s = scriptedSender([]);
-    await registerEpochWith(s, GID, fakeRootAuthority("root"), 8n, new Uint8Array(32).fill(8), [
+/** A commit sender scripted with statuses; `201` / `200` answer an id. */
+function scriptedCommitter(statuses: number[]) {
+  const posts: Array<{ path: string; body: string; proofEpoch: bigint }> = [];
+  return {
+    posts,
+    postCommit: vi.fn(async (path: string, body: string, proof: { epoch: bigint }) => {
+      posts.push({ path, body, proofEpoch: proof.epoch });
+      const status = statuses.shift() ?? 201;
+      if (status >= 400) throw Object.assign(new Error(`HTTP ${status}`), { status });
+      return { id: 40, createdAt: "t", resent: status === 200 };
+    }),
+  };
+}
+
+const PROOF = { epoch: 7n, sign: () => "proof" };
+const ROW = new Uint8Array([0xc0, 0x11]);
+
+describe("obligation 5 + ADR-0081 — commit with the root or a registrar, never without", () => {
+  it("the root signs the commit's append statement, revoke list and row included", async () => {
+    const s = scriptedCommitter([]);
+    const answer = await commitEpochWith(s, GID, fakeRootAuthority("root"), 8n, new Uint8Array(32).fill(8), [
       new Uint8Array(32).fill(1),
       new Uint8Array(32).fill(2),
-    ]);
-    const st = parseFakeStatement(s.puts[0]?.body ?? "");
-    expect(segmentOf(s.puts[0]?.path ?? "")).toBe("access");
+    ], ROW, PROOF);
+    expect(answer.id).toBe(40);
+    const st = parseFakeStatement(s.posts[0]?.body ?? "");
+    expect(segmentOf(s.posts[0]?.path ?? "")).toBe("commit");
     expect(st.signer).toBe("root");
     expect(st.epoch).toBe("8");
     expect(st.keys).toBe("01".repeat(32) + "02".repeat(32));
+    expect(st.row).toBe("c011");
+    expect(s.posts[0]?.proofEpoch).toBe(7n);
   });
 
   it("a registrar signs it too", async () => {
-    const s = scriptedSender([]);
-    await registerEpochWith(s, GID, fakeRegistrarAuthority("reg"), 8n, new Uint8Array(32));
-    expect(parseFakeStatement(s.puts[0]?.body ?? "").signer).toBe("reg");
+    const s = scriptedCommitter([]);
+    await commitEpochWith(s, GID, fakeRegistrarAuthority("reg"), 8n, new Uint8Array(32), [], ROW, PROOF);
+    expect(parseFakeStatement(s.posts[0]?.body ?? "").signer).toBe("reg");
   });
 
   it("without either, nothing is sent and the caller must not commit", async () => {
-    const s = scriptedSender([]);
-    await expect(registerEpochWith(s, GID, { kind: "none" }, 8n, new Uint8Array(32))).rejects.toBeInstanceOf(
-      NoJournalAuthorityError,
+    const s = scriptedCommitter([]);
+    await expect(
+      commitEpochWith(s, GID, { kind: "none" }, 8n, new Uint8Array(32), [], ROW, PROOF),
+    ).rejects.toBeInstanceOf(NoJournalAuthorityError);
+    expect(s.posts).toHaveLength(0);
+  });
+
+  it("a 409 is retried once with a fresh statement, then is a lost commit", async () => {
+    const once = scriptedCommitter([409, 201]);
+    await commitEpochWith(once, GID, fakeRootAuthority("root"), 8n, new Uint8Array(32), [], ROW, PROOF);
+    expect(once.posts).toHaveLength(2);
+    const twice = scriptedCommitter([409, 409]);
+    const err = await commitEpochWith(twice, GID, fakeRootAuthority("root"), 8n, new Uint8Array(32), [], ROW, PROOF).catch(
+      (e: unknown) => e,
     );
-    expect(s.puts).toHaveLength(0);
+    expect(isCommitConflict(err)).toBe(true);
+    expect(twice.posts).toHaveLength(2);
+  });
+
+  it("an empty row is refused before any request", async () => {
+    const s = scriptedCommitter([]);
+    await expect(
+      commitEpochWith(s, GID, fakeRootAuthority("root"), 8n, new Uint8Array(32), [], new Uint8Array(0), PROOF),
+    ).rejects.toThrow(/non-empty/);
+    expect(s.posts).toHaveLength(0);
   });
 });
 
@@ -216,13 +257,13 @@ describe("ADR-0074 — the root transfer of a key rotation", () => {
 });
 
 describe("second security pass — Append, Replace, the probe and the claim at creation", () => {
-  it("an Append 409 surfaces to the commit path; nothing is sent as a Replace", async () => {
-    const s = scriptedSender([409, 409]);
+  it("a lost commit (409) surfaces to the commit path; nothing is sent as a Replace", async () => {
+    const s = scriptedCommitter([409, 409]);
     await expect(
-      registerEpochWith(s, GID, fakeRootAuthority("root"), 5n, new Uint8Array(32).fill(5)),
+      commitEpochWith(s, GID, fakeRootAuthority("root"), 5n, new Uint8Array(32).fill(5), [], ROW, PROOF),
     ).rejects.toMatchObject({ status: 409 });
-    expect(s.puts.map((p) => segmentOf(p.path))).toEqual(["access", "access"]);
-    expect(s.puts.every((p) => parseFakeStatement(p.body).segment === "access")).toBe(true);
+    expect(s.posts.map((p) => segmentOf(p.path))).toEqual(["commit", "commit"]);
+    expect(s.posts.every((p) => parseFakeStatement(p.body).segment === "commit")).toBe(true);
   });
 
   it("the repair's Replace names the epoch and its key; a member cannot send one", async () => {
@@ -295,7 +336,6 @@ describe("the real signers (journal-authority.ts)", () => {
     const cases: Array<[string, { path: string; bodyJson: string; free(): void }]> = [
       ["claim", root.claim(GID, 1n, key)],
       ["reset", root.reset(GID, 1n, key)],
-      ["access", root.registerEpoch(GID, 2n, key, new Uint8Array(0))],
       ["registrars", root.registrars(GID, key, Uint8Array.from([RANK_MEMBER]))],
       ["registrars-set", root.registrarsSet(GID, key, Uint8Array.from([RANK_MEMBER]))],
       ["access", root.replaceEpoch(GID, 2n, key, new Uint8Array(0))],
@@ -303,6 +343,13 @@ describe("the real signers (journal-authority.ts)", () => {
     ];
     // ADR-0078 section 3: the push binding is gone from the signer.
     expect("pushBinding" in root).toBe(false);
+    // ADR-0081 (open question 1): no plain Append; a new epoch goes with its
+    // commit row to the commit route.
+    expect("registerEpoch" in root).toBe(false);
+    const commit = root.commit(GID, 2n, key, new Uint8Array(0), Uint8Array.from([7]));
+    expect(commit.path).toBe(`/ds/group/${hex}/commit`);
+    expect(Object.keys(JSON.parse(commit.bodyJson) as object)).toEqual(["statement_b64", "row_b64"]);
+    commit.free();
     for (const [segment, req] of cases) {
       expect(req.path).toBe(`/ds/group/${hex}/${segment}`);
       expect(Object.keys(JSON.parse(req.bodyJson) as object)).toEqual(["statement_b64"]);

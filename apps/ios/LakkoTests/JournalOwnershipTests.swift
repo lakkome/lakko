@@ -33,11 +33,11 @@ private final class FakeStatementSigner: DsStatementSignerProtocol, @unchecked S
 
     func publicKey() -> Data { key }
 
-    func registerEpoch(journalId: Data, epoch: UInt64, epochKey: Data, revoke: [Data]) throws
+    func commit(journalId: Data, epoch: UInt64, epochKey: Data, revoke: [Data], row: Data) throws
         -> DsStatementRequest {
-        calls.append("access:\(epoch)")
+        calls.append("commit:\(epoch)")
         lastRevoke = revoke
-        return req("access", "\"epoch\":\(epoch)")
+        return req("commit", "\"epoch\":\(epoch)")
     }
 
     func registrars(journalId: Data, changes: [DsRegistrarChange]) throws -> DsStatementRequest {
@@ -81,6 +81,26 @@ private final class FakeStatementDs: DsStatementSending {
     }
 
     var segments: [String] { sent.map { String($0.path.split(separator: "/").last ?? "") } }
+}
+
+/// ADR-0081 — a DS that records the commits it saw, with the proof epoch, and
+/// answers scripted refusals.
+private final class FakeCommitDs: DsCommitSending {
+    var sent: [(request: DsStatementRequest, proofEpoch: UInt64)] = []
+    var answers: [DsStatementError?] = []
+
+    func postCommit(_ request: DsStatementRequest, proof: DsRequestSigner) async throws -> DsCommitAnswer {
+        sent.append((request, proof.epoch()))
+        if !answers.isEmpty, let error = answers.removeFirst() { throw error }
+        return DsCommitAnswer(id: Int64(sent.count), createdAt: "t", resent: false)
+    }
+}
+
+private final class EpochProof: DsRequestSigner {
+    let value: UInt64
+    init(_ value: UInt64) { self.value = value }
+    func epoch() -> UInt64 { value }
+    func sign(method: String, path: String, query: String, body: Data) -> String { "proof@\(value)" }
 }
 
 // MARK: - Tests
@@ -552,51 +572,76 @@ final class JournalOwnershipTests: XCTestCase {
             registrarPublicKey: { _ in derived }), [])
     }
 
-    func testRegisterEpochSignsWithTheAuthorityAndCarriesTheRevokeList() async throws {
+    func testCommitEpochSignsWithTheAuthorityCarriesTheRevokeListAndIsProvenUnderN() async throws {
         let admin = FakeStatementSigner("admin")
-        let ds = FakeStatementDs()
-        try await JournalOwnership.registerEpoch(
+        let ds = FakeCommitDs()
+        try await JournalOwnership.commitEpoch(
             authority: .registrar(admin, .admin), journalId: gid, epoch: 8,
-            epochKey: Data(count: 32), revoke: [Data(repeating: 1, count: 32)], ds: ds)
-        XCTAssertEqual(admin.calls, ["access:8"])
+            epochKey: Data(count: 32), revoke: [Data(repeating: 1, count: 32)], row: Data([0xC0]),
+            proof: EpochProof(7), ds: ds)
+        XCTAssertEqual(admin.calls, ["commit:8"])
         XCTAssertEqual(admin.lastRevoke, [Data(repeating: 1, count: 32)])
-        XCTAssertTrue(ds.sent.first?.bodyJson.contains("\"by\":\"admin\"") == true)
+        XCTAssertTrue(ds.sent.first?.request.bodyJson.contains("\"by\":\"admin\"") == true)
+        XCTAssertEqual(ds.sent.first?.proofEpoch, 7)
+    }
+
+    func testAnEmptyCommitRowIsRefusedBeforeAnythingIsSent() async {
+        let ds = FakeCommitDs()
+        do {
+            try await JournalOwnership.commitEpoch(
+                authority: .root(FakeStatementSigner("root")), journalId: gid, epoch: 2,
+                epochKey: Data(count: 32), revoke: [], row: Data(), proof: EpochProof(1), ds: ds)
+            XCTFail("an empty row is refused")
+        } catch {}
+        XCTAssertTrue(ds.sent.isEmpty)
     }
 
     // MARK: Second security pass, finding 1 — Append, and a 409 abandons
 
-    /// An Append 409 is a lost race: the registration throws (the commit is
-    /// abandoned by its caller), the conflict hook is told the epoch this
-    /// device is at, and nothing is replaced from the commit path.
-    func testAnAppend409ThrowsAndNeverReplaces() async {
+    /// A 409 is retried once with a fresh statement (a lost lock race rolls
+    /// back undecided); a second 409 is a lost epoch: the commit throws (its
+    /// caller abandons it), the conflict hook is told the epoch this device is
+    /// at, and nothing is replaced from the commit path.
+    func testASecond409ThrowsAndNeverReplaces() async {
         let admin = FakeStatementSigner("admin")
-        let ds = FakeStatementDs()
-        ds.answers = [.conflict]
+        let ds = FakeCommitDs()
+        ds.answers = [.conflict, .conflict]
         var noted: [UInt64] = []
         do {
-            try await JournalOwnership.registerEpoch(
+            try await JournalOwnership.commitEpoch(
                 authority: .registrar(admin, .admin), journalId: gid, epoch: 8,
-                epochKey: Data(count: 32), revoke: [], ds: ds, onConflict: { noted.append($0) })
+                epochKey: Data(count: 32), revoke: [], row: Data([1]), proof: EpochProof(7), ds: ds,
+                onConflict: { noted.append($0) })
             XCTFail("a 409 aborts the commit")
         } catch let error as DsStatementError {
             XCTAssertEqual(error, .conflict)
         } catch {
             XCTFail("unexpected \(error)")
         }
-        XCTAssertEqual(admin.calls, ["access:8"], "Append only; no replace in a commit path")
+        XCTAssertEqual(admin.calls, ["commit:8", "commit:8"], "one retry; no replace in a commit path")
         XCTAssertEqual(noted, [7])
     }
 
-    /// The real FFI: registerEpoch and replaceEpoch sign distinct statements
-    /// on the same route.
-    func testTheRealSignerSignsAppendAndReplaceDifferently() throws {
+    func testOne409ThenALandedCommitIsNotAConflict() async throws {
+        let ds = FakeCommitDs()
+        ds.answers = [.conflict, nil]
+        let answer = try await JournalOwnership.commitEpoch(
+            authority: .root(FakeStatementSigner("root")), journalId: gid, epoch: 3,
+            epochKey: Data(count: 32), revoke: [], row: Data([1]), proof: EpochProof(2), ds: ds)
+        XCTAssertEqual(answer.id, 2)
+    }
+
+    /// The real FFI: a commit goes to the commit route, a replace to
+    /// `/access` (ADR-0081: the DS refuses a plain Append there).
+    func testTheRealSignerSendsACommitAndAReplaceToTheirRoutes() throws {
         let owner = try Identity.fromSeed(seed: Data(repeating: 0x52, count: 32))
         let root = try dsJournalRootSigner(accountIdentity: owner, journalId: gid)
         let key = Data(repeating: 3, count: 32)
-        let append = try root.registerEpoch(journalId: gid, epoch: 4, epochKey: key, revoke: [])
+        let commit = try root.commit(journalId: gid, epoch: 4, epochKey: key, revoke: [], row: Data([7]))
         let replace = try root.replaceEpoch(journalId: gid, epoch: 4, epochKey: key, revoke: [])
-        XCTAssertEqual(append.path, replace.path)
-        XCTAssertNotEqual(append.bodyJson, replace.bodyJson)
+        XCTAssertEqual(commit.path, "/ds/group/\(DsClient.pseudonymHex(gid))/commit")
+        XCTAssertEqual(replace.path, "/ds/group/\(DsClient.pseudonymHex(gid))/access")
+        XCTAssertTrue(commit.bodyJson.contains("row_b64"))
     }
 
     /// ADR-0050: removing one device of an account keeps the account a member.
@@ -617,13 +662,39 @@ final class JournalOwnershipTests: XCTestCase {
         let rootSeed = try dsJournalRootSeed(accountIdentitySeed: owner.ed25519Seed(), journalId: gid)
         let seed = try dsJournalRegistrarSeed(rootSeed: rootSeed, memberAccountKey: member.signaturePublicKey())
         let signer = try dsStatementSigner(seed: seed)
-        let request = try signer.registerEpoch(
-            journalId: gid, epoch: 5, epochKey: Data(repeating: 3, count: 32), revoke: [])
-        XCTAssertEqual(request.path, "/ds/group/\(DsClient.pseudonymHex(gid))/access")
+        let request = try signer.commit(
+            journalId: gid, epoch: 5, epochKey: Data(repeating: 3, count: 32), revoke: [], row: Data([1]))
+        XCTAssertEqual(request.path, "/ds/group/\(DsClient.pseudonymHex(gid))/commit")
         XCTAssertNotEqual(signer.publicKey(), try dsJournalRootSigner(accountIdentity: owner, journalId: gid).publicKey())
     }
 
     // MARK: Transport
+
+    /// ADR-0081 — the commit is a POST carrying the proof over the exact
+    /// body; 201 is a new row, 200 the identical re-send, 409 a lost epoch.
+    func testACommitIsAPostWithAProofAndItsAnswersAreRead() async throws {
+        let scope = DsAccessURLProtocol.freshScope()
+        DsAccessURLProtocol.script(scope, [
+            .init(status: 201, body: Data(#"{"id":5,"created_at":"2026-10-18T00:00:00Z"}"#.utf8)),
+            .init(status: 200, body: Data(#"{"id":5,"created_at":"2026-10-18T00:00:00Z"}"#.utf8)),
+            .init(status: 409, body: Data("that epoch is already registered".utf8)),
+        ])
+        let client = DsAccessURLProtocol.client(scope)
+        let request = DsStatementRequest(path: "/ds/group/ab/commit", bodyJson: #"{"statement_b64":"AA","row_b64":"AQ"}"#)
+        let first = try await client.postCommit(request, proof: EpochProof(3))
+        XCTAssertEqual(first, DsCommitAnswer(id: 5, createdAt: "2026-10-18T00:00:00Z", resent: false))
+        let again = try await client.postCommit(request, proof: EpochProof(3))
+        XCTAssertTrue(again.resent)
+        do {
+            _ = try await client.postCommit(request, proof: EpochProof(3))
+            XCTFail("409")
+        } catch let error as DsStatementError {
+            XCTAssertEqual(error, .conflict)
+        }
+        let seen = DsAccessURLProtocol.requests(scope)
+        XCTAssertEqual(seen.first?.method, "POST")
+        XCTAssertEqual(seen.first?.proof, "proof@3")
+    }
 
     func testAStatementIsAPutWithoutAProofAndA409IsRetriedOnce() async throws {
         let scope = DsAccessURLProtocol.freshScope()
@@ -804,21 +875,22 @@ extension JournalOwnershipTests {
             knownRegistrar: { known[$0] }), [Data(repeating: 0xDD, count: 32)])
     }
 
-    /// The admin's revocation travels in its epoch registration.
+    /// The admin's revocation travels in its commit's epoch registration.
     func testAnAdminsRegistrationCarriesTheRevocation() async throws {
         let admin = FakeStatementSigner("admin")
-        let ds = FakeStatementDs()
+        let ds = FakeCommitDs()
         let evicted = Data(repeating: 4, count: 32)
         let key = Data(repeating: 0xE4, count: 32)
         let revoke = JournalOwnership.revokeList(
             authority: .registrar(admin, .admin), evictedAccountKeys: [evicted],
             registrarPublicKey: { _ in nil },
             knownRegistrar: { $0 == evicted ? .init(publicKey: key, rank: .member) : nil })
-        try await JournalOwnership.registerEpoch(
+        try await JournalOwnership.commitEpoch(
             authority: .registrar(admin, .admin), journalId: gid, epoch: 9,
-            epochKey: Data(repeating: 9, count: 32), revoke: revoke, ds: ds)
+            epochKey: Data(repeating: 9, count: 32), revoke: revoke, row: Data([1]),
+            proof: EpochProof(8), ds: ds)
         XCTAssertEqual(admin.lastRevoke, [key])
-        XCTAssertEqual(ds.segments, ["access"])
+        XCTAssertEqual(ds.sent.map { String($0.request.path.split(separator: "/").last ?? "") }, ["commit"])
     }
 
     /// The known-registrar record: the newest envelope wins, scoped per

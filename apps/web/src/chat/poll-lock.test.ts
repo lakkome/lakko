@@ -60,7 +60,7 @@
  * The remaining cases are guards, not discriminators, and say so where they sit.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fakeAccessSigner } from "../ds/access-test-doubles";
+import { fakeAccessSigner, withCommitRoute, withStagedTwins } from "../ds/access-test-doubles";
 
 // No IndexedDB in the node test env; the store round-trip is covered by
 // `commit-outbox.test.ts`.
@@ -126,7 +126,7 @@ function statefulGroup(
   label: string,
 ): { group: WasmGroup; epoch: () => bigint } {
   let epoch = startEpoch;
-  const group = {
+  const group = withStagedTwins({
     get groupId(): Uint8Array {
       return groupId;
     },
@@ -146,7 +146,7 @@ function statefulGroup(
       // real apply loop runs end to end without a wasm stub in the way.
       return { kind: "Commit" };
     }),
-  } as unknown as WasmGroup;
+  }) as unknown as WasmGroup;
   return { group, epoch: () => epoch };
 }
 
@@ -200,7 +200,7 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
 
     const contacts = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {
@@ -227,7 +227,11 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     // as designed. (Since ADR-0053 the registration's await lets the fetch in
     // ahead of the persist too; where exactly it lands is not what this test
     // is about.)
-    expect(order).toEqual(["create:g1", "fetch", "persist", "publish"]);
+    // ADR-0081: the staged commit is recorded, then sent (registration +
+    // row); where the poll's fetch lands among them is not what this test is
+    // about.
+    expect(order.filter((o) => o !== "fetch")).toEqual(["create:g1", "persist", "publish"]);
+    expect(order).toContain("fetch");
     expect(g.epoch()).toBe(6n);
     expect(g.group.processIncomingVerifyingRoles).not.toHaveBeenCalled();
 
@@ -236,15 +240,15 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     const result = await within(1000, poll, "poll queued behind a commit");
 
     // The apply ran only after the commit's publish returned.
-    expect(order).toEqual([
+    expect(order.filter((o) => o !== "fetch")).toEqual([
       "create:g1",
-      "fetch",
       "persist",
       "publish",
       "apply:g#1",
       "apply:g#2",
       "apply:g#3",
     ]);
+    expect(order.indexOf("fetch")).toBeLessThan(order.indexOf("apply:g#1"));
     expect(g.epoch()).toBe(9n);
     expect(result.outcome).toBe("applied");
     expect(result.events).toHaveLength(3);
@@ -258,14 +262,14 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
 
     const contacts = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      {
+      withCommitRoute({
         registerGroupEpoch: async () => {},
         publishGroup: vi.fn(async () => {
           order.push("publish");
           await publishGate.promise;
           return { id: 1, createdAt: "t" };
         }),
-      } as unknown as DsClient,
+      }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {
@@ -445,13 +449,13 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
 
     const contacts = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      {
+      withCommitRoute({
         registerGroupEpoch: async () => {},
         publishGroup: vi.fn(async () => {
           order.push("publish");
           return { id: 1, createdAt: "t" };
         }),
-      } as unknown as DsClient,
+      }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},

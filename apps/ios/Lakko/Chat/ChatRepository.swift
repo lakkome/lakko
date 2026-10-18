@@ -3036,60 +3036,38 @@ public final class ChatRepository: ObservableObject {
             let recipientPseudonym: Data
         }
 
-        // ADR-0053 point 3 over the ADR-0040 F1 discipline: the epoch-N signer
-        // is taken before the core `addMemberFromWire` eager-merges N -> N+1;
-        // after it, the N+1 key is REGISTERED (proven under N) and only then is
-        // the outbox entry written and the commit published under N.
-        //
-        // EVERYTHING after the eager merge and before the publish — the
-        // registration, the second-artifact compute, the FAIL-CLOSED persist —
-        // runs inside the rollback guard of `DirectCommitSteps.run`: ANY throw
-        // there must roll the in-memory group back to the durable N. A Welcome /
-        // pseudonym compute or a registration that threw OUTSIDE it would leave
-        // the group at the un-published N+1, so a later same-session commit
-        // would build on N+1 and publish commit(N+1 -> N+2), which peers still
-        // at N drop as wrong-epoch, stranding the WHOLE group (the
-        // "device-ahead" hazard).
+        // ADR-0081 over ADR-0040: the commit is STAGED (the group stays at
+        // N), the Welcome's address computed, the ADR-0040 entry and the
+        // snapshot carrying the staged commit written FAIL-CLOSED, and only
+        // then do the commit row and the N+1 key reach the DS in ONE request
+        // (proven under N). The merge follows the DS's answer; a lost commit
+        // is abandoned; an unanswered one stays recorded and staged for the
+        // owed-verdict path (see `DirectCommitSteps`).
         // ADR-0057, live walk 2026-09-29 — the owner's claim on open precedes
-        // the registration, taken here while the group is still at N (the
-        // create below eager-merges).
+        // the registration, taken here while the group is still at N.
         // Checked after every wait in this region (``requireCommitRegion(_:)``).
         let bound = binding.capture()
         await ensureOwnerClaimOnOpen(groupIdHex: groupIdHex)
         try requireCommitRegion(bound)
-        let commitPublish: PublishResult = try await DirectCommitSteps(
+        let commitPublish: DsCommitAnswer = try await DirectCommitSteps(
             currentSigner: { try record.group.dsAccessSigner(identity: identity) },
             create: { () throws -> AddMember in
                 do {
-                    return try record.group.addMemberFromWire(
+                    return try record.group.stageAddMemberFromWire(
                         identity: identity,
                         keyPackage: keyPackageBytes
                     )
                 } catch {
-                    throw ChatError.wrapped("addMemberFromWire failed", underlying: error)
-                }
-            },
-            register: { [self] next in
-                do {
-                    try await registerNextEpoch(record: record, groupIdHex: groupIdHex, next: next)
-                } catch {
-                    throw ChatError.wrapped("DS access registration (add-member) failed", underlying: error)
+                    throw ChatError.wrapped("stageAddMemberFromWire failed", underlying: error)
                 }
             },
             prepare: { [self] addResult in
-                // The registration waited on the network. Nothing is recorded
-                // or published once the account has left: the durable write
-                // below would otherwise land under whoever is signed in now.
                 try requireCommitRegion(bound)
-                // Compute the second artifact (the Welcome envelope) + its mailbox
-                // destination so the outbox entry holds the EXACT bytes the
-                // restart sweep will re-publish (no drift). The Welcome ships to
-                // the new member's stranger inbox, addressed by their pubkey
-                // pseudonym.
-                let entryId = newOutboxEntryId()
-                // ADR-0078 — the outbox keeps the raw Welcome and the ADDRESS
-                // it goes to; the row is sealed at publish time to the
-                // verified mailbox the address resolves to.
+                // Compute the second artifact (the Welcome) + its mailbox
+                // destination BEFORE the commit is sent, so a member with no
+                // reachable mailbox is refused while nothing is on the DS, and
+                // the outbox entry holds the EXACT bytes the restart sweep
+                // would deliver.
                 let welcomeEnvelope = addResult.welcome
                 let recipientPseudonym: Data
                 do {
@@ -3110,63 +3088,63 @@ public final class ChatRepository: ObservableObject {
                 } catch {
                     throw ChatError.wrapped("no verified mailbox for the added member", underlying: error)
                 }
-                // Persist the outbox entry (commit + Welcome, BOTH artifacts) +
-                // the N+1 snapshot BEFORE any publish, FAIL-CLOSED. A throw
-                // ABORTS the op (no publish); the sweep re-publishes both
-                // artifacts on restart so a crash between the two publishes
-                // never strands the new member without a Welcome.
-                try persistCommitEntryThenSnapshotOrThrow(
-                    NewCommitEntry(
-                        id: entryId,
-                        groupId: base64Encode(record.groupId),
-                        targetEpoch: String(try record.group.epoch()),
-                        commitB64: base64Encode(addResult.commit),
-                        secondArtifactB64: base64Encode(welcomeEnvelope),
-                        secondArtifactKind: .welcome,
-                        secondArtifactMailboxB64: base64Encode(recipientPseudonym)
-                    )
-                )
                 return Prepared(
-                    entryId: entryId,
+                    entryId: newOutboxEntryId(),
                     commit: addResult.commit,
                     welcomeEnvelope: welcomeEnvelope,
                     recipientPseudonym: recipientPseudonym)
             },
-            // ADR-0040 (G-35) F1 — the registration, the artifact compute OR the
-            // FAIL-CLOSED persist aborted AFTER the eager merge. Roll the
-            // in-memory group back to the durable snapshot (still N) so this
-            // abort is "as if the op never happened" in memory too. See
-            // ``resetGroupToDurableSnapshot(groupIdHex:)``.
-            rollback: { [self] in
-                // The reset restores the bound identity's provider. Once the
-                // account has left, that provider is nobody's or the next
-                // account's, and is not rolled back for this commit.
-                guard bound.isCurrent else { return }
-                try resetGroupToDurableSnapshot(groupIdHex: groupIdHex)
-            },
-            publish: { [self] prepared, signerN in
-                // Publish artifact 1 — the commit to the group journal so
-                // existing members advance their epoch, signed under N.
-                let commitPublish: PublishResult
-                do {
-                    commitPublish = try await dsClient.publishGroup(
-                        groupId: record.groupId,
-                        payload: prepared.commit,
-                        auth: DsAuth(signer: signerN)
-                    )
-                } catch {
-                    throw ChatError.wrapped("DS publishGroup (add-member commit) failed", underlying: error)
-                }
-                // The commit is on the journal and its outbox entry is
-                // durable and un-acked. An account that left meanwhile stops
-                // here, as a crash would: its next session re-publishes the
-                // commit and the Welcome (ADR-0040).
+            // The ADR-0040 entry (commit + Welcome + its address) and the
+            // snapshot carrying the staged commit, FAIL-CLOSED, before
+            // anything is sent. `sweepVerdictPending` hands an unanswered
+            // commit to `resolveOwedVerdict`.
+            record: { [self] prepared in
                 try requireCommitRegion(bound)
-                chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: commitPublish.id)
-
-                // Publish artifact 2 — the Welcome to the new member's mailbox
-                // (the SAME bytes stored in the outbox entry), signed with the
-                // grant that reaches them (ADR-0060).
+                try persistCommitEntryThenSnapshotOrThrow(
+                    NewCommitEntry(
+                        id: prepared.entryId,
+                        groupId: base64Encode(record.groupId),
+                        // The epoch the staged commit was built against (N).
+                        targetEpoch: String(try record.group.epoch()),
+                        commitB64: base64Encode(prepared.commit),
+                        secondArtifactB64: base64Encode(prepared.welcomeEnvelope),
+                        secondArtifactKind: .welcome,
+                        secondArtifactMailboxB64: base64Encode(prepared.recipientPseudonym),
+                        sweepVerdictPending: true,
+                        welcomeMailboxesB64: [base64Encode(prepared.recipientPseudonym)]
+                    )
+                )
+            },
+            stagedSigner: { [self] in try stagedDsSigner(record: record, identity: identity) },
+            // ADR-0081 decision 1 — the commit row and the N+1 registration in
+            // one request, proven under N.
+            commit: { [self] prepared, next, proof in
+                try requireCommitRegion(bound)
+                do {
+                    return try await commitNextEpoch(
+                        record: record, groupIdHex: groupIdHex, next: next, proof: proof,
+                        row: prepared.commit)
+                } catch {
+                    throw ChatError.wrapped("DS commit (add-member) failed", underlying: error)
+                }
+            },
+            merge: { [self] prepared, answer in
+                try mergeStagedDirectCommit(
+                    record: record, groupIdHex: groupIdHex, identity: identity,
+                    entryId: prepared.entryId, answer: answer, welcomeOwed: true, bound: bound)
+            },
+            abandon: { [self] in
+                guard bound.isCurrent else { return }
+                try abandonStagedDirectCommit(record: record, identity: identity)
+            },
+            discard: { [self] prepared in
+                discardCommitEntry(entryId: prepared.entryId, bound: bound)
+            },
+            publish: { [self] prepared, answer in
+                // Artifact 2 — the Welcome to the new member's mailbox (the
+                // SAME bytes stored in the outbox entry), signed with the grant
+                // that reaches them (ADR-0060). A failure leaves the entry
+                // un-acked; the restart sweep delivers it.
                 let welcomePublish: PublishResult
                 do {
                     welcomePublish = try await publishWelcomeRecheckingOnce(
@@ -3176,13 +3154,12 @@ public final class ChatRepository: ObservableObject {
                     throw ChatError.wrapped("DS publishMailbox (Welcome) failed", underlying: error)
                 }
                 try requireCommitRegion(bound)
-
                 ackCommitBestEffort(
                     entryId: prepared.entryId,
-                    commitMessageId: commitPublish.id,
+                    commitMessageId: answer.id,
                     secondMessageId: welcomePublish.id
                 )
-                return commitPublish
+                return answer
             }
         ).run()
         try requireCommitRegion(bound)
@@ -3350,11 +3327,9 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
-        // ADR-0053 point 3 — signer N before the eager merge, register N+1
-        // proven under N, THEN the ADR-0040 persist, THEN the publish under N.
-        // A remove has no Welcome, so the rollback guard of
-        // `DirectCommitSteps.run` covers the registration and the FAIL-CLOSED
-        // persist — the same F1 invariant the add path enforces.
+        // ADR-0081 over ADR-0040 — staged, recorded (entry + snapshot with the
+        // staged commit), sent with the N+1 registration proven under N, then
+        // merged (see `DirectCommitSteps`). A remove has no Welcome.
         // ADR-0057 — the account this removal evicts, read from the roster
         // before the commit, so the root can revoke its registrar key in the
         // same registration.
@@ -3365,69 +3340,63 @@ public final class ChatRepository: ObservableObject {
         let bound = binding.capture()
         await ensureOwnerClaimOnOpen(groupIdHex: groupIdHex)
         try requireCommitRegion(bound)
-        let commitPublish: PublishResult = try await DirectCommitSteps(
+        let commitPublish: DsCommitAnswer = try await DirectCommitSteps(
             currentSigner: { try record.group.dsAccessSigner(identity: identity) },
             create: { () throws -> Data in
                 do {
-                    return try record.group.removeMember(
+                    return try record.group.stageRemoveMember(
                         identity: identity,
                         leafIndex: leafIndex
                     )
                 } catch {
-                    throw ChatError.wrapped("removeMember failed", underlying: error)
-                }
-            },
-            register: { [self] next in
-                do {
-                    try await registerNextEpoch(
-                        record: record, groupIdHex: groupIdHex, next: next,
-                        evictedAccountKeys: evicted)
-                } catch {
-                    throw ChatError.wrapped("DS access registration (remove-member) failed", underlying: error)
+                    throw ChatError.wrapped("stageRemoveMember failed", underlying: error)
                 }
             },
             prepare: { [self] commitBytes in
-                // As in the add path: nothing is recorded or published once
-                // the account has left.
+                // As in the add path: nothing is sent once the account has left.
                 try requireCommitRegion(bound)
-                // Persist the outbox entry (commit only) + the N+1 snapshot
-                // BEFORE the publish, FAIL-CLOSED. A throw ABORTS the op.
-                let entryId = newOutboxEntryId()
+                return (entryId: newOutboxEntryId(), commit: commitBytes)
+            },
+            // The entry (commit only) and the snapshot carrying the staged
+            // commit, FAIL-CLOSED, before anything is sent.
+            record: { [self] prepared in
+                try requireCommitRegion(bound)
                 try persistCommitEntryThenSnapshotOrThrow(
                     NewCommitEntry(
-                        id: entryId,
+                        id: prepared.entryId,
                         groupId: base64Encode(record.groupId),
                         targetEpoch: String(try record.group.epoch()),
-                        commitB64: base64Encode(commitBytes)
+                        commitB64: base64Encode(prepared.commit),
+                        sweepVerdictPending: true
                     )
                 )
-                return (entryId: entryId, commit: commitBytes)
             },
-            // ADR-0040 (G-35) F1 — roll the in-memory group back to the durable
-            // snapshot (still N). See ``resetGroupToDurableSnapshot(groupIdHex:)``.
-            rollback: { [self] in
-                // The reset restores the bound identity's provider. Once the
-                // account has left, that provider is nobody's or the next
-                // account's, and is not rolled back for this commit.
-                guard bound.isCurrent else { return }
-                try resetGroupToDurableSnapshot(groupIdHex: groupIdHex)
-            },
-            publish: { [self] prepared, signerN in
-                let commitPublish: PublishResult
-                do {
-                    commitPublish = try await dsClient.publishGroup(
-                        groupId: record.groupId,
-                        payload: prepared.commit,
-                        auth: DsAuth(signer: signerN)
-                    )
-                } catch {
-                    throw ChatError.wrapped("DS publishGroup (remove-member commit) failed", underlying: error)
-                }
-                // As in the add path (ADR-0040 re-publishes it).
+            stagedSigner: { [self] in try stagedDsSigner(record: record, identity: identity) },
+            commit: { [self] prepared, next, proof in
                 try requireCommitRegion(bound)
-                chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: commitPublish.id)
-                ackCommitBestEffort(entryId: prepared.entryId, commitMessageId: commitPublish.id)
-                return commitPublish
+                do {
+                    return try await commitNextEpoch(
+                        record: record, groupIdHex: groupIdHex, next: next, proof: proof,
+                        row: prepared.commit, evictedAccountKeys: evicted)
+                } catch {
+                    throw ChatError.wrapped("DS commit (remove-member) failed", underlying: error)
+                }
+            },
+            merge: { [self] prepared, answer in
+                try mergeStagedDirectCommit(
+                    record: record, groupIdHex: groupIdHex, identity: identity,
+                    entryId: prepared.entryId, answer: answer, welcomeOwed: false, bound: bound)
+            },
+            abandon: { [self] in
+                guard bound.isCurrent else { return }
+                try abandonStagedDirectCommit(record: record, identity: identity)
+            },
+            discard: { [self] prepared in
+                discardCommitEntry(entryId: prepared.entryId, bound: bound)
+            },
+            publish: { [self] prepared, answer in
+                ackCommitBestEffort(entryId: prepared.entryId, commitMessageId: answer.id)
+                return answer
             }
         ).run()
         state = state.with(threads: buildThreadList())
@@ -6482,9 +6451,23 @@ public final class ChatRepository: ObservableObject {
     @discardableResult
     public func sweepIfCommitter(groupIdHex: String) async -> SweepOutcome {
         // A group with no role table has no committer to be. Short-circuit
-        // before taking the lock, so the poll tail costs nothing at all there.
+        // before taking the lock, so the poll tail costs nothing at all there,
+        // unless (ADR-0081) a staged direct commit owes a verdict: one whose
+        // send got no answer is finished here, at the tail of every poll.
         guard usesProposalPath(groupIdHex: groupIdHex) else {
-            return .notCommitter(rank: nil)
+            guard let record = groups[groupIdHex],
+                  (try? record.group.hasStagedSweep()) == true else {
+                return .notCommitter(rank: nil)
+            }
+            do {
+                return try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+                    guard let record = groups[groupIdHex] else { return .notCommitter(rank: nil) }
+                    return try await resolveOwedVerdict(sweepPorts(record: record, groupIdHex: groupIdHex))
+                }
+            } catch {
+                NSLog("ADR-0081: a staged direct commit is still owed: \(error)")
+                return .unresolved
+            }
         }
         guard let record = groups[groupIdHex] else { return .notCommitter(rank: nil) }
         let before = PushGroupRouting.memberSignatureKeys(group: record.group)
@@ -6775,53 +6758,46 @@ public final class ChatRepository: ObservableObject {
                         SweepJournalRow(id: $0.id, payload: $0.payload, createdAt: $0.createdAt)
                     }
                 },
-                // A staged sweep leaves the group at N, so this signs under N —
-                // one of the two write epochs once N+1 is registered.
-                publishGroup: { [weak self] bytes in
-                    guard let self, bound.isCurrent else { throw StaleBindingError() }
-                    return try await self.dsClient.publishGroup(
-                        groupId: record.groupId, payload: bytes,
-                        auth: self.dsAuth(groupIdHex: groupIdHex)).id
-                },
-                publishMailbox: { [weak self] target, bytes in
-                    guard let self, bound.isCurrent else { throw StaleBindingError() }
-                    return try await self.publishSweepWelcome(
-                        target: target, bytes: bytes, record: record, groupIdHex: groupIdHex)
-                },
-                // ADR-0053 point 3, staged shape — register the epoch the staged
-                // sweep moves to (`dsStagedAccessSigner`), proven under the
-                // epoch the group still sits at, before the commit is published.
-                registerStagedEpoch: { [weak self] in
+                // ADR-0081 decision 1 — the staged commit and the registration
+                // of the epoch it moves to (`dsStagedAccessSigner`) in one
+                // request, proven under the epoch the group still sits at.
+                commitStaged: { [weak self] bytes in
                     guard let self, bound.isCurrent, let identity = self.canonicalIdentity else {
-                        throw ChatError.argument("ChatRepository not bootstrapped — cannot register")
+                        throw ChatError.argument("ChatRepository not bootstrapped — cannot commit")
                     }
                     guard let signerN1 = try record.group.dsStagedAccessSigner(identity: identity) else {
-                        throw ChatError.argument("no staged sweep to register an epoch for")
+                        throw ChatError.argument("no staged sweep to commit")
                     }
+                    let proof = try record.group.dsAccessSigner(identity: identity)
                     // The staged sweep has not merged, so the group is still at
-                    // N: the owner's claim (once per session) names N, and only
-                    // then is N+1 registered.
+                    // N: the owner's claim (once per session) names N.
                     await self.ensureOwnerClaimOnOpen(groupIdHex: groupIdHex)
                     try bound.require()
                     let epochN = (try? record.group.epoch()) ?? 0
                     do {
-                        try await self.registerNextEpoch(
-                            record: record, groupIdHex: groupIdHex, next: signerN1,
-                            evictedAccountKeys: record.stagedEvictedAccountKeys)
+                        let answer = try await self.commitNextEpoch(
+                            record: record, groupIdHex: groupIdHex, next: signerN1, proof: proof,
+                            row: bytes, evictedAccountKeys: record.stagedEvictedAccountKeys)
                         try bound.require()
                         self.sweepRegistrationBackoff[groupIdHex] = nil
+                        return answer.id
                     } catch {
                         if bound.isCurrent, SweepRegistrationBackoff.appliesTo(error) {
                             let next = SweepRegistrationBackoff.afterRefusal(
                                 self.sweepRegistrationBackoff[groupIdHex],
                                 nowMs: Self.nowMs(), epoch: epochN)
                             self.sweepRegistrationBackoff[groupIdHex] = next
-                            NSLog("ADR-0057: sweep epoch registration refused (%@); next attempt in %lld s",
+                            NSLog("ADR-0057: sweep commit refused (%@); next attempt in %lld s",
                                   String(describing: error),
                                   SweepRegistrationBackoff.delayMs(failures: next.failures) / 1000)
                         }
                         throw error
                     }
+                },
+                publishMailbox: { [weak self] target, bytes in
+                    guard let self, bound.isCurrent else { throw StaleBindingError() }
+                    return try await self.publishSweepWelcome(
+                        target: target, bytes: bytes, record: record, groupIdHex: groupIdHex)
                 },
                 // ADR-0057 obligation 5 — no root and no registrar seed: this
                 // device cannot register the next epoch, so it never stages.
@@ -6980,6 +6956,12 @@ public final class ChatRepository: ObservableObject {
                     )
                 }
                 try self.persistSnapshotDurableOrThrow()
+            },
+            // ADR-0081 — a 409 is a lost epoch, a 400 / 401 / 403 a refusal;
+            // anything else (the DS not reached) leaves the sweep staged.
+            classifyCommitFailure: { error in
+                if (error as? DsStatementError) == .conflict { return .lost }
+                return SweepRegistrationBackoff.appliesTo(error) ? .refused : .unknown
             }
         )
     }
@@ -7793,20 +7775,25 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// ADR-0057 obligation 5 — register the epoch a commit moves to, BEFORE
-    /// the commit is published, with this device's root or registrar key.
+    /// ADR-0081 decision 1 over ADR-0057 obligation 5 — register the epoch a
+    /// commit moves to with this device's root or registrar key AND append the
+    /// commit row, in one request (`POST .../commit`) proven by `proof`, the
+    /// key of the epoch the commit leaves.
     /// `evictedAccountKeys` are the accounts the commit removes; their
     /// registrar keys are revoked in the same statement — derived by the root,
     /// read from the owner's seed envelopes by an admin (strictly lower ranks
     /// only, see ``JournalOwnership/revokeList(authority:evictedAccountKeys:registrarPublicKey:knownRegistrar:equalOrHigherAccounts:)``).
-    /// Throws: a device with no authority, or a refused registration, aborts
-    /// the commit.
-    private func registerNextEpoch(
+    /// Throws: a device with no authority, or a refused commit, aborts it
+    /// (``DsStatementError/conflict`` when another commit owns the epoch).
+    @discardableResult
+    private func commitNextEpoch(
         record: GroupRecord,
         groupIdHex: String,
         next: DsGroupSigner,
+        proof: DsRequestSigner,
+        row: Data,
         evictedAccountKeys: [Data] = []
-    ) async throws {
+    ) async throws -> DsCommitAnswer {
         guard let authority = journalAuthority(record: record, groupIdHex: groupIdHex) else {
             throw ChatError.argument(
                 "this device holds neither the journal root nor a registrar seed — cannot commit")
@@ -7831,14 +7818,16 @@ public final class ChatRepository: ObservableObject {
             registrarPublicKey: { self.registrarPublicKey(groupId: record.groupId, accountKey: $0) },
             knownRegistrar: { known[$0] },
             equalOrHigherAccounts: equalOrHigher)
-        try await JournalOwnership.registerEpoch(
+        let answer = try await JournalOwnership.commitEpoch(
             authority: authority,
             journalId: record.groupId,
             epoch: next.epoch(),
             epochKey: next.verifyingKey(),
             revoke: revoke,
+            row: row,
+            proof: proof,
             ds: dsClient,
-            // Second security pass, finding 1 — an Append 409: the commit is
+            // Second security pass, finding 1 — a 409: the commit is
             // abandoned by the throw (never a Replace here); an owner or admin
             // schedules the repair check at the epoch it is at.
             onConflict: { [weak self] current in
@@ -7851,6 +7840,7 @@ public final class ChatRepository: ObservableObject {
         // The signer memory is the bound session's (``wipeInMemoryState()``).
         try bound.require()
         dsSigners.observe(journal: groupIdHex, signer: next)
+        return answer
     }
 
     /// The accounts the leaves in `removedLeaves` belong to, when every leaf of
@@ -8823,6 +8813,56 @@ public final class ChatRepository: ObservableObject {
 
     // MARK: - ADR-0040 (G-35) durable pending-commit outbox
 
+    /// ADR-0081 — the signer of the epoch a staged direct commit moves to.
+    private func stagedDsSigner(record: GroupRecord, identity: Identity) throws -> DsGroupSigner {
+        guard let next = try record.group.dsStagedAccessSigner(identity: identity) else {
+            throw ChatError.argument("no staged commit to register")
+        }
+        return next
+    }
+
+    /// ADR-0081 — the DS took a staged direct commit: re-arm the echo filter,
+    /// merge, and persist the merge FAIL-CLOSED. A failed write throws with
+    /// the merge standing in memory; the durable N + staged commit + entry
+    /// are what a restart finishes (the re-send answers the original row). A
+    /// Welcome still owed is marked so ``resolveOwedWelcomes(_:)`` retries it.
+    private func mergeStagedDirectCommit(
+        record: GroupRecord,
+        groupIdHex: String,
+        identity: Identity,
+        entryId: String,
+        answer: DsCommitAnswer,
+        welcomeOwed: Bool,
+        bound: BindingEpoch.Captured
+    ) throws {
+        chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: answer.id)
+        try requireCommitRegion(bound)
+        _ = try record.group.mergeStagedSweep(identity: identity)
+        try persistSnapshotDurableOrThrow()
+        if welcomeOwed, let accountIdB64 = currentAccountIdB64 {
+            do {
+                try commitOutbox.markWelcomesOwed(
+                    accountIdB64: accountIdB64, id: entryId, commitMessageId: answer.id)
+            } catch {
+                NSLog("ADR-0081: the owed Welcome was not recorded")
+            }
+        }
+    }
+
+    /// ADR-0081 — abandon a staged direct commit (per group,
+    /// `clear_pending_commit`) and persist that best effort.
+    private func abandonStagedDirectCommit(record: GroupRecord, identity: Identity) throws {
+        _ = try record.group.abandonStagedSweep(identity: identity)
+        persistSnapshotBestEffort()
+    }
+
+    /// Drop the outbox entry of a commit that is not and will not be on the
+    /// DS (best effort; an orphan is dropped by the owed-verdict path).
+    private func discardCommitEntry(entryId: String, bound: BindingEpoch.Captured) {
+        guard bound.isCurrent, let accountIdB64 = currentAccountIdB64 else { return }
+        commitOutbox.deleteEntryBestEffort(accountIdB64: accountIdB64, id: entryId)
+    }
+
     /// Persist the pending-commit outbox entry AND the N+1 MLS snapshot durably,
     /// FAIL-CLOSED, BEFORE any publish — the load-bearing step of every
     /// group-membership commit path.
@@ -9112,9 +9152,11 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// Re-publish one un-acked entry idempotently + re-arm the echo filter, then
-    /// ack. A re-publish failure (offline / DS down) leaves the entry un-acked
-    /// for the next sweep — safe. A corrupt (undecodable) commit is dropped.
+    /// Deliver what an un-acked direct-commit entry still owes (its Welcome),
+    /// then ack. Since ADR-0081 the entry is written after the commit route
+    /// took the commit, so the commit itself is never re-sent. A failure
+    /// (offline / DS down) leaves the entry un-acked for the next sweep — safe.
+    /// A corrupt (undecodable) entry is dropped.
     private func republishPendingCommit(
         record: GroupRecord,
         groupIdHex: String,
@@ -9128,24 +9170,11 @@ public final class ChatRepository: ObservableObject {
         }
         let bound = binding.capture()
         do {
-            // ADR-0053 — the device is durably at N+1, whose key was registered
-            // before the entry was written; sign under it (with the usual
-            // retries).
-            let commitPub = try await dsClient.publishGroup(
-                groupId: record.groupId,
-                payload: commitBytes,
-                auth: dsAuth(groupIdHex: groupIdHex)
-            )
-            // The entry stays un-acked for the account's next session once
-            // the account has left: the echo filter, the reach grants the
-            // Welcome is authorised with and the outbox the ack is filed in
-            // are by then the next account's.
-            try bound.require()
-            // Echo re-arm: the device is durably at N+1, so feeding its own
-            // re-fetched commit into `processIncoming` would raise
-            // `CannotDecryptOwnMessage`. Suppress it on the very next poll.
-            chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: commitPub.id)
-
+            // ADR-0081 — a direct commit's entry is written only after the
+            // commit route took the commit, so the commit is on the journal
+            // already and is never re-sent here; only the Welcome may still be
+            // owed. Its message id is not in the entry, so the ack carries none.
+            _ = commitBytes.count
             // ADR-0045 S7 — a direct-path second artifact is ALWAYS a mailbox
             // Welcome; since ADR-0053 no `WelcomeRendezvous` is written to a
             // group journal by any path.
@@ -9166,7 +9195,7 @@ public final class ChatRepository: ObservableObject {
             }
             ackCommitBestEffort(
                 entryId: entry.id,
-                commitMessageId: commitPub.id,
+                commitMessageId: nil,
                 secondMessageId: secondId
             )
         } catch {

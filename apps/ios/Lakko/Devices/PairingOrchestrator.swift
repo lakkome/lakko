@@ -233,7 +233,9 @@ public enum PairingOrchestrator {
                 identity: identity,
                 accountId: accountIdBytes
             )
-            DeviceGroupLifecycle.persistSnapshot(
+            // ADR-0081 decision 3 — fail-closed: a joined DeviceGroup that is
+            // not on disk is not reported as joined.
+            try DeviceGroupLifecycle.persistSnapshotOrThrow(
                 identity: identity,
                 accountIdB64: accountIdB64
             )
@@ -549,10 +551,19 @@ public enum PairingOrchestrator {
                 }
                 wipeDeviceSeed()
             }
-            DeviceGroupLifecycle.persistSnapshot(
-                identity: identity,
-                accountIdB64: accountIdB64
-            )
+            // ADR-0081 decision 3 — the write fails closed; this step has no
+            // caller to stop, so a failure is logged and the DeviceGroup is
+            // not on disk: the next start finds no state and rejoins through
+            // a sibling (decision 4) instead of running on a handle nothing
+            // persisted.
+            do {
+                try DeviceGroupLifecycle.persistSnapshotOrThrow(
+                    identity: identity,
+                    accountIdB64: accountIdB64
+                )
+            } catch {
+                NSLog("DeviceGroup snapshot (join by name) not persisted: %@", String(describing: error))
+            }
             if var sealed = historySealed {
                 historySealed = nil
                 do {
@@ -773,84 +784,57 @@ public enum PairingOrchestrator {
             wireBytes: scannedBytes,
             expectedLoginHandle: ownLoginHandle
         )
-        let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(
-            accountIdB64: accountIdB64
-        )
-        let ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
+        // ADR-0081 decision 2 — the Add goes through the DeviceGroup commit
+        // outbox: the entry (row, Welcome, N+1 snapshot) beside the N
+        // snapshot, the commit and the N+1 registration in one request, N+1
+        // made current, then the Welcome to the pairing RENDEZVOUS mailbox
+        // (unclaimed by design, ADR-0053 section 2). The bundles below are
+        // sealed on the same throwaway handle, at the post-add epoch, only
+        // once the commit landed.
+        let result = try await DeviceGroupCommits.commitChange(
             accountIdBytes: accountIdBytes,
             accountIdB64: accountIdB64,
-            deviceIdentitySeed: seed
-        )
-
-        let groupId = try ensured.group.groupId()
-        let ds = DsClient()
-        // ADR-0053 point 2 — claim-on-open (idempotent; also the claim of a
-        // DeviceGroup this flow just founded).
-        await DeviceGroupDsAccess.claim(
-            group: ensured.group, identity: ensured.identity, accountIdB64: accountIdB64, ds: ds)
-        // Second security pass, finding 3 — a DeviceGroup founded here whose
-        // claim did not land sends no Welcome.
-        try DeviceGroupDsAccess.requireFoundingClaim(group: ensured.group)
-
-        // ADR-0053 point 3 — the N+1 key is registered, proven under N, before
-        // the snapshot is written and anything is published; the commit then
-        // goes out signed under N.
-        _ = try await DeviceGroupDsAccess.directCommit(
-            group: ensured.group,
-            identity: ensured.identity,
-            accountIdB64: accountIdB64,
-            ds: ds,
-            create: {
-                try ensured.group.addDeviceFromWire(
+            build: { ensured in
+                let addition = try ensured.group.addDeviceFromWire(
                     identity: ensured.identity,
                     keyPackage: decoded.keyPackage
                 )
+                // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped;
+                // an add-device commit carries no attestation.
+                return DeviceGroupCommits.Built(
+                    kind: .add,
+                    row: DeviceGroupJournalEnvelope.encode(message: addition.commit, attestation: nil),
+                    welcome: addition.welcome,
+                    welcomeRendezvous: decoded.rendezvousPseudonym)
             },
-            prepare: { addition in
-                // G-7 — persist the advanced DeviceGroup snapshot BEFORE
-                // any publish. addDeviceFromWire already merged the pending
-                // commit, so the in-memory view is one epoch ahead; writing
-                // it to disk first closes the window where a crash between
-                // the publishes and the persist leaves the on-disk envelope
-                // an epoch behind (which would make the next launch try to
-                // add the same device twice). Fail closed: a write that did
-                // not land, or was refused because the session ended, stops
-                // the publish.
-                try DeviceGroupLifecycle.persistSnapshotOrThrow(
-                    identity: ensured.identity,
-                    accountIdB64: accountIdB64
-                )
-                return addition
-            },
-            publish: { addition, auth in
-                // The Welcome rides the pairing RENDEZVOUS mailbox, which stays
-                // unclaimed by design (ADR-0053 section 2): unsigned.
-                try await WelcomeCourier.publishWelcome(
-                    rendezvousPseudonym: decoded.rendezvousPseudonym,
-                    welcomeBytes: addition.welcome
-                )
-
-                // G-5 — broadcast the Commit to the DeviceGroup DS journal
-                // so any OTHER already-paired devices on this account
-                // advance to the new epoch; their DeviceGroup poll loop runs
-                // processIncoming on this row. MLS requires in-order epoch
-                // processing, so this is on the critical path (not
-                // best-effort) — a missed commit would permanently strand a
-                // third device. For the founder + first-pair case there is
-                // no other member, so the row is a harmless no-op (the
-                // joiner ratchets forward from the Welcome). Mirrors the
-                // DeviceRemoval.removeDeviceAt broadcast.
-                // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped; an
-                // add-device commit carries no attestation.
-                let envelope = DeviceGroupJournalEnvelope.encode(
-                    message: addition.commit,
-                    attestation: nil
-                )
-                _ = try await ds.publishGroup(groupId: groupId, payload: envelope, auth: auth)
-                return addition
+            after: { ensured in
+                await sendBundles(
+                    ensured: ensured, decoded: decoded, accountIdB64: accountIdB64, recovery: recovery)
             }
         )
+        guard let result, case .landed = result.outcome else {
+            // `nil` is not reachable (the build always commits); `.lost`: the
+            // DeviceGroup moved under this commit. The person scans again.
+            throw DeviceGroupCommits.Lost()
+        }
+        return ScanResult(
+            memberCount: 0,
+            newDeviceKey: try keyPackageSignatureKey(keyPackage: decoded.keyPackage),
+            keysSent: result.value ?? false
+        )
+    }
 
+    /// The bundles a pairing sends once its commit landed, sealed under the
+    /// post-add epoch of `ensured`: the history bundle, the recovery payload
+    /// and the state bundle. Each is best effort. Returns whether the
+    /// recovery payload (the keys) was sent.
+    @MainActor
+    private static func sendBundles(
+        ensured: DeviceGroupLifecycle.Ensured,
+        decoded: DecodedPairingQr,
+        accountIdB64: String,
+        recovery: ScanRecovery?
+    ) async -> Bool {
         // ADR-0060 section 7 — the setting and the reach-key versions reach
         // the new device from the sync runtime, which the caller reloads at the
         // post-add epoch (`reloadAfterLocalMembershipChange`): this handle
@@ -947,10 +931,6 @@ public enum PairingOrchestrator {
             NSLog("state bundle publish failed: %@", error.localizedDescription)
         }
 
-        return ScanResult(
-            memberCount: ensured.bootstrapped ? 2 : 0,
-            newDeviceKey: try keyPackageSignatureKey(keyPackage: decoded.keyPackage),
-            keysSent: keysSent
-        )
+        return keysSent
     }
 }

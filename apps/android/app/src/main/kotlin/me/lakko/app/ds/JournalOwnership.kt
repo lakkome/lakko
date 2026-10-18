@@ -52,13 +52,17 @@ public interface DsStatementSigning {
 
     public fun reset(journalId: ByteArray, epoch: ULong, epochKey: ByteArray): DsStatement
 
-    /** `access` in APPEND mode: accepted only at the journal's next epoch
-     *  (`409` otherwise). Every commit path registers with this. */
-    public fun registerEpoch(
+    /** ADR-0081 decision 1 — `commit`: an APPEND registration of [epoch]
+     *  (accepted only at the journal's next epoch, `409` otherwise) together
+     *  with the commit [row], sent as `POST .../commit` proven under epoch
+     *  `epoch - 1`. Every commit path sends this; since ADR-0081 (open
+     *  question 1, decided 2026-10-18) `access` refuses a plain Append. */
+    public fun commit(
         journalId: ByteArray,
         epoch: ULong,
         epochKey: ByteArray,
         revoke: List<ByteArray>,
+        row: ByteArray,
     ): DsStatement
 
     /** `access` in REPLACE mode (second security pass, finding 1): the repair
@@ -92,12 +96,13 @@ public class FfiDsStatementSigning(private val inner: DsStatementSignerInterface
     override fun reset(journalId: ByteArray, epoch: ULong, epochKey: ByteArray): DsStatement =
         inner.reset(journalId, epoch, epochKey, null as List<DsRegistrarEntry>?).let { DsStatement(it.path, it.bodyJson) }
 
-    override fun registerEpoch(
+    override fun commit(
         journalId: ByteArray,
         epoch: ULong,
         epochKey: ByteArray,
         revoke: List<ByteArray>,
-    ): DsStatement = inner.registerEpoch(journalId, epoch, epochKey, revoke).let { DsStatement(it.path, it.bodyJson) }
+        row: ByteArray,
+    ): DsStatement = inner.commit(journalId, epoch, epochKey, revoke, row).let { DsStatement(it.path, it.bodyJson) }
 
     override fun replaceEpoch(
         journalId: ByteArray,
@@ -206,25 +211,27 @@ public fun journalAuthorityKind(
 }
 
 /**
- * ADR-0057 — register the key of the epoch a commit moves to ([after], the
- * N+1 access signer, whose verifying key is what the server learns) with
- * [statements] (root or registrar), revoking [revoke] in the same step, BEFORE
- * the commit is persisted or published; hand back [before] (N), which signs
- * the commit POST itself.
+ * ADR-0081 decision 1 over ADR-0057 — register the key of the epoch a commit
+ * moves to ([after], the N+1 access signer, whose verifying key is what the
+ * server learns) with [statements] (root or registrar), revoking [revoke] in
+ * the same step, AND append the commit [row], in ONE request (`POST
+ * .../commit`) proven by [before] (N). Returns what the commit route answered.
  *
- * Throws [DsRegistrationUnavailable] (and [put] is never called) when either
+ * Throws [DsRegistrationUnavailable] (and [post] is never called) when either
  * access signer is missing, the commit does not move the epoch by exactly one,
  * or there is no statement signer — the last is the ordinary state of a plain
- * member, which may not commit at all. The caller aborts on ANY throw.
+ * member, which may not commit at all. Throws [DsCommitConflictError] when
+ * another commit owns the epoch. The caller aborts on ANY throw.
  */
-public suspend fun registerEpochBeforePublish(
+public suspend fun commitEpochWith(
     journalId: ByteArray,
     before: DsJournalSigner?,
     after: DsJournalSigner?,
     statements: DsStatementSigning?,
     revoke: List<ByteArray>,
-    put: suspend (make: () -> DsStatement) -> Unit,
-): DsJournalSigner {
+    row: ByteArray,
+    post: suspend (make: () -> DsStatement, proof: DsJournalSigner) -> DsCommitAnswer,
+): DsCommitAnswer {
     val current = before
         ?: throw DsRegistrationUnavailable("no access signer for the epoch the commit leaves")
     val next = after
@@ -236,9 +243,9 @@ public suspend fun registerEpochBeforePublish(
     }
     val signer = statements
         ?: throw DsRegistrationUnavailable("this account holds neither the root nor a registrar key")
+    if (row.isEmpty()) throw DsRegistrationUnavailable("a commit row must be non-empty")
     val key = next.verifyingKey
-    put { signer.registerEpoch(journalId, next.epoch, key, revoke) }
-    return current
+    return post({ signer.commit(journalId, next.epoch, key, revoke, row) }, current)
 }
 
 // -----------------------------------------------------------------

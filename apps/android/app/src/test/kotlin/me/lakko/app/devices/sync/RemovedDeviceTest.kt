@@ -54,9 +54,9 @@ class RemovedDeviceTest {
 
     @Test
     fun the_fork_repair_runs_only_on_a_group_known_to_be_active() {
-        assertTrue(RemovedDevice.forkRepairAllowed(RemovedDevice.readActive(active)))
-        assertFalse(RemovedDevice.forkRepairAllowed(RemovedDevice.readActive(inactive)))
-        assertFalse(RemovedDevice.forkRepairAllowed(RemovedDevice.readActive(unreadable)))
+        assertTrue(RemovedDevice.rejoinAllowed(RemovedDevice.readActive(active)))
+        assertFalse(RemovedDevice.rejoinAllowed(RemovedDevice.readActive(inactive)))
+        assertFalse(RemovedDevice.rejoinAllowed(RemovedDevice.readActive(unreadable)))
     }
 
     @Test

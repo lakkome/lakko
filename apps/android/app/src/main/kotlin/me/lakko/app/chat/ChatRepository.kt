@@ -2921,72 +2921,44 @@ public class ChatRepository(
                     }
                 }
                 val signerBeforeCommit = currentJournalSigner(groupIdHex)
-                val rosterBeforeCommit = rosterLeavesOrNull(record.group)
+                // ADR-0081 — STAGED: the group stays at N until the DS took it.
                 val commitBytes = try {
-                    record.group.setGroupRoles(identity, table.owner, admins)
+                    record.group.stageSetGroupRoles(identity, table.owner, admins)
                 } catch (e: FfiException) {
                     throw ChatError("setGroupRoles failed", e)
                 }
-                // ADR-0053 client contract point 3 — the Delivery Service learns the
-                // key of epoch N+1, proven under N's, BEFORE the outbox entry is
-                // written or the commit published. Held inside the provider lock on
-                // purpose: the group is eager-merged to an UN-published N+1, and
-                // releasing the lock here would let a sibling group's whole-provider
-                // snapshot capture it (the ADR-0040 hazard). The PUT is bounded by
-                // the DS client's request timeout; a refusal resets the group to the
-                // durable N and aborts, exactly as a failed outbox write does.
-                val commitSigner = registerNextEpochOrReset(
-                    groupIdHex,
-                    record.groupId,
-                    signerBeforeCommit,
-                    rosterBeforeCommit,
-                )
-                // ADR-0040 (G-35) — durable pending-commit outbox: persist the entry
-                // (commit only; a role change has no Welcome) THEN the N+1 snapshot,
-                // BOTH fail-closed, BEFORE any publish. A throw aborts the op (no
-                // publish); the restart sweep reconciles the crash window. See
-                // [sweepPendingCommits].
-                //
-                // ADR-0040 F1 residual (lakko-security) — reset-guard the pre-persist
-                // entry build: `requireAccountId` / `group.epoch()` can throw AFTER the
-                // eager merge (N -> N+1) and BEFORE runCrashSafeCommit, which would else
-                // strand the in-memory group at the un-published N+1. No outbox entry
-                // exists yet -> reset the group DIRECTLY. See [withPrePersistReset].
+                // The entry build can throw (`requireAccountId`, `group.epoch()`):
+                // abandon the staged commit then (ADR-0040 F1, per group).
                 val entry = withPrePersistReset(
-                    reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
+                    reset = { abandonStagedDirect(record, groupIdHex, identity, entryId = null) },
                 ) {
                     PendingCommitEntry(
                         id = newOutboxEntryId(),
                         accountId = requireAccountId(),
                         groupId = outboxB64(record.groupId),
+                        // The epoch the staged commit was built against (N).
                         targetEpoch = record.group.epoch().toString(),
                         commitB64 = outboxB64(commitBytes),
+                        isSweep = true,
                     )
                 }
-                prepareCrashSafeCommit(
-                    persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
-                    persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
-                    // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
-                    // reset the eager-merged in-memory group (N+1) back to the durable
-                    // snapshot (N) so a subsequent same-session commit builds on N, not
-                    // the unpublished N+1. Fires ONLY on the persist-abort, never on a
-                    // publish failure (that commit is durably recorded — the sweep
-                    // re-publishes it). See [onCommitPersistAbort].
-                    onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
+                // ADR-0081 over ADR-0040 — the staged commit is recorded (entry +
+                // the snapshot carrying it, fail-closed), then the commit row and
+                // the N+1 registration go out in ONE request proven under N, then
+                // the merge ([commitStagedDirect]). A lost commit is abandoned; an
+                // unanswered one stays recorded and staged for the owed verdict.
+                val committed = commitStagedDirect(
+                    record, groupIdHex, identity, signerBeforeCommit, entry,
+                    row = commitBytes, removedLeaves = emptyList(), welcomeOwed = false,
                 )
                 // Returning normally means BOTH durable writes landed, so the
                 // commit is now safe to put on the wire — the ADR-0040 §2 ordering,
                 // unchanged, just expressed across the lock release.
                 suspend {
-                    val commitPublish = try {
-                        dsClient.publishGroup(record.groupId, commitBytes, signer = commitSigner)
-                    } catch (e: Throwable) {
-                        throw ChatError(dsErrorMessage(e, "DS publishGroup (role change) failed"), e)
-                    }
+                    val commitPublish = committed
                     // Published for the account that asked. What follows files the row
                     // (echo filter, retry records, lists) and is that account's alone.
                     ensureSession()
-                    chatClient.markOwnPublishedCommit(groupIdHex, commitPublish.id)
                     ackCommitBestEffort(entry.id, commitPublish.id, null)
                     publishThreadList()
                     MembershipOutcome.Committed(commitPublish.id, null) as MembershipOutcome
@@ -3317,28 +3289,13 @@ public class ChatRepository(
                         MembershipOutcome.Proposed(publish.id) as MembershipOutcome?
                     }
                 }
-                // 1. create-commit — eager-merges epoch N -> N+1 in the in-memory provider.
+                // 1. create-commit — STAGED (ADR-0081): the group stays at N.
                 val signerBeforeCommit = currentJournalSigner(groupIdHex)
-                val rosterBeforeCommit = rosterLeavesOrNull(record.group)
                 val addResult = try {
-                    record.group.addMemberFromWire(identity, keyPackageBytes)
+                    record.group.stageAddMemberFromWire(identity, keyPackageBytes)
                 } catch (e: FfiException) {
                     throw ChatError("addMemberFromWire failed", e)
                 }
-                // ADR-0053 client contract point 3 — the Delivery Service learns the
-                // key of epoch N+1, proven under N's, BEFORE the outbox entry is
-                // written or the commit published. Held inside the provider lock on
-                // purpose: the group is eager-merged to an UN-published N+1, and
-                // releasing the lock here would let a sibling group's whole-provider
-                // snapshot capture it (the ADR-0040 hazard). The PUT is bounded by
-                // the DS client's request timeout; a refusal resets the group to the
-                // durable N and aborts, exactly as a failed outbox write does.
-                val commitSigner = registerNextEpochOrReset(
-                    groupIdHex,
-                    record.groupId,
-                    signerBeforeCommit,
-                    rosterBeforeCommit,
-                )
                 // Compute the second artifact (Welcome) + its mailbox destination
                 // UP-FRONT so the outbox entry holds the EXACT bytes the restart
                 // sweep will re-publish (no drift). The Welcome ships to the new
@@ -3357,7 +3314,7 @@ public class ChatRepository(
                 // un-published N+1. No outbox entry exists yet -> reset the group
                 // DIRECTLY. See [withPrePersistReset].
                 val (welcomeEnvelope, recipientPseudonym, entry) = withPrePersistReset(
-                    reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
+                    reset = { abandonStagedDirect(record, groupIdHex, identity, entryId = null) },
                 ) {
                     // ADR-0078: the raw Welcome, sealed per mailbox when written.
                     val welcomeEnvelope = addResult.welcome
@@ -3381,34 +3338,33 @@ public class ChatRepository(
                         secondArtifactKind = SecondArtifactKind.WELCOME,
                         secondArtifactMailboxB64 = outboxB64(recipientPseudonym),
                         secondArtifactAccountKeyB64 = outboxB64(recipientAccount),
+                        // ADR-0081 — owned by `resolveOwedVerdict` until merged;
+                        // the leaf key addresses the Welcome on a restart.
+                        isSweep = true,
+                        sweepWelcomeLeafKeysB64 = listOf(
+                            outboxB64(uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(keyPackageBytes)),
+                        ),
                     )
                     Triple(welcomeEnvelope, recipientPseudonym, entry)
                 }
-                prepareCrashSafeCommit(
-                    persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
-                    persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
-                    // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
-                    // reset the eager-merged in-memory group (N+1) back to the durable
-                    // snapshot (N) so a subsequent same-session commit builds on N, not
-                    // the unpublished N+1. Fires ONLY on the persist-abort, never on a
-                    // publish failure (that commit is durably recorded — the sweep
-                    // re-publishes it). See [onCommitPersistAbort].
-                    onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
+                // ADR-0081 over ADR-0040 — the staged commit is recorded (entry +
+                // the snapshot carrying it, fail-closed), then the commit row and
+                // the N+1 registration go out in ONE request proven under N, then
+                // the merge ([commitStagedDirect]). A lost commit is abandoned; an
+                // unanswered one stays recorded and staged for the owed verdict.
+                val committed = commitStagedDirect(
+                    record, groupIdHex, identity, signerBeforeCommit, entry,
+                    row = addResult.commit, removedLeaves = emptyList(), welcomeOwed = true,
                 )
                 // Returning normally means BOTH durable writes landed, so the
                 // commit is now safe to put on the wire — the ADR-0040 §2 ordering,
                 // unchanged, just expressed across the lock release.
                 suspend {
                     // 3. publish artifact 1 (commit) then artifact 2 (Welcome).
-                    val commitPublish = try {
-                        dsClient.publishGroup(record.groupId, addResult.commit, signer = commitSigner)
-                    } catch (e: Throwable) {
-                        throw ChatError(dsErrorMessage(e, "DS publishGroup (add-member commit) failed"), e)
-                    }
+                    val commitPublish = committed
                     // Published for the account that asked. What follows files the row
                     // (echo filter, retry records, lists) and is that account's alone.
                     ensureSession()
-                    chatClient.markOwnPublishedCommit(groupIdHex, commitPublish.id)
                     val welcomePublish = try {
                         publishWelcomeToMailbox(recipientPseudonym, welcomeEnvelope, groupIdHex, accountIdHint = accountId)
                     } catch (e: Throwable) {
@@ -3605,38 +3561,15 @@ public class ChatRepository(
                     }
                 }
                 val signerBeforeCommit = currentJournalSigner(groupIdHex)
-                val rosterBeforeCommit = rosterLeavesOrNull(record.group)
+                // ADR-0081 — STAGED: the group stays at N until the DS took it.
                 val commitBytes = try {
-                    record.group.removeMember(identity, leafIndex)
+                    record.group.stageRemoveMember(identity, leafIndex)
                 } catch (e: FfiException) {
                     throw ChatError("removeMember failed", e)
                 }
-                // ADR-0053 client contract point 3 — the Delivery Service learns the
-                // key of epoch N+1, proven under N's, BEFORE the outbox entry is
-                // written or the commit published. Held inside the provider lock on
-                // purpose: the group is eager-merged to an UN-published N+1, and
-                // releasing the lock here would let a sibling group's whole-provider
-                // snapshot capture it (the ADR-0040 hazard). The PUT is bounded by
-                // the DS client's request timeout; a refusal resets the group to the
-                // durable N and aborts, exactly as a failed outbox write does.
-                val commitSigner = registerNextEpochOrReset(
-                    groupIdHex,
-                    record.groupId,
-                    signerBeforeCommit,
-                    rosterBeforeCommit,
-                )
-                // ADR-0040 (G-35) — durable pending-commit outbox: persist the entry
-                // (commit only; a remove has no Welcome) THEN the N+1 snapshot, BOTH
-                // fail-closed, BEFORE the publish. A throw aborts the op (no publish);
-                // the restart sweep reconciles the crash window. See [sweepPendingCommits].
-                //
-                // ADR-0040 F1 residual (lakko-security) — reset-guard the pre-persist
-                // entry build: `requireAccountId` / `group.epoch()` can throw AFTER the
-                // eager merge (N -> N+1) and BEFORE runCrashSafeCommit, which would else
-                // strand the in-memory group at the un-published N+1. No outbox entry
-                // exists yet -> reset the group DIRECTLY. See [withPrePersistReset].
+                // The entry build can throw: abandon the staged commit then.
                 val entry = withPrePersistReset(
-                    reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) },
+                    reset = { abandonStagedDirect(record, groupIdHex, identity, entryId = null) },
                 ) {
                     PendingCommitEntry(
                         id = newOutboxEntryId(),
@@ -3644,18 +3577,17 @@ public class ChatRepository(
                         groupId = outboxB64(record.groupId),
                         targetEpoch = record.group.epoch().toString(),
                         commitB64 = outboxB64(commitBytes),
+                        isSweep = true,
                     )
                 }
-                prepareCrashSafeCommit(
-                    persistEntryOrThrow = { CommitOutboxStore.putEntry(applicationContext, entry) },
-                    persistSnapshotOrThrow = { persistSnapshotDurableOrThrow() },
-                    // ADR-0040 F1 (lakko-security) — on a fail-closed persist-abort,
-                    // reset the eager-merged in-memory group (N+1) back to the durable
-                    // snapshot (N) so a subsequent same-session commit builds on N, not
-                    // the unpublished N+1. Fires ONLY on the persist-abort, never on a
-                    // publish failure (that commit is durably recorded — the sweep
-                    // re-publishes it). See [onCommitPersistAbort].
-                    onPersistAbort = { onCommitPersistAbort(groupIdHex, entry.id) },
+                // ADR-0081 over ADR-0040 — the staged commit is recorded (entry +
+                // the snapshot carrying it, fail-closed), then the commit row and
+                // the N+1 registration go out in ONE request proven under N, then
+                // the merge ([commitStagedDirect]). A lost commit is abandoned; an
+                // unanswered one stays recorded and staged for the owed verdict.
+                val committed = commitStagedDirect(
+                    record, groupIdHex, identity, signerBeforeCommit, entry,
+                    row = commitBytes, removedLeaves = listOf(leafIndex), welcomeOwed = false,
                 )
                 // Returning normally means BOTH durable writes landed, so the
                 // commit is now safe to put on the wire — the ADR-0040 §2 ordering,
@@ -3664,15 +3596,10 @@ public class ChatRepository(
                 // [GroupPushRouting.publishRemoveThenRotate] only after THIS
                 // function returns, i.e. still strictly after the publish.
                 suspend {
-                    val commitPublish = try {
-                        dsClient.publishGroup(record.groupId, commitBytes, signer = commitSigner)
-                    } catch (e: Throwable) {
-                        throw ChatError(dsErrorMessage(e, "DS publishGroup (remove-member commit) failed"), e)
-                    }
+                    val commitPublish = committed
                     // Published for the account that asked. What follows files the row
                     // (echo filter, retry records, lists) and is that account's alone.
                     ensureSession()
-                    chatClient.markOwnPublishedCommit(groupIdHex, commitPublish.id)
                     ackCommitBestEffort(entry.id, commitPublish.id, null)
                     publishThreadList()
                     MembershipOutcome.Committed(commitPublish.id, null) as MembershipOutcome
@@ -10498,55 +10425,133 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0057 obligation 5 for a DIRECT (eager-merged) commit: register epoch
-     * N+1's key with this account's root or registrar signer, revoking the
-     * registrar keys of the accounts the commit evicted ([rosterBefore] against
-     * the post-merge roster, owner only), and return the N signer the commit
-     * POST is signed with. On any failure — no signer at all included — the
-     * group is reset to its durable snapshot and the commit aborts: no outbox
-     * entry, no publish.
+     * ADR-0081 over ADR-0040 for a DIRECT commit (a group with no role table).
+     * The commit was STAGED by the caller, so the group is still at N:
      *
-     * MUST run inside the provider lock, between the create-commit and the
-     * outbox write.
+     *  1. the [entry] (`isSweep = true`, owned by [resolveOwedVerdict] until it
+     *     merges) and the snapshot carrying the staged commit are written,
+     *     FAIL-CLOSED: a failure abandons the staged commit and throws, so
+     *     nothing was sent;
+     *  2. the commit [row] and the N+1 key (from the staged commit) go out in
+     *     one `POST .../commit` proven by [before] (N), revoking the registrar
+     *     keys of the accounts [removedLeaves] evicts (owner only);
+     *  3. on an answer the staged commit is merged and the merge persisted,
+     *     fail-closed (a failed write throws with the merge standing; the
+     *     durable N + staged + entry is what a restart finishes: the re-send
+     *     answers the original row). A Welcome still owed ([welcomeOwed]) is
+     *     marked so [resolveOwedWelcomes] retries it;
+     *     on a LOST commit (409, a definitive refusal) it is abandoned and the
+     *     entry dropped; on anything else (the network) the entry and the
+     *     staged commit stay for the next pass (the owed verdict at the next
+     *     open or sweep re-sends the same row).
+     *
+     * Runs inside the provider lock (the caller's), so no sibling snapshot can
+     * interleave the record. No retry and no reset here.
      */
-    private suspend fun registerNextEpochOrReset(
+    private suspend fun commitStagedDirect(
+        record: GroupRecord,
         groupIdHex: String,
-        groupId: ByteArray,
+        identity: Identity,
         before: DsJournalSigner?,
-        rosterBefore: List<me.lakko.app.ds.RosterLeaf>? = null,
-    ): DsJournalSigner =
+        entry: PendingCommitEntry,
+        row: ByteArray,
+        removedLeaves: List<UInt>,
+        welcomeOwed: Boolean,
+    ): me.lakko.app.ds.DsCommitAnswer {
         try {
-            registerOrReset(reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) }) {
-                val record = groups[groupIdHex]
-                    ?: throw me.lakko.app.ds.DsRegistrationUnavailable("no group record")
-                val after = rosterLeavesOrNull(record.group).orEmpty().map { it.accountKey }
-                val evictees = me.lakko.app.ds.evictedBetween(
-                    before = rosterBefore.orEmpty().map { it.accountKey },
-                    after = after,
-                )
-                val revoke = revokeKeysFor(record, groupIdHex, evictees)
-                val rank = journalRepairRankFor(record, groupIdHex)
-                noteAppendConflict(groupIdHex, groupId, before, rank) {
-                    me.lakko.app.ds.registerEpochBeforePublish(
-                        journalId = groupId,
-                        before = before,
-                        after = currentJournalSigner(groupIdHex),
-                        statements = commitStatementSignerFor(record, groupIdHex),
-                        revoke = revoke,
-                        put = { make -> dsClient.putStatement(make) },
-                    )
-                }.also { forgetRevokedAppointments(groupIdHex, evictees, revoke) }
+            CommitOutboxStore.putEntry(applicationContext, entry)
+            persistSnapshotDurableOrThrow()
+        } catch (cause: Throwable) {
+            withContext(kotlinx.coroutines.NonCancellable) {
+                abandonStagedDirect(record, groupIdHex, identity, entry.id)
             }
+            if (cause is kotlinx.coroutines.CancellationException || cause is ChatError) throw cause
+            throw ChatError("The group change could not be recorded on this device. Nothing was sent.", cause)
+        }
+        val answer = try {
+            val next = record.group.dsStagedAccessSigner(identity)?.let(::FfiDsJournalSigner)
+            val evictees = me.lakko.app.ds.evictedAccounts(
+                before = rosterLeavesOrNull(record.group).orEmpty(),
+                removedLeaves = removedLeaves,
+            )
+            val revoke = revokeKeysFor(record, groupIdHex, evictees)
+            val rank = journalRepairRankFor(record, groupIdHex)
+            noteAppendConflict(groupIdHex, record.groupId, before, rank) {
+                me.lakko.app.ds.commitEpochWith(
+                    journalId = record.groupId,
+                    before = before,
+                    after = next,
+                    statements = commitStatementSignerFor(record, groupIdHex),
+                    revoke = revoke,
+                    row = row,
+                    post = { make, proof -> dsClient.postCommit(make, proof) },
+                )
+            }.also { forgetRevokedAppointments(groupIdHex, evictees, revoke) }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            // Unanswered: the entry and the staged commit stay owed.
+            throw cause
+        } catch (cause: Throwable) {
+            if (cause is me.lakko.app.ds.DsCommitConflictError ||
+                SweepRegistrationBackoff.isBackoffRefusal(cause)
+            ) {
+                // Nothing of this commit is or will be on the DS.
+                abandonStagedDirect(record, groupIdHex, identity, entry.id)
+            }
+            if (cause is ChatError) throw cause
+            throw ChatError(
+                dsErrorMessage(cause, "The server did not accept the group change."),
+                cause,
+            )
+        }
+        chatClient.markOwnPublishedCommit(groupIdHex, answer.id)
+        try {
+            record.group.mergeStagedSweep(identity)
+            persistSnapshotDurableOrThrow()
         } catch (cause: kotlinx.coroutines.CancellationException) {
             throw cause
         } catch (cause: ChatError) {
             throw cause
         } catch (cause: Throwable) {
-            throw ChatError(
-                dsErrorMessage(cause, "The server did not accept the group change. Nothing was sent."),
-                cause,
-            )
+            throw ChatError("The group change was sent but could not be recorded on this device.", cause)
         }
+        if (welcomeOwed) {
+            try {
+                CommitOutboxStore.markWelcomesOwed(applicationContext, entry.id, answer.id)
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0081: the owed Welcome was not recorded")
+            }
+        }
+        return answer
+    }
+
+    /**
+     * ADR-0081 — abandon a staged direct commit (per group,
+     * `clear_pending_commit`), persist that best effort, and drop its outbox
+     * entry ([entryId], when one was written). When the abandon itself fails
+     * the group is reloaded from its durable snapshot (ADR-0040 F1), which
+     * holds no unrecorded staged commit.
+     */
+    private fun abandonStagedDirect(
+        record: GroupRecord,
+        groupIdHex: String,
+        identity: Identity,
+        entryId: String?,
+    ) {
+        try {
+            record.group.abandonStagedSweep(identity)
+            persistSnapshotBestEffort()
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0081: abandoning a staged commit failed; resetting the group")
+            resetGroupToDurableSnapshotOrThrow(groupIdHex)
+        }
+        if (entryId != null) {
+            try {
+                CommitOutboxStore.deleteEntry(applicationContext, entryId)
+            } catch (_: Throwable) {
+                // An orphan entry is dropped by the owed-verdict path (nothing staged).
+            }
+        }
+    }
 
     /**
      * ADR-0057 second security pass, finding 1 — run one Append registration
@@ -12488,8 +12493,10 @@ public class ChatRepository(
                         SweepJournalRow(it.id, it.payload, it.createdAt)
                     }
 
-                override suspend fun publishGroup(bytes: ByteArray): Long =
-                    dsClient.publishGroup(record.groupId, bytes).id
+                // ADR-0081 decision 1 — the staged commit and the registration
+                // of the epoch it moves to, in one request proven under N.
+                override suspend fun commitStaged(bytes: ByteArray, staged: StagedSweepArtifacts?): Long =
+                    commitStagedSweep(record, groupIdHex, identity, bytes, staged)
 
                 // ADR-0050 section 2.5a item 7 — never unsigned: with no
                 // grant accepted the Welcome stays owed.
@@ -12687,76 +12694,15 @@ public class ChatRepository(
             },
             encodeB64 = ::outboxB64,
             decodeB64 = ::outboxUnb64,
-            // ADR-0057 obligation 5 — register the staged epoch's key with this
-            // account's root (owner) or registrar signer before the sweep is
-            // recorded or published, revoking the registrar keys of the
-            // accounts the sweep evicts (owner only). The signers are derived
-            // under the provider lock; the PUT runs outside it (the sweep holds
-            // only the per-group lock here, and nothing is eager-merged).
-            registerStagedEpoch = { staged ->
-                data class Prepared(
-                    val next: DsJournalSigner?,
-                    val current: DsJournalSigner?,
-                    val statements: me.lakko.app.ds.DsStatementSigning?,
-                    val revoke: List<ByteArray>,
-                    val evictees: List<ByteArray>,
-                    val rank: me.lakko.app.ds.JournalRepairRank,
-                )
-                // ADR-0057 — a claim of this journal launched on open may still
-                // be in flight; register after it, not ahead of it (bounded).
-                ownerClaimGate.awaitBeforeRegistering(groupIdHex)
-                val prepared = providerLock.sessionLock {
-                    val next = record.group.dsStagedAccessSigner(identity)?.let(::FfiDsJournalSigner)
-                    val evictees = me.lakko.app.ds.evictedAccounts(
-                        before = rosterLeavesOrNull(record.group).orEmpty(),
-                        removedLeaves = staged.removedLeaves,
-                    )
-                    Prepared(
-                        next = next,
-                        current = currentJournalSigner(groupIdHex),
-                        statements = commitStatementSignerFor(record, groupIdHex),
-                        revoke = revokeKeysFor(record, groupIdHex, evictees),
-                        evictees = evictees,
-                        rank = journalRepairRankFor(record, groupIdHex),
-                    )
+            // ADR-0081 — a 409 is a lost epoch, a refusal that will not change
+            // on its own (the backoff's) is definitive; anything else leaves
+            // the sweep staged for the owed verdict.
+            classifyCommitFailure = { cause ->
+                when {
+                    cause is me.lakko.app.ds.DsCommitConflictError -> SweepCommitFailure.LOST
+                    SweepRegistrationBackoff.isBackoffRefusal(cause) -> SweepCommitFailure.REFUSED
+                    else -> SweepCommitFailure.UNKNOWN
                 }
-                // Append: a 409 abandons the staged sweep (the caller's
-                // rollback), never a Replace; an owner or admin notes the
-                // group for the repair check.
-                try {
-                    noteAppendConflict(groupIdHex, record.groupId, prepared.current, prepared.rank) {
-                        me.lakko.app.ds.registerEpochBeforePublish(
-                            journalId = record.groupId,
-                            before = prepared.current,
-                            after = prepared.next,
-                            statements = prepared.statements,
-                            revoke = prepared.revoke,
-                            put = { make -> dsClient.putStatement(make) },
-                        )
-                    }
-                } catch (cause: Throwable) {
-                    // A refusal that will not change on its own holds the next
-                    // stage of this group; the sweep itself is abandoned by the
-                    // caller exactly as before. Since ADR-0050 section 2.5a
-                    // item 8 that includes a registration this device could
-                    // not even sign (`DsRegistrationUnavailable`: no root or
-                    // registrar seed, or no access signer): re-staging every
-                    // poll would only abandon again.
-                    if (SweepRegistrationBackoff.isBackoffRefusal(cause)) {
-                        val hold = sweepBackoff.onRefused(groupIdHex, prepared.current?.epoch)
-                        android.util.Log.i(
-                            "ChatRepository",
-                            "ADR-0057: sweep registration refused (${cause.javaClass.simpleName}); " +
-                                "next attempt in ${hold.delayMs} ms",
-                        )
-                    }
-                    throw cause
-                }
-                // The appointment records are rewritten under the signed-in
-                // account: the one that registered, or nothing.
-                ensureSession()
-                sweepBackoff.reset(groupIdHex)
-                forgetRevokedAppointments(groupIdHex, prepared.evictees, prepared.revoke)
             },
             mayStage = {
                 val epoch = try {
@@ -12767,6 +12713,87 @@ public class ChatRepository(
                 sweepBackoff.mayStage(groupIdHex, epoch)
             },
         )
+    }
+
+    /**
+     * ADR-0081 decision 1 for a STAGED sweep: register the staged epoch's key
+     * with this account's root (owner) or registrar signer, revoking the
+     * registrar keys of the accounts the sweep evicts (owner only, from
+     * [staged]'s removed leaves; nothing on the restart path, where [staged]
+     * is `null`), AND append the commit [bytes], in one request proven under
+     * the epoch the group still sits at. The signers are derived under the
+     * provider lock; the POST runs outside it (the sweep holds only the
+     * per-group lock here, and nothing is eager-merged).
+     */
+    private suspend fun commitStagedSweep(
+        record: GroupRecord,
+        groupIdHex: String,
+        identity: Identity,
+        bytes: ByteArray,
+        staged: StagedSweepArtifacts?,
+    ): Long {
+        data class Prepared(
+            val next: DsJournalSigner?,
+            val current: DsJournalSigner?,
+            val statements: me.lakko.app.ds.DsStatementSigning?,
+            val revoke: List<ByteArray>,
+            val evictees: List<ByteArray>,
+            val rank: me.lakko.app.ds.JournalRepairRank,
+        )
+        // ADR-0057 — a claim of this journal launched on open may still be in
+        // flight; commit after it, not ahead of it (bounded).
+        ownerClaimGate.awaitBeforeRegistering(groupIdHex)
+        val prepared = providerLock.sessionLock {
+            val next = record.group.dsStagedAccessSigner(identity)?.let(::FfiDsJournalSigner)
+            val evictees = staged?.let {
+                me.lakko.app.ds.evictedAccounts(
+                    before = rosterLeavesOrNull(record.group).orEmpty(),
+                    removedLeaves = it.removedLeaves,
+                )
+            }.orEmpty()
+            Prepared(
+                next = next,
+                current = currentJournalSigner(groupIdHex),
+                statements = commitStatementSignerFor(record, groupIdHex),
+                revoke = revokeKeysFor(record, groupIdHex, evictees),
+                evictees = evictees,
+                rank = journalRepairRankFor(record, groupIdHex),
+            )
+        }
+        val answer = try {
+            noteAppendConflict(groupIdHex, record.groupId, prepared.current, prepared.rank) {
+                me.lakko.app.ds.commitEpochWith(
+                    journalId = record.groupId,
+                    before = prepared.current,
+                    after = prepared.next,
+                    statements = prepared.statements,
+                    revoke = prepared.revoke,
+                    row = bytes,
+                    post = { make, proof -> dsClient.postCommit(make, proof) },
+                )
+            }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            // A refusal that will not change on its own holds the next stage
+            // of this group. Since ADR-0050 section 2.5a item 8 that includes a
+            // commit this device could not even sign (`DsRegistrationUnavailable`).
+            if (SweepRegistrationBackoff.isBackoffRefusal(cause)) {
+                val hold = sweepBackoff.onRefused(groupIdHex, prepared.current?.epoch)
+                android.util.Log.i(
+                    "ChatRepository",
+                    "ADR-0057: sweep commit refused (${cause.javaClass.simpleName}); " +
+                        "next attempt in ${hold.delayMs} ms",
+                )
+            }
+            throw cause
+        }
+        // The appointment records are rewritten under the signed-in account:
+        // the one that committed, or nothing.
+        ensureSession()
+        sweepBackoff.reset(groupIdHex)
+        forgetRevokedAppointments(groupIdHex, prepared.evictees, prepared.revoke)
+        return answer.id
     }
 
     public suspend fun sweepPendingCommits(groupIdHex: String): Unit =
@@ -12867,11 +12894,7 @@ public class ChatRepository(
             sweepPendingCommitEntries(
                 entries = entries,
                 currentEpoch = currentEpoch,
-                republishCommit = { commit -> dsClient.publishGroup(record.groupId, commit).id },
                 republishWelcome = { mailbox, bytes -> publishWelcomeToMailbox(mailbox, bytes, groupIdHex).id },
-                // As in the sweep ports: the echo filter of the session that
-                // re-published, or none.
-                markOwnPublished = { id -> if (bound.isCurrent) chatClient.markOwnPublishedCommit(groupIdHex, id) },
                 onAck = { id, commitId, secondId -> ackCommitBestEffort(id, commitId, secondId) },
                 onDiscard = { id ->
                     try {

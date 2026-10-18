@@ -43,7 +43,7 @@
 import { t } from "../l10n";
 
 import { OwnerClaimMemo } from "./owner-claim";
-import { releaseAuthority, type JournalAuthority } from "./ownership";
+import { releaseAuthority, type CommitAnswer, type JournalAuthority } from "./ownership";
 
 /** The header a proof travels in (`dsProofHeaderName()` on the wasm surface;
  *  pinned against it by `access.test.ts`). */
@@ -419,19 +419,51 @@ export function dsClockSkewNotice(err: unknown): string | null {
 }
 
 // ----------------------------------------------------------------------------
-// Register before publish (ADR-0053 contract point 3, signed per ADR-0057)
+// Register with the commit (ADR-0053 contract point 3, signed per ADR-0057,
+// one request since ADR-0081)
 // ----------------------------------------------------------------------------
 
-/** The one network call the rule below needs, so it can be tested with a
- *  fake. The DS client implements it by signing with the journal's authority
- *  (root or registrar) and throws `NoJournalAuthorityError` without one. */
-export interface EpochRegistrar {
-  registerGroupEpoch(
+/** The one network call a commit needs, so the rule below can be tested with
+ *  a fake. The DS client implements it by signing the registration with the
+ *  journal's authority (root or registrar; `NoJournalAuthorityError` without
+ *  one) and sending it with the row (`DsClient.commitGroupEpoch`). */
+export interface EpochCommitter {
+  commitGroupEpoch(
     groupId: Uint8Array,
     epoch: bigint,
     epochKey: Uint8Array,
-    revokeKeys?: readonly Uint8Array[],
-  ): Promise<void>;
+    revokeKeys: readonly Uint8Array[],
+    row: Uint8Array,
+    proof: ProofSigner,
+  ): Promise<CommitAnswer>;
+}
+
+/**
+ * ADR-0081 decision 1 - register the key of the epoch a commit moves to AND
+ * append the commit `row`, in one request: `next` is the signer of the new
+ * epoch (its verifying key is what is registered), `proofN` the signer of the
+ * epoch the commit leaves (it proves the request). Throws when either cannot
+ * be derived (a commit whose epoch the server will never know strands every
+ * peer that applies it), on a refusal, and with `CommitConflictError` when
+ * another commit owns the epoch; the caller then abandons exactly as for a
+ * lost race. Resolves to the commit's journal row (an identical re-send of a
+ * commit the DS already took answers its original id).
+ */
+export async function commitWithNextEpoch(
+  committer: EpochCommitter,
+  groupId: Uint8Array,
+  next: ProofSigner | null,
+  proofN: ProofSigner | null,
+  row: Uint8Array,
+  revokeKeys: readonly Uint8Array[] = [],
+): Promise<CommitAnswer> {
+  if (next === null) {
+    throw new Error("ds access: the next epoch's key could not be derived");
+  }
+  if (proofN === null) {
+    throw new Error("ds access: the key of the epoch the commit leaves could not be derived");
+  }
+  return committer.commitGroupEpoch(groupId, next.epoch, next.verifyingKey(), revokeKeys, row, proofN);
 }
 
 /**
@@ -444,30 +476,6 @@ export function takeSigner(derive: () => ProofSigner): ProofSigner | null {
   } catch {
     return null;
   }
-}
-
-/**
- * Contract point 3 - register the key of the epoch a commit moves to BEFORE
- * the commit is published, signed with this device's root or registrar key
- * (ADR-0057 obligation 5), revoking `revokeKeys` in the same statement.
- * Throws when the registration is refused, or when this device holds no
- * authority; the caller aborts exactly as it would for a failed outbox write
- * (no publish).
- *
- * `next === null` means the new epoch's signer could not be derived, which is
- * itself a reason to abort: a commit whose epoch the server will never know
- * strands every peer that applies it.
- */
-export async function registerBeforePublish(
-  registrar: EpochRegistrar,
-  groupId: Uint8Array,
-  next: ProofSigner | null,
-  revokeKeys: readonly Uint8Array[] = [],
-): Promise<void> {
-  if (next === null) {
-    throw new Error("ds access: the next epoch's key could not be derived");
-  }
-  await registrar.registerGroupEpoch(groupId, next.epoch, next.verifyingKey(), revokeKeys);
 }
 
 // ----------------------------------------------------------------------------

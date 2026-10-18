@@ -72,23 +72,52 @@ import type {
 } from "../../../wasm/lakko_ffi_wasm";
 
 import {
+  DeviceGroupNotJoinedError,
   deviceGroupIdOf,
+  deviceGroupLineageSeed,
   ensureDeviceGroup,
-  persistDeviceGroupSnapshot,
   persistDeviceGroupSnapshotWithCursor,
+  type EnsuredDeviceGroup,
 } from "../lifecycle";
 import {
-  deleteDeviceGroupSnapshot,
+  deleteDeviceGroupPending,
+  dropDeviceGroupStateForRejoin,
   getDeviceGroupJournalCursor,
+  getDeviceGroupPending,
+  putDeviceGroupPending,
 } from "../device-group-snapshot-store";
 import { applyDeviceJournalBatch, startingCursor } from "./journal-batch";
 import { BindingEpoch, StaleBindingError } from "../../auth/binding-epoch";
-import { forkVerdict } from "./fork-verdict";
 import {
-  forkRepairAllowed,
+  KNOCK_CHECK_INTERVAL_MS,
+  REKNOCK_AFTER_MS,
+  admissionVerdict,
+  decodeAdmissionRecord,
+  decodeRejoinState,
+  encodeAdmissionRecord,
+  encodeRejoinState,
+  isBehind,
+  newAdmissionRecord,
+  noteAdded,
+  noteHandled,
+  rejoinOnce,
+  type AdmissionRecord,
+  type RejoinPorts,
+} from "../device-group-rejoin";
+import {
+  commitDeviceGroupChange,
+  resendOwedDeviceGroupCommitFor,
+} from "../device-group-commit-runtime";
+import { removeDeviceAt } from "../remove";
+import { DiscoveryClient } from "../../discovery/client";
+import { buildPairingQrPayload, generateRendezvousPseudonym, ownPairingHandle, parsePairingQrPayload } from "../pairing";
+import { pollForWelcome } from "../welcome-courier";
+import { base64Decode } from "../../auth/account-id";
+import {
   isDeviceRemoved,
   pollStepAfterBatch,
   readDeviceGroupActive,
+  rejoinAllowed,
 } from "./removed-device";
 import { decodeJournalEntry, encodeJournalEntry } from "../journal-envelope";
 import { fetchDeviceAttestKey } from "../../auth/device-attest-key";
@@ -438,7 +467,7 @@ export function DeviceGroupSyncProvider(props: {
   let pollDone: Promise<void> | null = null;
   let activeAccountIdB64: string | null = null;
   /** Bumped by every `teardown`. Work started under one binding (a bootstrap,
-   *  a handle reload, a fork repair, an outbox drain) captures it and, after
+   *  a handle reload, a rejoin, an outbox drain) captures it and, after
    *  each await, stops when it has moved: the account it was working for has
    *  signed out, and anything it assigned would belong to nobody or - after
    *  another sign-in - to somebody else. A counter rather than the account id
@@ -480,11 +509,17 @@ export function DeviceGroupSyncProvider(props: {
    *  other device's row can carry an id this device got from its own publish.
    *  See `sync/journal-batch.ts`. */
   const ownPublishedIds = new Set<number>();
-  /** Accounts whose forked DeviceGroup this provider has already re-founded.
-   *  The repair runs at most once per account for the provider's lifetime
-   *  (kept across logout), so a device that forks again waits for the next
-   *  page load rather than resetting the account's chain in a loop. */
-  const forkRepaired = new Set<string>();
+  /** The generation of the stored DeviceGroup snapshot the long-lived handle
+   *  was read from or last wrote (`device-group-snapshot-store.ts`). Every
+   *  write of this handle is conditional on it: a commit of this device made
+   *  through another handle replaces the row, and this handle - an epoch
+   *  behind - must not write over it (ADR-0081 decision 3). */
+  let handleGeneration: number | null = null;
+  /** ADR-0081 decision 4 - the rejoin in progress, if any. */
+  let rejoinAbort: AbortController | null = null;
+  /** The sibling's admission record (`device-group-rejoin.ts`), loaded with
+   *  the handle. */
+  let admissions: AdmissionRecord | null = null;
 
   // ADR-0053 contract point 1 — every request to the DeviceGroup journal is
   // proven under the access key of the epoch this device's DeviceGroup is at.
@@ -660,15 +695,26 @@ export function DeviceGroupSyncProvider(props: {
     let ensured;
     try {
       const seed = await ensureDeviceIdentitySeed(accountIdB64, deviceKey);
-      ensured = await ensureDeviceGroup(
-        accountIdBytes,
-        accountIdB64,
-        seed,
-        deviceKey,
-        auth.identitySecrets()?.accountIdentitySeed,
-      );
-      seed.fill(0);
+      try {
+        ensured = await ensureDeviceGroup(
+          accountIdBytes,
+          accountIdB64,
+          seed,
+          deviceKey,
+          auth.identitySecrets()?.accountIdentitySeed,
+          { mayFound: () => directoryListsNoOtherDevice(accountIdBytes, seed) },
+        );
+      } finally {
+        seed.fill(0);
+      }
     } catch (err) {
+      if (err instanceof DeviceGroupNotJoinedError && err.reason === "rejoin") {
+        // ADR-0081 decision 4: the account has other devices; one of them
+        // admits this device again.
+        if (!current()) return;
+        startRejoin(accountIdB64, accountIdBytes, deviceKey, current);
+        return;
+      }
       // eslint-disable-next-line no-console
       console.warn("DeviceGroupSyncProvider bootstrap failed", err);
       // The session this bootstrap was for is gone: its failure says nothing
@@ -697,6 +743,7 @@ export function DeviceGroupSyncProvider(props: {
     }
     identity = ensured.identity;
     group = ensured.group;
+    handleGeneration = ensured.generation;
 
     // Removed while the app was closed: the persisted snapshot already
     // carries the commit that removed this device. Nothing is polled, folded
@@ -759,6 +806,8 @@ export function DeviceGroupSyncProvider(props: {
       await publishGroupMessage(group.createServiceEnvelopeMessage(identity, envelope, mintHlc()));
     });
 
+    await loadAdmissions(accountIdB64, deviceKey);
+    if (!current()) return;
     startPollLoop(accountIdB64, deviceKey);
     void drainFolderOutbox();
     void flushUnsentLineage();
@@ -846,6 +895,7 @@ export function DeviceGroupSyncProvider(props: {
       }
       group = ensured.group;
       identity = ensured.identity;
+      handleGeneration = ensured.generation;
       ownPublishedIds.clear();
       if (isDeviceRemoved(readDeviceGroupActive(group))) {
         markRemoved();
@@ -879,6 +929,10 @@ export function DeviceGroupSyncProvider(props: {
     void persister.flush();
     binding.advance();
     reloading = false;
+    rejoinAbort?.abort();
+    rejoinAbort = null;
+    handleGeneration = null;
+    admissions = null;
     unbindDeviceCards();
     unregisterServiceSender?.();
     unregisterServiceSender = null;
@@ -1416,10 +1470,6 @@ export function DeviceGroupSyncProvider(props: {
       // eslint-disable-next-line no-console
       console.warn("DeviceGroup journal cursor read failed; starting from 0", err);
     }
-    /** When this loop started suspecting a fork (`fork-verdict.ts`). */
-    let suspectSince: number | undefined;
-    let forkReported = false;
-
     while (!signal.aborted) {
       // ADR-0057 obligation 2 - every device of the account holds the
       // DeviceGroup's root: claim the journal on open, once per session (an
@@ -1468,12 +1518,38 @@ export function DeviceGroupSyncProvider(props: {
       // The journal answered, so this device is online: send what waited.
       if (outbox().length > 0) void drainFolderOutbox();
 
+      // ADR-0081 decision 2, step 6 - a DeviceGroup commit of this device
+      // that did not finish (the DS could not be reached, a write failed, a
+      // crash) is finished before anything else; until it is, this device
+      // never reads itself as behind (the DS may hold its own next epoch).
+      let commitPending = false;
+      try {
+        const owed = await resendOwedDeviceGroupCommitFor({
+          accountIdBytes: accountIdBytesActive ?? new Uint8Array(0),
+          accountIdB64,
+          deviceKey,
+        });
+        if (owed !== null) {
+          // eslint-disable-next-line no-console
+          console.info(`DeviceGroup commit outbox: ${owed.kind}`);
+        }
+      } catch (err) {
+        commitPending = true;
+        // eslint-disable-next-line no-console
+        console.warn("DeviceGroup commit outbox: not finished yet", err instanceof Error ? err.name : "");
+      }
+      // A landed entry made its epoch current and reloaded this handle.
+      if (signal.aborted) return;
+      const createdAtOf = new Map<number, number>(
+        raw.messages.map((m) => [m.id, Date.parse(m.createdAt)] as [number, number]),
+      );
+
       // G-13 (ADR-0015): the 32-byte verifying key peers feed to
       // `processIncomingVerifyingRemovals`. Cached (24 h). Without it the
       // batch is HELD, not applied under a zero key: a zero key refuses a
       // removal the policy requires to be attested, and a refused row is
       // skipped for good once the cursor moves past it. A device removed that
-      // way would stay an epoch behind, drain the journal, read as forked and
+      // way would stay an epoch behind, drain the journal, read as behind and
       // re-found the DeviceGroup over every healthy device (ADR-0057,
       // 2026-09-30). Holding keeps the removal for the next poll.
       let attestVk: Uint8Array;
@@ -1548,6 +1624,7 @@ export function DeviceGroupSyncProvider(props: {
           if (judgeOwnRow(message.id, entry.message)) return;
           try {
             const attestation = entry.attestation ?? new Uint8Array(0);
+            const keysBefore = membersOf(g);
             // Refuse-to-apply an unattested removal under the policy. A throw —
             // bad frame / wrong epoch / a removal refused for want of a valid
             // attestation — is logged by `onApplyError` and the batch goes on.
@@ -1558,6 +1635,18 @@ export function DeviceGroupSyncProvider(props: {
               attestVk,
               BigInt(Math.floor(Date.now() / 1000)),
             );
+            // ADR-0081 decision 4 - the sibling's record of when each key
+            // was added, read at the row (the DS clock), so a knock older
+            // than the addition is known to be answered.
+            if (processed.kind !== "Application" && keysBefore !== null && admissions !== null) {
+              const keysAfter = membersOf(g) ?? [];
+              const at = createdAtOf.get(message.id);
+              for (const m of keysAfter) {
+                if (at !== undefined && Number.isFinite(at) && !keysBefore.some((b) => b.key === m.key)) {
+                  admissions = noteAdded(admissions, m.key, at);
+                }
+              }
+            }
             if (processed.kind === "Application") {
               const data = processed.applicationData;
               if (data === undefined) return;
@@ -1687,10 +1776,21 @@ export function DeviceGroupSyncProvider(props: {
         // A handle stopped while the batch was being applied (another handle
         // on this device changed the group) must not write its state: it is
         // an epoch behind what is on disk. Refusing holds the cursor.
-        persist: (to) =>
-          signal.aborted
-            ? Promise.reject(new Error("DeviceGroup handle replaced; not persisting"))
-            : persistDeviceGroupSnapshotWithCursor(id, accountIdB64, deviceKey, to),
+        persist: async (to) => {
+          if (signal.aborted || group !== g) {
+            throw new Error("DeviceGroup handle replaced; not persisting");
+          }
+          // Conditional on the row this handle read (ADR-0081 decision 3).
+          const written = await persistDeviceGroupSnapshotWithCursor(
+            id,
+            accountIdB64,
+            deviceKey,
+            to,
+            handleGeneration ?? undefined,
+          );
+          if (group === g) handleGeneration = written;
+          await saveAdmissions(accountIdB64, deviceKey);
+        },
         onApplyError: (message, err) => {
           // eslint-disable-next-line no-console
           console.warn("DeviceGroup journal row not applied", message.id, err);
@@ -1717,7 +1817,7 @@ export function DeviceGroupSyncProvider(props: {
       // so the next launch finds the inactive snapshot and shows the same
       // screen; nothing after it is polled or persisted.
       // Stopped while the batch was applied: nothing below (the removed
-      // screen, the growth re-send, the fork repair) is this loop's to decide
+      // screen, the growth re-send, the rejoin) is this loop's to decide
       // any more, and `g` may be freed.
       if (signal.aborted) return;
       if (pollStepAfterBatch(readDeviceGroupActive(g)) === "stop-removed") {
@@ -1755,90 +1855,216 @@ export function DeviceGroupSyncProvider(props: {
         if (signal.aborted) return;
       }
 
-      // Forked off the account's chain? A drained read (no rows, nothing
-      // more) while the DS names a newer epoch than this handle's means
-      // nothing left in the journal can bring it forward (`fork-verdict.ts`).
-      // The epoch is only derived when it can matter: a read with rows, or
-      // one the DS named no epoch for, is in sync whatever the epoch is.
+      // ADR-0081 decision 4 - behind for good? A drained read (no rows,
+      // nothing more) while the DS names a newer epoch than this handle's:
+      // since an epoch is registered only with its commit row, nothing left
+      // in the journal can bring this device forward. It drops its
+      // DeviceGroup state and rejoins through a sibling.
       const drained = raw.messages.length === 0 && !raw.hasMore;
       const latestEpoch = raw.latestEpoch === undefined ? undefined : BigInt(raw.latestEpoch);
       const localEpoch = drained && latestEpoch !== undefined ? deviceGroupEpoch(g, id) : null;
-      const verdict =
-        localEpoch === null
-          ? ({ kind: "in-sync" } as const)
-          : forkVerdict(localEpoch, drained, latestEpoch, suspectSince, Date.now());
-      suspectSince = verdict.kind === "suspect" ? verdict.since : undefined;
-      // The repair re-founds the account's DeviceGroup; it never runs on a
-      // removed device. An inactive group cannot reach this point anyway (it
-      // stopped above, and its epoch comes from a DS signer an inactive group
-      // cannot derive, so `localEpoch` is null and the verdict in-sync); the
-      // guard keeps it so if either of those changes.
-      if (verdict.kind === "forked" && forkRepairAllowed(readDeviceGroupActive(g))) {
-        if (forkRepaired.has(accountIdB64)) {
-          if (!forkReported) {
-            // eslint-disable-next-line no-console
-            console.warn(
-              `DeviceGroup still behind the DS after a repair this session: local epoch ${localEpoch}, DS epoch ${latestEpoch}; not repairing again`,
-            );
-            forkReported = true;
-          }
-        } else if (auth.identitySecrets()?.accountIdentitySeed === undefined) {
-          // The re-founding claims (or resets) the journal with the account's
-          // root, which needs the phrase seed. Without it nothing is deleted;
-          // the loop keeps polling and repairs once the seed is available.
-          if (!forkReported) {
-            // eslint-disable-next-line no-console
-            console.warn(
-              `DeviceGroup forked: local epoch ${localEpoch}, DS epoch ${latestEpoch}; account root not available, not repairing yet`,
-            );
-            forkReported = true;
-          }
-        } else {
+      if (
+        localEpoch !== null &&
+        isBehind(localEpoch, drained, latestEpoch, commitPending) &&
+        rejoinAllowed(readDeviceGroupActive(g))
+      ) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `DeviceGroup behind the DS with nothing left to read: local epoch ${localEpoch}, DS epoch ${latestEpoch}; rejoining`,
+        );
+        void enterRejoin(accountIdB64);
+        return;
+      }
+      // At the head: a sibling reads the knocks (ADR-0081 decision 4).
+      if (drained && !commitPending && Date.now() - lastKnockCheckAt >= KNOCK_CHECK_INTERVAL_MS) {
+        lastKnockCheckAt = Date.now();
+        await checkKnocks(g, id, accountIdB64, deviceKey, signal).catch((err: unknown) => {
           // eslint-disable-next-line no-console
-          console.warn(
-            `DeviceGroup forked: local epoch ${localEpoch}, DS epoch ${latestEpoch}; re-founding it`,
-          );
-          // The repair waits for this loop to finish, so it is started, not
-          // awaited, and the loop stops here.
-          void repairForkedDeviceGroup(accountIdB64, cursor);
-          return;
-        }
+          console.warn("DeviceGroup knock check failed", err instanceof Error ? err.name : "");
+        });
+        if (signal.aborted) return;
       }
     }
   }
 
+  /** When the knocks were last read. */
+  let lastKnockCheckAt = 0;
+  /** DS id of the last knock row read this session. */
+  let knockCursor = 0;
+
+  /** The directory check of the founding policy (ADR-0081 decision 4):
+   *  `true` when the account's directory lists no own device other than
+   *  this one. A failure throws (nothing is founded on an unread directory). */
+  async function directoryListsNoOtherDevice(accountIdBytes: Uint8Array, deviceSeed: Uint8Array): Promise<boolean> {
+    const wasm = await loadWasm();
+    const device = wasm.Identity.fromSeed(deviceSeed);
+    let ownKeyHex: string;
+    try {
+      ownKeyHex = bytesToHex(device.signaturePublicKey);
+    } finally {
+      device.free();
+    }
+    const listed = await new DiscoveryClient().fetchKeyPackages(accountIdBytes);
+    return (listed ?? []).every((row) => bytesToHex(row.deviceId) === ownKeyHex);
+  }
+
+  async function loadAdmissions(account: string, deviceKey: CryptoKey): Promise<void> {
+    let record: AdmissionRecord | null = null;
+    try {
+      const bytes = await getDeviceGroupPending(account, "admissions", deviceKey);
+      record = bytes === null ? null : decodeAdmissionRecord(bytes);
+    } catch {
+      record = null;
+    }
+    admissions = record ?? newAdmissionRecord(Date.now());
+  }
+
+  async function saveAdmissions(account: string, deviceKey: CryptoKey): Promise<void> {
+    if (admissions === null || activeAccountIdB64 !== account) return;
+    try {
+      await putDeviceGroupPending(account, "admissions", encodeAdmissionRecord(admissions), deviceKey);
+    } catch (err) {
+      // The record is a guard against admitting twice; an unsaved update is
+      // rebuilt from the journal by the next batch.
+      // eslint-disable-next-line no-console
+      console.warn("DeviceGroup admission record not saved", err instanceof Error ? err.name : "");
+    }
+  }
+
   /**
-   * Re-found a DeviceGroup that has forked off the account's chain
-   * (`fork-verdict.ts`): stop the poll loop, delete ONLY this account's
-   * DeviceGroup snapshot (its journal cursor lives in the same row), found a
-   * fresh DeviceGroup through `ensureDeviceGroup` - which claims the journal
-   * with the account's root and, on the 409 the old chain answers, RESETS it
-   * (ADR-0057 obligation 7) - and resume polling at the journal head as last
-   * seen: the old group's rows cannot be read by the new one, re-reading them
-   * only produces refused rows.
-   *
-   * What it keeps: the DeviceGroup snapshot store (`lakko-device-group-
-   * snapshots`) is its own IndexedDB database, separate from the chat MLS
-   * store, and the device identity seed, contacts and the synced-state row are
-   * not touched. The device identity is the same seed and the same signature
-   * key, so its conversation leaves in chats are unaffected.
-   *
-   * CONSEQUENCE: the reset removes every epoch key of the old chain, so every
-   * OTHER device of the account loses the DeviceGroup - its reads answer 401 -
-   * and must be added again from this one. A 401 is not a drained read, so
-   * those devices never start a repair of their own.
-   *
-   * The founding is fail-closed (`ensureDeviceGroup`): a claim or reset that
-   * does not land persists nothing, and the founding is tried again after
-   * `BOOTSTRAP_RETRY_MS` while the session lasts; the next session founds too,
-   * since the snapshot is gone.
+   * A sibling's side of ADR-0081 decision 4: read the DeviceGroup's knocks
+   * and admit each one {@link admissionVerdict} allows - remove the device's
+   * previous leaf if it is still in the roster, then add its KeyPackage, two
+   * commits through the outbox, the Welcome to the knock's rendezvous.
    */
-  async function repairForkedDeviceGroup(account: string, headCursor: number): Promise<void> {
+  async function checkKnocks(
+    g: WasmDeviceGroup,
+    id: WasmIdentity,
+    accountIdB64: string,
+    deviceKey: CryptoKey,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const accountBytes = accountIdBytesActive;
+    const session = auth.state();
+    const username = session.kind === "session" ? session.account.username : "";
+    if (accountBytes === null || admissions === null || username.trim().length === 0) return;
+    const ds = new DsClient();
+    const knocks = await ds.fetchKnocks(g.groupId(), { after: knockCursor });
+    if (signal.aborted || knocks.messages.length === 0) return;
+    knockCursor = knocks.messages[knocks.messages.length - 1]?.id ?? knockCursor;
+    const wasm = await loadWasm();
+    const loginHandle = await ownPairingHandle(username);
+    const roster = (membersOf(g) ?? []).map((m) => ({ leaf: m.leaf, keyHex: m.key }));
+    const ownKeyHex = bytesToHex(id.signaturePublicKey);
+    let policy = false;
+    try {
+      policy = g.requireAttestedRemovals();
+    } catch {
+      policy = false;
+    }
+    let directory: Map<string, Uint8Array> | null = null;
+    for (const knock of knocks.messages) {
+      if (signal.aborted) return;
+      let decoded;
+      try {
+        decoded = await parsePairingQrPayload(knock.payload, loginHandle);
+      } catch {
+        continue; // not a payload for this account (or not a pairing payload)
+      }
+      const keyHex = bytesToHex(wasm.keyPackageSignatureKey(decoded.keyPackage));
+      if (directory === null) directory = await ownDirectory(accountBytes, accountIdB64, deviceKey);
+      const listedKp = directory.get(keyHex);
+      const knockAtMs = Date.parse(knock.createdAt);
+      const verdict = admissionVerdict({
+        knockId: knock.id,
+        knockAtMs: Number.isFinite(knockAtMs) ? knockAtMs : 0,
+        keyHex,
+        ownKeyHex,
+        roster,
+        handled: new Set(admissions.handled),
+        watchingSinceMs: admissions.watchingSinceMs,
+        lastAddedAtMs: admissions.lastAddedAtMs[keyHex],
+        listed: listedKp !== undefined,
+        policyRequiresAttestation: policy,
+        nowMs: Date.now(),
+      });
+      if (verdict !== "admit") continue;
+      const account = { accountIdBytes: accountBytes, accountIdB64, deviceKey };
+      const previous = roster.find((m) => m.keyHex === keyHex);
+      if (previous !== undefined) {
+        await removeDeviceAt({ ...account, leafIndex: previous.leaf, attestation: null, rejoin: true });
+      }
+      const added = await commitDeviceGroupChange(
+        account,
+        (fresh) => {
+          const before = membersOfEnsured(fresh) ?? [];
+          // Another sibling admitted it meanwhile.
+          if (before.some((m) => m.key === keyHex)) return null;
+          const addition = fresh.group.addDeviceFromWire(fresh.identity, decoded.keyPackage);
+          return {
+            kind: "rejoin-add",
+            row: encodeJournalEntry(addition.commit, null),
+            welcome: { bytes: addition.welcome, rendezvous: decoded.rendezvousPseudonym },
+            priorLeaves: before.map((m) => m.leaf).sort((a, b) => a - b),
+          };
+        },
+        async (_fresh, outcome) => outcome,
+      );
+      if (admissions !== null && added !== null && added.outcome.kind === "landed") {
+        admissions = noteHandled(noteAdded(admissions, keyHex, Date.now()), knock.id);
+        await saveAdmissions(accountIdB64, deviceKey);
+        // eslint-disable-next-line no-console
+        console.info("DeviceGroup: a device of this account was admitted again");
+      }
+      // The commits reloaded the long-lived handle; the next pass re-reads.
+      return;
+    }
+  }
+
+  function membersOfEnsured(e: EnsuredDeviceGroup): LeafMember[] | null {
+    return membersOf(e.group);
+  }
+
+  /** The account's directory rows whose device binding verifies under the
+   *  account key the conversation leaves are bound to: leaf key hex to its
+   *  directory KeyPackage. */
+  async function ownDirectory(
+    accountIdBytes: Uint8Array,
+    accountIdB64: string,
+    deviceKey: CryptoKey,
+  ): Promise<Map<string, Uint8Array>> {
+    const wasm = await loadWasm();
+    const out = new Map<string, Uint8Array>();
+    const lineageSeed = await deviceGroupLineageSeed(accountIdB64, deviceKey, auth.identitySecrets()?.accountIdentitySeed);
+    if (lineageSeed === null) return out;
+    const lineage = wasm.Identity.fromSeed(lineageSeed);
+    let accountKeyHex: string;
+    try {
+      accountKeyHex = bytesToHex(lineage.signaturePublicKey);
+    } finally {
+      lineage.free();
+    }
+    const listed = await new DiscoveryClient().fetchKeyPackages(accountIdBytes);
+    for (const row of listed ?? []) {
+      let bound: Uint8Array | undefined;
+      try {
+        bound = wasm.keyPackageAccountKey(row.keyPackage) ?? undefined;
+      } catch {
+        bound = undefined;
+      }
+      const leafHex = bytesToHex(row.deviceId);
+      // A Phase 1 unbound leaf resolves to itself: not a binding.
+      if (bound === undefined || bytesToHex(bound) !== accountKeyHex || bytesToHex(bound) === leafHex) continue;
+      out.set(leafHex, row.keyPackage);
+    }
+    return out;
+  }
+
+  /** Stop following the DeviceGroup, drop its local state, and rejoin. */
+  async function enterRejoin(account: string): Promise<void> {
     const accountBytes = accountIdBytesActive;
     if (activeAccountIdB64 !== account || accountBytes === null || group === null) return;
-    if (forkRepaired.has(account)) return;
-    if (deviceRemoved() || !forkRepairAllowed(readDeviceGroupActive(group))) return;
-    forkRepaired.add(account);
+    if (deviceRemoved()) return;
     const current = binding.capture();
     reloading = true;
     try {
@@ -1850,19 +2076,6 @@ export function DeviceGroupSyncProvider(props: {
       const deviceKey = await getDeviceKey(account);
       if (deviceKey === null || !current()) return;
       try {
-        await deleteDeviceGroupSnapshot(account);
-      } catch (err) {
-        // The stale snapshot is still there, and founding over it would load
-        // it again: keep following with the handle held, as before.
-        // eslint-disable-next-line no-console
-        console.warn("DeviceGroup snapshot delete failed; not re-founding", err);
-        if (current()) startPollLoop(account, deviceKey);
-        return;
-      }
-      // Signed out during the delete: the handles are freed and unbound
-      // already, and the ones held now (if any) are a later session's.
-      if (!current()) return;
-      try {
         group?.free();
         identity?.free();
       } catch {
@@ -1870,76 +2083,128 @@ export function DeviceGroupSyncProvider(props: {
       }
       group = null;
       identity = null;
+      handleGeneration = null;
       ownPublishedIds.clear();
-      await installRefoundedDeviceGroup(account, accountBytes, deviceKey, headCursor, current);
+      setReady(false);
+      publishOwnDeviceRoster(null);
+      startRejoin(account, accountBytes, deviceKey, current, true);
     } finally {
       if (current()) reloading = false;
     }
   }
 
-  /** The founding half of {@link repairForkedDeviceGroup}, retried on its own
-   *  while the session lasts when the claim or reset does not land. */
-  async function installRefoundedDeviceGroup(
+  /**
+   * The device's side of ADR-0081 decision 4 (`device-group-rejoin.ts`):
+   * drop the local state, make sure the directory KeyPackage is out, knock,
+   * wait for the Welcome, join, then load the joined DeviceGroup like a
+   * bootstrap would. Runs until joined or the session ends.
+   */
+  function startRejoin(
     account: string,
     accountBytes: Uint8Array,
     deviceKey: CryptoKey,
-    headCursor: number,
     current: () => boolean,
-  ): Promise<void> {
-    if (!current() || activeAccountIdB64 !== account || group !== null || deviceRemoved()) return;
-    let ensured;
-    try {
-      const seed = await ensureDeviceIdentitySeed(account, deviceKey);
-      try {
-        ensured = await ensureDeviceGroup(
-          accountBytes,
-          account,
-          seed,
-          deviceKey,
-          auth.identitySecrets()?.accountIdentitySeed,
-        );
-      } finally {
-        seed.fill(0);
+    dropState = true,
+  ): void {
+    if (rejoinAbort !== null) return;
+    const abort = new AbortController();
+    rejoinAbort = abort;
+    accountIdBytesActive = accountBytes;
+    const ports = rejoinPorts(account, accountBytes, deviceKey, abort.signal);
+    void (async () => {
+      let first = dropState;
+      while (!abort.signal.aborted && current()) {
+        try {
+          const outcome = await rejoinOnce(ports, first);
+          first = false;
+          if (outcome === "joined") break;
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("DeviceGroup rejoin attempt failed; trying again", err instanceof Error ? err.name : "");
+          await sleepCancellable(BOOTSTRAP_RETRY_MS, abort.signal);
+        }
       }
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("DeviceGroup re-founding failed; trying again later", err);
-      if (!current()) return;
-      setReady(false);
-      setTimeout(() => {
-        void installRefoundedDeviceGroup(account, accountBytes, deviceKey, headCursor, current);
-      }, BOOTSTRAP_RETRY_MS);
-      return;
-    }
-    if (!current() || activeAccountIdB64 !== account || group !== null) {
-      freeHandles(ensured.group, ensured.identity);
-      return;
-    }
-    if (!ensured.bootstrapped) {
-      // eslint-disable-next-line no-console
-      // A write from the stale handle (a publish that was already out) landed
-      // after the delete. It is the forked state again; the next page load
-      // detects it and repairs then.
-      console.warn("DeviceGroup snapshot rewritten during the re-founding; not re-founded this session");
-    }
-    try {
-      await persistDeviceGroupSnapshotWithCursor(ensured.identity, account, deviceKey, headCursor);
-    } catch (err) {
-      // The founding is on disk without a cursor: the loop starts from 0 and
-      // the old group's rows are refused, which costs only the re-read.
-      // eslint-disable-next-line no-console
-      console.warn("DeviceGroup re-founding cursor persist failed", err);
-    }
-    if (!current() || group !== null) {
-      freeHandles(ensured.group, ensured.identity);
-      return;
-    }
-    group = ensured.group;
-    identity = ensured.identity;
-    setReady(true);
-    publishRoster(false);
-    startPollLoop(account, deviceKey);
-    void drainFolderOutbox();
+      if (rejoinAbort === abort) rejoinAbort = null;
+      if (abort.signal.aborted || !current()) return;
+      // Joined: load it like any session start.
+      activeAccountIdB64 = null;
+      void bootstrap(account, accountBytes);
+    })();
+  }
+
+  function rejoinPorts(
+    account: string,
+    accountBytes: Uint8Array,
+    deviceKey: CryptoKey,
+    signal: AbortSignal,
+  ): RejoinPorts {
+    return {
+      dropLocalState: () => dropDeviceGroupStateForRejoin(account),
+      publishDirectoryKeyPackage: () => auth.republishKeyPackage(),
+      async loadState() {
+        const bytes = await getDeviceGroupPending(account, "rejoin", deviceKey);
+        return bytes === null ? null : decodeRejoinState(bytes);
+      },
+      saveState: (state) => putDeviceGroupPending(account, "rejoin", encodeRejoinState(state), deviceKey),
+      async knock(nowMs) {
+        const wasm = await loadWasm();
+        const s = auth.state();
+        const username = s.kind === "session" ? s.account.username : "";
+        const loginHandle = await ownPairingHandle(username);
+        const groupId = await deviceGroupIdOf(account, deviceKey, auth.identitySecrets()?.accountIdentitySeed);
+        if (groupId === null) throw new Error("the DeviceGroup id cannot be derived yet");
+        const seed = await ensureDeviceIdentitySeed(account, deviceKey);
+        const joiner = wasm.Identity.fromSeed(seed);
+        seed.fill(0);
+        try {
+          const keyPackage = joiner.createKeyPackage();
+          const rendezvous = generateRendezvousPseudonym();
+          const payload = await buildPairingQrPayload(loginHandle, keyPackage, rendezvous);
+          const state = {
+            v: 1 as const,
+            rendezvousB64: base64Encode(rendezvous),
+            joinerSnapshotB64: base64Encode(joiner.snapshotStorage()),
+            knockedAtMs: nowMs,
+          };
+          // Kept BEFORE the knock: the joiner's provider is the only thing
+          // that can open the Welcome a sibling sends.
+          await putDeviceGroupPending(account, "rejoin", encodeRejoinState(state), deviceKey);
+          await new DsClient().knock(groupId, [payload]);
+          return state;
+        } finally {
+          joiner.free();
+        }
+      },
+      async awaitWelcome(state, deadlineMs) {
+        const remaining = Math.max(0, Math.min(deadlineMs - Date.now(), REKNOCK_AFTER_MS));
+        const outcome = await pollForWelcome(base64Decode(state.rendezvousB64), {
+          signal,
+          timeoutMs: remaining,
+        });
+        return outcome.kind === "received" ? outcome.welcome : null;
+      },
+      async join(state, welcome) {
+        const wasm = await loadWasm();
+        const seed = await ensureDeviceIdentitySeed(account, deviceKey);
+        const joiner = wasm.Identity.fromSeed(seed);
+        seed.fill(0);
+        try {
+          joiner.restoreStorage(base64Decode(state.joinerSnapshotB64));
+          const joined = wasm.DeviceGroup.joinFromWelcome(welcome, joiner, accountBytes);
+          try {
+            await persistDeviceGroupSnapshotWithCursor(joiner, account, deviceKey, undefined);
+          } finally {
+            joined.free();
+          }
+        } finally {
+          joiner.free();
+        }
+        // A fresh observer of the journal.
+        await putDeviceGroupPending(account, "admissions", encodeAdmissionRecord(newAdmissionRecord(Date.now())), deviceKey);
+      },
+      clearState: () => deleteDeviceGroupPending(account, "rejoin"),
+      now: () => Date.now(),
+    };
   }
 
   function applyParsed(parsed: ParsedDeviceGroupPayload): void {
@@ -2050,7 +2315,16 @@ export function DeviceGroupSyncProvider(props: {
     // A handle reload in between replaced `identity`; the snapshot on disk is
     // already the newer one.
     if (deviceKey !== null && identity === id) {
-      await persistDeviceGroupSnapshot(id, account, deviceKey);
+      // Fail-closed and conditional on the row this handle read (ADR-0081
+      // decision 3).
+      const written = await persistDeviceGroupSnapshotWithCursor(
+        id,
+        account,
+        deviceKey,
+        undefined,
+        handleGeneration ?? undefined,
+      );
+      if (identity === id) handleGeneration = written;
       if (!current()) throw new StaleBindingError();
     }
     return published.id;

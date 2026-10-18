@@ -382,24 +382,21 @@ internal fun <T> withPrePersistReset(reset: () -> Unit, prelude: () -> T): T {
  * it is unit-testable without the FFI Group / DS / echo filter. For each entry:
  *
  *   - [SweepVerdict.DISCARD] -> [onDiscard] (torn-write orphan or acked GC).
- *   - [SweepVerdict.RE_PUBLISH] -> re-publish the commit via [republishCommit],
- *     re-arm the committer's own-echo filter ([markOwnPublished]) for the
- *     re-fetched commit (else the next poll hits `CannotDecryptOwnMessage`),
- *     re-publish the second artifact to its destination, then [onAck]. A
- *     re-publish FAILURE (offline DS) leaves the entry (no [onAck]) for the next
- *     sweep.
+ *   - [SweepVerdict.RE_PUBLISH] -> deliver what the entry still owes (its
+ *     Welcome), then [onAck]. A delivery FAILURE (offline DS) leaves the entry
+ *     (no [onAck]) for the next sweep.
  *
- * The second-artifact re-publish never re-arms the echo filter: since ADR-0045
- * S7 the only direct-path second artifact is a WELCOME, which goes to the new
- * member's mailbox and never echoes back to the committer.
+ * ADR-0081 — a direct commit's entry is written only after the commit route
+ * took the commit, so the commit is on the journal already and is never
+ * re-sent here (the ack carries no commit id: the entry does not hold it).
+ * Since ADR-0045 S7 the only direct-path second artifact is a WELCOME, which
+ * goes to the new member's mailbox and never echoes back to the committer.
  */
 internal suspend fun sweepPendingCommitEntries(
     entries: List<PendingCommitEntry>,
     currentEpoch: ULong,
-    republishCommit: suspend (ByteArray) -> Long,
     republishWelcome: suspend (mailbox: ByteArray, bytes: ByteArray) -> Long,
-    markOwnPublished: (Long) -> Unit,
-    onAck: suspend (id: String, commitMessageId: Long, secondMessageId: Long?) -> Unit,
+    onAck: suspend (id: String, commitMessageId: Long?, secondMessageId: Long?) -> Unit,
     onDiscard: suspend (id: String) -> Unit,
     decodeB64: (String) -> ByteArray = ::outboxUnb64,
 ) {
@@ -408,11 +405,6 @@ internal suspend fun sweepPendingCommitEntries(
             SweepVerdict.DISCARD -> onDiscard(entry.id)
             SweepVerdict.RE_PUBLISH -> {
                 try {
-                    val newCommitId = republishCommit(decodeB64(entry.commitB64))
-                    // Echo re-arm: the device is durably at N+1, so feeding its
-                    // own re-fetched commit into processIncoming raises
-                    // CannotDecryptOwnMessage. Suppress it on the very next poll.
-                    markOwnPublished(newCommitId)
 
                     // ADR-0045 S7 — a direct-path second artifact is now ALWAYS
                     // a mailbox Welcome. The rendezvous arm this loop used to
@@ -429,12 +421,10 @@ internal suspend fun sweepPendingCommitEntries(
                             decodeB64(second),
                         )
                     }
-                    onAck(entry.id, newCommitId, secondMessageId)
+                    onAck(entry.id, null, secondMessageId)
                 } catch (_: Throwable) {
                     // Offline / DS down -> leave the entry un-acked; the next
-                    // sweep retries. Safe: the device is durably at N+1, so a
-                    // later re-publish is either the first publish (peers catch
-                    // up) or a wrong-epoch duplicate peers drop.
+                    // sweep retries the delivery.
                 }
             }
         }

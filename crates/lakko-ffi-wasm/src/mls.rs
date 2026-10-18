@@ -1238,6 +1238,72 @@ impl Group {
         group::encode_message(&commit).map_err(mls_err)
     }
 
+    /// ADR-0081 staged twin of [`Self::add_member`]: the same commit and
+    /// Welcome, but the group stays at epoch N holding the commit as pending,
+    /// exactly as [`Self::stage_pending_proposals`] leaves a sweep. Record it
+    /// durably, send it with `dsStagedAccessSigner`, then `mergeStagedSweep`
+    /// on the Delivery Service's acceptance or `abandonStagedSweep` on its
+    /// `409`. While it is staged every membership operation throws the
+    /// `sweepAlreadyStaged` refusal. The staged commit is persisted with the
+    /// group, so it survives `snapshotStorage` and a reload.
+    #[wasm_bindgen(js_name = stageAddMember)]
+    pub fn stage_add_member(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<AddMember, JsValue> {
+        self.stage_add_members_inner(identity, &[key_package])
+    }
+
+    /// The several-leaf form of [`Self::stage_add_member`] (one commit, one
+    /// Welcome; see [`Self::add_members`]). `keyPackages` is a `Uint8Array[]`.
+    #[wasm_bindgen(js_name = stageAddMembers)]
+    pub fn stage_add_members(
+        &self,
+        identity: &Identity,
+        key_packages: Vec<js_sys::Uint8Array>,
+    ) -> Result<AddMember, JsValue> {
+        let owned: Vec<Vec<u8>> = key_packages.into_iter().map(|a| a.to_vec()).collect();
+        let borrowed: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        self.stage_add_members_inner(identity, &borrowed)
+    }
+
+    fn stage_add_members_inner(
+        &self,
+        identity: &Identity,
+        key_packages: &[&[u8]],
+    ) -> Result<AddMember, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        let MemberAddition { commit, welcome } = g
+            .stage_add_members_from_wire(&identity.inner, key_packages)
+            .map_err(mls_err)?;
+        Ok(AddMember {
+            commit_bytes: group::encode_message(&commit).map_err(mls_err)?,
+            welcome_bytes: group::encode_message(&welcome).map_err(mls_err)?,
+        })
+    }
+
+    /// [`Self::remove_member`], staged (ADR-0081; see
+    /// [`Self::stage_add_member`]). Returns the commit to send.
+    #[wasm_bindgen(js_name = stageRemoveMember)]
+    pub fn stage_remove_member(
+        &self,
+        identity: &Identity,
+        leaf_index: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        let commit = g
+            .stage_remove_member(&identity.inner, lakko_mls::LeafNodeIndex::new(leaf_index))
+            .map_err(mls_err)?;
+        group::encode_message(&commit).map_err(mls_err)
+    }
+
     /// Encrypt an application payload for the current epoch.
     #[wasm_bindgen(js_name = createApplicationMessage)]
     pub fn create_application_message(
@@ -1335,6 +1401,24 @@ impl Group {
     ) -> Result<Vec<u8>, JsValue> {
         self.set_group_roles_core(identity, owner, admins_flat)
             .map_err(MlsFailure::into_js)
+    }
+
+    /// [`Self::set_group_roles`], staged (ADR-0081; see
+    /// [`Self::stage_add_member`]). Returns the commit to send.
+    #[wasm_bindgen(js_name = stageSetGroupRoles)]
+    pub fn stage_set_group_roles(
+        &self,
+        identity: &Identity,
+        owner: &[u8],
+        admins_flat: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
+        let table = role_table_from_flat(owner, admins_flat)
+            .map_err(MlsFailure::from)
+            .map_err(MlsFailure::into_js)?;
+        self.locked()
+            .map_err(MlsFailure::into_js)?
+            .stage_set_group_roles(&identity.inner, &table)
+            .map_err(mls_err)
     }
 
     /// **Propose** adding a member from their published KeyPackage — the
@@ -2302,6 +2386,20 @@ impl PublisherGroup {
             .lock()
             .map_err(|_| js_error("internal lock poisoned"))?;
         crate::ds_proof::group_signer(g.inner(), &identity.inner)
+    }
+
+    /// ADR-0081 - the 32-byte access seed of the current epoch, to record
+    /// with a commit before it merges (a rotation, an approve) so a re-send
+    /// after a reload can prove the epoch the commit left
+    /// (`DsProofSigner.forGroup`). Keep it only in the device-key-encrypted
+    /// record of that commit.
+    #[wasm_bindgen(js_name = dsAccessSeed)]
+    pub fn ds_access_seed(&self, identity: &Identity) -> Result<Vec<u8>, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        crate::ds_proof::group_access_seed(g.inner(), &identity.inner)
     }
 
     /// ADR-0028 OQ3 — the underlying MLS `group_id`. A co-publisher invite-link

@@ -25,7 +25,9 @@ final class PublisherCommitOutboxTests: XCTestCase {
         serverTargetEpoch: 8,
         commitB64: Data("commit".utf8).base64EncodedString(),
         welcomeB64: Data("welcome".utf8).base64EncodedString(),
-        joinerKeyB64: Data(repeating: 0x6A, count: 32).base64EncodedString())
+        joinerKeyB64: Data(repeating: 0x6A, count: 32).base64EncodedString(),
+        proofEpoch: 4,
+        proofSeedB64: Data(repeating: 0x73, count: 32).base64EncodedString())
 
     private var rotation: PublisherCommitEntry {
         PublisherCommitEntry(
@@ -34,23 +36,30 @@ final class PublisherCommitOutboxTests: XCTestCase {
             channelIdHex: approve.channelIdHex,
             groupIdHex: approve.groupIdHex,
             targetEpoch: 5,
-            serverTargetEpoch: 8)
+            serverTargetEpoch: 8,
+            commitB64: Data("rotation".utf8).base64EncodedString())
     }
 
     private final class Recorder {
         var calls: [String] = []
         var saved: [PublisherCommitEntry] = []
         var finished: PublisherCommitEntry?
+        var proofs: [UInt64?] = []
     }
 
-    private func ports(_ r: Recorder, failAt: String? = nil, serverEpoch: UInt32 = 7) -> PublisherCommitPorts {
+    private func ports(
+        _ r: Recorder, failAt: String? = nil, serverEpoch: UInt32 = 7, lost: Bool = false
+    ) -> PublisherCommitPorts {
         func step(_ name: String) throws {
             r.calls.append(name)
             if name == failAt { throw Failure() }
         }
         return PublisherCommitPorts(
-            registerEpoch: { try step("register") },
-            publishCommit: { try step("publish:\(String(decoding: $0, as: UTF8.self))") },
+            commitToJournal: { commit, proof in
+                r.proofs.append(proof?.epoch)
+                try step("commit:\(String(decoding: commit, as: UTF8.self))")
+            },
+            isLost: { _ in lost },
             deliverWelcome: { welcome, _ in try step("welcome:\(String(decoding: welcome, as: UTF8.self))") },
             serverEpoch: {
                 try step("server-epoch")
@@ -66,7 +75,7 @@ final class PublisherCommitOutboxTests: XCTestCase {
         let r = Recorder()
         try await PublisherCommitRunner.run(approve, ports: ports(r))
         XCTAssertEqual(r.calls, [
-            "register", "publish:commit", "welcome:welcome", "server-epoch", "reseal:8", "appoint",
+            "commit:commit", "welcome:welcome", "server-epoch", "reseal:8", "appoint",
         ])
         XCTAssertEqual(r.saved.map(\.done), [
             [.journal], [.journal, .welcome], [.journal, .welcome, .reseal],
@@ -75,10 +84,12 @@ final class PublisherCommitOutboxTests: XCTestCase {
         XCTAssertEqual(r.finished?.id, approve.id)
     }
 
-    func testARotationRegistersAndResealsAndPublishesNothing() async throws {
+    /// ADR-0081 — a rotation's epoch reaches the DS with its commit (best
+    /// effort), then the reseal.
+    func testARotationCommitsAndReseals() async throws {
         let r = Recorder()
         try await PublisherCommitRunner.run(rotation, ports: ports(r))
-        XCTAssertEqual(r.calls, ["register", "server-epoch", "reseal:8"])
+        XCTAssertEqual(r.calls, ["commit:rotation", "server-epoch", "reseal:8"])
     }
 
     func testAFailedStepLeavesWhatLandedAndTheNextRunResumesThere() async throws {
@@ -105,20 +116,52 @@ final class PublisherCommitOutboxTests: XCTestCase {
         XCTAssertEqual(r.finished?.done, [.journal, .reseal])
     }
 
-    func testARefusedRegistrationDoesNotHoldARotation() async throws {
+    /// ADR-0081 — the journal step is proven under the recorded seed of the
+    /// epoch the commit left, so a replay after a restart can still send a
+    /// commit that never reached the DS.
+    func testTheJournalStepIsProvenUnderTheRecordedEpoch() async throws {
         let r = Recorder()
-        try await PublisherCommitRunner.run(rotation, ports: ports(r, failAt: "register"))
-        XCTAssertEqual(r.calls, ["register", "server-epoch", "reseal:8"])
-        XCTAssertEqual(r.finished?.done, [.journal, .reseal])
+        try await PublisherCommitRunner.run(approve, ports: ports(r))
+        XCTAssertEqual(r.proofs, [4])
     }
 
-    func testARefusedRegistrationStopsAnApproveBeforeItsCommitIsPublished() async throws {
+    func testARotationCommitTheDsDidNotAnswerDefersOnlyItsJournalStep() async throws {
+        let r = Recorder()
+        try await PublisherCommitRunner.run(rotation, ports: ports(r, failAt: "commit:rotation"))
+        XCTAssertEqual(r.calls, ["commit:rotation", "server-epoch", "reseal:8"])
+        XCTAssertNil(r.finished, "kept for the journal step")
+        let kept = try XCTUnwrap(r.saved.last)
+        XCTAssertEqual(kept.remainingSteps, [.journal])
+        let again = Recorder()
+        try await PublisherCommitRunner.run(kept, ports: ports(again, serverEpoch: 8))
+        XCTAssertEqual(again.calls, ["commit:rotation"])
+        XCTAssertEqual(again.finished?.done, [.reseal, .journal])
+    }
+
+    func testALostRotationCommitDoesNotHoldTheRotation() async throws {
+        let r = Recorder()
+        try await PublisherCommitRunner.run(
+            rotation, ports: ports(r, failAt: "commit:rotation", lost: true))
+        XCTAssertEqual(r.calls, ["commit:rotation", "server-epoch", "reseal:8"])
+        XCTAssertEqual(r.finished?.done, [.journal, .reseal])
+        XCTAssertEqual(r.finished?.journalLost, true)
+    }
+
+    func testALostApproveDeliversNoWelcomeAndAppointsNobodyButReseals() async throws {
+        let r = Recorder()
+        try await PublisherCommitRunner.run(
+            approve, ports: ports(r, failAt: "commit:commit", lost: true))
+        XCTAssertEqual(r.calls, ["commit:commit", "server-epoch", "reseal:8"])
+        XCTAssertEqual(r.finished?.journalLost, true)
+    }
+
+    func testAnUnansweredCommitStopsAnApproveBeforeTheWelcome() async throws {
         let r = Recorder()
         do {
-            try await PublisherCommitRunner.run(approve, ports: ports(r, failAt: "register"))
-            XCTFail("the registration failure must surface")
+            try await PublisherCommitRunner.run(approve, ports: ports(r, failAt: "commit:commit"))
+            XCTFail("the commit failure must surface")
         } catch {}
-        XCTAssertEqual(r.calls, ["register"])
+        XCTAssertEqual(r.calls, ["commit:commit"])
         XCTAssertTrue(r.saved.isEmpty)
         XCTAssertNil(r.finished)
     }

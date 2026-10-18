@@ -8,7 +8,6 @@ import me.lakko.app.ds.DsJournalSigner
 import me.lakko.app.ds.FfiDsJournalSigner
 import me.lakko.app.ds.DsStatementSigning
 import me.lakko.app.ds.FfiDsStatementSigning
-import me.lakko.app.ds.registerEpochBeforePublish
 import uniffi.lakko_ffi_uniffi.DeviceGroup
 import uniffi.lakko_ffi_uniffi.Identity
 
@@ -20,10 +19,10 @@ import uniffi.lakko_ffi_uniffi.Identity
  * derives the same journal ROOT from the account identity seed and registers
  * every epoch with it; there are no registrars (and nothing to revoke).
  *
- * The DeviceGroup's commit paths ([PairingOrchestrator], [DeviceRemoval]) each
- * open their own short-lived handle, so they take the signers from that handle
- * explicitly: [signerOf] before the commit (epoch N) and after it (N+1), then
- * [registerNext] before anything is persisted or published.
+ * The DeviceGroup's commit paths ([PairingOrchestrator], [DeviceRemoval]) go
+ * through the commit outbox ([DeviceGroupCommits], ADR-0081): the N+1
+ * registration and the commit row reach the DS in one request, proven under
+ * N. Nothing here registers an epoch on its own.
  */
 internal object DeviceGroupJournalAccess {
     /** The [me.lakko.app.ds.DsSignerRegistry] owner tag of the sync
@@ -160,6 +159,9 @@ internal object DeviceGroupJournalAccess {
                 accountIdB64 = accountIdB64,
                 deviceIdentitySeed = deviceSeed,
                 accountSeed = accountIdentitySeed,
+                // ADR-0081 decision 4 — a key reset is one of the two cases
+                // that found (the new seed names a new journal nobody holds).
+                found = true,
             )
         } finally {
             deviceSeed.fill(0)
@@ -207,26 +209,4 @@ internal object DeviceGroupJournalAccess {
             null
         }
 
-    /**
-     * ADR-0057 obligation 5 — register epoch N+1's key ([after]) with the
-     * account's journal [root] and return [before], the signer the commit POST
-     * is signed with. Throws when the registration cannot be made or is
-     * refused (no root on this device included); the caller must then publish
-     * nothing.
-     */
-    suspend fun registerNext(
-        ds: DsClient,
-        groupId: ByteArray,
-        before: DsJournalSigner?,
-        after: DsJournalSigner?,
-        root: DsStatementSigning?,
-    ): DsJournalSigner =
-        registerEpochBeforePublish(
-            journalId = groupId,
-            before = before,
-            after = after,
-            statements = root,
-            revoke = emptyList(),
-            put = { make -> ds.putStatement(make) },
-        )
 }

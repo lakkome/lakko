@@ -30,6 +30,9 @@ const APPROVE: PublisherCommitEntry = {
   welcomeB64: btoa("welcome"),
   joinerKeyB64: btoa("j".repeat(32)),
   replyGrantB64: "Z3JhbnQ=",
+  proofEpoch: "4",
+  proofSeedB64: btoa("s".repeat(32)),
+  journalLost: false,
   done: [],
 };
 
@@ -37,14 +40,16 @@ const ROTATION: PublisherCommitEntry = {
   ...APPROVE,
   id: "0b".repeat(16),
   kind: "rotation",
-  commitB64: null,
+  // ADR-0081: a rotation's commit reaches the journal with its epoch.
+  commitB64: btoa("rotation"),
   welcomeB64: null,
   joinerKeyB64: null,
   replyGrantB64: null,
 };
 
-function ports(opts: { failAt?: string; serverEpoch?: number } = {}) {
+function ports(opts: { failAt?: string; serverEpoch?: number; lost?: boolean } = {}) {
   const calls: string[] = [];
+  const proofs: (string | null)[] = [];
   const saved: PublisherCommitEntry[] = [];
   let finished: PublisherCommitEntry | null = null;
   const step = (name: string) => {
@@ -52,12 +57,11 @@ function ports(opts: { failAt?: string; serverEpoch?: number } = {}) {
     if (opts.failAt === name) throw new Error(`${name} failed`);
   };
   const p: PublisherCommitPorts = {
-    async registerEpoch() {
-      step("register");
+    async commitToJournal(commit, proof) {
+      proofs.push(proof === null ? null : `${proof.epoch}:${new TextDecoder().decode(proof.seed)}`);
+      step(`commit:${new TextDecoder().decode(commit)}`);
     },
-    async publishCommit(commit) {
-      step(`publish:${new TextDecoder().decode(commit)}`);
-    },
+    classifyCommitFailure: () => (opts.lost === true ? "lost" : "unknown"),
     async deliverWelcome(welcome, _key, grant) {
       step(`welcome:${new TextDecoder().decode(welcome)}:${grant ?? "none"}`);
     },
@@ -78,7 +82,7 @@ function ports(opts: { failAt?: string; serverEpoch?: number } = {}) {
       finished = e;
     },
   };
-  return { p, calls, saved, finished: () => finished };
+  return { p, calls, saved, proofs, finished: () => finished };
 }
 
 describe("running a recorded PublisherGroup commit", () => {
@@ -86,8 +90,7 @@ describe("running a recorded PublisherGroup commit", () => {
     const t = ports();
     await runPublisherCommit(APPROVE, t.p);
     expect(t.calls).toEqual([
-      "register",
-      "publish:commit",
+      "commit:commit",
       "welcome:welcome:Z3JhbnQ=",
       "server-epoch",
       "reseal:8",
@@ -102,10 +105,10 @@ describe("running a recorded PublisherGroup commit", () => {
     expect(t.finished()?.id).toBe(APPROVE.id);
   });
 
-  it("a rotation registers the epoch and reseals; it publishes no commit and no Welcome", async () => {
+  it("a rotation sends its commit with the epoch and reseals; it sends no Welcome", async () => {
     const t = ports();
     await runPublisherCommit(ROTATION, t.p);
-    expect(t.calls).toEqual(["register", "server-epoch", "reseal:8"]);
+    expect(t.calls).toEqual(["commit:rotation", "server-epoch", "reseal:8"]);
   });
 
   it("a failed step leaves what landed recorded, and the next run resumes there", async () => {
@@ -127,17 +130,48 @@ describe("running a recorded PublisherGroup commit", () => {
     expect(t.finished()?.done).toEqual(["journal", "reseal"]);
   });
 
-  it("a refused epoch registration does not hold a rotation, which publishes nothing", async () => {
-    const t = ports({ failAt: "register" });
-    await runPublisherCommit(ROTATION, t.p);
-    expect(t.calls).toEqual(["register", "server-epoch", "reseal:8"]);
-    expect(t.finished()?.done).toEqual(["journal", "reseal"]);
+  it("the journal step is proven under the recorded seed of the epoch the commit left", async () => {
+    // ADR-0081: the commit merged eagerly, so a replay after a reload holds
+    // only the N+1 key; the recorded epoch-N seed lets it prove the epoch
+    // the DS requires for a first send.
+    const t = ports();
+    await runPublisherCommit(APPROVE, t.p);
+    expect(t.proofs).toEqual([`4:${"s".repeat(32)}`]);
   });
 
-  it("a refused epoch registration stops an approve before its commit is published", async () => {
-    const t = ports({ failAt: "register" });
-    await expect(runPublisherCommit(APPROVE, t.p)).rejects.toThrow(/register/);
-    expect(t.calls).toEqual(["register"]);
+  it("a rotation commit the DS did not answer defers only its journal step", async () => {
+    const t = ports({ failAt: "commit:rotation" });
+    await runPublisherCommit(ROTATION, t.p);
+    expect(t.calls).toEqual(["commit:rotation", "server-epoch", "reseal:8"]);
+    // The reseal landed; the entry is kept for the journal step.
+    expect(t.finished()).toBeNull();
+    const kept = t.saved.at(-1)!;
+    expect(remainingSteps(kept)).toEqual(["journal"]);
+    const again = ports({ serverEpoch: 8 });
+    await runPublisherCommit(kept, again.p);
+    expect(again.calls).toEqual(["commit:rotation"]);
+    expect(again.finished()?.done).toEqual(["reseal", "journal"]);
+  });
+
+  it("a rotation commit the DS refused (409) is lost and does not hold the rotation", async () => {
+    const t = ports({ failAt: "commit:rotation", lost: true });
+    await runPublisherCommit(ROTATION, t.p);
+    expect(t.calls).toEqual(["commit:rotation", "server-epoch", "reseal:8"]);
+    expect(t.finished()?.done).toEqual(["journal", "reseal"]);
+    expect(t.finished()?.journalLost).toBe(true);
+  });
+
+  it("an approve whose commit lost (409) delivers no Welcome and appoints nobody, but reseals", async () => {
+    const t = ports({ failAt: "commit:commit", lost: true });
+    await runPublisherCommit(APPROVE, t.p);
+    expect(t.calls).toEqual(["commit:commit", "server-epoch", "reseal:8"]);
+    expect(t.finished()?.journalLost).toBe(true);
+  });
+
+  it("an approve commit the DS did not answer stops the approve before its Welcome", async () => {
+    const t = ports({ failAt: "commit:commit" });
+    await expect(runPublisherCommit(APPROVE, t.p)).rejects.toThrow(/commit/);
+    expect(t.calls).toEqual(["commit:commit"]);
     expect(t.saved).toEqual([]);
     expect(t.finished()).toBeNull();
   });

@@ -114,15 +114,20 @@ class DsJournalSignerTest {
     private val journal = ByteArray(32) { 9 }
 
     @Test
-    fun `registration registers the next epoch's key with the statement signer and returns the current`() = runTest {
+    fun `a commit registers the next epoch's key with the statement signer, proven by the current`() = runTest {
         val before = Signer(7uL)
         val after = Signer(8uL)
         val root = RecordingStatementSigner("root")
         var put: DsStatement? = null
-        val used = registerEpochBeforePublish(journal, before, after, root, emptyList()) { make -> put = make() }
-        assertSame(before, used)
+        var proof: DsJournalSigner? = null
+        commitEpochWith(journal, before, after, root, emptyList(), byteArrayOf(1)) { make, p ->
+            put = make()
+            proof = p
+            DsCommitAnswer(id = 1, createdAt = "t", resent = false)
+        }
+        assertSame(before, proof)
         assertEquals(listOf("register@8"), root.calls)
-        assertTrue(put!!.path.endsWith("/access"))
+        assertTrue(put!!.path.endsWith("/commit"))
     }
 
     @Test
@@ -138,8 +143,9 @@ class DsJournalSignerTest {
         )) {
             assertThrows(DsRegistrationUnavailable::class.java) {
                 kotlinx.coroutines.runBlocking {
-                    registerEpochBeforePublish(journal, pair.first, pair.second, statements, emptyList()) {
+                    commitEpochWith(journal, pair.first, pair.second, statements, emptyList(), byteArrayOf(1)) { _, _ ->
                         calls += "register"
+                        DsCommitAnswer(id = 1, createdAt = "t", resent = false)
                     }
                 }
             }

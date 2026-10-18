@@ -172,8 +172,13 @@ final class CommitterSweepTests: XCTestCase {
                     if let err = journal.fetchThrows { throw err }
                     return journal.rowsAfter[after] ?? []
                 },
-                publishGroup: { bytes in
+                // ADR-0081 — the commit and the staged epoch's registration
+                // in one call: `registerThrows` is a refused registration,
+                // `publishThrows` any other failure of the same request.
+                commitStaged: { bytes in
                     group.log.append("publish:commit")
+                    journal.registrations += 1
+                    if let err = journal.registerThrows { throw err }
                     if let err = journal.publishThrows { throw err }
                     journal.published.append(("commit", bytes))
                     journal.nextId += 1
@@ -186,11 +191,6 @@ final class CommitterSweepTests: XCTestCase {
                     journal.nextId += 1
                     return journal.nextId
                 },
-                registerStagedEpoch: {
-                    group.log.append("register")
-                    journal.registrations += 1
-                    if let err = journal.registerThrows { throw err }
-                }
             ),
             outbox: SweepOutboxPort(
                 newEntryId: { "entry-1" },
@@ -283,7 +283,7 @@ final class CommitterSweepTests: XCTestCase {
         // than the two-party one this mechanism exists to close.
         XCTAssertEqual(
             h.log,
-            ["fetch", "stage", "register", "record", "publish:commit", "fetch",
+            ["fetch", "stage", "record", "publish:commit", "fetch",
              "merge", "welcomes-owed", "publish:welcome", "ack"],
             "obligation 4 orders record -> publish -> verdict -> merge, and obligation 2 puts "
             + "the Welcome strictly after the merge — with the durable welcomes-owed marker "
@@ -321,7 +321,7 @@ final class CommitterSweepTests: XCTestCase {
             // consumed, so it must durably write them first (see
             // `Chat/DurableCursor.swift`).
             [
-                "fetch", "stage", "register", "record", "publish:commit", "fetch", "apply",
+                "fetch", "stage", "record", "publish:commit", "fetch", "apply",
                 "persist-applied", "abandon", "discard",
             ],
             "a lost sweep abandons and DISCARDS its entry — re-publishing a commit whose "
@@ -383,18 +383,16 @@ final class CommitterSweepTests: XCTestCase {
             h.log,
             ["publish:commit", "fetch", "merge", "welcomes-owed",
              "publish:welcome", "ack"],
-            "the re-publish is idempotent (peers at N+1 drop the duplicate as wrong-epoch), "
-            + "NO second durable record is written — the entry already exists — and NOTHING "
-            + "is re-registered (ADR-0057: the first run registered before it recorded)"
+            "the re-send is idempotent (ADR-0081: the DS answers the original row's id), "
+            + "and NO second durable record is written — the entry already exists"
         )
         XCTAssertTrue(h.outbox.recorded.isEmpty, "a re-publish must not re-record")
     }
 
-    /// ADR-0057 — an owed verdict that turns out LOST must not have
-    /// re-registered the epoch on the way: a root registration replaces every
-    /// epoch at and above it, so it would replace the winner's epoch and cut
-    /// the group off. The verdict is resolved only.
-    func testAnOwedVerdictThatLostReRegistersNothing() async throws {
+    /// ADR-0081 — an owed verdict re-sends its row with a fresh Append
+    /// registration, which never replaces the winner's epoch; a loss read
+    /// from the journal still abandons and discards.
+    func testAnOwedVerdictThatLostAbandonsAndDiscards() async throws {
         let h = makeHarness()
         h.group.staged = true
         h.group.pending = 1
@@ -408,7 +406,9 @@ final class CommitterSweepTests: XCTestCase {
         guard case .lost = outcome else {
             return XCTFail("a foreign commit below ours is a LOSS, got \(outcome)")
         }
-        XCTAssertFalse(h.log.contains("register"), "an owed verdict never re-registers: \(h.log)")
+        // ADR-0081 — the owed verdict re-sends the same row with a freshly
+        // signed registration (idempotent on the DS); it never replaces.
+        XCTAssertEqual(h.journal.registrations, 1)
         XCTAssertEqual(
             h.log, ["publish:commit", "fetch", "apply", "persist-applied", "abandon", "discard"])
     }
@@ -487,7 +487,7 @@ final class CommitterSweepTests: XCTestCase {
             // expected
         }
         XCTAssertEqual(
-            h.log, ["fetch", "stage", "register", "record", "abandon"],
+            h.log, ["fetch", "stage", "record", "abandon"],
             "nothing was published, so the group must look as though the sweep never happened"
         )
         XCTAssertFalse(h.group.staged)
@@ -917,7 +917,7 @@ final class CommitterSweepTests: XCTestCase {
 
         XCTAssertEqual(
             h.log,
-            ["fetch", "stage", "register", "record", "publish:commit", "fetch",
+            ["fetch", "stage", "record", "publish:commit", "fetch",
              "merge", "welcomes-owed", "publish:welcome", "ack"]
         )
     }
@@ -1009,9 +1009,8 @@ final class CommitterSweepTests: XCTestCase {
                 h.group.log.append("fetch")
                 return try await fetch(after)
             },
-            publishGroup: inner.publishGroup,
-            publishMailbox: inner.publishMailbox,
-            registerStagedEpoch: inner.registerStagedEpoch
+            commitStaged: inner.commitStaged,
+            publishMailbox: inner.publishMailbox
         )
         return ports
     }
@@ -1027,9 +1026,8 @@ final class CommitterSweepTests: XCTestCase {
         let inner = ports.journal
         ports.journal = SweepJournalPort(
             fetch: inner.fetch,
-            publishGroup: inner.publishGroup,
+            commitStaged: inner.commitStaged,
             publishMailbox: inner.publishMailbox,
-            registerStagedEpoch: inner.registerStagedEpoch,
             canRegister: { false })
 
         let outcome = try await runCommitterSweep(ports)
@@ -1048,9 +1046,8 @@ final class CommitterSweepTests: XCTestCase {
         let inner = ports.journal
         ports.journal = SweepJournalPort(
             fetch: inner.fetch,
-            publishGroup: inner.publishGroup,
+            commitStaged: inner.commitStaged,
             publishMailbox: inner.publishMailbox,
-            registerStagedEpoch: inner.registerStagedEpoch,
             canRegister: inner.canRegister,
             registrationDue: { false })
         return ports
@@ -1128,50 +1125,88 @@ final class CommitterSweepTests: XCTestCase {
         XCTAssertEqual(h.journal.published.map(\.kind), ["commit", "welcome"])
     }
 
-    // MARK: - ADR-0053 point 3: register the staged epoch before publishing
+    // MARK: - ADR-0081 decision 1: the staged epoch rides with the commit
 
-    /// The next epoch's key is registered after the stage and before anything
-    /// is recorded or published: a commit is never on the wire before the
-    /// server knows its epoch.
-    func testTheStagedEpochIsRegisteredBeforeTheRecordAndThePublish() async throws {
+    private func classified(_ h: Harness) -> SweepPorts {
+        var ports = h.ports
+        ports.classifyCommitFailure = { error in
+            if (error as? DsStatementError) == .conflict { return .lost }
+            return error is StubError ? .refused : .unknown
+        }
+        return ports
+    }
+
+    private struct NotReached: Error {}
+
+    /// The entry is recorded first; the staged epoch's key then reaches the DS
+    /// together with the commit, in one call.
+    func testTheStagedEpochReachesTheDsWithTheCommitAfterTheRecord() async throws {
         let h = makeHarness()
         _ = try await runCommitterSweep(h.ports)
 
         let log = h.log
-        let register = try XCTUnwrap(log.firstIndex(of: "register"))
-        XCTAssertLessThan(try XCTUnwrap(log.firstIndex(of: "stage")), register)
-        XCTAssertLessThan(register, try XCTUnwrap(log.firstIndex(of: "record")))
-        XCTAssertLessThan(register, try XCTUnwrap(log.firstIndex(of: "publish:commit")))
+        let commit = try XCTUnwrap(log.firstIndex(of: "publish:commit"))
+        XCTAssertLessThan(try XCTUnwrap(log.firstIndex(of: "stage")), commit)
+        XCTAssertLessThan(try XCTUnwrap(log.firstIndex(of: "record")), commit)
+        XCTAssertFalse(log.contains("register"), "no separate registration exists")
         XCTAssertEqual(h.journal.registrations, 1)
     }
 
-    /// A failed registration abandons the sweep before publishing — the
-    /// group looks as though the sweep never happened.
-    func testAFailedRegistrationAbandonsBeforePublishing() async throws {
+    /// A refused commit (the registration refused, the proof not verified)
+    /// put nothing on the DS: the sweep abandons, drops its entry, throws.
+    func testARefusedCommitAbandonsAndDropsItsEntry() async throws {
         let h = makeHarness()
         h.journal.registerThrows = StubError()
 
         do {
-            _ = try await runCommitterSweep(h.ports)
-            XCTFail("a failed registration must abort the sweep")
+            _ = try await runCommitterSweep(classified(h))
+            XCTFail("a refused commit must surface")
         } catch is StubError {
             // expected
         }
-        XCTAssertEqual(h.log, ["fetch", "stage", "register", "abandon"])
+        XCTAssertEqual(h.log, ["fetch", "stage", "record", "publish:commit", "abandon", "discard"])
         XCTAssertFalse(h.group.staged)
-        XCTAssertTrue(h.outbox.recorded.isEmpty, "nothing may be recorded")
-        XCTAssertEqual(h.journal.published.count, 0, "nothing may be published")
+        XCTAssertEqual(h.journal.published.count, 0)
     }
 
-    /// ADR-0057 — the restart path re-registers NOTHING (a root
-    /// re-registration after a lost sweep would replace the winner's epoch),
-    /// so a registration that would fail cannot touch it either: no abandon,
-    /// the re-publish and the verdict proceed.
-    func testTheRestartPathNeverRegistersAndNeverAbandonsOverIt() async throws {
+    /// `409` at the commit route: another commit owns the staged epoch. The
+    /// sweep abandons exactly like a lost verdict; the proposals survive.
+    func testALostEpochAtTheCommitRouteIsALoss() async throws {
+        let h = makeHarness()
+        h.journal.publishThrows = DsStatementError.conflict
+
+        let outcome = try await runCommitterSweep(classified(h))
+
+        XCTAssertEqual(outcome, .lost(commitMessageId: nil))
+        XCTAssertEqual(h.log, ["fetch", "stage", "record", "publish:commit", "abandon", "discard"])
+        XCTAssertFalse(h.group.staged)
+        XCTAssertTrue(h.outbox.acked.isEmpty)
+    }
+
+    /// A commit that may or may not have landed (the DS not reached) leaves
+    /// the sweep staged with its entry; the owed verdict re-sends it.
+    func testACommitThatDidNotReachTheDsStaysStaged() async throws {
+        let h = makeHarness()
+        h.journal.publishThrows = NotReached()
+
+        do {
+            _ = try await runCommitterSweep(classified(h))
+            XCTFail("the failure surfaces")
+        } catch is NotReached {
+            // expected
+        }
+        XCTAssertTrue(h.group.staged, "the verdict stays owed")
+        XCTAssertTrue(h.outbox.discarded.isEmpty)
+        XCTAssertNotNil(h.outbox.owed)
+        XCTAssertFalse(h.log.contains("abandon"))
+    }
+
+    /// The restart path re-sends the same row with its registration and
+    /// reads the verdict; it never abandons over a send that went through.
+    func testTheRestartPathReSendsTheCommitWithItsRegistration() async throws {
         let h = makeHarness()
         h.group.staged = true
         h.outbox.owed = SweepDurableEntry(id: "owed-1", commitB64: base64Encode(Data([0xC0, 0x05])))
-        h.journal.registerThrows = StubError()
 
         let outcome = try await resolveOwedVerdict(h.ports)
 
@@ -1179,8 +1214,8 @@ final class CommitterSweepTests: XCTestCase {
             return XCTFail("the owed verdict must still be read, got \(outcome)")
         }
         XCTAssertFalse(h.log.contains("abandon"))
-        XCTAssertFalse(h.log.contains("register"))
         XCTAssertEqual(Array(h.log.prefix(2)), ["publish:commit", "fetch"])
+        XCTAssertEqual(h.journal.registrations, 1)
     }
 
 }

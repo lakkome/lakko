@@ -73,69 +73,140 @@ public struct DsAuth {
     }
 }
 
-/// ADR-0053 client contract point 3, ADR-0057 obligation 5 — the shape of
-/// every direct (eager-merge) commit: take the epoch-N signer BEFORE the
-/// create, create (the group is now at N+1), take the N+1 signer, register its
-/// key with this device's root or registrar key, and only then record the
-/// ADR-0040 outbox entry and publish the commit signed under N. A failed
-/// registration is handled exactly like a failed outbox write: roll back,
-/// publish nothing.
+/// ADR-0081 over ADR-0040 — the shape of every direct commit of a
+/// conversation group (a group with no role table). The commit is STAGED,
+/// never eagerly merged, so the group stays at epoch N until the DS decided:
 ///
-/// So a commit is never on the wire before the server knows its epoch, and no
-/// peer that applies it holds an epoch the server refuses.
+/// 1. take the epoch-N signer, stage the commit (`create`), compute what goes
+///    with it (`prepare`: the Welcome and its address);
+/// 2. `record` the ADR-0040 entry and the snapshot that carries the staged
+///    commit, FAIL-CLOSED: a failure abandons the staged commit (per group,
+///    nothing else touched), drops the entry and throws — nothing was sent;
+/// 3. send the commit row with the N+1 registration (`POST .../commit`, the
+///    N+1 key from the staged commit, proven under N);
+/// 4. on an answer (201, or 200 for a re-send the DS recognises) `merge` the
+///    staged commit and persist the merge, fail-closed, then `publish` the
+///    rest (the Welcome);
+///    on a LOST commit (409, or a definitive refusal: ``isLost``) `abandon`
+///    it, drop the entry and throw;
+///    on anything else (the network) throw and leave the entry and the
+///    staged commit: the owed-verdict path (``resolveOwedVerdict(_:)``, at
+///    the tail of every poll and at the restart sweep) re-sends the same row
+///    and finishes it.
+///
+/// There is no point at which this device is ahead of the DS or below its
+/// own commit: the epoch advances only after the DS took the commit, and the
+/// commit is recorded before it is sent. No retry and no reset here.
 public struct DirectCommitSteps<Created, Prepared, Published> {
-    /// The group's signer at its CURRENT epoch.
+    /// The group's signer at its CURRENT epoch (N; the commit is staged).
     public var currentSigner: () throws -> DsGroupSigner
-    /// Build the commit. Eager-merges N -> N+1 in memory.
+    /// Stage the commit. The group stays at N.
     public var create: () throws -> Created
-    /// Register `next`'s epoch key (ADR-0057 `PUT .../access`, signed by the
-    /// root or a registrar).
-    public var register: (_ next: DsGroupSigner) async throws -> Void
-    /// Everything that must be durable before the publish (the second-artifact
-    /// compute + the ADR-0040 entry + the N+1 snapshot). Runs only after a
-    /// successful registration.
+    /// Everything computed from the commit before it is recorded (the second
+    /// artifact, the address it goes to). A throw abandons.
     public var prepare: (Created) throws -> Prepared
-    /// Undo the eager merge (reset to the durable epoch-N snapshot). Called when
-    /// the registration or the prepare throws.
-    public var rollback: () throws -> Void
-    /// Publish the commit (and whatever else), signed under the epoch-N signer.
-    public var publish: (Prepared, DsGroupSigner) async throws -> Published
+    /// The ADR-0040 entry and the snapshot carrying the staged commit,
+    /// fail-closed. A throw abandons and drops the entry.
+    public var record: (Prepared) throws -> Void
+    /// The signer of N+1, from the staged commit.
+    public var stagedSigner: () throws -> DsGroupSigner
+    /// Send the commit row with `next`'s registration, proven by `proof` (N).
+    public var commit: (_ prepared: Prepared, _ next: DsGroupSigner, _ proof: DsGroupSigner) async throws -> DsCommitAnswer
+    /// The DS took the commit: merge it and persist the merge, fail-closed.
+    public var merge: (Prepared, DsCommitAnswer) throws -> Void
+    /// Abandon the staged commit and persist that (best effort).
+    public var abandon: () throws -> Void
+    /// Drop the recorded entry of a commit that is not and will not be on
+    /// the DS.
+    public var discard: (Prepared) -> Void
+    /// Publish the rest (the Welcome) once merged.
+    public var publish: (Prepared, DsCommitAnswer) async throws -> Published
+    /// Whether a failed `commit` is lost: nothing of it is or will be on the
+    /// DS (a 409, a definitive refusal).
+    public var isLost: (Error) -> Bool
 
     public init(
         currentSigner: @escaping () throws -> DsGroupSigner,
         create: @escaping () throws -> Created,
-        register: @escaping (_ next: DsGroupSigner) async throws -> Void,
         prepare: @escaping (Created) throws -> Prepared,
-        rollback: @escaping () throws -> Void,
-        publish: @escaping (Prepared, DsGroupSigner) async throws -> Published
+        record: @escaping (Prepared) throws -> Void,
+        stagedSigner: @escaping () throws -> DsGroupSigner,
+        commit: @escaping (_ prepared: Prepared, _ next: DsGroupSigner, _ proof: DsGroupSigner) async throws -> DsCommitAnswer,
+        merge: @escaping (Prepared, DsCommitAnswer) throws -> Void,
+        abandon: @escaping () throws -> Void,
+        discard: @escaping (Prepared) -> Void,
+        publish: @escaping (Prepared, DsCommitAnswer) async throws -> Published,
+        isLost: @escaping (Error) -> Bool = DsCommitFailure.isLost
     ) {
         self.currentSigner = currentSigner
         self.create = create
-        self.register = register
         self.prepare = prepare
-        self.rollback = rollback
+        self.record = record
+        self.stagedSigner = stagedSigner
+        self.commit = commit
+        self.merge = merge
+        self.abandon = abandon
+        self.discard = discard
         self.publish = publish
+        self.isLost = isLost
     }
 
     /// On the main actor: the steps are closures of main-actor owners (the
-    /// chat repository), and the synchronous ones (`create`, `prepare`,
-    /// `rollback`) read and write their state. Run from a non-isolated
-    /// executor they would do so beside the main actor, and a sign-out could
-    /// run between a step's binding check and its write.
+    /// chat repository), and the synchronous ones read and write their state.
     @MainActor
     public func run() async throws -> Published {
         let signerN = try currentSigner()
         let created = try create()
         let prepared: Prepared
         do {
-            let signerN1 = try currentSigner()
-            try await register(signerN1)
             prepared = try prepare(created)
         } catch {
-            try rollback()
+            try abandon()
             throw error
         }
-        return try await publish(prepared, signerN)
+        do {
+            try record(prepared)
+        } catch {
+            try abandon()
+            discard(prepared)
+            throw error
+        }
+        let answer: DsCommitAnswer
+        do {
+            let signerN1 = try stagedSigner()
+            answer = try await commit(prepared, signerN1, signerN)
+        } catch let error where isLost(error) {
+            try abandon()
+            discard(prepared)
+            throw error
+        }
+        try merge(prepared, answer)
+        return try await publish(prepared, answer)
+    }
+}
+
+/// ADR-0081 — what a failed commit request means.
+public enum DsCommitFailure {
+    /// `true` for a lost commit (`409`) and a definitive refusal (`400`,
+    /// `401`, `403`): nothing of the commit is or will be on the DS.
+    public static func isLost(_ error: Error) -> Bool {
+        if (error as? DsStatementError) == .conflict { return true }
+        if let chat = error as? ChatError, case .wrapped(_, let underlying) = chat {
+            return isLost(underlying)
+        }
+        return SweepRegistrationBackoff.appliesTo(error)
+    }
+}
+
+/// Whether a DS request failed before it reached the DS (the caller cannot
+/// tell whether it took effect).
+public enum DsTransientFailure {
+    public static func isNetwork(_ error: Error) -> Bool {
+        if let ds = error as? DsClientError, case .network = ds { return true }
+        if let chat = error as? ChatError, case .wrapped(_, let underlying) = chat {
+            return isNetwork(underlying)
+        }
+        return false
     }
 }
 

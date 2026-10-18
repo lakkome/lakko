@@ -200,8 +200,17 @@ export interface SweepJournalRow {
 export interface SweepJournalPort {
   /** Rows strictly after `after`, in ascending id order. */
   fetch(after: number): Promise<SweepJournalRow[]>;
-  /** Publish to this group's journal; resolves to the DS-assigned id. */
-  publishGroup(bytes: Uint8Array): Promise<number>;
+  /**
+   * ADR-0081 decision 1 - send the staged commit through the commit route:
+   * the registration of the staged epoch's key (`dsStagedAccessSigner`,
+   * signed with this device's root or registrar key, revoking the evictees'
+   * registrar keys when this device can derive them) and the commit row in
+   * ONE request, proven under the current epoch's key. Resolves to the
+   * commit's journal row id - an identical re-send (the restart path)
+   * answers the original id. Throws on a failure;
+   * {@link SweepPorts.classifyCommitFailure} says what it means.
+   */
+  commitStaged(bytes: Uint8Array): Promise<number>;
   /**
    * Publish the (raw) Welcome to a member's account mailbox, sealed there to
    * the mailbox key the write resolves (ADR-0078); resolves to the DS id, or to
@@ -326,21 +335,21 @@ export interface SweepPorts {
    *  added member. */
   wrapWelcome(welcome: Uint8Array): Uint8Array;
   /**
-   * ADR-0053 contract point 3, the staged half — register the key of the
-   * epoch the staged sweep moves to (`dsStagedAccessSigner`), signed with this
-   * device's root or registrar key (ADR-0057 obligation 5), revoking the
-   * registrar keys of the accounts the sweep evicts when this device can
-   * derive them (the owner). THROWS when the registration is refused; the
-   * sweep then abandons before publishing, so a commit is never on the wire
-   * before the server knows its epoch. The registration is an APPEND (the
-   * second security pass): a 409 means another committer registered the
-   * epoch first and is handled exactly as a lost publish race, abandon and
-   * never Replace.
+   * What a failed {@link SweepJournalPort.commitStaged} means (ADR-0081):
    *
-   * Optional only so a port set built for a test that is not about ADR-0053
-   * need not stub it; the production adapter always supplies it.
+   * - `"lost"`: the commit route answered 409 - another commit owns the
+   *   staged epoch, nothing of this commit is on the DS. The sweep abandons
+   *   exactly like a lost verdict;
+   * - `"refused"`: a definitive refusal (the registration was refused, the
+   *   proof did not verify): nothing is on the DS either, and the sweep
+   *   abandons and drops its entry;
+   * - `"unknown"`: the DS could not be reached, or answered in a way that
+   *   does not say whether the commit landed. The sweep stays staged with its
+   *   entry, and the owed verdict re-sends it (idempotent on the DS).
+   *
+   * Optional (absent: every failure is `"unknown"`).
    */
-  registerStagedEpoch?(): Promise<void>;
+  classifyCommitFailure?(err: unknown): "lost" | "refused" | "unknown";
   /**
    * ADR-0057 obligation 5 — may this device register an epoch for the group
    * at all (does it hold the root or a registrar seed)? `false` means it
@@ -431,7 +440,12 @@ export type SweepOutcome =
     }
   /** Lost the journal order: abandoned, no Welcome published, the proposals
    *  survive for the winner's next sweep. */
-  | { readonly kind: "lost"; readonly commitMessageId: number }
+  | {
+      readonly kind: "lost";
+      /** The commit's journal row, absent when the commit route refused it
+       *  (409: it never reached the journal). */
+      readonly commitMessageId?: number;
+    }
   /** A previous run merged a winning sweep but could not get its Welcome onto
    *  the wire. The fan-out has now been retried and acked. */
   | {
@@ -771,10 +785,8 @@ async function publishAndAdjudicate(
       welcomeMailboxesB64: mailboxes,
     };
     try {
-      // ADR-0053 contract point 3 — the server learns the staged epoch's key
-      // before anything durable says the commit exists, and long before it is
-      // on the wire. A refusal lands in the catch: abandon, no publish.
-      await ports.registerStagedEpoch?.();
+      // ADR-0081: the entry is recorded first; the staged epoch's key and the
+      // commit row then reach the DS together, in the commit call below.
       await ports.outbox.record(entry);
     } catch (err) {
       // FAIL-CLOSED. Nothing was published, so the group must look as though
@@ -787,15 +799,26 @@ async function publishAndAdjudicate(
     }
   } else {
     entry = owed;
-    // The restart half: the registration landed before the entry was written.
-    // It is NOT re-sent (ADR-0057): the verdict below decides, and a commit
-    // path never repairs the chain (an Append re-sent after the chain moved on
-    // would only meet 409).
+    // The restart half: the commit call below re-sends the same row with a
+    // freshly signed registration. The DS answers the original id when the
+    // first send landed, 409 when another commit took the epoch.
   }
 
-  const commitMessageId = await ports.journal.publishGroup(
-    ports.decodeB64(entry.commitB64),
-  );
+  let commitMessageId: number;
+  try {
+    commitMessageId = await ports.journal.commitStaged(ports.decodeB64(entry.commitB64));
+  } catch (err) {
+    const meaning = ports.classifyCommitFailure?.(err) ?? "unknown";
+    if (meaning === "unknown") throw err;
+    // Nothing of this commit is on the DS: abandon like a lost verdict. The
+    // proposals stay pending for the next sweep (the winner's, or this
+    // device's after a backoff).
+    group.abandonStagedSweep();
+    await ports.persist();
+    await ports.outbox.discard(entry.id);
+    if (meaning === "refused") throw err;
+    return { kind: "lost" };
+  }
   ports.markOwnPublished(commitMessageId);
 
   const finishApply = ports.beginApply?.();

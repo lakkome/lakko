@@ -72,7 +72,9 @@
 import type { Wasm } from "../wasm";
 import { loadWasm } from "../wasm";
 import { DsClient } from "../ds/client";
-import { registerBeforePublish, takeSigner } from "../ds/access";
+import { commitWithNextEpoch, takeSigner, type ProofSigner } from "../ds/access";
+import { isCommitConflict } from "../ds/ownership";
+import { isBackoffRefusal } from "../chat/sweep-backoff";
 import { channelsActions } from "../state/channels-state";
 import {
   newEntryId,
@@ -174,7 +176,12 @@ export async function runRotationOnce(
   //    N -> N+1 in the account identity's provider), then record the
   //    rotation together with that provider snapshot, durably, before any
   //    of its steps runs. A refused record runs nothing.
-  ctx.publisherGroup.rotate(ctx.identity);
+  // ADR-0081 - the key of the epoch the rotation leaves proves its commit
+  // request; its seed is taken before the eager merge and recorded with the
+  // rotation, so a replay after a reload can still prove it.
+  const proofEpoch = ctx.publisherGroup.epoch();
+  const proofSeed = ctx.publisherGroup.dsAccessSeed(ctx.identity);
+  const rotationCommit = ctx.publisherGroup.rotate(ctx.identity);
   const entry: PublisherCommitEntry = {
     id: newEntryId(),
     kind: "rotation",
@@ -182,17 +189,22 @@ export async function runRotationOnce(
     groupIdHex: hexOf(ctx.publisherGroup.groupId()),
     targetEpoch: ctx.publisherGroup.epoch().toString(),
     serverTargetEpoch: newServerEpoch,
-    commitB64: null,
+    commitB64: b64Of(rotationCommit),
     welcomeB64: null,
     joinerKeyB64: null,
     replyGrantB64: null,
+    proofEpoch: proofEpoch.toString(),
+    proofSeedB64: b64Of(proofSeed),
+    journalLost: false,
     done: [],
   };
+  proofSeed.fill(0);
   await channelsActions.recordPublisherCommit(entry);
 
-  // 3. The steps: register the N+1 epoch key on the DS with the channel's
-  //    root (ADR-0057), reseal the N+1 seed to every subscriber and commit
-  //    the rotation on the channels service (ADR-0030 chunked fanout).
+  // 3. The steps: the N+1 epoch key and the rotation commit on the DS in
+  //    one request (ADR-0057, ADR-0081), reseal the N+1 seed to every
+  //    subscriber and commit the rotation on the channels service (ADR-0030
+  //    chunked fanout).
   await runPublisherCommit(entry, publisherCommitPorts(ctx));
 
   // 4. Stamp the new state + persist.
@@ -220,27 +232,30 @@ export interface PublisherCommitContext {
  */
 export function publisherCommitPorts(
   ctx: PublisherCommitContext,
-  extras: Partial<Pick<PublisherCommitPorts, "publishCommit" | "deliverWelcome" | "appoint">> = {},
+  extras: Partial<Pick<PublisherCommitPorts, "deliverWelcome" | "appoint">> = {},
 ): PublisherCommitPorts {
   const ds = ctx.ds ?? new DsClient();
   return {
-    async registerEpoch() {
-      const signer = takeSigner(() => ctx.publisherGroup.dsAccessSigner(ctx.identity));
+    async commitToJournal(commit, proof) {
+      const next = takeSigner(() => ctx.publisherGroup.dsAccessSigner(ctx.identity));
+      // ADR-0081 - proven under the recorded key of the epoch the commit
+      // left, live and on a replay alike. An entry without one (none is
+      // written any more) can complete only an identical re-send, which the
+      // DS recognises under any retained key.
+      let proofSigner: ProofSigner | null = null;
+      if (proof !== null) {
+        const wasm = await loadWasm();
+        proofSigner = takeSigner(() => wasm.DsProofSigner.forGroup(proof.epoch, proof.seed));
+      }
       try {
-        // ADR-0057 — registered with the channel owner's root. A 409 on a
-        // replay is this device's own earlier registration of the epoch.
-        await registerBeforePublish(ds, ctx.publisherGroup.groupId(), signer);
-      } catch (err) {
-        if ((err as { status?: unknown }).status !== 409) throw err;
+        // ADR-0057 — registered with the channel owner's root, with the row.
+        await commitWithNextEpoch(ds, ctx.publisherGroup.groupId(), next, proofSigner ?? next, commit);
       } finally {
-        signer?.free();
+        next?.free();
+        proofSigner?.free();
       }
     },
-    publishCommit:
-      extras.publishCommit ??
-      (async () => {
-        throw new Error("publisher commit: no journal publish for this kind");
-      }),
+    classifyCommitFailure: (err) => (isCommitConflict(err) || isBackoffRefusal(err) ? "lost" : "unknown"),
     deliverWelcome:
       extras.deliverWelcome ??
       (async () => {
@@ -465,4 +480,11 @@ function base64Encode(bytes: Uint8Array): string {
     s += String.fromCharCode(b);
   }
   return btoa(s);
+}
+
+/** Standard base64 of `bytes` (the entry's encoding). */
+function b64Of(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i] ?? 0);
+  return btoa(bin);
 }

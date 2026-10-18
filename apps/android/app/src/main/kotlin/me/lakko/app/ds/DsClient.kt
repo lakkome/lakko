@@ -492,6 +492,51 @@ public class DsClient(
     }
 
     /**
+     * ADR-0081 decision 1 — `POST /ds/group/{hex}/commit`: the root's or a
+     * registrar's `RegisterEpoch` statement for the next epoch together with
+     * the commit row, in one request proven by [proof] (the key of the epoch
+     * the commit leaves) over the exact body. [make] signs a fresh statement
+     * per attempt (its nonce is spent on the first try). `201` is a new row,
+     * `200` the identical re-send of one that landed (its original id).
+     *
+     * `409` is retried once (a lost lock race rolls back undecided); a second
+     * `409` throws [DsCommitConflictError]: another commit owns the epoch. Any
+     * other refusal throws [DsHttpError] (`401` as [DsProofRefusedError]); a
+     * request that did not reach the DS throws [DsNetworkError] — the caller
+     * cannot tell whether it landed, and the identical re-send says.
+     */
+    public suspend fun postCommit(make: () -> DsStatement, proof: DsJournalSigner): DsCommitAnswer {
+        var attempt = 0
+        while (true) {
+            attempt += 1
+            val statement = make()
+            if (!statement.path.startsWith("/ds/group/") || !statement.path.endsWith("/commit")) {
+                throw DsClientArgError("a commit path must name a group journal's commit route")
+            }
+            val body = statement.bodyJson.toByteArray(Charsets.UTF_8)
+            val response = send(
+                method = HttpMethod.Post,
+                endpoint = statement.path,
+                query = "",
+                body = body,
+                contentType = ContentType.Application.Json,
+                waitSecs = null,
+                signer = proof,
+            )
+            val status = response.status.value
+            if (status == HTTP_OK || status == HTTP_CREATED) {
+                val parsed: PublishWireResponse = response.body()
+                return DsCommitAnswer(id = parsed.id, createdAt = parsed.created_at, resent = status == HTTP_OK)
+            }
+            if (status == HTTP_CONFLICT) {
+                if (attempt < STATEMENT_ATTEMPTS) continue
+                throw DsCommitConflictError(statement.path, response.safeReadBody())
+            }
+            throw proofOrHttpError(response, statement.path)
+        }
+    }
+
+    /**
      * `PUT /ds/mailbox/{hex}/access` claiming the mailbox [signer]'s mailbox
      * key names ([pseudonym], ADR-0078; the body is `{"mailbox_pk_b64"}`).
      * Unsigned by design. Throws on a refusal.
@@ -935,6 +980,10 @@ public class DsClient(
 
         private const val HTTP_CONFLICT: Int = 409
 
+        private const val HTTP_OK: Int = 200
+
+        private const val HTTP_CREATED: Int = 201
+
         /** ADR-0057 — a statement is tried at most twice: once, and once
          *  more after a `409` (a lock race the retry wins). */
         private const val STATEMENT_ATTEMPTS: Int = 2
@@ -1173,6 +1222,22 @@ public class DsReachKeyAdd(
     public val publicKey: ByteArray,
     public val expiresAtMs: Long? = null,
 )
+
+/** ADR-0081 decision 1 — what the commit route answered: the row's id and
+ *  time, and whether it was the identical re-send of a commit that had
+ *  already landed (`200`) rather than a new row (`201`). */
+public data class DsCommitAnswer(
+    val id: Long,
+    val createdAt: String,
+    val resent: Boolean,
+)
+
+/** ADR-0081 — the commit route's `409`: another commit owns the epoch, so
+ *  nothing of this commit is on the DS. */
+public class DsCommitConflictError(
+    endpoint: String,
+    body: String,
+) : DsHttpError(status = 409, endpoint = endpoint, body = body, message = "ds $endpoint → 409: epoch taken")
 
 /** Network-level failure (DNS, TLS, no route, …). */
 public class DsNetworkError(

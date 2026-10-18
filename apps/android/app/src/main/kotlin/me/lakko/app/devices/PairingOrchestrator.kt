@@ -192,7 +192,9 @@ public object PairingOrchestrator {
                 accountId = account.accountIdBytes,
             )
             group = joined
-            DeviceGroupLifecycle.persistSnapshot(
+            // ADR-0081 decision 3 — fail-closed: a joined DeviceGroup that is
+            // not on disk is not reported as joined.
+            DeviceGroupLifecycle.persistSnapshotOrThrow(
                 context = context,
                 identity = identity,
                 accountIdB64 = account.accountIdB64,
@@ -295,11 +297,25 @@ public object PairingOrchestrator {
                                     me.lakko.app.auth.SignInKeyWrites.required(wipes, accountIdB64) {
                                         DeviceIdentityStore.putDeviceIdentitySeed(context, accountIdB64, seed)
                                     }
-                                    DeviceGroupLifecycle.persistSnapshot(
-                                        context = context,
-                                        identity = identity,
-                                        accountIdB64 = accountIdB64,
-                                    )
+                                    // ADR-0081 decision 3 — the write fails
+                                    // closed; a failure is logged and the
+                                    // DeviceGroup is not on disk: the next
+                                    // start finds no state and rejoins
+                                    // through a sibling (decision 4).
+                                    try {
+                                        DeviceGroupLifecycle.persistSnapshotOrThrow(
+                                            context = context,
+                                            identity = identity,
+                                            accountIdB64 = accountIdB64,
+                                        )
+                                    } catch (cause: kotlinx.coroutines.CancellationException) {
+                                        throw cause
+                                    } catch (cause: Throwable) {
+                                        android.util.Log.w(
+                                            "PairingOrchestrator",
+                                            "DeviceGroup snapshot (join by name) not persisted (${cause.javaClass.simpleName})",
+                                        )
+                                    }
                                     applyFetchedBundles(joined, accountIdB64, bundles)
                                 }
                             }
@@ -733,108 +749,64 @@ public object PairingOrchestrator {
         accountIdBytes: ByteArray,
         accountIdB64: String,
         recovery: ScanRecovery? = null,
-    ): ScanResult {
-        val seed = DeviceIdentityStore.ensureDeviceIdentitySeed(
-            context = context,
-            accountIdB64 = accountIdB64,
-        )
-        val ensured = DeviceGroupLifecycle.ensureDeviceGroup(
+    ): ScanResult = try {
+        // ADR-0081 decision 2 — the Add goes through the DeviceGroup commit
+        // outbox: the entry (row, Welcome, N+1 snapshot) beside the N snapshot,
+        // the commit and the N+1 registration in one request, N+1 made current
+        // (the sync runtime reopens and, when it is the lowest prior leaf,
+        // re-sends the folded state), then the Welcome to the pairing
+        // RENDEZVOUS mailbox (unclaimed by design, ADR-0053 section 2). The
+        // bundles below are sealed on the same throwaway handle, at the
+        // post-add epoch, only once the commit landed.
+        val result = DeviceGroupCommits.commitChange(
             context = context,
             accountIdBytes = accountIdBytes,
             accountIdB64 = accountIdB64,
-            deviceIdentitySeed = seed,
-        )
-        // Scrub the raw seed; the Identity owns the secret
-        // material from here on.
-        seed.fill(0)
-
-        try {
-            // ADR-0057 finding 3 — no Welcome for a DeviceGroup whose founding
-            // claim has not landed: claim first, fail closed.
-            DsClient().use { ds ->
-                DeviceGroupJournalAccess.claimFoundingIfUnconfirmed(
-                    context = context,
-                    accountIdB64 = accountIdB64,
-                    group = ensured.group,
+            build = { ensured ->
+                // ADR-0058 section 5.1 — the members before the add, so the
+                // sync runtime can decide whether this device re-sends.
+                val leavesBeforeAdd = runCatching { ensured.group.devices().map { it.leafIndex } }.getOrNull()
+                val addition = ensured.group.addDeviceFromWire(
                     identity = ensured.identity,
-                    ds = ds,
+                    keyPackage = decoded.keyPackage,
                 )
-            }
-            // ADR-0058 section 5.1 — the members before the add, so the sync
-            // runtime can decide whether this device re-sends its state.
-            val leavesBeforeAdd = runCatching {
-                ensured.group.devices().map { it.leafIndex }
-            }.getOrNull()
-            val signerBeforeCommit = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity)
-            val addition = ensured.group.addDeviceFromWire(
-                identity = ensured.identity,
-                keyPackage = decoded.keyPackage,
-            )
-            // ADR-0053 client contract point 3 — register epoch N+1 BEFORE the
-            // snapshot is persisted or anything published. A refusal throws out
-            // of here with nothing durable and nothing on the wire: this handle
-            // is throwaway, so the durable DeviceGroup stays at N.
-            val commitSigner = DsClient().use { ds ->
-                DeviceGroupJournalAccess.registerNext(
-                    ds = ds,
-                    groupId = ensured.group.groupId(),
-                    before = signerBeforeCommit,
-                    after = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity),
-                    root = DeviceGroupJournalAccess.rootOf(context, accountIdB64, ensured.group.groupId()),
+                // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped;
+                // an add-device commit carries no attestation.
+                DeviceGroupCommits.Built(
+                    kind = DeviceGroupCommitEntry.Kind.ADD,
+                    row = DeviceGroupJournalEnvelope.encode(addition.commit, null),
+                    welcome = addition.welcome,
+                    welcomeRendezvous = decoded.rendezvousPseudonym,
+                    priorLeaves = leavesBeforeAdd,
                 )
-            }
+            },
+            after = { ensured -> sendBundles(context, ensured, decoded, accountIdB64, recovery) },
+        )
+        val landed = result?.takeIf { it.outcome is DeviceGroupCommitOutcome.Landed }
+            ?: throw DeviceGroupCommits.Lost()
+        ScanResult(
+            memberCount = 0,
+            newDeviceKey = uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(decoded.keyPackage),
+            keysSent = landed.value ?: false,
+        )
+    } finally {
+        recovery?.phraseEntropy?.fill(0)
+    }
 
-            // G-7 — persist the advanced DeviceGroup snapshot
-            // BEFORE any publish. addDeviceFromWire already merged
-            // the pending commit, so the in-memory view is one
-            // epoch ahead; writing it to disk first closes the
-            // window where a crash between the publishes and the
-            // persist leaves the on-disk envelope an epoch behind
-            // (which would make the next launch try to add the
-            // same device twice).
-            DeviceGroupLifecycle.persistSnapshot(
-                context = context,
-                identity = ensured.identity,
-                accountIdB64 = accountIdB64,
-            )
-
-            WelcomeCourier.publishWelcome(
-                rendezvousPseudonym = decoded.rendezvousPseudonym,
-                welcomeBytes = addition.welcome,
-            )
-
-            // G-5 — broadcast the Commit to the DeviceGroup DS
-            // journal so any OTHER already-paired devices on this
-            // account advance to the new epoch; their DeviceGroup
-            // poll loop runs processIncoming on this row. MLS
-            // requires in-order epoch processing, so this is on the
-            // critical path (not best-effort) — a missed commit
-            // would permanently strand a third device. For the
-            // founder + first-pair case there is no other member,
-            // so the row is a harmless no-op (the joiner ratchets
-            // forward from the Welcome). Mirrors the
-            // DeviceRemoval.removeDeviceAt broadcast.
-            // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped; an
-            // add-device commit carries no attestation.
-            val envelope = DeviceGroupJournalEnvelope.encode(addition.commit, null)
-            DsClient().use { ds ->
-                ds.publishGroup(
-                    groupId = ensured.group.groupId(),
-                    payload = envelope,
-                    signer = commitSigner,
-                )
-            }
-
-            // ADR-0058 section 5.1 — this device never receives its own commit
-            // back, so tell the sync runtime: it reopens its DeviceGroup handle
-            // at the new epoch and, when it is the lowest prior leaf, re-sends
-            // the folded state (folders, pins, drafts) the new device cannot
-            // decrypt from the journal.
-            if (leavesBeforeAdd != null) {
-                me.lakko.app.devices.sync.DeviceGroupSyncRepository.active
-                    ?.onLocalDeviceAdded(leavesBeforeAdd)
-            }
-
+    /**
+     * The bundles a pairing sends once its commit landed, sealed under the
+     * post-add epoch of [ensured]: the history bundle, the recovery payload and
+     * the state bundle. Each is best effort. Returns whether the recovery
+     * payload (the keys) was sent.
+     */
+    private suspend fun sendBundles(
+        context: Context,
+        ensured: DeviceGroupLifecycle.Ensured,
+        decoded: DecodedPairingQr,
+        accountIdB64: String,
+        recovery: ScanRecovery?,
+    ): Boolean {
+        run {
             // Phase 2a3d8-ui — best-effort history catch-up
             // bundle. Read the local message log, derive the
             // post-add exporter secret, seal, publish as the
@@ -945,23 +917,7 @@ public object PairingOrchestrator {
             // 2026-09-30, SecretReuseError on the new device). Best-effort.
             me.lakko.app.reach.ReachManager.get(context).resendToDevices()
 
-            return ScanResult(
-                memberCount = if (ensured.bootstrapped) 2 else 0,
-                newDeviceKey = uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(decoded.keyPackage),
-                keysSent = keysSent,
-            )
-        } finally {
-            recovery?.phraseEntropy?.fill(0)
-            try {
-                ensured.group.close()
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            try {
-                ensured.identity.close()
-            } catch (_: Throwable) {
-                // best-effort
-            }
+            return keysSent
         }
     }
 }

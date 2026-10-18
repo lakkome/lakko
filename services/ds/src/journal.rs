@@ -135,7 +135,7 @@ impl Notifiers {
     /// tasks that subscribe after this call do **not** see the event —
     /// they must double-check via a fresh fetch first (see
     /// `fetch_with_wait`'s loop).
-    fn wake(&self, key: NotifyKey) {
+    pub(crate) fn wake(&self, key: NotifyKey) {
         let arc = self.get_or_create(key);
         arc.notify_waiters();
     }
@@ -245,6 +245,29 @@ pub(crate) async fn publish(
         id,
         created_at: row.0,
     }))
+}
+
+/// Insert one row into `queue` on `conn` (inside a caller's transaction) and
+/// return its id. The caller wakes the long-polls once its transaction has
+/// committed (ADR-0081: the commit route appends inside the registration's
+/// transaction).
+pub(crate) async fn insert_row(
+    conn: &mut sqlx::MySqlConnection,
+    queue: Queue,
+    owner_id: &[u8; PSEUDONYM_LEN],
+    bytes: &[u8],
+) -> Result<u64, sqlx::Error> {
+    let sql = format!(
+        "INSERT INTO {} ({}, payload) VALUES (?, ?)",
+        queue.table(),
+        queue.owner_col(),
+    );
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(&owner_id[..])
+        .bind(bytes)
+        .execute(&mut *conn)
+        .await?;
+    Ok(result.last_insert_id())
 }
 
 /// Answer a mailbox publish exactly as [`publish`] would, and store nothing

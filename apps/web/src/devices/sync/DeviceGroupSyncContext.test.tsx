@@ -109,11 +109,24 @@ vi.mock("../lifecycle", () => ({
   persistDeviceGroupSnapshot: async (identity: FakeHandle, account: string) => {
     h.persisted.push({ owner: identity.owner, account });
   },
-  persistDeviceGroupSnapshotWithCursor: async () => undefined,
+  persistDeviceGroupSnapshotWithCursor: async () => 1,
+  deviceGroupLineageSeed: async () => null,
+  DeviceGroupNotJoinedError: class extends Error {
+    readonly reason = "rejoin";
+  },
 }));
 vi.mock("../device-group-snapshot-store", () => ({
   deleteDeviceGroupSnapshot: async () => undefined,
+  dropDeviceGroupStateForRejoin: async () => undefined,
   getDeviceGroupJournalCursor: async () => 0,
+  getDeviceGroupPending: async () => null,
+  putDeviceGroupPending: async () => undefined,
+  deleteDeviceGroupPending: async () => undefined,
+}));
+// ADR-0081 - the DeviceGroup commit outbox and the rejoin: nothing owed here.
+vi.mock("../device-group-commit-runtime", () => ({
+  commitDeviceGroupChange: async () => null,
+  resendOwedDeviceGroupCommitFor: async () => null,
 }));
 vi.mock("./synced-projection", () => ({
   buildFolderChangeSet: vi.fn(),

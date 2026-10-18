@@ -236,18 +236,23 @@ public enum CoPublisher {
         }
     }
 
-    /// Register the epoch a PublisherGroup commit moves to under the root
-    /// (obligation 5). Throws: a refused registration aborts the commit.
-    static func registerEpoch(
-        ds: DsStatementSending,
+    /// ADR-0081 decision 1 over obligation 5 — register the epoch a
+    /// PublisherGroup commit moves to under the root AND append the commit
+    /// `row`, in one request proven by `proof` (the key of the epoch the
+    /// commit leaves). Throws: a refused commit aborts it.
+    @discardableResult
+    static func commitEpoch(
+        ds: DsCommitSending,
         identity: Identity,
         publisherGroup: PublisherGroup,
-        next: DsGroupSigner
-    ) async throws {
-        try await JournalOwnership.registerEpoch(
+        next: DsGroupSigner,
+        proof: DsRequestSigner,
+        row: Data
+    ) async throws -> DsCommitAnswer {
+        try await JournalOwnership.commitEpoch(
             authority: .root(try rootSigner(identity: identity, publisherGroup: publisherGroup)),
             journalId: try publisherGroup.groupId(), epoch: next.epoch(),
-            epochKey: next.verifyingKey(), revoke: [], ds: ds)
+            epochKey: next.verifyingKey(), revoke: [], row: row, proof: proof, ds: ds)
     }
 
     /// What one ``pollJournal(ds:identity:publisherGroup:knockAfter:)`` did.
@@ -337,7 +342,8 @@ public enum CoPublisher {
 
     /// Approve a pending co-publisher. Commits the Add (advances the
     /// PublisherGroup epoch), then, in order: registers the new epoch's
-    /// access key (ADR-0053 point 3) and publishes the commit to the journal,
+    /// access key and publishes the commit to the journal in one request
+    /// (ADR-0081),
     /// sends the Welcome to the joiner's own mailbox (point 8: a non-member
     /// cannot read the claimed journal), RESEALS the new-epoch channel seed
     /// to all subscribers (the Add changed the exporter output, so existing
@@ -360,6 +366,11 @@ public enum CoPublisher {
         let serverTarget = current &+ 1
         guard serverTarget > current else { throw CoPublisherError.unexpectedServerEpoch(current) }
         let (identity, group) = try context.open()
+        // ADR-0081 — the proof of the epoch the Add leaves, taken before the
+        // eager merge and recorded with the approve: the commit route is
+        // proven under it, live and on a replay after a restart.
+        let proofEpoch = try group.epoch()
+        let proofSeed = try group.dsAccessSeed(identity: identity)
         let added = try group.approveExternalJoin(identity: identity, proposalRef: proposalRef)
         let entry = PublisherCommitEntry(
             kind: .approve,
@@ -369,7 +380,9 @@ public enum CoPublisher {
             serverTargetEpoch: serverTarget,
             commitB64: added.commit.base64EncodedString(),
             welcomeB64: added.welcome.base64EncodedString(),
-            joinerKeyB64: proposalRef.base64EncodedString())
+            joinerKeyB64: proposalRef.base64EncodedString(),
+            proofEpoch: proofEpoch,
+            proofSeedB64: proofSeed.base64EncodedString())
         try ChannelPublisherCommits.record(entry, accountIdB64: context.accountIdB64)
         try await PublisherCommitRunner.run(
             entry, ports: ChannelPublisherCommits.ports(context, state: state))

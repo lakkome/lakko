@@ -341,63 +341,137 @@ final class DsJournalAccessTests: XCTestCase {
         XCTAssertNil(memory.observe(journal: "g", signer: FakeSigner(epoch: 4)))
     }
 
-    // MARK: Point 3 — register before publish (direct commit)
+    // MARK: ADR-0081 over ADR-0040 — a direct commit: staged, recorded, sent, merged
 
-    func testADirectCommitRegistersTheNextEpochBeforeRecordAndPublish() async throws {
+    /// A recording harness: the staged commit moves nothing until `merge`.
+    private final class StagedLog {
         var log: [String] = []
         var epoch: UInt64 = 6
-        var registered: UInt64?
-        var publishedUnder: UInt64?
-        let result = try await DirectCommitSteps(
-            currentSigner: { log.append("signer"); return FakeSigner(epoch: epoch) },
-            create: { () -> String in log.append("create"); epoch += 1; return "commit" },
-            register: { next in
-                log.append("register"); registered = next.epoch()
+        var staged = false
+        var committedAt: UInt64?
+        var provenUnder: UInt64?
+    }
+
+    @MainActor
+    private func steps(
+        _ h: StagedLog,
+        commit: @escaping (StagedLog) async throws -> DsCommitAnswer = { _ in
+            DsCommitAnswer(id: 41, createdAt: "t", resent: false)
+        },
+        record: @escaping (StagedLog) throws -> Void = { _ in },
+        merge: @escaping (StagedLog) throws -> Void = { _ in }
+    ) -> DirectCommitSteps<String, String, String> {
+        DirectCommitSteps(
+            currentSigner: { h.log.append("signer"); return FakeSigner(epoch: h.epoch) },
+            create: { () -> String in h.log.append("stage"); h.staged = true; return "commit" },
+            prepare: { created in h.log.append("prepare"); return created },
+            record: { _ in h.log.append("record"); try record(h) },
+            stagedSigner: { FakeSigner(epoch: h.epoch + 1) },
+            commit: { prepared, next, proof in
+                h.log.append("commit:\(prepared)")
+                h.committedAt = next.epoch()
+                h.provenUnder = proof.epoch()
+                return try await commit(h)
             },
-            prepare: { created in log.append("record"); return created },
-            rollback: { log.append("rollback") },
-            publish: { prepared, signerN in
-                log.append("publish"); publishedUnder = signerN.epoch(); return prepared
-            }
-        ).run()
-        XCTAssertEqual(result, "commit")
-        XCTAssertEqual(log, ["signer", "create", "signer", "register", "record", "publish"])
-        XCTAssertEqual(registered, 7, "the epoch the commit moves to")
-        XCTAssertEqual(publishedUnder, 6, "the commit POST is signed under N")
+            merge: { _, answer in
+                h.log.append("merge:\(answer.id)")
+                try merge(h)
+                h.staged = false
+                h.epoch += 1
+            },
+            abandon: { h.log.append("abandon"); h.staged = false },
+            discard: { _ in h.log.append("discard") },
+            publish: { prepared, answer in h.log.append("publish"); return "\(prepared)@\(answer.id)" }
+        )
     }
 
-    func testAFailedRegistrationRollsBackAndPublishesNothing() async throws {
-        var log: [String] = []
-        struct Refused: Error {}
+    @MainActor
+    func testADirectCommitIsRecordedBeforeItIsSentAndMergedOnlyAfterTheAnswer() async throws {
+        let h = StagedLog()
+        let result = try await steps(h).run()
+        XCTAssertEqual(result, "commit@41")
+        XCTAssertEqual(
+            h.log, ["signer", "stage", "prepare", "record", "commit:commit", "merge:41", "publish"])
+        XCTAssertEqual(h.committedAt, 7, "the epoch the staged commit moves to")
+        XCTAssertEqual(h.provenUnder, 6, "the commit is proven under N")
+        XCTAssertEqual(h.epoch, 7)
+        XCTAssertFalse(h.staged)
+    }
+
+    @MainActor
+    func testALostCommitIsAbandonedAtNAndItsEntryDropped() async throws {
+        let h = StagedLog()
         do {
-            _ = try await DirectCommitSteps(
-                currentSigner: { FakeSigner(epoch: 1) },
-                create: { () -> Int in log.append("create"); return 1 },
-                register: { _ in log.append("register"); throw Refused() },
-                prepare: { created in log.append("record"); return created },
-                rollback: { log.append("rollback") },
-                publish: { _, _ in log.append("publish") }
-            ).run()
-            XCTFail("a failed registration must abort")
-        } catch is Refused {}
-        XCTAssertEqual(log, ["create", "register", "rollback"])
+            _ = try await steps(h, commit: { _ in throw DsStatementError.conflict }).run()
+            XCTFail("a lost epoch must abort")
+        } catch DsStatementError.conflict {}
+        XCTAssertEqual(
+            h.log, ["signer", "stage", "prepare", "record", "commit:commit", "abandon", "discard"])
+        XCTAssertEqual(h.epoch, 6, "the group never left N")
+        XCTAssertFalse(h.staged)
     }
 
-    func testAFailedRecordAfterRegistrationRollsBackToo() async throws {
-        var log: [String] = []
+    @MainActor
+    func testARefusedCommitIsAbandonedLikeALostOne() async throws {
+        let h = StagedLog()
+        do {
+            _ = try await steps(h, commit: { _ in throw DsStatementError.unauthorized }).run()
+            XCTFail("a refusal must abort")
+        } catch DsStatementError.unauthorized {}
+        XCTAssertEqual(h.log.suffix(2), ["abandon", "discard"])
+        XCTAssertEqual(h.epoch, 6)
+    }
+
+    /// No "three tries then reset": an unanswered commit stays recorded and
+    /// staged, and the owed-verdict path re-sends it.
+    @MainActor
+    func testAnUnansweredCommitStaysRecordedAndStagedForTheOwedVerdict() async throws {
+        let h = StagedLog()
+        let offline = DsClientError.network(
+            endpoint: "/ds/group/ab/commit", underlying: URLError(.notConnectedToInternet))
+        do {
+            _ = try await steps(h, commit: { _ in throw offline }).run()
+            XCTFail("an unanswered commit surfaces")
+        } catch is DsClientError {}
+        XCTAssertEqual(h.log, ["signer", "stage", "prepare", "record", "commit:commit"])
+        XCTAssertTrue(h.staged, "the staged commit is kept for the re-send")
+        XCTAssertEqual(h.epoch, 6)
+    }
+
+    @MainActor
+    func testAFailedRecordSendsNothingAndAbandons() async throws {
+        let h = StagedLog()
         struct Disk: Error {}
         do {
-            _ = try await DirectCommitSteps(
-                currentSigner: { FakeSigner(epoch: 1) },
-                create: { () -> Int in 1 },
-                register: { _ in log.append("register") },
-                prepare: { (_: Int) -> Int in log.append("record"); throw Disk() },
-                rollback: { log.append("rollback") },
-                publish: { _, _ in log.append("publish") }
-            ).run()
-            XCTFail("a failed record must abort")
+            _ = try await steps(h, record: { _ in throw Disk() }).run()
+            XCTFail("a failed record surfaces")
         } catch is Disk {}
-        XCTAssertEqual(log, ["register", "record", "rollback"])
+        XCTAssertEqual(h.log, ["signer", "stage", "prepare", "record", "abandon", "discard"])
+        XCTAssertFalse(h.staged)
+        XCTAssertEqual(h.epoch, 6)
+    }
+
+    /// The DS took the commit; a failed persist of the merge surfaces without
+    /// an abandon (the durable record re-sends and merges after a restart).
+    @MainActor
+    func testAFailedMergePersistDoesNotAbandon() async throws {
+        let h = StagedLog()
+        struct Disk: Error {}
+        do {
+            _ = try await steps(h, merge: { _ in throw Disk() }).run()
+            XCTFail("a failed merge persist surfaces")
+        } catch is Disk {}
+        XCTAssertFalse(h.log.contains("abandon"))
+        XCTAssertFalse(h.log.contains("publish"))
+    }
+
+    func testLostCoversAConflictAndADefinitiveRefusalOnly() {
+        XCTAssertTrue(DsCommitFailure.isLost(DsStatementError.conflict))
+        XCTAssertTrue(DsCommitFailure.isLost(DsStatementError.unauthorized))
+        XCTAssertTrue(DsCommitFailure.isLost(
+            ChatError.wrapped("x", underlying: DsStatementError.conflict)))
+        XCTAssertFalse(DsCommitFailure.isLost(DsClientError.network(
+            endpoint: "/x", underlying: URLError(.timedOut))))
     }
 
     // MARK: Point 4 — heal on apply: gone under ADR-0057 (see

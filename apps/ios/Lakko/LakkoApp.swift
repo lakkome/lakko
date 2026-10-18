@@ -418,6 +418,17 @@ struct LakkoApp: App {
         sync.onKeyRotationEnvelope = { [weak auth] envelope in
             auth?.receiveKeyRotationEnvelope(envelope, arrival: .ownDeviceGroup)
         }
+        // ADR-0081 decision 4 — a device that lost or fell behind its
+        // DeviceGroup knocks under this account's login handle, after its own
+        // directory KeyPackage (the signed device binding a sibling checks)
+        // is published; a sibling admits only knocks naming the handle.
+        sync.loginHandleProvider = { [weak auth] in
+            guard let auth else { return nil }
+            return DeviceSession.current(auth)?.loginHandle
+        }
+        sync.republishDirectoryKeyPackage = { [weak chat] in
+            await chat?.republishKeyPackage().value
+        }
         // A superseded device with no pending envelope reads its DeviceGroup
         // journal to the head once before it treats the change as a reset.
         auth.readDeviceGroupJournalToHead = { [weak sync] _ in

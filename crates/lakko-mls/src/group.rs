@@ -36,6 +36,26 @@
 //! commit kind. They are what makes leaving possible at all: an owner may not
 //! leave while owner, so without transfer a person was bound to every group they
 //! created.
+//!
+//! **Staged direct commits (ADR-0081, an invariant-#3 change).** Each direct
+//! path a client still sends to a Delivery Service has a staged twin:
+//! [`Group::stage_add_members`] (and `_from_wire`), [`Group::stage_remove_member`],
+//! [`Group::stage_set_group_roles`]. A staged twin builds the same commit with
+//! the same local refusals but leaves the group at epoch N holding it as
+//! pending, exactly as [`Group::stage_pending_proposals`] leaves a sweep, so
+//! the one pending-commit lifecycle serves both: [`Group::has_staged_sweep`],
+//! [`Group::staged_export_secret`] (the N+1 key the commit is registered
+//! under), [`Group::merge_staged_sweep`] (the Delivery Service accepted the
+//! commit) and [`Group::abandon_staged_sweep`] (it refused it; a per-group
+//! `clear_pending_commit`, never a whole-provider restore). The staged commit
+//! is persisted with the group state, so a client records it durably before
+//! sending and can always finish it after a restart: the order ADR-0040
+//! established for crash safety, with the epoch advance held back until the
+//! server decided. While a commit is staged every membership operation on the
+//! group is refused with [`crate::RefusalReason::SweepAlreadyStaged`]. The
+//! eager paths stay for commits no Delivery Service decides on (a founding
+//! commit nobody else receives, a `PublisherGroup` rotation). Pinned by
+//! `tests/staged_direct_commit.rs`.
 
 use openmls::ciphersuite::hash_ref::ProposalRef;
 use openmls::credentials::CredentialType;
@@ -386,6 +406,19 @@ pub(crate) fn decode_pending_external_joins(
         ));
     }
     Ok(pending)
+}
+
+/// How a direct commit path ends ([ADR-0081]).
+///
+/// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DirectFinish {
+    /// Merge before returning: the eager path, for a commit no Delivery
+    /// Service decides on (a founding commit nobody else receives, a
+    /// `PublisherGroup` rotation, the tests).
+    Merge,
+    /// Leave the commit staged at N until the Delivery Service answers.
+    Stage,
 }
 
 /// Output of [`Group::add_member`].
@@ -814,6 +847,35 @@ impl Group {
         ))
     }
 
+    /// Refuse to build a commit while one is staged ([ADR-0081]).
+    ///
+    /// OpenMLS refuses too (a group holding a pending commit is not
+    /// operational), but with an untyped error; this gives the caller the
+    /// same typed refusal a second [`Group::stage_pending_proposals`] gets.
+    /// Building a second commit would replace the first, which may already
+    /// be on the Delivery Service.
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    fn refuse_if_commit_staged(&self, op: &str) -> Result<()> {
+        if self.has_staged_sweep() {
+            return Err(Error::refused(
+                RefusalReason::SweepAlreadyStaged,
+                format!("{op} refused: a staged commit is already awaiting a verdict"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// End a direct commit path: merge it, or leave it staged.
+    fn finish_direct(&mut self, identity: &Identity, finish: DirectFinish) -> Result<()> {
+        if finish == DirectFinish::Merge {
+            self.inner
+                .merge_pending_commit(&identity.provider)
+                .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        }
+        Ok(())
+    }
+
     /// Add a member by their published [`KeyPackage`].
     ///
     /// Consumes one of the new member's published KeyPackages on success.
@@ -861,9 +923,46 @@ impl Group {
         identity: &Identity,
         key_packages: Vec<KeyPackage>,
     ) -> Result<MemberAddition> {
+        self.add_members_finishing(identity, key_packages, DirectFinish::Merge)
+    }
+
+    /// [`Self::add_members`], **staged** instead of merged ([ADR-0081]).
+    ///
+    /// The commit and the Welcome are built exactly as the eager path builds
+    /// them, every local refusal included, but the group stays at epoch N
+    /// holding the commit as pending, as [`Group::stage_pending_proposals`]
+    /// leaves a sweep. The caller records the commit durably, sends it with
+    /// the key of N+1 ([`Group::staged_export_secret`]), and then either
+    /// merges ([`Group::merge_staged_sweep`], on the Delivery Service's
+    /// acceptance) or abandons ([`Group::abandon_staged_sweep`], on its
+    /// refusal). The staged commit is part of the group state OpenMLS
+    /// persists, so it survives a snapshot and a restart.
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::add_members`] returns, and a typed
+    /// [`RefusalReason::SweepAlreadyStaged`] refusal while any commit is
+    /// staged.
+    pub fn stage_add_members(
+        &mut self,
+        identity: &Identity,
+        key_packages: Vec<KeyPackage>,
+    ) -> Result<MemberAddition> {
+        self.add_members_finishing(identity, key_packages, DirectFinish::Stage)
+    }
+
+    fn add_members_finishing(
+        &mut self,
+        identity: &Identity,
+        key_packages: Vec<KeyPackage>,
+        finish: DirectFinish,
+    ) -> Result<MemberAddition> {
         if key_packages.is_empty() {
             return Err(Error::Group("add_members: no KeyPackage given".to_owned()));
         }
+        self.refuse_if_commit_staged("add_member")?;
         self.refuse_if_proposals_pending("add_member")?;
         // ADR-0050: the direct path admits nothing the proposal path would
         // refuse — a leaf whose credential does not resolve to an account.
@@ -895,9 +994,7 @@ impl Group {
             .add_members(&identity.provider, &identity.signature_keys, &key_packages)
             .map_err(|e| Error::Group(format!("add_members: {e:?}")))?;
 
-        self.inner
-            .merge_pending_commit(&identity.provider)
-            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        self.finish_direct(identity, finish)?;
 
         Ok(MemberAddition { commit, welcome })
     }
@@ -973,6 +1070,29 @@ impl Group {
         identity: &Identity,
         key_packages: &[&[u8]],
     ) -> Result<MemberAddition> {
+        let validated = Self::validate_key_packages(identity, key_packages)?;
+        self.add_members(identity, validated)
+    }
+
+    /// [`Self::add_members_from_wire`], staged ([`Self::stage_add_members`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyPackage`] for a validation failure of any package, else
+    /// what [`Self::stage_add_members`] returns.
+    pub fn stage_add_members_from_wire(
+        &mut self,
+        identity: &Identity,
+        key_packages: &[&[u8]],
+    ) -> Result<MemberAddition> {
+        let validated = Self::validate_key_packages(identity, key_packages)?;
+        self.stage_add_members(identity, validated)
+    }
+
+    fn validate_key_packages(
+        identity: &Identity,
+        key_packages: &[&[u8]],
+    ) -> Result<Vec<KeyPackage>> {
         let mut validated = Vec::with_capacity(key_packages.len());
         for bytes in key_packages {
             let kp_in = crate::key_package::deserialize(bytes)?;
@@ -982,7 +1102,7 @@ impl Group {
                     .map_err(|e| Error::KeyPackage(format!("validate: {e:?}")))?,
             );
         }
-        self.add_members(identity, validated)
+        Ok(validated)
     }
 
     /// Remove a member identified by their leaf index.
@@ -1000,6 +1120,34 @@ impl Group {
         identity: &Identity,
         leaf: LeafNodeIndex,
     ) -> Result<MlsMessageOut> {
+        self.remove_member_finishing(identity, leaf, DirectFinish::Merge)
+    }
+
+    /// [`Self::remove_member`], staged ([ADR-0081]; see
+    /// [`Self::stage_add_members`] for the lifecycle).
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::remove_member`] returns, and a typed
+    /// [`RefusalReason::SweepAlreadyStaged`] refusal while any commit is
+    /// staged.
+    pub fn stage_remove_member(
+        &mut self,
+        identity: &Identity,
+        leaf: LeafNodeIndex,
+    ) -> Result<MlsMessageOut> {
+        self.remove_member_finishing(identity, leaf, DirectFinish::Stage)
+    }
+
+    fn remove_member_finishing(
+        &mut self,
+        identity: &Identity,
+        leaf: LeafNodeIndex,
+        finish: DirectFinish,
+    ) -> Result<MlsMessageOut> {
+        self.refuse_if_commit_staged("remove_member")?;
         self.refuse_if_proposals_pending("remove_member")?;
         // ADR-0062: removing a person's last leaf from a one-to-one is refused
         // here, locally, before the commit is built; every peer refuses it too.
@@ -1013,9 +1161,7 @@ impl Group {
             .remove_members(&identity.provider, &identity.signature_keys, &[leaf])
             .map_err(|e| Error::Group(format!("remove_members: {e:?}")))?;
 
-        self.inner
-            .merge_pending_commit(&identity.provider)
-            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        self.finish_direct(identity, finish)?;
 
         Ok(commit)
     }
@@ -1037,6 +1183,16 @@ impl Group {
         identity: &Identity,
         extensions: Extensions<GroupContext>,
     ) -> Result<MlsMessageOut> {
+        self.set_group_context_extensions_finishing(identity, extensions, DirectFinish::Merge)
+    }
+
+    fn set_group_context_extensions_finishing(
+        &mut self,
+        identity: &Identity,
+        extensions: Extensions<GroupContext>,
+        finish: DirectFinish,
+    ) -> Result<MlsMessageOut> {
+        self.refuse_if_commit_staged("set_group_context_extensions")?;
         self.refuse_if_proposals_pending("set_group_context_extensions")?;
         // ADR-0062: a one-to-one's GroupContext is frozen from creation, and no
         // rewrite anywhere may change a conversation's kind. Both are refused
@@ -1063,9 +1219,7 @@ impl Group {
             )
             .map_err(|e| Error::Group(format!("update_group_context_extensions: {e:?}")))?;
 
-        self.inner
-            .merge_pending_commit(&identity.provider)
-            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        self.finish_direct(identity, finish)?;
 
         Ok(commit)
     }
@@ -1680,12 +1834,39 @@ impl Group {
     /// of the group, when a member proposal is pending (see
     /// [`Self::refuse_if_proposals_pending`]), or on any OpenMLS-side failure.
     pub fn set_group_roles(&mut self, identity: &Identity, roles: &RoleTable) -> Result<Vec<u8>> {
+        self.set_group_roles_finishing(identity, roles, DirectFinish::Merge)
+    }
+
+    /// [`Self::set_group_roles`], staged ([ADR-0081]; see
+    /// [`Self::stage_add_members`] for the lifecycle).
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::set_group_roles`] returns, and a typed
+    /// [`RefusalReason::SweepAlreadyStaged`] refusal while any commit is
+    /// staged.
+    pub fn stage_set_group_roles(
+        &mut self,
+        identity: &Identity,
+        roles: &RoleTable,
+    ) -> Result<Vec<u8>> {
+        self.set_group_roles_finishing(identity, roles, DirectFinish::Stage)
+    }
+
+    fn set_group_roles_finishing(
+        &mut self,
+        identity: &Identity,
+        roles: &RoleTable,
+        finish: DirectFinish,
+    ) -> Result<Vec<u8>> {
         self.refuse_unenforceable_role_table(identity, roles)?;
         // `set_group_context_extensions` replaces the whole extension set, so
         // the list is the current one verbatim with only the role table swapped
         // (ADR-0062 — the kind and `required_capabilities` ride through).
         let exts = self.role_rewrite_extensions(roles)?;
-        let commit = self.set_group_context_extensions(identity, exts)?;
+        let commit = self.set_group_context_extensions_finishing(identity, exts, finish)?;
         encode_message(&commit)
     }
 
@@ -2761,10 +2942,15 @@ impl Group {
             && one_to_one_holds(&effects, members, self.group_kind()).is_ok()
     }
 
-    /// `true` when a sweep built by [`Group::stage_pending_proposals`] is
-    /// staged and still awaiting its journal verdict.
+    /// `true` when a commit is staged and still awaiting its verdict: a sweep
+    /// built by [`Group::stage_pending_proposals`], or (since [ADR-0081]) a
+    /// direct commit built by [`Group::stage_add_members`],
+    /// [`Group::stage_remove_member`] or [`Group::stage_set_group_roles`].
+    /// The verdict entry points below ([`Group::staged_export_secret`],
+    /// [`Group::merge_staged_sweep`], [`Group::abandon_staged_sweep`]) serve
+    /// both: OpenMLS holds one pending commit per group, whatever built it.
     ///
-    /// Only that method can put this group into that state. Every
+    /// Only those methods can put this group into that state. Every eager
     /// direct-commit path ([`Group::add_member`], [`Group::remove_member`],
     /// [`Group::set_group_context_extensions`], [`Group::self_update`],
     /// [`Group::approve_external_join`]) merges before it returns, and
@@ -2772,6 +2958,8 @@ impl Group {
     /// after any of them this is `false` and the verdict entry points below are
     /// no-ops. That is the whole reason a rollback here cannot reach a path
     /// that never had one.
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
     #[must_use]
     pub fn has_staged_sweep(&self) -> bool {
         self.inner.pending_commit().is_some()

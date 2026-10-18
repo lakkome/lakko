@@ -72,6 +72,20 @@ public struct PublisherCommitEntry: Codable, Equatable, Sendable {
     public let welcomeB64: String?
     /// Approve: standard base64 of the joiner's signature (= account) key.
     public let joinerKeyB64: String?
+    /// ADR-0081 — the epoch the commit LEFT, whose key proves the commit
+    /// request. The commit merged eagerly, so after a restart the group holds
+    /// only the N+1 key, and the DS takes a commit only under a proof of N
+    /// (an identical re-send under any retained key); with the seed a replay
+    /// always learns the answer: appended, the original row, or `409`.
+    public let proofEpoch: UInt64?
+    /// ADR-0081 — standard base64 of that epoch's 32-byte access seed. Lives
+    /// only in this device-key-encrypted record and goes with it.
+    public let proofSeedB64: String?
+    /// ADR-0081 — the DS answered the journal step with `409` or a definitive
+    /// refusal: nothing of the commit is on the journal, so an approve
+    /// delivers no Welcome and appoints nobody (the reseal still runs: the
+    /// owner's posts are sealed under the merged seed). `nil` reads `false`.
+    public var journalLost: Bool?
     /// The steps that have landed.
     public var done: [Step]
 
@@ -85,6 +99,9 @@ public struct PublisherCommitEntry: Codable, Equatable, Sendable {
         commitB64: String? = nil,
         welcomeB64: String? = nil,
         joinerKeyB64: String? = nil,
+        proofEpoch: UInt64? = nil,
+        proofSeedB64: String? = nil,
+        journalLost: Bool? = nil,
         done: [Step] = []
     ) {
         self.id = id
@@ -96,6 +113,9 @@ public struct PublisherCommitEntry: Codable, Equatable, Sendable {
         self.commitB64 = commitB64
         self.welcomeB64 = welcomeB64
         self.joinerKeyB64 = joinerKeyB64
+        self.proofEpoch = proofEpoch
+        self.proofSeedB64 = proofSeedB64
+        self.journalLost = journalLost
         self.done = done
     }
 
@@ -164,12 +184,15 @@ public struct PublisherCommitEntry: Codable, Equatable, Sendable {
 /// What running the steps of one entry needs; injected so the order is
 /// testable without a network.
 public struct PublisherCommitPorts {
-    /// Register the group's CURRENT epoch key (the N+1 one) on the DS with
-    /// the channel's root. Idempotent. Required before an approve publishes
-    /// its commit; best effort for a rotation, which publishes none.
-    public var registerEpoch: @MainActor () async throws -> Void
-    /// Publish the Add commit to the group journal.
-    public var publishCommit: @MainActor (_ commit: Data) async throws -> Void
+    /// ADR-0081 decision 1 — register the group's CURRENT epoch key (the N+1
+    /// one) with the channel's root AND append `commit` to the group journal,
+    /// in one request (`POST .../commit`), proven under the recorded key of
+    /// the epoch the commit left (`proof`; `nil` on an entry that kept none).
+    /// A re-send of the same commit is idempotent on the DS.
+    public var commitToJournal: @MainActor (_ commit: Data, _ proof: (epoch: UInt64, seed: Data)?) async throws -> Void
+    /// ADR-0081 — whether a failed journal step is lost (`409`, a definitive
+    /// refusal): nothing of the commit is or will be on the DS.
+    public var isLost: (Error) -> Bool
     /// Write the Welcome to the joiner's mailbox.
     public var deliverWelcome: @MainActor (_ welcome: Data, _ joinerKey: Data) async throws -> Void
     /// The channels service's current epoch.
@@ -185,8 +208,8 @@ public struct PublisherCommitPorts {
     public var finish: @MainActor (_ entry: PublisherCommitEntry) -> Void
 
     public init(
-        registerEpoch: @escaping @MainActor () async throws -> Void,
-        publishCommit: @escaping @MainActor (Data) async throws -> Void,
+        commitToJournal: @escaping @MainActor (Data, (epoch: UInt64, seed: Data)?) async throws -> Void,
+        isLost: @escaping (Error) -> Bool = DsCommitFailure.isLost,
         deliverWelcome: @escaping @MainActor (Data, Data) async throws -> Void,
         serverEpoch: @escaping @MainActor () async throws -> UInt32,
         reseal: @escaping @MainActor (UInt32) async throws -> Void,
@@ -194,8 +217,8 @@ public struct PublisherCommitPorts {
         save: @escaping @MainActor (PublisherCommitEntry) throws -> Void,
         finish: @escaping @MainActor (PublisherCommitEntry) -> Void
     ) {
-        self.registerEpoch = registerEpoch
-        self.publishCommit = publishCommit
+        self.commitToJournal = commitToJournal
+        self.isLost = isLost
         self.deliverWelcome = deliverWelcome
         self.serverEpoch = serverEpoch
         self.reseal = reseal
@@ -209,33 +232,42 @@ public struct PublisherCommitPorts {
 public enum PublisherCommitRunner {
     /// Run the remaining steps of `entry` in order, recording each as it
     /// lands. Throws the first step's failure, leaving the entry (with what
-    /// did land) for the next run.
+    /// did land) for the next run. A rotation's journal step that failed for
+    /// an unknown reason (the network) is the exception: the other steps run
+    /// and the entry is kept, not finished, so the next replay sends the
+    /// journal step again.
     @MainActor
     public static func run(_ entry: PublisherCommitEntry, ports: PublisherCommitPorts) async throws {
         var current = entry
-        for step in current.remainingSteps {
+        var journalDeferred = false
+        stepLoop: for step in current.remainingSteps {
             switch step {
             case .journal:
-                if current.kind == .rotation {
-                    // A rotation commit is not published to the journal, so
-                    // no peer can hold an unregistered epoch: the
-                    // registration stays best effort, as it always was (a
-                    // co-publisher's is refused, its root is not the
-                    // journal's), and the owner's lazy claim on a refused
-                    // request registers the current epoch with the root.
-                    do {
-                        try await ports.registerEpoch()
-                    } catch {
-                        NSLog("ADR-0057: PublisherGroup rotation epoch not registered: %@",
-                              String(describing: error))
+                if let commit = current.commitB64.flatMap({ Data(base64Encoded: $0) }) {
+                    var proof: (epoch: UInt64, seed: Data)?
+                    if let epoch = current.proofEpoch,
+                       let seed = current.proofSeedB64.flatMap({ Data(base64Encoded: $0) }) {
+                        proof = (epoch, seed)
                     }
-                } else {
-                    try await ports.registerEpoch()
-                    if let commit = current.commitB64.flatMap({ Data(base64Encoded: $0) }) {
-                        try await ports.publishCommit(commit)
+                    do {
+                        try await ports.commitToJournal(commit, proof)
+                    } catch where ports.isLost(error) {
+                        // ADR-0081 — nothing of this commit is or will be on
+                        // the DS (a co-publisher's rotation is refused like
+                        // this: its root is not the journal's).
+                        NSLog("ADR-0081: PublisherGroup commit not taken by the journal (%@)",
+                              current.kind.rawValue)
+                        current.journalLost = true
+                    } catch {
+                        guard current.kind == .rotation else { throw error }
+                        // The subscribers' reseal does not wait on the DS.
+                        NSLog("ADR-0081: PublisherGroup rotation commit deferred")
+                        journalDeferred = true
+                        continue stepLoop
                     }
                 }
             case .welcome:
+                if current.journalLost == true { break }
                 if let welcome = current.welcomeB64.flatMap({ Data(base64Encoded: $0) }),
                    let joiner = current.joinerKeyB64.flatMap({ Data(base64Encoded: $0) }) {
                     try await ports.deliverWelcome(welcome, joiner)
@@ -245,6 +277,7 @@ public enum PublisherCommitRunner {
                     try await ports.reseal(current.serverTargetEpoch)
                 }
             case .appoint:
+                if current.journalLost == true { break }
                 if let joiner = current.joinerKeyB64.flatMap({ Data(base64Encoded: $0) }) {
                     do {
                         try await ports.appoint(joiner)
@@ -258,6 +291,7 @@ public enum PublisherCommitRunner {
             current = current.withStepDone(step)
             try ports.save(current)
         }
+        if journalDeferred { return }
         ports.finish(current)
     }
 }

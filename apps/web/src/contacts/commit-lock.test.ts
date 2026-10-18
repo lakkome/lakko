@@ -48,7 +48,7 @@
  * The remaining cases are guards, not discriminators, and say so where they sit.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fakeAccessSigner } from "../ds/access-test-doubles";
+import { fakeAccessSigner, withCommitRoute, withStagedTwins } from "../ds/access-test-doubles";
 
 // No IndexedDB in the node test env; the store round-trip is covered by
 // `src/chat/commit-outbox.test.ts`.
@@ -100,7 +100,7 @@ function statefulGroup(
   label: string,
 ): { group: WasmGroup; epoch: () => bigint } {
   let epoch = startEpoch;
-  const group = {
+  const group = withStagedTwins({
     get groupId(): Uint8Array {
       return groupId;
     },
@@ -113,7 +113,7 @@ function statefulGroup(
       order.push(`create:${label}${leaf}`);
       return new Uint8Array([1, 2, 3]);
     }),
-  } as unknown as WasmGroup;
+  }) as unknown as WasmGroup;
   return { group, epoch: () => epoch };
 }
 
@@ -142,7 +142,7 @@ describe("ADR-0040 — the commit region is serialized per group", () => {
 
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async (e) => {
@@ -160,7 +160,9 @@ describe("ADR-0040 — the commit region is serialized per group", () => {
     await settle();
 
     // The load-bearing assertion. Op A is parked in its publish; op B must not
-    // have created ANYTHING yet, so exactly one eager merge has happened.
+    // have created ANYTHING yet. ADR-0081: A's commit is staged (the fake's
+    // raw epoch moved once, the group still reads N) and recorded before it
+    // is sent.
     expect(g.epoch()).toBe(6n);
     expect(order).toEqual(["create:g1", "persist", "publish"]);
 
@@ -178,7 +180,8 @@ describe("ADR-0040 — the commit region is serialized per group", () => {
       "publish",
     ]);
     expect(g.epoch()).toBe(7n);
-    expect(targetEpochs).toEqual(["6", "7"]);
+    // ADR-0081: an entry names the epoch its staged commit was built against.
+    expect(targetEpochs).toEqual(["5", "6"]);
   });
 
   it("SERIALIZING, not coalescing — both distinct removals run in full", async () => {
@@ -194,7 +197,7 @@ describe("ADR-0040 — the commit region is serialized per group", () => {
 
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},
@@ -234,7 +237,7 @@ describe("ADR-0040 — the commit region is serialized per group", () => {
 
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},
@@ -265,7 +268,7 @@ describe("ADR-0040 — the commit region is serialized per group", () => {
 
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {
@@ -290,6 +293,8 @@ describe("ADR-0040 — the commit region is serialized per group", () => {
       commitMessageId: 7,
       welcomeMessageId: undefined,
     });
+    // ADR-0081: A's record failed before anything was sent (its staged commit
+    // was abandoned at N); B's commit was recorded and sent.
     expect(publishGroup).toHaveBeenCalledTimes(1);
   });
 });
@@ -340,7 +345,7 @@ describe("ADR-0045 — a second role change is refused while one is pending", ()
     const adminsFlat = new Uint8Array(0);
     const pending: Array<{ kind: string }> = [];
     const proposed: Uint8Array[] = [];
-    const group = {
+    const group = withStagedTwins({
       get groupId(): Uint8Array {
         return GID;
       },
@@ -358,7 +363,7 @@ describe("ADR-0045 — a second role change is refused while one is pending", ()
           return new Uint8Array([4, 5, 6]);
         },
       ),
-    } as unknown as WasmGroup;
+    }) as unknown as WasmGroup;
     return { group, admins: () => adminsFlat, proposed: () => proposed };
   }
 
@@ -374,7 +379,7 @@ describe("ADR-0045 — a second role change is refused while one is pending", ()
 
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},
@@ -406,7 +411,7 @@ describe("ADR-0045 — a second role change is refused while one is pending", ()
     const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},

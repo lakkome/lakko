@@ -7,6 +7,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.fail
@@ -199,7 +200,12 @@ class CommitterSweepTest {
             return if (scripted.isNotEmpty()) scripted.removeAt(0) else rows
         }
 
-        override suspend fun publishGroup(bytes: ByteArray): Long {
+        /** ADR-0081 — set to make the commit route fail (a refusal, a lost
+         *  epoch, or the DS not reached). */
+        var commitThrows: Throwable? = null
+
+        override suspend fun commitStaged(bytes: ByteArray, staged: StagedSweepArtifacts?): Long {
+            commitThrows?.let { throw it }
             published.add("commit@${bytes[0].toInt()}")
             return nextId++
         }
@@ -347,9 +353,9 @@ class CommitterSweepTest {
             }
         }
         val recordingJournal = object : SweepJournalPort by journal {
-            override suspend fun publishGroup(bytes: ByteArray): Long {
+            override suspend fun commitStaged(bytes: ByteArray, staged: StagedSweepArtifacts?): Long {
                 order.add("publish")
-                return journal.publishGroup(bytes)
+                return journal.commitStaged(bytes, staged)
             }
         }
         runCommitterSweep(
@@ -588,7 +594,7 @@ class CommitterSweepTest {
                 throw IllegalStateException("DS unreachable")
             }
 
-            override suspend fun publishGroup(bytes: ByteArray): Long = 1
+            override suspend fun commitStaged(bytes: ByteArray, staged: StagedSweepArtifacts?): Long = 1
 
             override suspend fun publishMailbox(pseudonym: ByteArray, bytes: ByteArray): Long = 2
         }
@@ -1324,11 +1330,11 @@ class CommitterSweepTest {
     }
 
     /**
-     * ADR-0053 client contract point 3 — the staged epoch's key is registered
-     * BEFORE the sweep is durably recorded or published.
+     * ADR-0081 decision 1 — the entry is recorded first; the staged epoch's
+     * key then reaches the DS with the commit, in one call.
      */
     @Test
-    fun `ADR-0053 — the staged epoch is registered before the record and the publish`() = runTest {
+    fun `ADR-0081 — the staged epoch reaches the DS with the commit, after the record`() = runTest {
         val journal = FakeJournal()
         val outbox = FakeOutbox()
         val order = mutableListOf<String>()
@@ -1339,60 +1345,57 @@ class CommitterSweepTest {
             }
         }
         val recordingJournal = object : SweepJournalPort by journal {
-            override suspend fun publishGroup(bytes: ByteArray): Long {
+            override suspend fun commitStaged(bytes: ByteArray, staged: StagedSweepArtifacts?): Long {
                 order.add("publish")
-                return journal.publishGroup(bytes)
+                return journal.commitStaged(bytes, staged)
             }
         }
         val base = ports(journal = journal, outbox = outbox)
-        runCommitterSweep(
-            SweepPorts(
-                group = base.group,
-                journal = recordingJournal,
-                outbox = recordingOutbox,
-                cursor = base.cursor,
-                actingCommitter = base.actingCommitter,
-                welcomeTargets = base.welcomeTargets,
-                markOwnPublished = base.markOwnPublished,
-                persist = base.persist,
-                persistApplied = base.persistApplied,
-                encodeB64 = base.encodeB64,
-                decodeB64 = base.decodeB64,
-                registerStagedEpoch = { order.add("register") },
-            ),
-        )
-        assertEquals(listOf("register", "record", "publish"), order)
+        runCommitterSweep(base.with(journal = recordingJournal, outbox = recordingOutbox))
+        assertEquals(listOf("record", "publish"), order)
     }
 
-    /**
-     * ADR-0053 client contract point 3, fail-closed half — a refused
-     * registration abandons the staged sweep with nothing recorded and nothing
-     * on the wire, exactly as a failed durable record does.
-     */
+    private fun SweepPorts.with(
+        journal: SweepJournalPort = this.journal,
+        outbox: SweepOutboxPort = this.outbox,
+        classifyCommitFailure: (Throwable) -> SweepCommitFailure = this.classifyCommitFailure,
+    ): SweepPorts = SweepPorts(
+        group = group,
+        journal = journal,
+        outbox = outbox,
+        cursor = cursor,
+        actingCommitter = actingCommitter,
+        welcomeTargets = welcomeTargets,
+        markOwnPublished = markOwnPublished,
+        persist = persist,
+        persistApplied = persistApplied,
+        encodeB64 = encodeB64,
+        decodeB64 = decodeB64,
+        classifyCommitFailure = classifyCommitFailure,
+        mayStage = mayStage,
+    )
+
+    private fun classified(base: SweepPorts): SweepPorts = base.with(
+        classifyCommitFailure = { cause ->
+            when (cause) {
+                is me.lakko.app.ds.DsCommitConflictError -> SweepCommitFailure.LOST
+                is IllegalStateException -> SweepCommitFailure.REFUSED
+                else -> SweepCommitFailure.UNKNOWN
+            }
+        },
+    )
+
+    /** ADR-0081 — a refused commit (registration refused, proof not
+     *  verified) put nothing on the DS: abandon, drop the entry, throw. */
     @Test
-    fun `ADR-0053 — a refused registration abandons the sweep before any record or publish`() = runTest {
+    fun `ADR-0081 — a refused commit abandons the sweep and drops its entry`() = runTest {
         val group = FakeGroup(rank = 0u, pending = 1)
         val journal = FakeJournal()
         val outbox = FakeOutbox()
-        val base = ports(group = group, journal = journal, outbox = outbox)
         val refused = IllegalStateException("401 proof required")
+        journal.commitThrows = refused
         val thrown = try {
-            runCommitterSweep(
-                SweepPorts(
-                    group = base.group,
-                    journal = base.journal,
-                    outbox = base.outbox,
-                    cursor = base.cursor,
-                    actingCommitter = base.actingCommitter,
-                    welcomeTargets = base.welcomeTargets,
-                    markOwnPublished = base.markOwnPublished,
-                    persist = base.persist,
-                    persistApplied = base.persistApplied,
-                    encodeB64 = base.encodeB64,
-                    decodeB64 = base.decodeB64,
-                    registerStagedEpoch = { throw refused },
-                ),
-            )
+            runCommitterSweep(classified(ports(group = group, journal = journal, outbox = outbox)))
             null
         } catch (e: IllegalStateException) {
             e
@@ -1402,7 +1405,41 @@ class CommitterSweepTest {
         assertEquals(0, group.merged)
         assertFalse("nothing may be left staged", group.hasStagedSweep())
         assertEquals(emptyList<String>(), journal.published)
-        assertTrue("nothing may be recorded", outbox.recorded.isEmpty())
+        assertEquals(listOf("entry-1"), outbox.discarded)
+    }
+
+    /** ADR-0081 — `409` at the commit route: another commit owns the staged
+     *  epoch. The sweep abandons exactly like a lost verdict. */
+    @Test
+    fun `ADR-0081 — a lost epoch at the commit route is a loss`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        val journal = FakeJournal()
+        val outbox = FakeOutbox()
+        journal.commitThrows = me.lakko.app.ds.DsCommitConflictError("/ds/group/ab/commit", "")
+        val outcome = runCommitterSweep(classified(ports(group = group, journal = journal, outbox = outbox)))
+        assertEquals(SweepOutcome.Lost(null), outcome)
+        assertEquals(1, group.abandoned)
+        assertFalse(group.hasStagedSweep())
+        assertEquals(listOf("entry-1"), outbox.discarded)
+        assertTrue(outbox.acked.isEmpty())
+    }
+
+    /** ADR-0081 — a commit that may or may not have landed (the DS not
+     *  reached) leaves the sweep staged with its entry; the owed verdict
+     *  re-sends it. */
+    @Test
+    fun `ADR-0081 — a commit that did not reach the DS stays staged`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        val journal = FakeJournal()
+        val outbox = FakeOutbox()
+        journal.commitThrows = java.io.IOException("no route")
+        assertThrows(java.io.IOException::class.java) {
+            runBlocking { runCommitterSweep(classified(ports(group = group, journal = journal, outbox = outbox))) }
+        }
+        assertTrue("the verdict stays owed", group.hasStagedSweep())
+        assertEquals(0, group.abandoned)
+        assertTrue(outbox.discarded.isEmpty())
+        assertNotNull(outbox.owed)
     }
 
     /** A hold after a refused registration stops a NEW stage before any

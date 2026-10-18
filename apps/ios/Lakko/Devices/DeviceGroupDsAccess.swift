@@ -19,6 +19,10 @@ import LakkoCore
 /// A DeviceGroup handle is rebuilt from the snapshot by each flow that needs
 /// one, so there is no long-lived previous-epoch signer to fall back on here:
 /// a refused request is retried once after the root's lazy claim.
+///
+/// ADR-0081 — a DeviceGroup commit is sent through the commit outbox
+/// (``DeviceGroupCommits``): the N+1 registration and the commit row reach the
+/// DS in one request. Nothing here registers an epoch on its own.
 public enum DeviceGroupDsAccess {
 
     /// The journal root of the account's DeviceGroup, or `nil` when the
@@ -168,6 +172,9 @@ public enum DeviceGroupDsAccess {
             accountIdB64: accountIdB64,
             deviceIdentitySeed: seed,
             accountSeed: accountSeed,
+            // ADR-0081 decision 4 — a key reset is one of the two cases that
+            // found (the new seed names a new journal nobody holds).
+            found: true,
             snapshotStore: snapshotStore
         )
         guard try ensured.group.groupId() == journalId else {
@@ -226,41 +233,5 @@ public enum DeviceGroupDsAccess {
                 throw refusal
             }
         }
-    }
-
-    /// Register-before-publish (obligation 5) for one direct DeviceGroup
-    /// commit. `create` eager-merges N -> N+1 on a throwaway handle; the N+1
-    /// key is registered under the root; `prepare` runs next (whatever must be
-    /// durable before the publish); `publish` goes out signed under N. A
-    /// failed registration publishes nothing and leaves the on-disk snapshot at
-    /// N — the handle itself is discarded by the caller, so there is nothing
-    /// in memory to roll back.
-    public static func directCommit<Created, Prepared, Published>(
-        group: DeviceGroup,
-        identity: Identity,
-        accountIdB64: String,
-        ds: DsClient,
-        create: @escaping () throws -> Created,
-        prepare: @escaping (Created) throws -> Prepared,
-        publish: @escaping (Prepared, DsAuth) async throws -> Published
-    ) async throws -> Published {
-        let groupId = try group.groupId()
-        return try await DirectCommitSteps(
-            currentSigner: { try group.dsAccessSigner(identity: identity) },
-            create: create,
-            register: { next in
-                guard let root = rootSigner(accountIdB64: accountIdB64, groupId: groupId) else {
-                    throw DsStatementError.unauthorized
-                }
-                try await JournalOwnership.registerEpoch(
-                    authority: .root(root), journalId: groupId, epoch: next.epoch(),
-                    epochKey: next.verifyingKey(), revoke: [], ds: ds)
-            },
-            prepare: prepare,
-            rollback: {},
-            publish: { prepared, signerN in
-                try await publish(prepared, DsAuth(signer: signerN))
-            }
-        ).run()
     }
 }

@@ -82,26 +82,29 @@ public enum ChannelPublisherCommits {
 
     /// The ports a recorded commit runs through. `state`, when given, gets
     /// the N+1 content seed and the new server epoch once the reseal landed.
+    ///
+    /// ADR-0081: the journal step is proven under the recorded seed of the
+    /// epoch the commit left (``PublisherCommitEntry/proofSeedB64``), live
+    /// and on a replay after a restart alike. An entry without one can
+    /// complete only an identical re-send, which the DS recognises under any
+    /// retained key.
     public static func ports(
         _ context: Context, state: ChannelsUiState?
     ) -> PublisherCommitPorts {
         let account = context.accountIdB64
         return PublisherCommitPorts(
-            registerEpoch: {
+            commitToJournal: { commit, proof in
                 let (identity, group) = try context.open()
                 let next = try group.dsAccessSigner(identity: identity)
-                do {
-                    try await CoPublisher.registerEpoch(
-                        ds: context.ds, identity: identity, publisherGroup: group, next: next)
-                } catch DsStatementError.conflict {
-                    // This device's own earlier registration of the epoch.
+                let proofSigner: DsGroupSigner
+                if let proof {
+                    proofSigner = try DsProofSigner.forGroup(epoch: proof.epoch, accessSeed: proof.seed)
+                } else {
+                    proofSigner = next
                 }
-            },
-            publishCommit: { commit in
-                let (identity, group) = try context.open()
-                _ = try await context.ds.publishGroup(
-                    groupId: try group.groupId(), payload: commit,
-                    auth: DsAuth(signer: try group.dsAccessSigner(identity: identity)))
+                try await CoPublisher.commitEpoch(
+                    ds: context.ds, identity: identity, publisherGroup: group,
+                    next: next, proof: proofSigner, row: commit)
             },
             deliverWelcome: { welcome, joinerKey in
                 try await CoPublisher.deliverWelcome(ds: context.ds, welcome: welcome, joinerKey: joinerKey)

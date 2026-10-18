@@ -1357,6 +1357,25 @@ private fun SessionRoot(
         }
         onDispose { me.lakko.app.devices.sync.DeviceGroupSyncRepository.keyRotationSink = null }
     }
+    // ADR-0081 decision 4 - a device that lost or fell behind its DeviceGroup
+    // knocks under this account's login handle, after its own directory
+    // KeyPackage (the signed device binding a sibling checks) is published;
+    // a sibling admits only knocks naming the handle.
+    DisposableEffect(authRepository, chatRepository) {
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.loginHandleProvider = {
+            val session = authRepository.state.value as? me.lakko.app.auth.AuthState.Session
+            session?.account?.username?.takeIf { it.isNotBlank() }?.let { name ->
+                runCatching { uniffi.lakko_ffi_uniffi.loginHandle(name) }.getOrNull()
+            }
+        }
+        me.lakko.app.devices.sync.DeviceGroupSyncRepository.directoryKeyPackagePublisher = {
+            chatRepository.republishKeyPackage()
+        }
+        onDispose {
+            me.lakko.app.devices.sync.DeviceGroupSyncRepository.loginHandleProvider = null
+            me.lakko.app.devices.sync.DeviceGroupSyncRepository.directoryKeyPackagePublisher = null
+        }
+    }
     // This device adopted rotated account keys (as the device that changed
     // them, or as a kept device): every directory row of the account was
     // deleted by the rotation, so this device's KeyPackage is published

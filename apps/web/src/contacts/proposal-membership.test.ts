@@ -82,8 +82,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import {
   fakeAccessSigner,
   fakeRegistrarAuthority,
-  fakeRootAuthority,
-} from "../ds/access-test-doubles";
+  fakeRootAuthority, withStagedTwins } from "../ds/access-test-doubles";
 import { dsAccess } from "../ds/access";
 
 // No IndexedDB in the node test env; the store round-trip is covered by
@@ -279,7 +278,7 @@ function fakeGroup(opts: {
     });
   }
   return {
-    group: base as unknown as WasmGroup,
+    group: withStagedTwins(base) as unknown as WasmGroup,
     order,
     epoch: () => epoch,
     pending: () => pending,
@@ -310,10 +309,12 @@ function client(
 function ds(order: string[], journal: unknown[] = []): Partial<DsClient> {
   let id = 100;
   return {
-    // ADR-0053 — the epoch registration a commit and a sweep run before they
-    // publish. Accepted, and deliberately not logged into `order`: the
-    // ordering is pinned in `contacts/ds-access-commit.test.ts`.
-    registerGroupEpoch: vi.fn(async () => {}),
+    // ADR-0081 — a commit (direct or swept) reaches the journal with its
+    // epoch's registration in one call; logged as the publish it contains.
+    commitGroupEpoch: vi.fn(async () => {
+      order.push("publish");
+      return { id: (id += 1), createdAt: "t", resent: false };
+    }),
     publishGroup: vi.fn(async () => {
       order.push("publish");
       return { id: (id += 1), createdAt: "t" };
@@ -370,11 +371,12 @@ describe("ADR-0045 obligation 5 — which path a group takes", () => {
     const out = await c.removeMemberFromGroup(null, g.group, 4);
 
     expect(out).toMatchObject({ kind: "committed" });
-    // create -> record -> publish, the ADR-0040 sequence, byte-for-byte as it
-    // was. A legacy group has no owner, hence no committer, and every peer's
-    // receipt gate would drop a proposal it emitted — so routing it into the
-    // proposal path would mean nothing it asks for ever applies.
-    expect(g.order).toEqual(["removeMember", "record", "publish"]);
+    // stage -> record -> publish (the commit route: registration + row) ->
+    // persist of the merge (ADR-0081). A legacy group has no owner, hence no
+    // committer, and every peer's receipt gate would drop a proposal it
+    // emitted — so routing it into the proposal path would mean nothing it
+    // asks for ever applies.
+    expect(g.order).toEqual(["removeMember", "record", "publish", "persist"]);
     expect(g.epoch()).toBe(7n);
   });
 
@@ -562,7 +564,7 @@ describe("ADR-0045 — the restart sweep resolves an owed verdict FIRST", () => 
     expect(order).not.toContain("publish-mailbox");
   });
 
-  it("re-publishes an ordinary direct-commit entry as before", async () => {
+  it("an ordinary direct-commit entry is acked without sending its commit again (ADR-0081)", async () => {
     const g = fakeGroup({ gid: freshGid(), roleTable: false });
     const order: string[] = [];
     loadUnacked.mockResolvedValueOnce([
@@ -579,7 +581,9 @@ describe("ADR-0045 — the restart sweep resolves an owed verdict FIRST", () => 
 
     await c.sweepPendingCommits(g.group, NOOP);
 
-    expect(order).toContain("publish");
+    // The entry was written after the commit route took the commit.
+    expect(order).not.toContain("publish");
+    expect(markAcked).toHaveBeenCalledWith("direct-1", undefined, undefined);
   });
 });
 
@@ -605,7 +609,10 @@ describe("ADR-0045 — the verdict apply surfaces the rows it consumes", () => {
     let id = 100;
     let fetches = 0;
     return {
-      registerGroupEpoch: vi.fn(async () => {}),
+      commitGroupEpoch: vi.fn(async () => {
+        order.push("publish");
+        return { id: (id += 1), createdAt: "t", resent: false };
+      }),
       publishGroup: vi.fn(async () => {
         order.push("publish");
         return { id: (id += 1), createdAt: "t" };

@@ -41,6 +41,10 @@
  * token instead (ADR-0054 S3), carrying no credentials; a mailbox write with
  * no reach proof spends one `mailbox-write` token the same way (ADR-0078).
  *
+ * ADR-0081 - a commit is `POST /ds/group/<hex>/commit` ({@link DsClient.postCommit},
+ * {@link DsClient.commitGroupEpoch}): the next epoch's registration and the
+ * commit row in one request, proven under the key of the epoch it leaves.
+ *
  * ADR-0057 statements (claim, reset, register, registrars, root transfer) are
  * `PUT /ds/group/<hex>/<segment>` with the signer's JSON body and NO proof
  * header ({@link DsClient.putStatement}).
@@ -64,9 +68,12 @@ import { type OwnerClaimOutcome } from "./owner-claim";
 import {
   NoJournalAuthorityError,
   claimAsOwner,
-  isStatus,
-  registerEpochWith,
+  commitEpochWith,
+  isCommitConflict,
   releaseAuthority,
+  type CommitAnswer,
+  type CommitProofSigner,
+  type CommitSender,
   type StatementSender,
 } from "./ownership";
 import { journalRepair, type JournalRepair } from "./journal-repair";
@@ -306,7 +313,7 @@ export interface DsClientOptions {
   readonly repair?: Pick<JournalRepair, "note">;
 }
 
-export class DsClient implements StatementSender {
+export class DsClient implements StatementSender, CommitSender {
   private readonly access: DsAccessRegistry;
   private readonly repair: Pick<JournalRepair, "note">;
   private readonly fetchImpl: typeof fetch;
@@ -533,29 +540,70 @@ export class DsClient implements StatementSender {
     });
   }
 
-  /** {@link EpochRegistrar} over this client: register `epochKey` at `epoch`
-   *  signed with this device's authority over the journal (root or
-   *  registrar), revoking `revokeKeys`. Throws `NoJournalAuthorityError`
-   *  when this device holds neither.
+  /**
+   * ADR-0081 - `POST <path>` (`/ds/group/<hex>/commit`) with a commit body
+   * the wasm statement signer built, proven by `proof` (the key of the epoch
+   * the commit leaves). `201` is a new append, `200` an identical re-send of
+   * a commit the DS already took (the original id). Throws `DsHttpError` on a
+   * refusal (409: another commit owns the epoch).
+   */
+  async postCommit(path: string, bodyJson: string, proof: CommitProofSigner): Promise<CommitAnswer> {
+    if (!path.startsWith("/ds/group/") || !path.endsWith("/commit")) {
+      throw new DsClientArgError("a commit path must name a group journal's commit route");
+    }
+    const req = {
+      method: "POST" as const,
+      path,
+      query: "",
+      body: new TextEncoder().encode(bodyJson),
+      contentType: "application/json",
+    };
+    const headers: Record<string, string> = { "content-type": req.contentType };
+    headers[DS_PROOF_HEADER] = proof.sign(req.method, req.path, req.query, req.body);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        method: "POST",
+        headers,
+        body: req.body.slice(),
+      });
+    } catch (err) {
+      throw new DsNetworkError(path, err);
+    }
+    const ok = await this.finish(req, response);
+    const json = (await ok.json()) as { id: number; created_at: string };
+    return { id: json.id, createdAt: json.created_at, resent: ok.status === 200 };
+  }
+
+  /**
+   * ADR-0081 decision 1 - register `epochKey` at `epoch` with this device's
+   * authority over the journal (root or registrar; ADR-0057 obligation 5),
+   * revoking `revokeKeys`, and append `row` - in ONE request proven under
+   * `proof` (the key of epoch `epoch - 1`). Throws `NoJournalAuthorityError`
+   * without an authority and `CommitConflictError` when another commit owns
+   * the epoch.
    *
-   *  The owner claims the journal first (once per session): a registration in
-   *  an unclaimed journal is refused `401` and nothing would ever claim it. */
-  async registerGroupEpoch(
+   * The owner claims the journal first (once per session), as
+   * the ADR-0057 registration did before ADR-0081.
+   */
+  async commitGroupEpoch(
     groupId: Uint8Array,
     epoch: bigint,
     epochKey: Uint8Array,
-    revokeKeys: readonly Uint8Array[] = [],
-  ): Promise<void> {
+    revokeKeys: readonly Uint8Array[],
+    row: Uint8Array,
+    proof: CommitProofSigner,
+  ): Promise<CommitAnswer> {
     if (groupId.length === 0) throw new DsClientArgError("groupId must be non-empty");
     await this.ensureOwnerClaim(groupId);
     const authority = this.access.journalAuthority(groupId);
     try {
-      await registerEpochWith(this, groupId, authority, epoch, epochKey, revokeKeys);
+      return await commitEpochWith(this, groupId, authority, epoch, epochKey, revokeKeys, row, proof);
     } catch (err) {
-      // Append 409: another committer registered `epoch` first. The caller
-      // abandons (never a Replace in a commit path); an owner or admin
-      // schedules the repair check at the epoch it is at.
-      if (isStatus(err, 409) && epoch > 0n) {
+      // Another commit owns `epoch`: the caller abandons (never a Replace in a
+      // commit path); an owner or admin schedules the repair check at the
+      // epoch it is at.
+      if (isCommitConflict(err) && epoch > 0n) {
         this.repair.note(groupId, epoch - 1n, "append-conflict");
       }
       throw err;

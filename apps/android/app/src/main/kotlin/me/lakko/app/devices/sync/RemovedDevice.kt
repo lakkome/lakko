@@ -47,12 +47,12 @@ internal object RemovedDevice {
         if (isRemoved(active)) PollStep.StopRemoved else PollStep.Continue
 
     /**
-     * Whether the ADR-0057 fork repair may run on this handle. The repair
-     * re-founds the account's DeviceGroup, so it runs only on a group known to
-     * be active: never on a removed device (it is not forked, it is out), and
+     * Whether a device that is behind may drop its DeviceGroup state and
+     * rejoin through a sibling (ADR-0081 decision 4): only on a group known to
+     * be active — never on a removed device (it is not behind, it is out), and
      * not on a handle whose state could not be read.
      */
-    fun forkRepairAllowed(active: Boolean?): Boolean = active == true
+    fun rejoinAllowed(active: Boolean?): Boolean = active == true
 }
 
 /** The outcome of [RemovedDevice.pollStepAfterBatch]. */

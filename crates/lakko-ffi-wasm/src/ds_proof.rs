@@ -81,6 +81,29 @@ fn for_reach_inner(reach_seed: &[u8]) -> Option<DsProofSigner> {
 
 #[wasm_bindgen]
 impl DsProofSigner {
+    /// A group access signer rebuilt from a recorded access seed (ADR-0081):
+    /// the 32-byte seed `dsAccessSeed` returned at `epoch`. It exists for a
+    /// PublisherGroup commit, which merges eagerly: the seed of the epoch the
+    /// commit left is recorded with the commit, so a re-send after a restart
+    /// can still prove that epoch (the Delivery Service then appends it, or
+    /// answers the original row, or `409`).
+    ///
+    /// # Errors
+    ///
+    /// Throws when `accessSeed` is not 32 bytes.
+    #[wasm_bindgen(js_name = forGroup)]
+    pub fn for_group(epoch: u64, access_seed: &[u8]) -> Result<DsProofSigner, JsValue> {
+        let seed = <[u8; 32]>::try_from(access_seed).map_err(|_| {
+            JsValue::from(js_sys::Error::new(&format!(
+                "access seed must be 32 bytes, got {}",
+                access_seed.len()
+            )))
+        })?;
+        Ok(DsProofSigner {
+            inner: Inner::for_group(epoch, &seed),
+        })
+    }
+
     /// A reach-key signer (ADR-0060 §2) at `dsReachEpoch()`: signs a write to
     /// a closed identity mailbox with a 32-byte reach seed the owner
     /// registered (or a delegate seed, next to a delegation). Its proof header
@@ -281,6 +304,19 @@ pub fn ds_mailbox_signer(account_identity: &Identity) -> DsProofSigner {
     }
 }
 
+/// The 32-byte access seed of the group's current epoch (the input of
+/// [`group_signer`]), for a commit that must record it (ADR-0081).
+pub(crate) fn group_access_seed(
+    group: &MlsGroup,
+    identity: &MlsIdentity,
+) -> Result<Vec<u8>, JsValue> {
+    let group_id = group.group_id();
+    let secret = group
+        .export_secret(identity, ACCESS_KEY_LABEL, &group_id, 32)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(secret.to_vec())
+}
+
 /// The group access signer at the group's current epoch - the one exporter
 /// derivation every `dsAccessSigner` method shares.
 pub(crate) fn group_signer(
@@ -322,6 +358,18 @@ pub(crate) fn staged_group_signer(
 mod tests {
     use super::*;
     use lakko_ds_proof::{verify, Proof};
+
+    #[test]
+    fn a_signer_rebuilt_from_a_recorded_seed_is_the_epochs_signer() {
+        // ADR-0081: see the UniFFI twin of this test.
+        let identity = MlsIdentity::generate("s").unwrap();
+        let group = MlsGroup::create(&identity, lakko_mls::GroupKind::Group).unwrap();
+        let live = group_signer(&group, &identity).unwrap();
+        let seed = group_access_seed(&group, &identity).unwrap();
+        let rebuilt = DsProofSigner::for_group(group.epoch(), &seed).unwrap();
+        assert_eq!(rebuilt.epoch(), live.epoch());
+        assert_eq!(rebuilt.verifying_key(), live.verifying_key());
+    }
 
     #[test]
     fn a_group_signer_is_verified_by_the_server_under_the_registered_key() {

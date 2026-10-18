@@ -35,18 +35,25 @@ class PublisherCommitOutboxTest {
         commitB64 = b64("commit"),
         welcomeB64 = b64("welcome"),
         joinerKeyB64 = b64("j".repeat(32)),
+        proofEpoch = 4,
+        proofSeedB64 = b64("s".repeat(32)),
     )
 
     private val rotation = approve.copy(
         id = "0b".repeat(16),
         kind = PublisherCommitEntry.Kind.ROTATION,
-        commitB64 = null,
+        commitB64 = b64("rotation"),
         welcomeB64 = null,
         joinerKeyB64 = null,
     )
 
-    private class Recorder(val failAt: String? = null, val serverEpoch: Long = 7) : PublisherCommitPorts {
+    private class Recorder(
+        val failAt: String? = null,
+        val serverEpoch: Long = 7,
+        val lost: Boolean = false,
+    ) : PublisherCommitPorts {
         val calls = mutableListOf<String>()
+        val proofs = mutableListOf<Long?>()
         val saved = mutableListOf<PublisherCommitEntry>()
         var finished: PublisherCommitEntry? = null
 
@@ -55,8 +62,11 @@ class PublisherCommitOutboxTest {
             if (name == failAt) throw IllegalStateException("$name failed")
         }
 
-        override suspend fun registerEpoch() = step("register")
-        override suspend fun publishCommit(commit: ByteArray) = step("publish:${commit.decodeToString()}")
+        override suspend fun commitToJournal(commit: ByteArray, proofEpoch: Long?, proofSeed: ByteArray?) {
+            proofs += proofEpoch
+            step("commit:${commit.decodeToString()}")
+        }
+        override fun isLost(cause: Throwable): Boolean = lost
         override suspend fun deliverWelcome(welcome: ByteArray, joinerKey: ByteArray) =
             step("welcome:${welcome.decodeToString()}")
         override suspend fun serverEpoch(): Long {
@@ -80,7 +90,7 @@ class PublisherCommitOutboxTest {
         val r = Recorder()
         runPublisherCommit(approve, r, quiet)
         assertEquals(
-            listOf("register", "publish:commit", "welcome:welcome", "server-epoch", "reseal:8", "appoint"),
+            listOf("commit:commit", "welcome:welcome", "server-epoch", "reseal:8", "appoint"),
             r.calls,
         )
         val steps = PublisherCommitEntry.Step.entries
@@ -89,10 +99,10 @@ class PublisherCommitOutboxTest {
     }
 
     @Test
-    fun `a rotation registers and reseals and publishes nothing`() = runTest {
+    fun `a rotation commits its epoch with its commit and reseals`() = runTest {
         val r = Recorder()
         runPublisherCommit(rotation, r, quiet)
-        assertEquals(listOf("register", "server-epoch", "reseal:8"), r.calls)
+        assertEquals(listOf("commit:rotation", "server-epoch", "reseal:8"), r.calls)
     }
 
     @Test
@@ -121,22 +131,54 @@ class PublisherCommitOutboxTest {
     }
 
     @Test
-    fun `a refused registration does not hold a rotation`() = runTest {
-        val r = Recorder(failAt = "register")
-        runPublisherCommit(rotation, r, quiet)
-        assertEquals(listOf("register", "server-epoch", "reseal:8"), r.calls)
-        assertNotNull(r.finished)
+    fun `the journal step is proven under the recorded epoch the commit left`() = runTest {
+        // ADR-0081: a replay after a restart holds only the N+1 key; the
+        // recorded epoch-N seed lets it send a commit that never reached the DS.
+        val r = Recorder()
+        runPublisherCommit(approve, r, quiet)
+        assertEquals(listOf<Long?>(4), r.proofs)
     }
 
     @Test
-    fun `a refused registration stops an approve before its commit is published`() = runTest {
-        val r = Recorder(failAt = "register")
+    fun `a rotation commit the DS did not answer defers only its journal step`() = runTest {
+        val r = Recorder(failAt = "commit:rotation")
+        runPublisherCommit(rotation, r, quiet)
+        assertEquals(listOf("commit:rotation", "server-epoch", "reseal:8"), r.calls)
+        assertNull(r.finished)
+        val kept = r.saved.last()
+        assertEquals(listOf(PublisherCommitEntry.Step.JOURNAL), kept.remainingSteps)
+        val again = Recorder(serverEpoch = 8)
+        runPublisherCommit(kept, again, quiet)
+        assertEquals(listOf("commit:rotation"), again.calls)
+        assertEquals(listOf(PublisherCommitEntry.Step.RESEAL, PublisherCommitEntry.Step.JOURNAL), again.finished?.done)
+    }
+
+    @Test
+    fun `a lost rotation commit does not hold the rotation`() = runTest {
+        val r = Recorder(failAt = "commit:rotation", lost = true)
+        runPublisherCommit(rotation, r, quiet)
+        assertEquals(listOf("commit:rotation", "server-epoch", "reseal:8"), r.calls)
+        assertNotNull(r.finished)
+        assertTrue(r.finished!!.journalLost)
+    }
+
+    @Test
+    fun `a lost approve delivers no Welcome and appoints nobody but reseals`() = runTest {
+        val r = Recorder(failAt = "commit:commit", lost = true)
+        runPublisherCommit(approve, r, quiet)
+        assertEquals(listOf("commit:commit", "server-epoch", "reseal:8"), r.calls)
+        assertTrue(r.finished!!.journalLost)
+    }
+
+    @Test
+    fun `an unanswered commit stops an approve before the Welcome`() = runTest {
+        val r = Recorder(failAt = "commit:commit")
         try {
             runPublisherCommit(approve, r, quiet)
-            fail("the registration failure must surface")
+            fail("the commit failure must surface")
         } catch (_: IllegalStateException) {
         }
-        assertEquals(listOf("register"), r.calls)
+        assertEquals(listOf("commit:commit"), r.calls)
         assertTrue(r.saved.isEmpty())
         assertNull(r.finished)
     }

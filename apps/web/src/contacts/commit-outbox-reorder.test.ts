@@ -20,16 +20,20 @@
  * commit. The outbox store + DS are mocked so no wasm / IndexedDB is needed.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fakeAccessSigner } from "../ds/access-test-doubles";
+import { fakeAccessSigner, withCommitRoute, withStagedTwins } from "../ds/access-test-doubles";
 
 // The outbox helpers the client imports (markAcked / loadUnacked) are stubbed so
 // the tests need no IndexedDB. The store round-trip itself is covered by
 // `src/chat/commit-outbox.test.ts`.
 const markAcked = vi.fn(async () => {});
 const loadUnacked = vi.fn(async () => [] as unknown[]);
+const deleteEntry = vi.fn(async () => {});
+const markWelcomesOwed = vi.fn(async () => {});
 vi.mock("../chat/commit-outbox", () => ({
   markAcked: (...a: unknown[]) => markAcked(...(a as [])),
   loadUnacked: (...a: unknown[]) => loadUnacked(...(a as [])),
+  deleteEntry: (...a: unknown[]) => deleteEntry(...(a as [])),
+  markWelcomesOwed: (...a: unknown[]) => markWelcomesOwed(...(a as [])),
 }));
 
 // `addMemberToGroup` computes the Welcome's account key via
@@ -139,7 +143,7 @@ function mockGroup(order: string[], opts: { roleTable?: boolean } = {}): WasmGro
     base["roleTableOwner"] = vi.fn(() => undefined);
     base["roleTableAdmins"] = vi.fn(() => new Uint8Array(0));
   }
-  return base as unknown as WasmGroup;
+  return withStagedTwins(base) as unknown as WasmGroup;
 }
 
 function makeClient(
@@ -149,7 +153,7 @@ function makeClient(
 ): ContactsClient {
   return new ContactsClient(
     {} as unknown as DiscoveryClient,
-    { registerGroupEpoch: async () => {}, ...ds } as unknown as DsClient,
+    withCommitRoute({ registerGroupEpoch: async () => {}, ...ds }) as unknown as DsClient,
     {
       identityProvider: () => IDENTITY_TOKEN,
       onPersistWithCommit: (e) => {
@@ -165,51 +169,76 @@ afterEach(() => {
   hoisted.artifactComputeThrows = false;
 });
 
-describe("ADR-0040 — commit path persist-before-publish (fail-closed)", () => {
-  it("removeMember: persist runs BEFORE publish on the success path", async () => {
+describe("ADR-0040 + ADR-0081 — a direct commit: staged, recorded, then sent", () => {
+  it("removeMember: the staged commit is recorded BEFORE it is sent, and merged after", async () => {
     const order: string[] = [];
     const publishGroup = vi.fn(async () => {
       order.push("publish");
       return { id: 42, createdAt: "t" };
     });
-    const client = makeClient(order, { publishGroup }, async () => {});
+    const entries: unknown[] = [];
+    const client = makeClient(order, { publishGroup }, async (e) => {
+      entries.push(e);
+    });
 
-    const res = await client.removeMemberFromGroup(null, mockGroup(order), 1);
+    const group = mockGroup(order);
+    const res = await client.removeMemberFromGroup(null, group, 1);
 
+    // ADR-0081: the commit is staged (the group stays at N), recorded with
+    // the snapshot that carries it, sent, and merged only on the answer.
     expect(order).toEqual(["create", "persist", "publish"]);
+    expect(entries).toEqual([
+      expect.objectContaining({ targetEpoch: "5", sweepVerdictPending: true }),
+    ]);
+    expect(group.epoch).toBe(6n);
+    expect(group.hasStagedSweep()).toBe(false);
     expect(publishGroup).toHaveBeenCalledTimes(1);
-    // ADR-0045 — `mockGroup`'s `roleTableOwner` returns a key, so this group
-    // WOULD take the proposal path; the two cases below that must stay on the
-    // direct path use a double with no role table. Kept here deliberately: this
-    // assertion is what proves the branch is decided by the role table and not
-    // by the method called.
     expect(res).toEqual({
       kind: "committed",
       commitMessageId: 42,
       welcomeMessageId: undefined,
     });
-    // Acked after the publish.
     expect(markAcked).toHaveBeenCalledWith(expect.any(String), 42, undefined);
   });
 
-  it("removeMember: a persist FAILURE aborts the op — publishGroup is NOT called", async () => {
+  it("removeMember: a LOST commit (409) is abandoned at N and its entry dropped", async () => {
     const order: string[] = [];
     const publishGroup = vi.fn(async () => {
       order.push("publish");
-      return { id: 1, createdAt: "t" };
+      throw Object.assign(new Error("409"), { status: 409 });
     });
-    const client = makeClient(order, { publishGroup }, async () => {
-      throw new Error("IndexedDB write failed");
+    const entries: { id: string }[] = [];
+    const client = makeClient(order, { publishGroup }, async (e) => {
+      entries.push(e as { id: string });
     });
 
-    await expect(
-      client.removeMemberFromGroup(null, mockGroup(order), 1),
-    ).rejects.toBeInstanceOf(ContactsError);
+    const group = mockGroup(order);
+    await expect(client.removeMemberFromGroup(null, group, 1)).rejects.toBeInstanceOf(ContactsError);
 
-    // The whole point: the commit never reached the DS.
-    expect(publishGroup).not.toHaveBeenCalled();
-    expect(order).toEqual(["create", "persist"]);
+    expect(order).toEqual(["create", "persist", "publish"]);
+    expect(group.epoch).toBe(5n);
+    expect(group.hasStagedSweep()).toBe(false);
+    expect(deleteEntry).toHaveBeenCalledWith(entries[0]?.id);
     expect(markAcked).not.toHaveBeenCalled();
+  });
+
+  it("removeMember: a commit the DS did not answer stays staged and recorded for the owed verdict", async () => {
+    const order: string[] = [];
+    const publishGroup = vi.fn(async () => {
+      order.push("publish");
+      throw new TypeError("Failed to fetch");
+    });
+    const client = makeClient(order, { publishGroup }, async () => {});
+
+    const group = mockGroup(order);
+    await expect(client.removeMemberFromGroup(null, group, 1)).rejects.toBeInstanceOf(ContactsError);
+
+    // No "three tries then reset": the entry and the staged commit stay, and
+    // `resolveOwedVerdict` re-sends the same row on the next pass.
+    expect(publishGroup).toHaveBeenCalledTimes(1);
+    expect(group.hasStagedSweep()).toBe(true);
+    expect(group.epoch).toBe(5n);
+    expect(deleteEntry).not.toHaveBeenCalled();
   });
 
   it("setMemberAdmin: a group with NO role table is refused outright", async () => {
@@ -259,14 +288,14 @@ describe("ADR-0040 — restart sweep re-publishes + re-arms the echo filter", ()
   const groupIdB64 = base64Encode(GROUP_ID);
 
   function sweepGroup(): WasmGroup {
-    return {
+    return withStagedTwins({
       get groupId(): Uint8Array {
         return GROUP_ID;
       },
-    } as unknown as WasmGroup;
+    }) as unknown as WasmGroup;
   }
 
-  it("re-publishes an un-acked remove-style entry (commit only) + re-arms echo", async () => {
+  it("an un-acked remove-style entry (commit only) is acked without sending the commit again (ADR-0081)", async () => {
     const commitBytes = new Uint8Array([1, 2, 3]);
     loadUnacked.mockResolvedValueOnce([
       {
@@ -289,26 +318,21 @@ describe("ADR-0040 — restart sweep re-publishes + re-arms the echo filter", ()
     }));
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, publishMailbox, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, publishMailbox, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {},
     );
     const rearmed: number[] = [];
 
     await client.sweepPendingCommits(sweepGroup(), (id) => rearmed.push(id));
 
-    // Re-published the commit to the group journal with the SAME bytes.
-    expect(publishGroup).toHaveBeenCalledTimes(1);
-    expect(publishGroup.mock.calls[0]?.[0]).toEqual(GROUP_ID);
-    expect(publishGroup.mock.calls[0]?.[1]).toEqual(commitBytes);
-    // No mailbox artifact for a remove.
+    // The entry was written only after the commit route took the commit.
+    expect(publishGroup).not.toHaveBeenCalled();
     expect(publishMailbox).not.toHaveBeenCalled();
-    // Echo re-armed for the re-published commit id.
-    expect(rearmed).toEqual([500]);
-    // Entry acked.
-    expect(markAcked).toHaveBeenCalledWith("e1", 500, undefined);
+    expect(rearmed).toEqual([]);
+    expect(markAcked).toHaveBeenCalledWith("e1", undefined, undefined);
   });
 
-  it("re-publishes an add-style entry: commit to the journal, Welcome SEALED to the mailbox (no echo re-arm for the mailbox)", async () => {
+  it("an add-style entry: only its Welcome is owed, SEALED to the mailbox", async () => {
     const commitBytes = new Uint8Array([1, 1]);
     const welcome = new Uint8Array([2, 2, 2]);
     const accountKey = new Uint8Array(32).fill(3);
@@ -336,28 +360,24 @@ describe("ADR-0040 — restart sweep re-publishes + re-arms the echo filter", ()
     }));
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, publishMailbox, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, publishMailbox, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {},
     );
     const rearmed: number[] = [];
 
     await client.sweepPendingCommits(sweepGroup(), (id) => rearmed.push(id));
 
-    // Commit -> group journal, Welcome -> the new member's mailbox.
-    expect(publishGroup).toHaveBeenCalledTimes(1);
-    expect(publishGroup.mock.calls[0]?.[1]).toEqual(commitBytes);
+    expect(publishGroup).not.toHaveBeenCalled();
     expect(publishMailbox).toHaveBeenCalledTimes(1);
     // ADR-0078: to the verified target's address, the RAW Welcome sealed as
     // a Welcome row (kind 2) to the target's mailbox key; no clear kind byte.
     expect(publishMailbox.mock.calls[0]?.[0]).toEqual(TARGET.address);
     expect(publishMailbox.mock.calls[0]?.[1]).toEqual(new Uint8Array([0xee, 0x55, 2, 2, 2, 2]));
-    // ONLY the commit id is echo re-armed — the mailbox Welcome never echoes
-    // back to the committer's group poll.
-    expect(rearmed).toEqual([600]);
-    expect(markAcked).toHaveBeenCalledWith("e2", 600, 601);
+    expect(rearmed).toEqual([]);
+    expect(markAcked).toHaveBeenCalledWith("e2", undefined, 601);
   });
 
-  it("leaves the entry un-acked when the re-publish fails (offline DS)", async () => {
+  it("leaves the entry un-acked when the Welcome cannot be delivered (offline DS)", async () => {
     loadUnacked.mockResolvedValueOnce([
       {
         id: "e4",
@@ -365,30 +385,31 @@ describe("ADR-0040 — restart sweep re-publishes + re-arms the echo filter", ()
         groupId: groupIdB64,
         targetEpoch: "6",
         commitB64: base64Encode(new Uint8Array([1])),
+        secondArtifactB64: base64Encode(new Uint8Array([2])),
+        secondArtifactKind: "welcome",
+        secondArtifactAccountKeyB64: base64Encode(new Uint8Array(32).fill(3)),
         acked: false,
       },
     ] as unknown[]);
 
-    const publishGroup = vi.fn(async () => {
+    const publishMailbox = vi.fn(async () => {
       throw new Error("DS unreachable");
     });
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, publishMailbox: vi.fn(), registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup: vi.fn(), publishMailbox, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {},
     );
 
     await client.sweepPendingCommits(sweepGroup(), () => {});
 
-    // Publish attempted, but NOT acked -> the next sweep retries.
-    expect(publishGroup).toHaveBeenCalledTimes(1);
+    expect(publishMailbox).toHaveBeenCalledTimes(1);
     expect(markAcked).not.toHaveBeenCalled();
   });
 });
 
-describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", () => {
+describe("ADR-0040 F1 + ADR-0081 — a staged direct commit needs no reload to roll back", () => {
   const GID = new Uint8Array([9, 9, 9, 9]);
-  const GID_B64 = base64Encode(GID);
 
   /** A stateful stand-in for an MLS group whose remove-commit eager-merges the
    *  epoch N -> N+1 (exactly as the real core does inside `removeMember`),
@@ -402,7 +423,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     setEpoch: (e: bigint) => void;
   } {
     let epoch = startEpoch;
-    const group = {
+    const group = withStagedTwins({
       get groupId(): Uint8Array {
         return GID;
       },
@@ -414,7 +435,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
         epoch += 1n; // eager merge N -> N+1
         return new Uint8Array([1, 2, 3]);
       }),
-    } as unknown as WasmGroup;
+    }) as unknown as WasmGroup;
     return {
       group,
       epoch: () => epoch,
@@ -424,28 +445,27 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     };
   }
 
-  it("a transient persist failure rolls the in-memory epoch back to N; the retry builds on N, not the poisoned N+1", async () => {
+  it("a lost commit (409) leaves the group at N without a reset; the retry builds on N", async () => {
     const N = 5n;
     const g = statefulGroup(N);
-    const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
+    let publishCalls = 0;
+    const publishGroup = vi.fn(async () => {
+      publishCalls += 1;
+      // The FIRST commit meets another commit at N+1 (ADR-0081: 409).
+      if (publishCalls === 1) throw Object.assign(new Error("409"), { status: 409 });
+      return { id: 1, createdAt: "t" };
+    });
 
     const persistTargetEpochs: string[] = [];
-    let persistCalls = 0;
     const abortHookGids: string[] = [];
 
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async (e) => {
-          persistCalls += 1;
           persistTargetEpochs.push((e as { targetEpoch: string }).targetEpoch);
-          // The FIRST persist fails (a transient IndexedDB quota hiccup that
-          // then clears — the exact F1 scenario, NOT a crash).
-          if (persistCalls === 1) {
-            throw new Error("IndexedDB quota hiccup (transient)");
-          }
         },
         // Model chats.resetGroupToDurableSnapshot: reload the group at the last
         // durable epoch (N). The observable effect is the epoch roll-back.
@@ -456,27 +476,20 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
       },
     );
 
-    // Op A: create-commit eager-merges 5 -> 6, then the persist throws -> abort.
     await expect(
       client.removeMemberFromGroup(null, g.group, 1),
     ).rejects.toBeInstanceOf(ContactsError);
 
-    // The reset hook fired for THIS group id, and the in-memory epoch is back at
-    // N (5) — NOT the poisoned, un-published N+1 (6).
-    expect(abortHookGids).toEqual([GID_B64]);
-    expect(g.epoch()).toBe(N);
-    // The commit never reached the DS (fail-closed abort).
-    expect(publishGroup).not.toHaveBeenCalled();
-    // The aborted op's entry recorded the eager-merged N+1 (6).
-    expect(persistTargetEpochs[0]).toBe("6");
+    // ADR-0081: the commit was staged, so abandoning it is the whole rollback;
+    // no reload from the durable snapshot is needed.
+    expect(abortHookGids).toEqual([]);
+    expect(g.group.epoch).toBe(N);
+    expect(persistTargetEpochs).toEqual(["5"]);
 
-    // Op B — the user retries in the SAME session. It must build on the reset N
-    // (5) and eager-merge 5 -> 6, NOT 6 -> 7. A 6 -> 7 commit would publish while
-    // peers are still at N and strand the whole group (the F1 bug).
+    // The retry is staged on N again and merges 5 -> 6, NOT 6 -> 7.
     const res = await client.removeMemberFromGroup(null, g.group, 1);
-    expect(g.epoch()).toBe(6n);
-    expect(persistTargetEpochs[1]).toBe("6"); // N+1 of the reset N, not "7"
-    expect(publishGroup).toHaveBeenCalledTimes(1);
+    expect(g.group.epoch).toBe(6n);
+    expect(persistTargetEpochs).toEqual(["5", "5"]);
     expect(res.kind === "committed" ? res.commitMessageId : -1).toBe(1);
   });
 
@@ -486,7 +499,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     const abortHook = vi.fn(async () => {});
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},
@@ -496,22 +509,38 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
 
     await client.removeMemberFromGroup(null, g.group, 1);
 
-    // Published + persisted -> the group correctly stays at N+1; no reset.
-    expect(g.epoch()).toBe(6n);
+    expect(g.group.epoch).toBe(6n);
     expect(abortHook).not.toHaveBeenCalled();
     expect(publishGroup).toHaveBeenCalledTimes(1);
   });
 
-  it("FAIL-SAFE: when the reset itself fails, the op rejects with a hard error (never swallowed) and does not publish", async () => {
-    const g = statefulGroup(5n);
+  it("FAIL-SAFE: when the abandon AND the reset after a failed record both fail, the op rejects with a hard error", async () => {
+    let epoch = 5n;
+    const group = withStagedTwins({
+      get groupId(): Uint8Array {
+        return GID;
+      },
+      get epoch(): bigint {
+        return epoch;
+      },
+      dsAccessSigner: fakeAccessSigner(() => epoch),
+      removeMember: vi.fn(() => {
+        epoch += 1n;
+        return new Uint8Array([1, 2, 3]);
+      }),
+      abandonStagedSweep: () => {
+        throw new Error("abandon failed");
+      },
+    }) as unknown as WasmGroup;
+    const g = { group };
     const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {
-          throw new Error("IndexedDB write failed");
+          throw new Error("disk full");
         },
         onCommitPersistAbort: async () => {
           // e.g. no durable snapshot for the group — the reset cannot recover it.
@@ -520,26 +549,25 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
       },
     );
 
-    // The reset-failure error (not the original persist error) surfaces — a hard,
-    // distinct signal that the group may still be poisoned. Never swallowed.
     await expect(
       client.removeMemberFromGroup(null, g.group, 1),
     ).rejects.toThrowError(/reset FAILED/);
     expect(publishGroup).not.toHaveBeenCalled();
   });
 
-  it("with no reset hook wired (standalone / test callers), a persist failure still aborts cleanly", async () => {
+  it("a failed record sends nothing and leaves the group at N with nothing staged", async () => {
     const g = statefulGroup(5n);
     const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
+    const abortHook = vi.fn(async () => {});
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {
           throw new Error("disk full");
         },
-        // onCommitPersistAbort intentionally UNSET.
+        onCommitPersistAbort: abortHook,
       },
     );
 
@@ -547,10 +575,33 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
       client.removeMemberFromGroup(null, g.group, 1),
     ).rejects.toBeInstanceOf(ContactsError);
     expect(publishGroup).not.toHaveBeenCalled();
-    // No cache to reset -> the in-memory epoch stays at the un-published N+1.
-    // Such callers persist nothing + hold no cached group, so they are outside
-    // the desync blast radius (the documented no-op path).
-    expect(g.epoch()).toBe(6n);
+    expect(abortHook).not.toHaveBeenCalled();
+    expect(g.group.epoch).toBe(5n);
+    expect(g.group.hasStagedSweep()).toBe(false);
+  });
+
+  it("a failed persist of the MERGE keeps N+1 in memory; the durable record re-sends on the owed verdict", async () => {
+    const g = statefulGroup(5n);
+    const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
+    const client = new ContactsClient(
+      {} as unknown as DiscoveryClient,
+      withCommitRoute({ publishGroup, registerGroupEpoch: async () => {} }) as unknown as DsClient,
+      {
+        identityProvider: () => IDENTITY_TOKEN,
+        onPersistWithCommit: async () => {},
+        onPersist: async () => {
+          throw new Error("disk full");
+        },
+      },
+    );
+
+    await expect(
+      client.removeMemberFromGroup(null, g.group, 1),
+    ).rejects.toThrow(/disk full/);
+    // The DS took the commit; the merge stands in memory (the durable N +
+    // staged + entry is what a reload finishes: the re-send answers 200).
+    expect(publishGroup).toHaveBeenCalledTimes(1);
+    expect(g.group.epoch).toBe(6n);
   });
 
   // The F1 pre-persist RESIDUAL: in the two-artifact paths, code between the
@@ -563,7 +614,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     let armArtifactThrow = false;
     const N = 5n;
     let epoch = N;
-    const group = {
+    const group = withStagedTwins({
       get groupId(): Uint8Array {
         return GID;
       },
@@ -580,7 +631,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
           welcome: new Uint8Array([4, 4]),
         };
       }),
-    } as unknown as WasmGroup;
+    }) as unknown as WasmGroup;
 
     const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
     const publishMailbox = vi.fn(async () => ({ id: 2, createdAt: "t" }));
@@ -595,7 +646,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
           { deviceId: new Uint8Array(32).fill(9), keyPackage: new Uint8Array([2, 9, 9]) },
         ],
       } as unknown as DiscoveryClient,
-      { publishGroup, publishMailbox, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, publishMailbox, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {
@@ -620,11 +671,11 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
       ),
     ).rejects.toBeInstanceOf(ContactsError);
 
-    // Reset fired off the poisoned N+1; the persist never ran (throw was before
-    // it); NEITHER artifact reached the DS.
+    // ADR-0081: the staged commit was abandoned (no reset needed); the persist
+    // never ran (throw was before it); NEITHER artifact reached the DS.
     expect(persistCalled).toBe(false);
-    expect(abortHookGids).toEqual([GID_B64]);
-    expect(epoch).toBe(N);
+    expect(abortHookGids).toEqual([]);
+    expect(group.epoch).toBe(N);
     expect(publishGroup).not.toHaveBeenCalled();
     expect(publishMailbox).not.toHaveBeenCalled();
   });
@@ -634,7 +685,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
       epoch += 1n;
       return { commit: new Uint8Array([1]), welcome: new Uint8Array([2]) };
     });
-    const group = {
+    const group = withStagedTwins({
       get groupId(): Uint8Array {
         return GID;
       },
@@ -643,7 +694,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
       },
       dsAccessSigner: fakeAccessSigner(() => epoch),
       addMember,
-    } as unknown as WasmGroup;
+    }) as unknown as WasmGroup;
     const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
     const publishMailbox = vi.fn(async () => ({ id: 2, createdAt: "t" }));
     const client = new ContactsClient(
@@ -655,7 +706,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
           { deviceId: new Uint8Array(32).fill(9), keyPackage: new Uint8Array([7, 9, 9]) },
         ],
       } as unknown as DiscoveryClient,
-      { publishGroup, publishMailbox, registerGroupEpoch: async () => {} } as unknown as DsClient,
+      withCommitRoute({ publishGroup, publishMailbox, registerGroupEpoch: async () => {} }) as unknown as DsClient,
       { identityProvider: () => IDENTITY_TOKEN },
     );
     await expect(

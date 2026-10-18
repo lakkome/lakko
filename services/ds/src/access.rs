@@ -151,17 +151,17 @@ pub(crate) fn now_ms() -> u64 {
 
 /// One registered epoch key of a group.
 #[derive(Clone, Copy, Debug)]
-struct EpochKey {
-    epoch: u64,
-    key: VerifyingKey,
+pub(crate) struct EpochKey {
+    pub(crate) epoch: u64,
+    pub(crate) key: VerifyingKey,
     /// The rank that registered it (member 1, admin 2, root 3).
-    rank: u8,
+    pub(crate) rank: u8,
 }
 
 /// The rows of a group's registered access keys, newest epoch first, as the
 /// query returns them. A row that does not parse is skipped rather than
 /// trusted (this server wrote every row from a validated key).
-fn parse_key_rows(rows: Vec<(u64, Vec<u8>, u8)>) -> Vec<EpochKey> {
+pub(crate) fn parse_key_rows(rows: Vec<(u64, Vec<u8>, u8)>) -> Vec<EpochKey> {
     rows.into_iter()
         .filter_map(|(epoch, pk, rank)| {
             VerifyingKey::from_bytes(&pk)
@@ -177,7 +177,7 @@ fn parse_key_rows(rows: Vec<(u64, Vec<u8>, u8)>) -> Vec<EpochKey> {
 /// that many epochs from `H` onward, so the maximum over `keys` is the
 /// journal's `H`. `None` only for a journal with no such registration in
 /// reach, which then has the two-newest write tier alone.
-fn admin_floor(keys: &[EpochKey]) -> Option<u64> {
+pub(crate) fn admin_floor(keys: &[EpochKey]) -> Option<u64> {
     keys.iter()
         .filter(|k| k.rank >= Rank::Admin.to_byte())
         .map(|k| k.epoch)
@@ -212,6 +212,24 @@ async fn group_keys(
     .fetch_all(pool)
     .await
     .map_err(db_error("load group access keys"))?;
+    Ok(parse_key_rows(rows))
+}
+
+/// [`group_keys`] read on `conn` (inside a statement transaction, after
+/// [`lock_group`], so the keys are the ones the decision runs against).
+pub(crate) async fn group_keys_on(
+    conn: &mut MySqlConnection,
+    group_id: &[u8; PSEUDONYM_LEN],
+) -> Result<Vec<EpochKey>, HandlerError> {
+    let rows: Vec<(u64, Vec<u8>, u8)> = sqlx::query_as(
+        "SELECT epoch, access_pk, registered_rank FROM ds_group_access WHERE group_id = ? \
+         ORDER BY epoch DESC LIMIT ?",
+    )
+    .bind(&group_id[..])
+    .bind(MAX_RETAINED_EPOCHS)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(registration_db_error("load group access keys"))?;
     Ok(parse_key_rows(rows))
 }
 

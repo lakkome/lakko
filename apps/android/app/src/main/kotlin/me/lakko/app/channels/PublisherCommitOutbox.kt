@@ -65,6 +65,20 @@ public data class PublisherCommitEntry(
     val welcomeB64: String? = null,
     /** Approve: standard base64 of the joiner's signature (= account) key. */
     val joinerKeyB64: String? = null,
+    /** ADR-0081 — the epoch the commit LEFT, whose key proves the commit
+     *  request. The commit merged eagerly, so after a restart the group holds
+     *  only the N+1 key, and the DS takes a commit only under a proof of N (an
+     *  identical re-send under any retained key); with the seed a replay
+     *  always learns the answer: appended, the original row, or `409`. */
+    val proofEpoch: Long? = null,
+    /** ADR-0081 — standard base64 of that epoch's 32-byte access seed. Lives
+     *  only in this device-key-sealed record and goes with it. */
+    val proofSeedB64: String? = null,
+    /** ADR-0081 — the DS answered the journal step with `409` or a definitive
+     *  refusal: nothing of the commit is on the journal, so an approve
+     *  delivers no Welcome and appoints nobody (the reseal still runs: the
+     *  owner's posts are sealed under the merged seed). */
+    val journalLost: Boolean = false,
     /** The steps that have landed. */
     val done: List<Step> = emptyList(),
 ) {
@@ -135,13 +149,17 @@ public fun replayVerdict(entry: PublisherCommitEntry, restoredEpoch: Long?): Pub
 /** What running the steps of one entry needs; injected so the order is
  *  testable without a network. */
 public interface PublisherCommitPorts {
-    /** Register the group's CURRENT epoch key (the N+1 one) on the DS with
-     *  the channel's root. Idempotent. Required before an approve publishes
-     *  its commit; best effort for a rotation, which publishes none. */
-    public suspend fun registerEpoch()
+    /** ADR-0081 decision 1 — register the group's CURRENT epoch key (the N+1
+     *  one) with the channel's root AND append [commit] to the group journal,
+     *  in one request (`POST .../commit`), proven under the recorded key of
+     *  the epoch the commit left ([proofEpoch], [proofSeed]; `null` on an
+     *  entry that kept none). A re-send of the same commit is idempotent on
+     *  the DS. */
+    public suspend fun commitToJournal(commit: ByteArray, proofEpoch: Long?, proofSeed: ByteArray?)
 
-    /** Publish the Add commit to the group journal. */
-    public suspend fun publishCommit(commit: ByteArray)
+    /** ADR-0081 — whether a failed journal step is lost (`409`, a definitive
+     *  refusal): nothing of the commit is or will be on the DS. */
+    public fun isLost(cause: Throwable): Boolean
 
     /** Write the Welcome to the joiner's mailbox. */
     public suspend fun deliverWelcome(welcome: ByteArray, joinerKey: ByteArray)
@@ -168,7 +186,9 @@ private fun b64(s: String): ByteArray = java.util.Base64.getDecoder().decode(s)
 /**
  * Run the remaining steps of [entry] in order, recording each as it lands.
  * Throws the first step's failure, leaving the entry (with what did land) for
- * the next run.
+ * the next run. A rotation's journal step that failed for an unknown reason
+ * (the network) is the exception: the other steps run and the entry is kept,
+ * not finished, so the next replay sends the journal step again.
  */
 public suspend fun runPublisherCommit(
     entry: PublisherCommitEntry,
@@ -180,26 +200,40 @@ public suspend fun runPublisherCommit(
     },
 ) {
     var current = entry
+    var journalDeferred = false
     for (step in current.remainingSteps) {
         when (step) {
-            PublisherCommitEntry.Step.JOURNAL ->
-                if (current.kind == PublisherCommitEntry.Kind.ROTATION) {
-                    // A rotation commit is not published to the journal, so no
-                    // peer can hold an unregistered epoch: the registration
-                    // stays best effort, as it always was (a co-publisher's is
-                    // refused, its root is not the journal's).
+            PublisherCommitEntry.Step.JOURNAL -> {
+                val commit = current.commitB64
+                if (commit != null) {
                     try {
-                        ports.registerEpoch()
+                        ports.commitToJournal(b64(commit), current.proofEpoch, current.proofSeedB64?.let(::b64))
                     } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                         throw e
                     } catch (e: Throwable) {
-                        warn("ADR-0057: rotated epoch not registered", e)
+                        if (ports.isLost(e)) {
+                            // ADR-0081 — nothing of this commit is or will be on
+                            // the DS (a co-publisher's rotation is refused like
+                            // this: its root is not the journal's).
+                            warn("ADR-0081: PublisherGroup commit not taken by the journal", e)
+                            current = current.copy(journalLost = true)
+                        } else if (current.kind == PublisherCommitEntry.Kind.ROTATION) {
+                            // The subscribers' reseal does not wait on the DS.
+                            warn("ADR-0081: rotation commit deferred", e)
+                            journalDeferred = true
+                            continue
+                        } else {
+                            throw e
+                        }
                     }
-                } else {
-                    ports.registerEpoch()
-                    current.commitB64?.let { ports.publishCommit(b64(it)) }
                 }
+            }
             PublisherCommitEntry.Step.WELCOME -> {
+                if (current.journalLost) {
+                    current = current.withStepDone(step)
+                    ports.save(current)
+                    continue
+                }
                 val welcome = current.welcomeB64
                 val joiner = current.joinerKeyB64
                 if (welcome != null && joiner != null) ports.deliverWelcome(b64(welcome), b64(joiner))
@@ -207,7 +241,7 @@ public suspend fun runPublisherCommit(
             PublisherCommitEntry.Step.RESEAL ->
                 if (!current.resealLanded(ports.serverEpoch())) ports.reseal(current.serverTargetEpoch)
             PublisherCommitEntry.Step.APPOINT ->
-                current.joinerKeyB64?.let { joiner ->
+                current.joinerKeyB64?.takeIf { !current.journalLost }?.let { joiner ->
                     try {
                         ports.appoint(b64(joiner))
                     } catch (e: kotlin.coroutines.cancellation.CancellationException) {
@@ -222,6 +256,7 @@ public suspend fun runPublisherCommit(
         current = current.withStepDone(step)
         ports.save(current)
     }
+    if (journalDeferred) return
     ports.finish(current)
 }
 

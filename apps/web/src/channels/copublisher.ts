@@ -79,7 +79,6 @@ import { scanJournal } from "../chat/journal-head-epoch";
 import {
   dsAccess,
   knockToJoin,
-  takeSigner,
 } from "../ds/access";
 import { openOwnRow, sealRowFor } from "../contacts/mailbox-row";
 import { takeKnockReadSlot } from "../chat/knock-cursor";
@@ -407,8 +406,8 @@ export function pendingCoPublishers(publisherGroup: PublisherGroup): Uint8Array[
 }
 
 /** Approve a pending co-publisher. Commits the Add (advances the PublisherGroup
- *  epoch), registers the new epoch's DS access key and broadcasts the commit to
- *  the journal (ADR-0053: register before publish), delivers the Welcome to the
+ *  epoch), registers the new epoch's DS access key together with the commit
+ *  (ADR-0081: one request), delivers the Welcome to the
  *  joiner's own mailbox, then RESEALS the new-epoch channel seed to all
  *  subscribers — the Add changed the exporter output, so existing subscribers
  *  must get the new seed or they break (see the module docs).
@@ -435,6 +434,11 @@ export async function approveCoPublisher(
     // G-50: the server epoch the reseal binds to is read BEFORE the eager
     // merge: after it nothing may fail before the record is durable.
     const serverEpoch = (await fetchEpoch(channelIdHex, apiBase)).epoch;
+    // ADR-0081 - the key of the epoch the approve leaves proves its commit
+    // request; its seed is taken before the eager merge and recorded with
+    // the approve, so a replay after a reload can still prove it.
+    const proofEpoch = publisherGroup.epoch();
+    const proofSeed = publisherGroup.dsAccessSeed(identity);
     const added = publisherGroup.approveExternalJoin(identity, proposalRef);
     const entry: PublisherCommitEntry = {
       id: newEntryId(),
@@ -447,8 +451,12 @@ export async function approveCoPublisher(
       welcomeB64: base64Encode(added.welcome),
       joinerKeyB64: base64Encode(proposalRef),
       replyGrantB64: joinReplyFor(proposalRef),
+      proofEpoch: proofEpoch.toString(),
+      proofSeedB64: base64Encode(proofSeed),
+      journalLost: false,
       done: [],
     };
+    proofSeed.fill(0);
     added.free();
     // The N+1 provider snapshot and this record in one durable write; a
     // refused write publishes nothing.
@@ -462,9 +470,9 @@ export async function approveCoPublisher(
  * The ports of a recorded approve: the rotation ports (the N+1 key, the
  * reseal) plus the journal publish, the Welcome and the appointment.
  *
- * - The commit goes to the journal under the CURRENT (N+1) access key,
- *   which the journal step registered first; the DS accepts the two newest
- *   epochs, and a replay after a reload holds no other.
+ * - ADR-0081: the commit goes to the journal together with the N+1 key's
+ *   registration, proven under the epoch-N key whose seed the entry records,
+ *   live and on a replay after a reload alike.
  * - ADR-0053 contract point 8 — the Welcome goes to the joiner's own account
  *   mailbox, never to the journal. ADR-0060 section 6: the mailbox is closed,
  *   so the write is signed under the `reply` grant the joiner's attribution
@@ -487,14 +495,6 @@ function approvePorts(
   return publisherCommitPorts(
     { publisherGroup, identity, channelIdHex, ...(apiBase === undefined ? {} : { apiBase }), ds },
     {
-      async publishCommit(commit) {
-        const signer = takeSigner(() => publisherGroup.dsAccessSigner(identity));
-        try {
-          await ds.publishGroup(groupId, commit, { signer });
-        } finally {
-          signer?.free();
-        }
-      },
       async deliverWelcome(welcome, joinerKey, replyGrantB64) {
         const wasm = await loadWasm();
         await writeToPerson(

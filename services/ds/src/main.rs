@@ -82,6 +82,8 @@
 //! - `PUT    /ds/group/{group_id_hex}/claim`       — first claim, by the journal's root (ADR-0057)
 //! - `PUT    /ds/group/{group_id_hex}/reset`       — the root replaces the epoch chain
 //! - `PUT    /ds/group/{group_id_hex}/access`      — a registrar registers an epoch's access key
+//! - `POST   /ds/group/{group_id_hex}/commit`      — register the next epoch and append the commit
+//!   row that reaches it, in one transaction (ADR-0081; `src/commit.rs`)
 //! - `PUT    /ds/group/{group_id_hex}/registrars`  — the root manages registrars
 //! - `PUT    /ds/group/{group_id_hex}/root`        — the root names a new root
 //! - `PUT    /ds/mailbox/{mailbox_hex}/access`     — claim a mailbox under its mailbox key (ADR-0078)
@@ -96,6 +98,7 @@
 #![forbid(unsafe_code)]
 
 mod access;
+mod commit;
 mod journal;
 mod ownership;
 mod reach;
@@ -254,6 +257,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/ds/group/{group_hex}/claim", put(ownership::put_claim))
         .route("/ds/group/{group_hex}/reset", put(ownership::put_reset))
         .route("/ds/group/{group_hex}/access", put(ownership::put_register))
+        .route("/ds/group/{group_hex}/commit", post(commit::post_commit))
         .route(
             "/ds/group/{group_hex}/registrars",
             put(ownership::put_registrars),

@@ -185,26 +185,27 @@ describe("the DS client: an Append 409 notes the repair and is never answered wi
     const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       if (init?.body !== undefined) bodies.push(new TextDecoder().decode(init.body as ArrayBuffer));
       const status = script.shift() ?? 204;
-      return new Response(status === 204 ? null : "{}", { status });
+      const body = status === 204 ? null : status === 201 ? '{"id":1,"created_at":"t"}' : "{}";
+      return new Response(body, { status });
     }) as unknown as typeof fetch;
     const note = vi.fn(() => true);
     const ds = new DsClient("/api/ds", { access, fetchImpl, repair: { note } });
     return { ds, note, bodies };
   }
 
-  it("409 (retried once, as every statement): thrown to the commit path, repair noted at the epoch it is at", async () => {
+  it("409 (retried once): thrown to the commit path, repair noted at the epoch it is at", async () => {
     const c = client([409, 409]);
-    await expect(c.ds.registerGroupEpoch(GID, 8n, new Uint8Array(32).fill(8))).rejects.toMatchObject({
-      status: 409,
-    });
+    await expect(
+      c.ds.commitGroupEpoch(GID, 8n, new Uint8Array(32).fill(8), [], new Uint8Array([1]), fakeSigner(7n)),
+    ).rejects.toMatchObject({ status: 409 });
     expect(c.note).toHaveBeenCalledWith(GID, 7n, "append-conflict");
-    // Only Append statements left the client.
-    expect(c.bodies.map((b) => parseFakeStatement(b).segment)).toEqual(["access", "access"]);
+    // Only commits (an Append with its row, ADR-0081) left the client.
+    expect(c.bodies.map((b) => parseFakeStatement(b).segment)).toEqual(["commit", "commit"]);
   });
 
-  it("a registration that lands notes nothing", async () => {
-    const c = client([204]);
-    await c.ds.registerGroupEpoch(GID, 8n, new Uint8Array(32));
+  it("a commit that lands notes nothing", async () => {
+    const c = client([201]);
+    await c.ds.commitGroupEpoch(GID, 8n, new Uint8Array(32), [], new Uint8Array([1]), fakeSigner(7n));
     expect(c.note).not.toHaveBeenCalled();
   });
 

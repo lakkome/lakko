@@ -37,15 +37,19 @@ public class RecordingStatementSigner(
         return DsStatement("/ds/group/${hex(journalId)}/reset", """{"by":"$name"}""")
     }
 
-    override fun registerEpoch(
+    public var lastRow: ByteArray? = null
+
+    override fun commit(
         journalId: ByteArray,
         epoch: ULong,
         epochKey: ByteArray,
         revoke: List<ByteArray>,
+        row: ByteArray,
     ): DsStatement {
         calls += "register@$epoch"
         lastRevoke = revoke
-        return DsStatement("/ds/group/${hex(journalId)}/access", """{"by":"$name"}""")
+        lastRow = row
+        return DsStatement("/ds/group/${hex(journalId)}/commit", """{"by":"$name"}""")
     }
 
     public var lastRegistrarSet: List<JournalRegistrarEntry> = emptyList()

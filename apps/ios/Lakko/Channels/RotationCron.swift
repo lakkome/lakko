@@ -171,12 +171,13 @@ public actor RotationCron {
         let entry = try await Self.recordRotation(
             context.commits, serverTargetEpoch: newServerEpoch)
 
-        // 3. The steps: register the N+1 epoch key on the DS
-        //    with the channel's root (ADR-0057, best effort for
-        //    a rotation), reseal the N+1 seed to every
-        //    subscriber and commit the rotation on the channels
-        //    service with the ADR-0030 chunked fanout (C-42:
-        //    the commit is the one atomic point).
+        // 3. The steps: the N+1 epoch key and the rotation
+        //    commit on the DS in one request (ADR-0057,
+        //    ADR-0081; best effort for a rotation), reseal the
+        //    N+1 seed to every subscriber and commit the
+        //    rotation on the channels service with the ADR-0030
+        //    chunked fanout (C-42: the commit is the one atomic
+        //    point).
         try await Self.runEntry(entry, context: context)
 
         // 4. Stamp the new state + persist.
@@ -192,19 +193,29 @@ public actor RotationCron {
         _ commits: ChannelPublisherCommits.Context, serverTargetEpoch: UInt32
     ) throws -> PublisherCommitEntry {
         let (identity, group) = try commits.open()
-        _ = try group.rotate(identity: identity)
+        // ADR-0081 — the proof of the epoch the rotation leaves, taken before
+        // the eager merge and recorded with the rotation, so a replay after a
+        // restart can still prove it.
+        let proofEpoch = try group.epoch()
+        let proofSeed = try group.dsAccessSeed(identity: identity)
+        let commit = try group.rotate(identity: identity)
         let entry = PublisherCommitEntry(
             kind: .rotation,
             channelIdHex: commits.channelIdHex.lowercased(),
             groupIdHex: DsClient.pseudonymHex(try group.groupId()),
             targetEpoch: try group.epoch(),
-            serverTargetEpoch: serverTargetEpoch)
+            serverTargetEpoch: serverTargetEpoch,
+            commitB64: commit.base64EncodedString(),
+            proofEpoch: proofEpoch,
+            proofSeedB64: proofSeed.base64EncodedString())
         try ChannelPublisherCommits.record(entry, accountIdB64: commits.accountIdB64)
         return entry
     }
 
     @MainActor
-    private static func runEntry(_ entry: PublisherCommitEntry, context: Context) async throws {
+    private static func runEntry(
+        _ entry: PublisherCommitEntry, context: Context
+    ) async throws {
         try await PublisherCommitRunner.run(
             entry, ports: ChannelPublisherCommits.ports(context.commits, state: context.state))
         ChannelPublisherCommits.refreshContentSeed(context.commits, state: context.state)

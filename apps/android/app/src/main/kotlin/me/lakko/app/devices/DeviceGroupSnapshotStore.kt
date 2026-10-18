@@ -78,6 +78,24 @@ import javax.crypto.spec.GCMParameterSpec
  */
 public object DeviceGroupSnapshotStore {
 
+    /**
+     * ADR-0081 — the pending rows kept BESIDE the DeviceGroup snapshot, each
+     * in the same sealed envelope: the commit in flight, the rejoin in
+     * progress, a sibling's admission record. [deleteSnapshot] (Forget
+     * device) removes all of them with the snapshot; the writes go through
+     * the account store gate like the snapshot's, so a sealed account takes
+     * no late write (ADR-0077).
+     */
+    public enum class PendingKind(public val fileTag: String) {
+        COMMIT("commit"),
+        REJOIN("rejoin"),
+        ADMISSIONS("admissions"),
+    }
+
+    /** Refused: another handle wrote the snapshot since the generation a
+     *  conditional write named (ADR-0081 decision 3). */
+    public class SnapshotChanged : IllegalStateException("the DeviceGroup snapshot moved under this handle")
+
     /** AES-256-GCM in [Cipher] notation. */
     private const val AES_GCM_NOPAD = "AES/GCM/NoPadding"
 
@@ -130,8 +148,71 @@ public object DeviceGroupSnapshotStore {
         accountIdB64: String,
         snapshotBytes: ByteArray,
         dir: String = ENVELOPE_DIR,
-    ) {
+        /** ADR-0081 decision 3 — the generation the writing handle read; the
+         *  write is refused ([SnapshotChanged]) when another handle wrote
+         *  since. `null` writes unconditionally. */
+        expectedGeneration: Int? = null,
+    ): Int =
+        // The gate before the generation lock, always: Forget device runs its
+        // wipe holding the gate exclusively and takes the generation lock to
+        // delete, so the opposite order could deadlock.
         me.lakko.app.account.AccountStoreGate.writeOrEnd(accountIdB64) {
+            SnapshotGenerations.write(dir + "|" + accountIdB64, expectedGeneration) {
+                sealToFile(snapshotBytes, envelopeFile(context, accountIdB64, dir))
+            }
+        }
+
+    /** The generation the snapshot of [accountIdB64] is at (0 before the
+     *  first write of this process). */
+    public fun generation(accountIdB64: String, dir: String = ENVELOPE_DIR): Int =
+        SnapshotGenerations.current(dir + "|" + accountIdB64)
+
+    /** ADR-0081 — write a pending row beside the snapshot, FAIL-CLOSED (a
+     *  failed write throws, and so does a write for an account whose session
+     *  has ended). */
+    public fun putPending(context: Context, accountIdB64: String, kind: PendingKind, bytes: ByteArray) {
+        me.lakko.app.account.AccountStoreGate.writeOrEnd(accountIdB64) {
+            sealToFile(bytes, pendingFile(context, accountIdB64, kind))
+        }
+    }
+
+    /** The pending row of [kind], or `null` when absent or unreadable. */
+    public fun getPending(context: Context, accountIdB64: String, kind: PendingKind): ByteArray? =
+        try {
+            readEnvelope(pendingFile(context, accountIdB64, kind))
+        } catch (_: Throwable) {
+            null
+        }
+
+    /** Delete one pending row. No-op when absent. */
+    public fun deletePending(context: Context, accountIdB64: String, kind: PendingKind) {
+        pendingFile(context, accountIdB64, kind).delete()
+    }
+
+    /**
+     * ADR-0081 decision 4 — a device that lost or fell behind its
+     * DeviceGroup drops its state to rejoin: the snapshot, the commit in
+     * flight and the admission record go; the rejoin row (the knock this
+     * device is waiting on) stays.
+     */
+    public fun dropStateForRejoin(context: Context, accountIdB64: String) {
+        dropUnusableSnapshot(context, accountIdB64)
+        deletePending(context, accountIdB64, PendingKind.COMMIT)
+        deletePending(context, accountIdB64, PendingKind.ADMISSIONS)
+    }
+
+    /** Delete the snapshot file alone (the pending rows stay): a snapshot
+     *  that does not decrypt or does not restore can never become usable
+     *  (ADR-0081 decision 4). A deletion is a change: a handle that read the
+     *  deleted snapshot may not write it back. */
+    public fun dropUnusableSnapshot(context: Context, accountIdB64: String) {
+        SnapshotGenerations.write(ENVELOPE_DIR + "|" + accountIdB64, null) {
+            envelopeFile(context, accountIdB64, ENVELOPE_DIR).delete()
+        }
+    }
+
+    private fun sealToFile(snapshotBytes: ByteArray, file: File) {
+        run {
             if (snapshotBytes.isEmpty()) {
                 throw IllegalArgumentException("snapshotBytes must be non-empty")
             }
@@ -148,7 +229,7 @@ public object DeviceGroupSnapshotStore {
             System.arraycopy(iv, 0, out, 0, GCM_IV_LEN)
             System.arraycopy(ciphertext, 0, out, GCM_IV_LEN, ciphertext.size)
 
-            envelopeFile(context, accountIdB64, dir).writeBytes(out)
+            file.writeBytes(out)
         }
     }
 
@@ -168,8 +249,9 @@ public object DeviceGroupSnapshotStore {
         context: Context,
         accountIdB64: String,
         dir: String = ENVELOPE_DIR,
-    ): ByteArray? {
-        val file = envelopeFile(context, accountIdB64, dir)
+    ): ByteArray? = readEnvelope(envelopeFile(context, accountIdB64, dir))
+
+    private fun readEnvelope(file: File): ByteArray? {
         if (!file.exists()) return null
         val blob = file.readBytes()
         if (blob.size <= GCM_IV_LEN) return null
@@ -203,7 +285,14 @@ public object DeviceGroupSnapshotStore {
         accountIdB64: String,
         dir: String = ENVELOPE_DIR,
     ) {
-        envelopeFile(context, accountIdB64, dir).delete()
+        if (dir == ENVELOPE_DIR) {
+            // ADR-0081 — the outbox, the rejoin and the admission record go
+            // with the DeviceGroup snapshot.
+            dropUnusableSnapshot(context, accountIdB64)
+            for (kind in PendingKind.values()) deletePending(context, accountIdB64, kind)
+        } else {
+            envelopeFile(context, accountIdB64, dir).delete()
+        }
     }
 
     // -----------------------------------------------------------------
@@ -244,6 +333,15 @@ public object DeviceGroupSnapshotStore {
         return kg.generateKey()
     }
 
+    private fun pendingFile(context: Context, accountIdB64: String, kind: PendingKind): File {
+        val dir = File(context.noBackupFilesDir, ENVELOPE_DIR)
+        if (!dir.exists() && !dir.mkdirs()) {
+            // The write surfaces the real I/O error.
+        }
+        val safe = accountIdB64.replace("/", "_")
+        return File(dir, "$safe.${kind.fileTag}.pending")
+    }
+
     /**
      * Per-account envelope file path. Mirror of
      * [me.lakko.app.chat.IdentitySnapshotStore]'s `envelopeFile`
@@ -265,4 +363,31 @@ public object DeviceGroupSnapshotStore {
         val safe = accountIdB64.replace("/", "_")
         return File(dir, "$safe.bin")
     }
+}
+
+/**
+ * ADR-0081 decision 3 — the per-(store, account) generation every DeviceGroup
+ * snapshot write bumps. A write may name the generation it read and is then
+ * refused ([DeviceGroupSnapshotStore.SnapshotChanged]) when another handle
+ * wrote since: a long-lived handle still at N never puts N back over the N+1
+ * a commit made current through a handle of its own. Kept in memory per
+ * process (only this process writes the DeviceGroup snapshot), starting at 0.
+ * Context-free so the rule runs on the host JVM.
+ */
+internal object SnapshotGenerations {
+    private val generations = HashMap<String, Int>()
+
+    fun current(key: String): Int = synchronized(generations) { generations[key] ?: 0 }
+
+    /** Run [write] under the lock when [expected] is `null` or current; the
+     *  generation is bumped only when [write] returned. */
+    fun write(key: String, expected: Int?, write: () -> Unit): Int = synchronized(generations) {
+        val now = generations[key] ?: 0
+        if (expected != null && expected != now) throw DeviceGroupSnapshotStore.SnapshotChanged()
+        write()
+        generations[key] = now + 1
+        now + 1
+    }
+
+    internal fun resetForTest() = synchronized(generations) { generations.clear() }
 }

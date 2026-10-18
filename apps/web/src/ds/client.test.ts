@@ -17,7 +17,7 @@ import {
   fakeSigner,
   parseFakeStatement,
 } from "./access-test-doubles";
-import { NoJournalAuthorityError } from "./ownership";
+import { NoJournalAuthorityError, isCommitConflict } from "./ownership";
 import { fakeTokenPool } from "../tokens/anon-token-test-doubles";
 import { DsClient, DsClientArgError, DsHttpError, journalQuery } from "./client";
 
@@ -215,54 +215,67 @@ describe("ADR-0057 statements", () => {
     await expect(ds.putStatement("/ds/mailbox/x/access", "{}")).rejects.toBeInstanceOf(DsClientArgError);
   });
 
-  it("registerGroupEpoch signs with the root when this account owns the journal", async () => {
+  const ROW = new TextEncoder().encode("commit row");
+  const CREATED = { status: 201, json: { id: 77, created_at: "t" } };
+
+  it("commitGroupEpoch POSTs the root's statement and the row, proven under N's key (ADR-0081)", async () => {
     const reg = ownedRegistry(() => fakeSigner(4n), true);
     // The owner's once-per-session claim goes first (`owner-claim.ts`).
-    const { fetchImpl, sent } = fakeFetch([{ status: 204 }, { status: 204 }]);
-    await new DsClient("/api/ds", { access: reg, fetchImpl }).registerGroupEpoch(
+    const { fetchImpl, sent } = fakeFetch([{ status: 204 }, CREATED]);
+    const answer = await new DsClient("/api/ds", { access: reg, fetchImpl }).commitGroupEpoch(
       GID,
       5n,
       new Uint8Array(32).fill(5),
       [new Uint8Array(32).fill(9)],
+      ROW,
+      fakeSigner(4n, "n"),
     );
+    expect(answer).toEqual({ id: 77, createdAt: "t", resent: false });
     expect(sent[0]?.url).toBe(`/api/ds/ds/group/${GID_HEX}/claim`);
-    const st = parseFakeStatement(new TextDecoder().decode(sent[1]?.body));
-    expect(sent[1]?.url).toBe(`/api/ds/ds/group/${GID_HEX}/access`);
+    expect(sent[1]?.url).toBe(`/api/ds/ds/group/${GID_HEX}/commit`);
+    expect(sent[1]?.method).toBe("POST");
+    const body = new TextDecoder().decode(sent[1]?.body);
+    const st = parseFakeStatement(body);
     expect(st.signer).toBe("root");
     expect(st.epoch).toBe("5");
     expect(st.keys).toBe("09".repeat(32));
+    expect(st.row).toBe(Array.from(ROW, (b) => b.toString(16).padStart(2, "0")).join(""));
+    // The proof covers the exact body, under the key of the epoch left.
+    expect(sent[1]?.proof).toBe(`proof:n@4:POST:/ds/group/${GID_HEX}/commit::${sent[1]?.body?.length}`);
   });
 
-  it("registerGroupEpoch signs with the registrar seed otherwise", async () => {
+  it("a 200 is a re-send the DS already took", async () => {
     const reg = ownedRegistry(() => fakeSigner(4n), false, true);
-    const { fetchImpl, sent } = fakeFetch([{ status: 204 }]);
-    await new DsClient("/api/ds", { access: reg, fetchImpl }).registerGroupEpoch(GID, 5n, new Uint8Array(32));
+    const { fetchImpl, sent } = fakeFetch([{ status: 200, json: { id: 70, created_at: "t" } }]);
+    const answer = await new DsClient("/api/ds", { access: reg, fetchImpl }).commitGroupEpoch(
+      GID, 5n, new Uint8Array(32), [], ROW, fakeSigner(4n),
+    );
+    expect(answer.resent).toBe(true);
+    expect(answer.id).toBe(70);
     expect(parseFakeStatement(new TextDecoder().decode(sent[0]?.body)).signer).toBe("reg");
   });
 
-  it("registerGroupEpoch with neither refuses before any request", async () => {
+  it("commitGroupEpoch with neither root nor registrar refuses before any request", async () => {
     const reg = ownedRegistry(() => fakeSigner(4n), false, false);
     const { fetchImpl, sent } = fakeFetch([]);
     await expect(
-      new DsClient("/api/ds", { access: reg, fetchImpl }).registerGroupEpoch(GID, 5n, new Uint8Array(32)),
+      new DsClient("/api/ds", { access: reg, fetchImpl }).commitGroupEpoch(GID, 5n, new Uint8Array(32), [], ROW, fakeSigner(4n)),
     ).rejects.toBeInstanceOf(NoJournalAuthorityError);
     expect(sent).toHaveLength(0);
   });
 
-  it("a 409 (the server's lock race) is retried once, then surfaces", async () => {
-    const reg = ownedRegistry(() => fakeSigner(4n), true);
-    const once = fakeFetch([{ status: 409 }, { status: 204 }]);
-    await new DsClient("/api/ds", { access: reg, fetchImpl: once.fetchImpl }).registerGroupEpoch(
-      GID,
-      5n,
-      new Uint8Array(32),
+  it("a 409 is retried once with a fresh statement, then surfaces as a lost commit", async () => {
+    const reg = ownedRegistry(() => fakeSigner(4n), false, true);
+    const once = fakeFetch([{ status: 409 }, CREATED]);
+    await new DsClient("/api/ds", { access: reg, fetchImpl: once.fetchImpl }).commitGroupEpoch(
+      GID, 5n, new Uint8Array(32), [], ROW, fakeSigner(4n),
     );
     expect(once.sent).toHaveLength(2);
     const twice = fakeFetch([{ status: 409 }, { status: 409 }]);
     const err = await new DsClient("/api/ds", { access: reg, fetchImpl: twice.fetchImpl })
-      .registerGroupEpoch(GID, 5n, new Uint8Array(32))
+      .commitGroupEpoch(GID, 5n, new Uint8Array(32), [], ROW, fakeSigner(4n))
       .catch((e: unknown) => e);
-    expect((err as DsHttpError).status).toBe(409);
+    expect(isCommitConflict(err)).toBe(true);
     expect(twice.sent).toHaveLength(2);
   });
 });

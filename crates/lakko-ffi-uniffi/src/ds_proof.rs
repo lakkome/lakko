@@ -92,6 +92,29 @@ impl DsProofSigner {
         })
     }
 
+    /// A group access signer rebuilt from a recorded access seed (ADR-0081):
+    /// the 32-byte seed `dsAccessSeed` returned at `epoch`. It exists for a
+    /// PublisherGroup commit, which merges eagerly: the seed of the epoch the
+    /// commit left is recorded with the commit, so a re-send after a restart
+    /// can still prove that epoch (the Delivery Service then appends it, or
+    /// answers the original row, or `409`).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Message`] when `access_seed` is not 32 bytes.
+    #[uniffi::constructor]
+    pub fn for_group(epoch: u64, access_seed: Vec<u8>) -> Result<Self, FfiError> {
+        let seed = <[u8; 32]>::try_from(access_seed.as_slice()).map_err(|_| {
+            FfiError::Message(format!(
+                "access seed must be 32 bytes, got {}",
+                access_seed.len()
+            ))
+        })?;
+        Ok(Self {
+            inner: Inner::for_group(epoch, &seed),
+        })
+    }
+
     /// The epoch this signer proves membership at (`dsMailboxEpoch()` for a
     /// mailbox signer, `dsReachEpoch()` for a reach signer).
     pub fn epoch(&self) -> u64 {
@@ -288,6 +311,21 @@ pub(crate) fn group_signer(
     }))
 }
 
+/// The 32-byte access seed of the group's current epoch (the input of
+/// [`group_signer`]), for a commit that must record it (ADR-0081).
+///
+/// # Errors
+///
+/// The MLS exporter's own failures.
+pub(crate) fn group_access_seed(
+    group: &MlsGroup,
+    identity: &MlsIdentity,
+) -> Result<Vec<u8>, FfiError> {
+    let group_id = group.group_id();
+    let secret = group.export_secret(identity, ACCESS_KEY_LABEL, &group_id, 32)?;
+    Ok(secret.to_vec())
+}
+
 /// The access signer for the epoch a staged sweep moves to (N+1) while the
 /// group still sits at N, or `None` when nothing is staged. The committer
 /// registers this key, proven under N, BEFORE publishing the sweep.
@@ -315,6 +353,21 @@ pub(crate) fn staged_group_signer(
 mod tests {
     use super::*;
     use lakko_ds_proof::{verify, Proof};
+
+    #[test]
+    fn a_signer_rebuilt_from_a_recorded_seed_is_the_epochs_signer() {
+        // ADR-0081: a PublisherGroup commit records the seed of the epoch it
+        // left; the signer rebuilt from it after a restart must prove that
+        // epoch under the key the Delivery Service registered for it.
+        let identity = MlsIdentity::generate("s").unwrap();
+        let group = MlsGroup::create(&identity, lakko_mls::GroupKind::Group).unwrap();
+        let live = group_signer(&group, &identity).unwrap();
+        let seed = group_access_seed(&group, &identity).unwrap();
+        let rebuilt = DsProofSigner::for_group(group.epoch(), seed).unwrap();
+        assert_eq!(rebuilt.epoch(), live.epoch());
+        assert_eq!(rebuilt.verifying_key(), live.verifying_key());
+        assert!(DsProofSigner::for_group(0, vec![0u8; 31]).is_err());
+    }
 
     #[test]
     fn a_group_signer_is_verified_by_the_server_under_the_registered_key() {

@@ -372,7 +372,12 @@ public object CoPublisher {
         val current = channelsClient.fetchEpoch(channelIdHex)
         if (current == UInt.MAX_VALUE) throw CoPublisherException.UnexpectedServerEpoch(current)
         val serverTarget = (current + 1u).toLong()
+        // ADR-0081 — the proof of the epoch the Add leaves, taken before the
+        // eager merge and recorded with the approve: the commit route is
+        // proven under it, live and on a replay after a restart.
         val entry = recordCommit(identity, accountIdB64, store, persistNow) {
+            val proofEpoch = publisherGroup.epoch().toLong()
+            val proofSeed = publisherGroup.dsAccessSeed(identity)
             val added = publisherGroup.approveExternalJoin(identity, proposalRef)
             PublisherCommitEntry(
                 id = PublisherCommitEntry.newId(),
@@ -384,7 +389,9 @@ public object CoPublisher {
                 commitB64 = Base64.encodeToString(added.commit, Base64.NO_WRAP),
                 welcomeB64 = Base64.encodeToString(added.welcome, Base64.NO_WRAP),
                 joinerKeyB64 = Base64.encodeToString(proposalRef, Base64.NO_WRAP),
-            )
+                proofEpoch = proofEpoch,
+                proofSeedB64 = Base64.encodeToString(proofSeed, Base64.NO_WRAP),
+            ).also { proofSeed.fill(0) }
         }
         runPublisherCommit(
             entry,
@@ -437,22 +444,30 @@ public object CoPublisher {
         accountIdB64: String,
         store: PublisherCommitStore,
     ): PublisherCommitPorts = object : PublisherCommitPorts {
-        override suspend fun registerEpoch() {
+        /** ADR-0081 — proven under the recorded seed of the epoch the commit
+         *  left, live and on a replay alike; an entry without one can complete
+         *  only an identical re-send (any retained key proves that). */
+        override suspend fun commitToJournal(commit: ByteArray, proofEpoch: Long?, proofSeed: ByteArray?) {
             val groupId = publisherGroup.groupId()
-            val signer = signerOf(publisherGroup, identity)
+            val next = signerOf(publisherGroup, identity)
                 ?: throw me.lakko.app.ds.DsRegistrationUnavailable("the channel journal key could not be derived")
-            val root = me.lakko.app.ds.FfiDsStatementSigning.root(identity, groupId)
-            try {
-                ds.putStatement { root.registerEpoch(groupId, signer.epoch, signer.verifyingKey, emptyList()) }
-            } catch (e: me.lakko.app.ds.DsHttpError) {
-                // A 409 is this device's own earlier registration of the epoch.
-                if (e.status != HTTP_CONFLICT) throw e
+            val proof: DsJournalSigner = if (proofEpoch != null && proofSeed != null) {
+                me.lakko.app.ds.FfiDsJournalSigner(
+                    uniffi.lakko_ffi_uniffi.DsProofSigner.forGroup(proofEpoch.toULong(), proofSeed),
+                )
+            } else {
+                next
             }
+            val root = me.lakko.app.ds.FfiDsStatementSigning.root(identity, groupId)
+            ds.postCommit(
+                { root.commit(groupId, next.epoch, next.verifyingKey, emptyList(), commit) },
+                proof,
+            )
         }
 
-        override suspend fun publishCommit(commit: ByteArray) {
-            ds.publishGroup(publisherGroup.groupId(), commit, signer = signerOf(publisherGroup, identity))
-        }
+        override fun isLost(cause: Throwable): Boolean =
+            cause is me.lakko.app.ds.DsCommitConflictError ||
+                me.lakko.app.chat.SweepRegistrationBackoff.isBackoffRefusal(cause)
 
         override suspend fun deliverWelcome(welcome: ByteArray, joinerKey: ByteArray) {
             // ADR-0053 client contract point 8 — the Welcome goes to the

@@ -16,7 +16,7 @@
 //! |---|---|---|
 //! | `claim` | anyone, first time | the signer becomes the root, one epoch |
 //! | `reset` | the root | replaces the chain (and the registrar set when sent) |
-//! | `access` | root or registrar | appends or replaces an epoch, revokes lower ranks |
+//! | `access` | root or registrar | replaces an epoch, revokes lower ranks; an append is refused `400 append-needs-commit` (ADR-0081: a new epoch arrives with its commit, `src/commit.rs`) |
 //! | `registrars` | the root | adds, re-ranks, removes registrars |
 //! | `registrars-set` | the root | replaces the whole registrar set |
 //! | `root` | the root | names a new root (naming itself: a `204` no-op, the "am I still the root?" probe) |
@@ -31,8 +31,8 @@
 //! rank does not reach, `409` when the statement conflicts with the state).
 //! A refusal after the nonce commits, so the nonce stays spent.
 //!
-//! **The epoch rule** (`access`), with `latest` the newest registered epoch
-//! and ranks member 1, admin 2, root 3 (a claim or reset registers as the
+//! **The epoch rule** (`access` for a Replace, `POST .../commit` for an
+//! Append), with `latest` the newest registered epoch and ranks member 1, admin 2, root 3 (a claim or reset registers as the
 //! root). A statement says which of two things it does (the 2026-09-28
 //! security pass: without it, a lagging root device's ordinary registration
 //! truncated epochs other devices had legitimately advanced):
@@ -120,6 +120,23 @@ fn conflict(msg: &str) -> HandlerError {
     (StatusCode::CONFLICT, msg.to_string())
 }
 
+/// The error code of the refusal of a plain append (ADR-0081, open question 1).
+pub(crate) const APPEND_NEEDS_COMMIT: &str = "append-needs-commit";
+
+/// ADR-0081 open question 1 (decided 2026-10-18): a new epoch is registered
+/// only together with the commit row that reaches it (`POST .../commit`), so
+/// an append-mode statement on `PUT .../access` is refused - `400` with
+/// `{"error":"append-needs-commit"}` - for every journal, before its
+/// signature is looked at. It is a request this route no longer takes, not a
+/// judgment about the journal, so the answer is the same whatever the journal
+/// and the signer.
+fn append_needs_commit() -> HandlerError {
+    (
+        StatusCode::BAD_REQUEST,
+        format!("{{\"error\":\"{APPEND_NEEDS_COMMIT}\"}}"),
+    )
+}
+
 /// Parse and shape-check a statement for the route `kind` on `group_id`.
 fn parse_statement(
     body: &[u8],
@@ -182,6 +199,15 @@ async fn handle(
 ) -> Result<Response, HandlerError> {
     let group_id = journal::decode_pseudonym(group_hex)?;
     let statement = parse_statement(body, kind, &group_id)?;
+    if matches!(
+        statement.body,
+        StatementBody::RegisterEpoch {
+            mode: RegisterMode::Append,
+            ..
+        }
+    ) {
+        return Err(append_needs_commit());
+    }
     statement.verify(now_ms()).map_err(|_| refused())?;
 
     let mut conn = state
@@ -208,7 +234,7 @@ async fn handle(
 /// Whether a signer of `standing` is heard on a statement of `kind` at
 /// all. A registrar sending a registrars set is heard and refused (403): it
 /// is someone to this journal, only not the root.
-const fn is_heard(kind: StatementKind, standing: Standing) -> bool {
+pub(crate) const fn is_heard(kind: StatementKind, standing: Standing) -> bool {
     match kind {
         StatementKind::Claim => matches!(standing, Standing::Unclaimed | Standing::Root),
         StatementKind::Reset | StatementKind::Registrars | StatementKind::RootTransfer => {
@@ -222,7 +248,7 @@ const fn is_heard(kind: StatementKind, standing: Standing) -> bool {
 
 /// Who the signer is to this journal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Standing {
+pub(crate) enum Standing {
     /// The journal is unclaimed.
     Unclaimed,
     /// The journal's root (rank 3).
@@ -243,7 +269,7 @@ impl Standing {
     }
 }
 
-type Decision = Result<Result<(), HandlerError>, HandlerError>;
+pub(crate) type Decision = Result<Result<(), HandlerError>, HandlerError>;
 
 #[allow(clippy::too_many_lines)] // one arm per statement kind, kept in one place
 async fn decide(
@@ -252,15 +278,7 @@ async fn decide(
     statement: &SignedStatement,
 ) -> Decision {
     lock_group(&mut *conn, group_id).await?;
-    let root = load_root(&mut *conn, group_id).await?;
-    let standing = match root {
-        None => Standing::Unclaimed,
-        Some(r) if r == statement.signer => Standing::Root,
-        Some(_) => match registrar_rank(&mut *conn, group_id, &statement.signer).await? {
-            Some(rank) => Standing::Registrar(rank),
-            None => Standing::Stranger,
-        },
-    };
+    let standing = standing_of(&mut *conn, group_id, &statement.signer).await?;
     // Who may be heard at all, before the nonce is spent: a stranger costs
     // the server no row and learns the uniform 401.
     if !is_heard(statement.body.kind(), standing) {
@@ -326,11 +344,28 @@ async fn decide(
 // State reads
 // ============================================================================
 
+/// Who `signer` is to the journal, read on `conn` (after [`lock_group`]).
+pub(crate) async fn standing_of(
+    conn: &mut MySqlConnection,
+    group_id: &[u8; PSEUDONYM_LEN],
+    signer: &[u8; KEY_LEN],
+) -> Result<Standing, HandlerError> {
+    let root = load_root(&mut *conn, group_id).await?;
+    Ok(match root {
+        None => Standing::Unclaimed,
+        Some(r) if r == *signer => Standing::Root,
+        Some(_) => match registrar_rank(&mut *conn, group_id, signer).await? {
+            Some(rank) => Standing::Registrar(rank),
+            None => Standing::Stranger,
+        },
+    })
+}
+
 fn key_of(bytes: &[u8]) -> Option<[u8; KEY_LEN]> {
     bytes.try_into().ok()
 }
 
-async fn load_root(
+pub(crate) async fn load_root(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
 ) -> Result<Option<[u8; KEY_LEN]>, HandlerError> {
@@ -343,7 +378,7 @@ async fn load_root(
     Ok(row.and_then(|(pk,)| key_of(&pk)))
 }
 
-async fn registrar_rank(
+pub(crate) async fn registrar_rank(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
     key: &[u8; KEY_LEN],
@@ -406,7 +441,7 @@ async fn highest_rank_above(
 }
 
 /// The key and rank registered at `epoch`.
-async fn registration_at(
+pub(crate) async fn registration_at(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
     epoch: u64,
@@ -457,6 +492,7 @@ pub(crate) async fn insert_epoch(
            (group_id, epoch, access_pk, registered_by, registered_rank) VALUES (?, ?, ?, ?, ?) \
          ON DUPLICATE KEY UPDATE access_pk = VALUES(access_pk), \
            registered_by = VALUES(registered_by), registered_rank = VALUES(registered_rank), \
+           commit_row_hash = NULL, commit_message_id = NULL, \
            created_at = CURRENT_TIMESTAMP(3)",
     )
     .bind(&group_id[..])
@@ -569,12 +605,12 @@ async fn apply_reset(
 }
 
 /// One register-epoch statement, as the rules read it.
-struct Registration<'a> {
-    signer: &'a [u8; KEY_LEN],
-    standing: Standing,
-    epoch: u64,
-    epoch_key: &'a [u8; KEY_LEN],
-    mode: RegisterMode,
+pub(crate) struct Registration<'a> {
+    pub(crate) signer: &'a [u8; KEY_LEN],
+    pub(crate) standing: Standing,
+    pub(crate) epoch: u64,
+    pub(crate) epoch_key: &'a [u8; KEY_LEN],
+    pub(crate) mode: RegisterMode,
 }
 
 /// What a registration does to the chain once the rules allow it.
@@ -663,7 +699,7 @@ async fn epoch_rule(
     }
 }
 
-async fn apply_register(
+pub(crate) async fn apply_register(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
     reg: &Registration<'_>,
@@ -1857,27 +1893,34 @@ mod tests {
             put("access", br#"{"statement_b64":"AAAA"}"#.to_vec()).await,
             StatusCode::BAD_REQUEST
         );
-        // A stale statement is a 401.
-        let stale = j
-            .root
-            .sign_at(
-                &j.gid,
-                StatementBody::RegisterEpoch {
-                    epoch: 2,
-                    epoch_key: key(2).verifying_key().to_bytes(),
-                    mode: RegisterMode::Append,
-                    revoke: vec![],
-                },
-                now_ms() - lakko_ds_proof::PROOF_WINDOW_MS - 1_000,
-                fresh_nonce(),
-            )
-            .unwrap();
+        // ADR-0081: an append on `/access` is refused before anything else.
+        assert_eq!(
+            put("access", register_two.body_json().into_bytes()).await,
+            StatusCode::BAD_REQUEST
+        );
+        // A stale statement is a 401 (a replace: the route's own kind).
+        let replace_one = |unix_ms: u64| {
+            j.root
+                .sign_at(
+                    &j.gid,
+                    StatementBody::RegisterEpoch {
+                        epoch: 1,
+                        epoch_key: key(1).verifying_key().to_bytes(),
+                        mode: RegisterMode::Replace,
+                        revoke: vec![],
+                    },
+                    unix_ms,
+                    fresh_nonce(),
+                )
+                .unwrap()
+        };
+        let stale = replace_one(now_ms() - lakko_ds_proof::PROOF_WINDOW_MS - 1_000);
         assert_eq!(
             put("access", stale.body_json().into_bytes()).await,
             StatusCode::UNAUTHORIZED
         );
         // Accepted once, refused on replay.
-        let body = register_two.body_json().into_bytes();
+        let body = replace_one(now_ms()).body_json().into_bytes();
         assert_eq!(put("access", body.clone()).await, StatusCode::NO_CONTENT);
         assert_eq!(put("access", body).await, StatusCode::UNAUTHORIZED);
     }

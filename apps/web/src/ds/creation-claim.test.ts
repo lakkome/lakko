@@ -17,8 +17,13 @@ import { fileURLToPath } from "node:url";
 const putDeviceGroupSnapshot = vi.fn(async () => undefined);
 vi.mock("../devices/device-group-snapshot-store", () => ({
   getDeviceGroupSnapshot: async () => null,
+  getDeviceGroupSnapshotState: async () => null,
+  deleteDeviceGroupSnapshot: async () => undefined,
   putDeviceGroupSnapshot: (...a: unknown[]) => putDeviceGroupSnapshot(...(a as [])),
 }));
+
+/** ADR-0081 decision 4: these foundings are a single-device account's. */
+const ALONE = { mayFound: async (): Promise<boolean> => true };
 
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { ContactsClient } from "../contacts/client";
@@ -241,6 +246,7 @@ describe("a DeviceGroup founding: nothing persisted before the claim lands", () 
         new Uint8Array(64).fill(0x31),
         {} as CryptoKey,
         new Uint8Array(64).fill(0x32),
+        ALONE,
       ),
     ).rejects.toBeDefined();
     expect(putDeviceGroupSnapshot).not.toHaveBeenCalled();
@@ -252,7 +258,7 @@ describe("a DeviceGroup founding: nothing persisted before the claim lands", () 
     const fetchSpy = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchSpy);
     await expect(
-      ensureDeviceGroup(ACCOUNT_ID, "acc", new Uint8Array(64).fill(0x33), {} as CryptoKey),
+      ensureDeviceGroup(ACCOUNT_ID, "acc", new Uint8Array(64).fill(0x33), {} as CryptoKey, undefined, ALONE),
     ).rejects.toBeDefined();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(putDeviceGroupSnapshot).not.toHaveBeenCalled();
@@ -277,6 +283,7 @@ describe("a DeviceGroup founding: nothing persisted before the claim lands", () 
       new Uint8Array(64).fill(0x34),
       {} as CryptoKey,
       new Uint8Array(64).fill(0x35),
+      ALONE,
     );
     expect(order).toEqual(["claim", "persist"]);
     ensured.group.free();

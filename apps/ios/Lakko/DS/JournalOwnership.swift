@@ -31,6 +31,33 @@ public protocol DsStatementSending: AnyObject {
     func putStatement(_ request: DsStatementRequest) async throws
 }
 
+/// ADR-0081 decision 1 — what the commit route answered: the journal row's
+/// id and time, and whether it was the identical re-send of a commit that had
+/// already landed (`200`, the original row) rather than a new one (`201`).
+public struct DsCommitAnswer: Equatable {
+    public let id: Int64
+    public let createdAt: String
+    public let resent: Bool
+
+    public init(id: Int64, createdAt: String, resent: Bool) {
+        self.id = id
+        self.createdAt = createdAt
+        self.resent = resent
+    }
+}
+
+/// Anything that can send one ADR-0081 commit. The production value is
+/// ``DsClient``; a protocol so a test can model the DS.
+public protocol DsCommitSending: AnyObject {
+    /// `POST <request.path>` with `request.bodyJson` and the request proof of
+    /// `proof` over those exact bytes. Throws ``DsStatementError`` on a
+    /// refusal (`409` is ``DsStatementError/conflict``) and
+    /// ``DsClientError/network(endpoint:underlying:)`` when the DS was not
+    /// reached (the caller cannot tell whether the commit landed; the
+    /// identical re-send says).
+    func postCommit(_ request: DsStatementRequest, proof: DsRequestSigner) async throws -> DsCommitAnswer
+}
+
 /// A refused ownership statement, by the status the DS answered.
 public enum DsStatementError: Error, Equatable, LocalizedError {
     /// `400` — malformed, the wrong journal, or an epoch above `2^48 - 1`.
@@ -428,30 +455,47 @@ public enum JournalOwnership {
         }
     }
 
-    /// Register `epochKey` at `epoch` with the device's authority, revoking
-    /// `revoke` in the same statement, in APPEND mode (second security pass,
-    /// finding 1): the DS accepts it only at `latest + 1` (or the identical
-    /// re-send) and answers `409` otherwise. Throws the DS refusal; the caller
-    /// aborts its commit on a throw (register-before-publish). A commit path
-    /// never replaces: an Append `409` is a lost race, abandoned like a lost
-    /// publish race, and `onConflict` is told the epoch this device is at (so
-    /// the owner or an admin can schedule the repair check,
-    /// ``JournalRepair``).
-    public static func registerEpoch(
+    /// ADR-0081 decision 1 — register `epochKey` at `epoch` with the device's
+    /// authority, revoking `revoke` in the same statement, AND append `row`
+    /// (the commit that reaches `epoch`) in ONE request: `POST .../commit`,
+    /// proven by `proof`, the key of epoch `epoch - 1`. The DS accepts it only
+    /// at `latest + 1`; the identical re-send (same key, same row) answers the
+    /// original message id (`resent`), any other commit at a registered epoch
+    /// is `409`. Since ADR-0081 (open question 1, decided 2026-10-18) this is
+    /// the only way an epoch is appended: `PUT .../access` refuses an Append.
+    ///
+    /// A `409` is retried once with a freshly signed statement (a lost race
+    /// for the group's lock row rolls back without deciding); a second `409`
+    /// throws ``DsStatementError/conflict`` and `onConflict` is told the epoch
+    /// this device is at, so the owner or an admin can schedule the repair
+    /// check (``JournalRepair``). A commit path never replaces.
+    @discardableResult
+    public static func commitEpoch(
         authority: JournalAuthority,
         journalId: Data,
         epoch: UInt64,
         epochKey: Data,
         revoke: [Data],
-        ds: DsStatementSending,
+        row: Data,
+        proof: DsRequestSigner,
+        ds: DsCommitSending,
         onConflict: ((_ currentEpoch: UInt64) -> Void)? = nil
-    ) async throws {
-        let request = try authority.signer.registerEpoch(
-            journalId: journalId, epoch: epoch, epochKey: epochKey, revoke: revoke)
+    ) async throws -> DsCommitAnswer {
+        guard !row.isEmpty else { throw DsStatementError.malformed("a commit row must be non-empty") }
+        func once() async throws -> DsCommitAnswer {
+            let request = try authority.signer.commit(
+                journalId: journalId, epoch: epoch, epochKey: epochKey, revoke: revoke, row: row)
+            return try await ds.postCommit(request, proof: proof)
+        }
         do {
-            try await ds.putStatement(request)
+            return try await once()
         } catch DsStatementError.conflict {
-            NSLog("ADR-0057: epoch append refused (409); the commit is abandoned")
+            // Retried once below.
+        }
+        do {
+            return try await once()
+        } catch DsStatementError.conflict {
+            NSLog("ADR-0081: the commit's epoch belongs to another commit (409); abandoned")
             if epoch > 0 { onConflict?(epoch - 1) }
             throw DsStatementError.conflict
         }

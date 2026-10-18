@@ -79,6 +79,15 @@
 //! replace mode, registrar management, the whole registrar set, root
 //! transfer) the DS routes take as bodies; the push binding is retired (ADR-0078).
 //!
+//! # Commits ([ADR-0081])
+//!
+//! The [`commit`] module: the body of `POST /ds/group/{hex}/commit`, which
+//! registers an epoch (an append-mode statement) and appends the commit row
+//! that reaches it in one step, so a registration without its commit row
+//! cannot exist.
+//!
+//! [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+//!
 //! [ADR-0057]: ../../../docs/adr/0057-journal-ownership.md
 //!
 //! [ADR-0053]: ../../../docs/adr/0053-ds-journal-authorisation.md
@@ -105,8 +114,14 @@ pub use lakko_contacts::mailbox::{
 };
 pub use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey};
 
+pub mod commit;
 pub mod committer;
 pub mod delegation;
+
+pub use commit::{
+    commit_body_json, commit_row_hash, is_commit_statement, CommitBodyError, COMMIT_PATH_SEGMENT,
+    COMMIT_ROW_FIELD, COMMIT_STATEMENT_FIELD,
+};
 
 pub use committer::{check_committer_delegations, delegation_for, CommitterDelegationCheckError};
 pub use delegation::{

@@ -10,7 +10,7 @@ import { takeSigner } from "../../ds/access";
 
 import {
   REMOVED_DEVICE_COPY,
-  forkRepairAllowed,
+  rejoinAllowed,
   isDeviceRemoved,
   pollStepAfterBatch,
   readDeviceGroupActive,
@@ -50,10 +50,10 @@ describe("removed device (second-device.md section 3.1)", () => {
     expect(pollStepAfterBatch(read)).toBe("continue");
   });
 
-  it("the fork repair runs only on a group known to be active", () => {
-    expect(forkRepairAllowed(readDeviceGroupActive(active))).toBe(true);
-    expect(forkRepairAllowed(readDeviceGroupActive(inactive))).toBe(false);
-    expect(forkRepairAllowed(readDeviceGroupActive(unreadable))).toBe(false);
+  it("a rejoin starts only on a group known to be active", () => {
+    expect(rejoinAllowed(readDeviceGroupActive(active))).toBe(true);
+    expect(rejoinAllowed(readDeviceGroupActive(inactive))).toBe(false);
+    expect(rejoinAllowed(readDeviceGroupActive(unreadable))).toBe(false);
   });
 
   it("uses the spec's copy exactly", () => {
@@ -91,11 +91,11 @@ describe("removed device over the real DeviceGroup", () => {
 
       expect(readDeviceGroupActive(b)).toBe(false);
       expect(pollStepAfterBatch(readDeviceGroupActive(b))).toBe("stop-removed");
-      expect(forkRepairAllowed(readDeviceGroupActive(b))).toBe(false);
+      expect(rejoinAllowed(readDeviceGroupActive(b))).toBe(false);
       expect(takeSigner(() => b.dsAccessSigner(idB))).toBeNull();
 
       expect(readDeviceGroupActive(a)).toBe(true);
-      expect(forkRepairAllowed(readDeviceGroupActive(a))).toBe(true);
+      expect(rejoinAllowed(readDeviceGroupActive(a))).toBe(true);
     } finally {
       added.free();
       a.free();

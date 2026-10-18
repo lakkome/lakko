@@ -21,7 +21,6 @@
  * walks to the other device); the scanner side is a single
  * acknowledged transaction (scan happens, ack happens, done).
  */
-import { announceDeviceGroupChangedHere } from "./sync/growth";
 import { resendServiceEnvelopes } from "../reach/service-envelope-outbox";
 import { loadWasm, type Wasm } from "../wasm";
 import type {
@@ -45,16 +44,11 @@ import {
   generateRendezvousPseudonym,
   parsePairingQrPayload,
 } from "./pairing";
-import { DsClient } from "../ds/client";
 import { encodeJournalEntry } from "./journal-envelope";
+import { persistDeviceGroupSnapshot, type EnsuredDeviceGroup } from "./lifecycle";
+import { commitDeviceGroupChange } from "./device-group-commit-runtime";
+import { t } from "../l10n";
 import {
-  ensureDeviceGroup,
-  persistDeviceGroupSnapshot,
-  registerDeviceGroupEpochOrThrow,
-} from "./lifecycle";
-import { takeSigner } from "../ds/access";
-import {
-  publishWelcome,
   pollForWelcome,
   publishHistoryBundle,
   pollForHistoryBundle,
@@ -831,227 +825,167 @@ export async function runScanFlow(args: {
     args.loginHandle,
   );
 
-  const seed = await ensureDeviceIdentitySeed(args.accountIdB64, args.deviceKey);
-  const ensured = await ensureDeviceGroup(
-    args.accountIdBytes,
-    args.accountIdB64,
-    seed,
-    args.deviceKey,
-  );
-  seed.fill(0);
-
-  // ADR-0053 — the DeviceGroup journal key of the epoch the add leaves, taken
-  // BEFORE the create call. Freed with the ephemeral group below.
-  const signerN = takeSigner(() => ensured.group.dsAccessSigner(ensured.identity));
-  try {
-    // ADR-0058 section 5.1 — who was a member before this add, for the
-    // growth re-send the sync runtime runs once the add is on disk.
-    let priorLeaves: number[] = [];
-    try {
-      priorLeaves = ensured.group
-        .devices()
-        .map((m: { leafIndex: number }) => m.leafIndex)
-        .sort((a: number, b: number) => a - b);
-    } catch {
-      priorLeaves = [];
-    }
-    const addition = ensured.group.addDeviceFromWire(
-      ensured.identity,
-      decoded.keyPackage,
-    );
-
-    // ADR-0053 contract point 3 — register the new epoch's key, proven under
-    // the old one, BEFORE the advanced snapshot is persisted or anything is
-    // published. A refusal throws out of here with nothing written: the
-    // ephemeral group is freed and the durable DeviceGroup stays at N.
-    const ds = new DsClient();
-    await registerDeviceGroupEpochOrThrow(ds, ensured.group, ensured.identity, signerN);
-
-    // G-7 — persist the advanced DeviceGroup snapshot BEFORE any
-    // publish. `addDeviceFromWire` already merged the pending
-    // commit, so the in-memory view is one epoch ahead; writing it
-    // to disk first closes the window where a crash between the
-    // publishes and the persist leaves the on-disk envelope an
-    // epoch behind (which would make the next launch try to add the
-    // same device twice).
-    await persistDeviceGroupSnapshot(
-      ensured.identity,
-      args.accountIdB64,
-      args.deviceKey,
-    );
-
-    // The sync runtime holds a long-lived handle that is now an epoch
-    // behind. Tell it BEFORE the commit is published, so it stops before it
-    // can see the commit and write its stale state over this one, reloads,
-    // and - if this device is the lowest prior leaf - re-sends the account's
-    // synced state to the new device (ADR-0058 section 5.1).
-    if (priorLeaves.length > 0) {
+  // ADR-0081 decision 2 — the add goes through the DeviceGroup commit outbox:
+  // the entry beside the durable snapshot, one `POST .../commit` (the next
+  // epoch's registration and the commit row together), the next epoch made
+  // current, the Welcome to the rendezvous the joining device polls, the
+  // entry deleted. A failure after the entry was written is finished by the
+  // outbox later; the joining device keeps polling meanwhile.
+  const result = await commitDeviceGroupChange(
+    {
+      accountIdBytes: args.accountIdBytes,
+      accountIdB64: args.accountIdB64,
+      deviceKey: args.deviceKey,
+    },
+    (ensured) => {
+      // ADR-0058 section 5.1 — who was a member before this add, for the
+      // growth re-send the sync runtime runs once the add is current.
+      let priorLeaves: number[] = [];
       try {
-        announceDeviceGroupChangedHere({
-          growth: { priorLeaves, ownLeaf: ensured.group.ownLeafIndex() },
-        });
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("DeviceGroup growth announce failed", err);
+        priorLeaves = ensured.group
+          .devices()
+          .map((m: { leafIndex: number }) => m.leafIndex)
+          .sort((a: number, b: number) => a - b);
+      } catch {
+        priorLeaves = [];
       }
+      const addition = ensured.group.addDeviceFromWire(ensured.identity, decoded.keyPackage);
+      // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped; an
+      // add-device commit carries no attestation.
+      return {
+        kind: "add",
+        row: encodeJournalEntry(addition.commit, null),
+        welcome: { bytes: addition.welcome, rendezvous: decoded.rendezvousPseudonym },
+        priorLeaves,
+      };
+    },
+    async (ensured, outcome) => {
+      if (outcome.kind === "lost") {
+        // Another device of the account changed the DeviceGroup at the same
+        // epoch: nothing of this add is on the journal. The person scans
+        // again; the joining device is still waiting.
+        throw new Error(t("devices.add.error.generic"));
+      }
+      return finishScan(args, decoded, ensured);
+    },
+  );
+  if (result === null) throw new Error(t("devices.add.error.generic"));
+  return result.value;
+}
+
+/**
+ * The part of {@link runScanFlow} that runs once the add is on the journal
+ * and current: the service envelopes, then the best-effort history,
+ * recovery and state bundles, sealed under the post-add exporter on the
+ * throwaway handle the commit was built on.
+ */
+async function finishScan(
+  args: Parameters<typeof runScanFlow>[0],
+  decoded: Awaited<ReturnType<typeof parsePairingQrPayload>>,
+  ensured: EnsuredDeviceGroup,
+): Promise<ScanResult> {
+  // ADR-0060 section 7 - the setting and the key versions, for the device
+  // just admitted, now that the commit is on the journal. Sent by the sync
+  // runtime through its own handle, reloaded from the snapshot made current
+  // above: sealing them here, on this second handle of the same DeviceGroup,
+  // reused the sync handle's sender generations (seen live 2026-09-30,
+  // SecretReuseError on the new device).
+  resendServiceEnvelopes();
+
+  // Phase 2a3d8-ui — best-effort history catch-up bundle.
+  try {
+    const secret = ensured.group.historyBundleSecret(ensured.identity);
+    const sealed = await buildHistoryBundleFromLog({
+      accountIdB64: args.accountIdB64,
+      deviceKey: args.deviceKey,
+      secret,
+    });
+    if (sealed !== null) {
+      await publishHistoryBundle(decoded.rendezvousPseudonym, sealed);
     }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("history bundle publish failed", err);
+  }
 
-    // Push the Welcome to the rendezvous mailbox the joining
-    // device is polling.
-    await publishWelcome(decoded.rendezvousPseudonym, addition.welcome);
-
-    // G-5 — broadcast the Commit to the DeviceGroup DS journal so
-    // any OTHER already-paired devices on this account advance to
-    // the new epoch; their DeviceGroup poll loop runs
-    // `processIncoming` on this row (see `DeviceGroupSyncContext`).
-    // MLS requires in-order epoch processing, so this is on the
-    // critical path (not best-effort) — a missed commit would
-    // permanently strand a third device. For the founder +
-    // first-pair case there is no other member, so the row is a
-    // harmless no-op (the joiner ratchets forward from the Welcome,
-    // not this journal entry). Mirrors the `removeDeviceAt`
-    // broadcast in `remove.ts`.
-    // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped; an
-    // add-device commit carries no attestation. ADR-0053: proven under the
-    // key of the epoch the commit leaves, which the other devices still hold.
-    await ds.publishGroup(
-      ensured.group.groupId(),
-      encodeJournalEntry(addition.commit, null),
-      { signer: signerN },
-    );
-
-    // ADR-0060 section 7 - the setting and the key versions, for the device
-    // just admitted, now that the commit is on the journal. Sent by the sync
-    // runtime through its own handle, reloaded from the snapshot persisted
-    // above: sealing them here, on this second handle of the same
-    // DeviceGroup, reused the sync handle's sender generations (seen live
-    // 2026-09-30, SecretReuseError on the new device).
-    resendServiceEnvelopes();
-
-    // Phase 2a3d8-ui — best-effort history catch-up bundle.
-    // Read the local message log, derive the post-add
-    // exporter secret, seal the bundle, publish as the
-    // *second* mailbox row (Welcome was the first). A
-    // failure anywhere along the chain is non-fatal — the
-    // joining device still gets the Welcome + ratchets
-    // forward; it just lands with an empty timeline.
+  // ADR-0018 factor (a) — best-effort recovery payload, sealed under the
+  // per-pairing exporter key at the POST-ADD epoch. A failure anywhere along
+  // this chain must NOT break the pairing itself.
+  let recoveryPublished = false;
+  if (args.recovery !== undefined) {
+    let grant: Uint8Array | null = null;
+    let key: Uint8Array | null = null;
+    let payload: Uint8Array | null = null;
     try {
-      const secret = ensured.group.historyBundleSecret(ensured.identity);
-      const sealed = await buildHistoryBundleFromLog({
-        accountIdB64: args.accountIdB64,
-        deviceKey: args.deviceKey,
-        secret,
-      });
-      if (sealed !== null) {
-        await publishHistoryBundle(decoded.rendezvousPseudonym, sealed);
-      }
+      const wasm = await loadWasm();
+      const grantB64 = await args.recovery.deviceAuthorizeStart();
+      grant = base64UrlDecodeNoPad(grantB64);
+      key = ensured.group.exportSecret(
+        ensured.identity,
+        RECOVERY_EXPORTER_LABEL,
+        decoded.rendezvousPseudonym,
+        RECOVERY_EXPORTER_KEY_LENGTH,
+      );
+      payload = buildRecoveryPayload(grant, args.recovery.phraseEntropy);
+      const sealed = wasm.sealWithKey(key, payload);
+      await publishRecoveryPayload(decoded.rendezvousPseudonym, sealed);
+      recoveryPublished = true;
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn("history bundle publish failed", err);
+      console.warn("recovery payload publish failed", err);
+    } finally {
+      grant?.fill(0);
+      key?.fill(0);
+      payload?.fill(0);
+      args.recovery.phraseEntropy.fill(0);
     }
-
-    // ADR-0018 factor (a) — best-effort recovery payload. Mint a
-    // single-use device grant (bearer), derive the
-    // per-pairing exporter key at the POST-ADD epoch (the joiner
-    // ratchets to the same epoch from the Welcome, so it derives
-    // identical bytes), seal `grant(32) ‖ phrase_entropy(16)`, and
-    // publish the tagged row to the SAME rendezvous mailbox. A
-    // failure anywhere along this chain must NOT break the pairing
-    // itself — log + continue; the fresh device then falls back to
-    // its other routes (a passkey, the phrase).
-    let recoveryPublished = false;
-    if (args.recovery !== undefined) {
-      let grant: Uint8Array | null = null;
-      let key: Uint8Array | null = null;
-      let payload: Uint8Array | null = null;
-      try {
-        const wasm = await loadWasm();
-        const grantB64 = await args.recovery.deviceAuthorizeStart();
-        grant = base64UrlDecodeNoPad(grantB64);
-        key = ensured.group.exportSecret(
-          ensured.identity,
-          RECOVERY_EXPORTER_LABEL,
-          decoded.rendezvousPseudonym,
-          RECOVERY_EXPORTER_KEY_LENGTH,
-        );
-        payload = buildRecoveryPayload(
-          grant,
-          args.recovery.phraseEntropy,
-        );
-        const sealed = wasm.sealWithKey(key, payload);
-        await publishRecoveryPayload(decoded.rendezvousPseudonym, sealed);
-        recoveryPublished = true;
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("recovery payload publish failed", err);
-      } finally {
-        // Zeroize every local copy of secret material, success or
-        // not. The caller handed over the entropy for this call alone
-        // (documented contract), so consuming it here is safe.
-        grant?.fill(0);
-        key?.fill(0);
-        payload?.fill(0);
-        args.recovery.phraseEntropy.fill(0);
-      }
-    }
-
-    // ADR-0050 section 2.9 — the state bundle: contacts, pins and the ids
-    // of every group this device holds, sealed under the per-pairing
-    // exporter like the recovery row. Best-effort; a failure leaves the new
-    // device with the chats it is admitted to and no contact names.
-    {
-      let key: Uint8Array | null = null;
-      try {
-        const wasm = await loadWasm();
-        const snapshot = await loadMlsSnapshot(args.accountIdB64, args.deviceKey);
-        // ADR-0074: the account's earlier keys, so a device paired after a
-        // rotation binds its conversation leaves under the same account key
-        // as this device and reads the predecessor mailboxes.
-        let ownPredecessors: CarriedOwnPredecessor[] = [];
-        try {
-          ownPredecessors = await collectOwnPredecessors(args.accountIdB64, args.deviceKey, (seed) =>
-            accountKeyHexOfSeed(wasm, seed),
-          );
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            "state bundle: the earlier account keys could not be read",
-            err instanceof Error ? err.name : "unknown",
-          );
-        }
-        const bundle = buildStateBundle(
-          snapshot?.knownGroupIds ?? [],
-          args.accountIdB64,
-          ownPredecessors,
-        );
-        key = ensured.group.exportSecret(
-          ensured.identity,
-          STATE_EXPORTER_LABEL,
-          decoded.rendezvousPseudonym,
-          STATE_EXPORTER_KEY_LENGTH,
-        );
-        const sealed = wasm.sealWithKey(key, encodeStateBundle(bundle));
-        await publishStateBundle(decoded.rendezvousPseudonym, sealed);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("state bundle publish failed", err);
-      } finally {
-        key?.fill(0);
-      }
-    }
-
-    // member count: founder + freshly-added leaf, plus any
-    // prior members. We don't expose `devices()` through FFI
-    // yet (2a3c), so surface a best-effort estimate.
-    const wasm = await loadWasm();
-    return {
-      memberCount: ensured.bootstrapped ? 2 : 0,
-      newDeviceKey: wasm.keyPackageSignatureKey(decoded.keyPackage),
-      recoveryPublished,
-    };
-  } finally {
-    signerN?.free();
-    ensured.group.free();
-    ensured.identity.free();
   }
+
+  // ADR-0050 section 2.9 — the state bundle: contacts, pins and the ids of
+  // every group this device holds, sealed under the per-pairing exporter like
+  // the recovery row. Best-effort.
+  {
+    let key: Uint8Array | null = null;
+    try {
+      const wasm = await loadWasm();
+      const snapshot = await loadMlsSnapshot(args.accountIdB64, args.deviceKey);
+      let ownPredecessors: CarriedOwnPredecessor[] = [];
+      try {
+        ownPredecessors = await collectOwnPredecessors(args.accountIdB64, args.deviceKey, (seed) =>
+          accountKeyHexOfSeed(wasm, seed),
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "state bundle: the earlier account keys could not be read",
+          err instanceof Error ? err.name : "unknown",
+        );
+      }
+      const bundle = buildStateBundle(
+        snapshot?.knownGroupIds ?? [],
+        args.accountIdB64,
+        ownPredecessors,
+      );
+      key = ensured.group.exportSecret(
+        ensured.identity,
+        STATE_EXPORTER_LABEL,
+        decoded.rendezvousPseudonym,
+        STATE_EXPORTER_KEY_LENGTH,
+      );
+      const sealed = wasm.sealWithKey(key, encodeStateBundle(bundle));
+      await publishStateBundle(decoded.rendezvousPseudonym, sealed);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("state bundle publish failed", err);
+    } finally {
+      key?.fill(0);
+    }
+  }
+
+  const wasm = await loadWasm();
+  return {
+    memberCount: ensured.group.devices().length,
+    newDeviceKey: wasm.keyPackageSignatureKey(decoded.keyPackage),
+    recoveryPublished,
+  };
 }

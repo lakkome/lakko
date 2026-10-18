@@ -37,8 +37,22 @@
  * What an entry holds: the commit and Welcome (public MLS artefacts the DS
  * stores anyway), the joiner's key and its reply grant (to address the
  * Welcome again after a restart: the grant is otherwise held in memory
- * only), and the epochs. It lives inside the device-key-encrypted channel
- * log, never in plain storage.
+ * only), the epochs, and (ADR-0081) the access seed of the epoch the commit
+ * LEFT. The commit merged eagerly, so after a restart the group holds only
+ * the N+1 key; the DS takes a commit only under a proof of N (and an
+ * identical re-send under any retained key), so without the seed a first
+ * send that never reached the DS could never be sent again. With it a
+ * replay always learns the answer: appended, the original row, or 409. It
+ * lives inside the device-key-encrypted channel log, never in plain storage,
+ * and goes with the entry.
+ *
+ * A journal step the DS answers with 409 (another commit took the epoch) or
+ * a definitive refusal is LOST: the step is done, `journalLost` is set, and
+ * an approve then delivers no Welcome and makes no appointment (a Welcome for
+ * a commit nobody has would put the joiner into a group nobody else is in);
+ * the reseal still runs, since the owner's posts are sealed under the merged
+ * seed. Any other failure of a rotation's journal step defers it: the reseal
+ * runs, and the entry stays for the journal step alone.
  */
 
 /** Which commit an entry records. */
@@ -68,6 +82,14 @@ export interface PublisherCommitEntry {
   readonly joinerKeyB64: string | null;
   /** Approve: the joiner's `reply` grant wire, standard base64. */
   readonly replyGrantB64: string | null;
+  /** ADR-0081: the epoch the commit left (decimal `u64`), whose key proves
+   *  the commit request; `null` on an entry written before it was kept. */
+  readonly proofEpoch: string | null;
+  /** ADR-0081: standard base64 of that epoch's 32-byte access seed. */
+  readonly proofSeedB64: string | null;
+  /** ADR-0081: the DS answered the journal step with 409 or a definitive
+   *  refusal; the Welcome and the appointment are skipped. */
+  readonly journalLost: boolean;
   /** The steps that have landed. */
   readonly done: readonly PublisherCommitStep[];
 }
@@ -147,6 +169,11 @@ export function parsePublisherCommitEntry(raw: unknown): PublisherCommitEntry | 
     return null;
   }
   if (r.kind === "approve" && (commitB64 === null || welcomeB64 === null || joinerKeyB64 === null)) return null;
+  const proofEpoch = optString(r.proofEpoch);
+  const proofSeedB64 = optString(r.proofSeedB64);
+  if (proofEpoch === undefined || proofSeedB64 === undefined) return null;
+  if (proofEpoch !== null && !/^\d+$/.test(proofEpoch)) return null;
+  if (r.journalLost !== undefined && typeof r.journalLost !== "boolean") return null;
   if (!Array.isArray(r.done)) return null;
   const done: PublisherCommitStep[] = [];
   for (const s of r.done) {
@@ -164,6 +191,9 @@ export function parsePublisherCommitEntry(raw: unknown): PublisherCommitEntry | 
     welcomeB64,
     joinerKeyB64,
     replyGrantB64,
+    proofEpoch,
+    proofSeedB64,
+    journalLost: r.journalLost === true,
     done,
   };
 }
@@ -175,13 +205,18 @@ export function parsePublisherCommitEntry(raw: unknown): PublisherCommitEntry | 
 /** What running the steps of one entry needs; injected so the order is
  *  testable without a network. */
 export interface PublisherCommitPorts {
-  /** Register the group's CURRENT epoch key (the N+1 one) on the DS with the
-   *  channel's root. Idempotent. Required before an approve publishes its
-   *  commit; best effort for a rotation, which publishes none. */
-  registerEpoch(): Promise<void>;
-  /** Publish the Add commit to the group journal. Idempotent at the
-   *  receivers (a duplicate is dropped as a wrong-epoch commit). */
-  publishCommit(commit: Uint8Array): Promise<void>;
+  /** ADR-0081 - register the group's CURRENT epoch key (the N+1 one) with
+   *  the channel's root AND append `commit` to the group journal, in one
+   *  request (`POST .../commit`), proven under the recorded key of the epoch
+   *  the commit left (`proof`; `null` on an entry that kept none). A re-send
+   *  of the same commit is idempotent on the DS. */
+  commitToJournal(
+    commit: Uint8Array,
+    proof: { readonly epoch: bigint; readonly seed: Uint8Array } | null,
+  ): Promise<void>;
+  /** ADR-0081: `"lost"` for a 409 or a definitive refusal (nothing of the
+   *  commit is or will be on the DS), else `"unknown"`. */
+  classifyCommitFailure(err: unknown): "lost" | "unknown";
   /** Write the Welcome to the joiner's mailbox under its reply grant. */
   deliverWelcome(welcome: Uint8Array, joinerKey: Uint8Array, replyGrantB64: string | null): Promise<void>;
   /** The channels service's current epoch. */
@@ -207,30 +242,45 @@ function b64(s: string): Uint8Array {
 /**
  * Run the remaining steps of `entry` in order, recording each as it lands.
  * Throws the first step's failure, leaving the entry (with what did land)
- * for the next run.
+ * for the next run. A rotation's journal step that failed for an unknown
+ * reason (the network) is the exception: the other steps run, and the entry
+ * is kept, not finished, so the next replay sends the journal step again.
  */
 export async function runPublisherCommit(entry: PublisherCommitEntry, ports: PublisherCommitPorts): Promise<void> {
   let current = entry;
+  let journalDeferred = false;
   for (const step of remainingSteps(current)) {
     switch (step) {
-      case "journal":
-        if (current.kind === "rotation") {
-          // A rotation commit is not published to the journal, so no peer can
-          // hold an unregistered epoch: the registration stays best effort, as
-          // it always was (a co-publisher's is refused, its root is not the
-          // journal's), and the owner's lazy claim on a refused request
-          // registers the current epoch with the root.
-          try {
-            await ports.registerEpoch();
-          } catch (err) {
-            console.warn("ds: PublisherGroup epoch registration after rotation failed", err);
+      case "journal": {
+        if (current.commitB64 === null) break;
+        const proof =
+          current.proofEpoch !== null && current.proofSeedB64 !== null
+            ? { epoch: BigInt(current.proofEpoch), seed: b64(current.proofSeedB64) }
+            : null;
+        try {
+          await ports.commitToJournal(b64(current.commitB64), proof);
+        } catch (err) {
+          if (ports.classifyCommitFailure(err) === "lost") {
+            // ADR-0081: nothing of this commit is or will be on the DS (a
+            // co-publisher's rotation is refused like this: its root is not
+            // the journal's).
+            console.warn("ds: PublisherGroup commit not taken by the journal", current.kind);
+            current = { ...current, journalLost: true };
+            break;
           }
-        } else {
-          await ports.registerEpoch();
-          if (current.commitB64 !== null) await ports.publishCommit(b64(current.commitB64));
+          if (current.kind === "rotation") {
+            // The subscribers' reseal does not wait on the DS: the journal
+            // step stays owed and the entry is kept for it.
+            console.warn("ds: PublisherGroup rotation commit deferred", err instanceof Error ? err.name : "");
+            journalDeferred = true;
+            continue;
+          }
+          throw err;
         }
         break;
+      }
       case "welcome":
+        if (current.journalLost) break;
         if (current.welcomeB64 !== null && current.joinerKeyB64 !== null) {
           await ports.deliverWelcome(b64(current.welcomeB64), b64(current.joinerKeyB64), current.replyGrantB64);
         }
@@ -239,6 +289,7 @@ export async function runPublisherCommit(entry: PublisherCommitEntry, ports: Pub
         if (!resealLanded(current, await ports.serverEpoch())) await ports.reseal(current.serverTargetEpoch);
         break;
       case "appoint":
+        if (current.journalLost) break;
         if (current.joinerKeyB64 !== null) {
           try {
             await ports.appoint(b64(current.joinerKeyB64));
@@ -253,5 +304,6 @@ export async function runPublisherCommit(entry: PublisherCommitEntry, ports: Pub
     current = withStepDone(current, step);
     await ports.save(current);
   }
+  if (journalDeferred) return;
   await ports.finish(current);
 }

@@ -91,7 +91,7 @@ vi.mock("../state/channels-state", () => ({
 }));
 
 import { approveCoPublisher, pollCoPublisherJournal } from "./copublisher";
-import { fakeAccessSigner } from "../ds/access-test-doubles";
+import { fakeAccessSigner, withCommitRoute } from "../ds/access-test-doubles";
 import type { DsClient } from "../ds/client";
 
 interface Deferred<T> {
@@ -143,6 +143,8 @@ function statefulPublisherGroup(
   const group = {
     groupId: () => groupId,
     dsAccessSigner: fakeAccessSigner(() => BigInt(epoch)),
+    // ADR-0081: the approve records the access seed of the epoch it leaves.
+    dsAccessSeed: () => new Uint8Array(32).fill(epoch),
     channelId: () => new Uint8Array([7, 7]),
     epoch: () => BigInt(epoch),
     channelSeed: vi.fn(() => {
@@ -182,7 +184,7 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
     const publishGate = deferred<void>();
 
     let publishes = 0;
-    const ds = {
+    const ds = withCommitRoute({
       registerGroupEpoch: vi.fn(async () => {}),
       publishGroup: vi.fn(async () => {
         publishes += 1;
@@ -203,7 +205,7 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
           hasMore: false,
         };
       }),
-    } as unknown as DsClient;
+    }) as unknown as DsClient;
 
     const approve = approveCoPublisher(
       ds,
@@ -256,7 +258,7 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
     const seeds: number[] = [];
 
     let publishes = 0;
-    const ds = {
+    const ds = withCommitRoute({
       registerGroupEpoch: vi.fn(async () => {}),
       publishGroup: vi.fn(async () => {
         publishes += 1;
@@ -274,7 +276,7 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
         ],
         hasMore: false,
       })),
-    } as unknown as DsClient;
+    }) as unknown as DsClient;
 
     sealSubscriberSeedEnvelope.mockImplementation(
       (..._a: unknown[]) => new Uint8Array([0xaa]),

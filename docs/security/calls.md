@@ -5292,10 +5292,87 @@ registration required, appointment never holds the entry, codec).
 Unit-tested on 2026-10-16; not walked live.
 
 **What this does NOT do.** It does not survive Forget device (the provider and
-the records are deleted with the account). It does not publish a rotation
-commit to the journal; a co-publisher still learns a rotation only through
-the reseal. On web a refused record leaves the tab without channel writes
+the records are deleted with the account). Since ADR-0081 (2026-10-18) the
+journal step is one `POST .../commit` carrying the N+1 registration and the
+commit, a rotation's commit included (a co-publisher still learns a
+rotation's seed through the reseal), proven under the epoch the commit left,
+whose access seed the record keeps (`proofEpoch`, `proofSeedB64`), so a replay
+after a restart can still send a commit that never reached the DS and always
+learns the answer (C-80). A `409` or a definitive refusal marks the journal
+step lost: an approve then delivers no Welcome and appoints nobody, and the
+owner's PublisherGroup stays ahead of its journal (the eager merge is not
+undone). A rotation whose journal step got no answer keeps its entry for that
+step alone while the reseal runs. On web a refused record leaves the tab without channel writes
 until it reloads.
+
+## An epoch registered only with its commit (C-80)
+
+### C-80: An epoch key exists on the DS only together with the commit row that reaches it
+
+[ADR-0081](../adr/0081-devicegroup-commits-cannot-strand.md) decision 1 and
+open question 1 (decided 2026-10-18 by the maintainer), amending ADR-0057
+and ADR-0040.
+
+**The rule.** A new epoch of a group journal is registered only by
+`POST /ds/group/{hex}/commit`. The body is `{"statement_b64", "row_b64"}`
+(`lakko_ds_proof::commit_body_json`): an Append `RegisterEpoch` statement
+for epoch N+1 signed by the journal root or a registrar (ADR-0057), and the
+journal row (the commit, in the journal's envelope). The request proof is
+signed by a key of epoch N (the epoch the commit leaves; any other proof
+epoch is `400`). In one transaction behind the journal's lock row the DS
+verifies the statement and the proof, accepts the Append at `latest + 1`
+under the ADR-0057 rank rules, appends the row and records `BLAKE3(row)`
+and the row id with the registration (`ds_group_access.commit_row_hash`,
+`commit_message_id`, migration `0013`). A re-send of the same key and the
+same row at a registered epoch appends nothing and answers the original row
+(`200`), whatever retained key proves it; any other commit at a registered
+epoch, or an epoch other than `latest + 1`, is `409`, decided before the
+write tier is consulted. `PUT /ds/group/{hex}/access` refuses a plain Append
+for every journal (`400 {"error":"append-needs-commit"}`, checked before the
+signature); the claim (a journal's first registration), the ADR-0057 Replace
+from a higher rank (which clears a replaced epoch's row binding), the
+registrar set and the root transfer stay on their routes. So a registration
+without its row cannot be created, and a commit cannot be on the journal
+without its epoch's key.
+
+**Where it is enforced.** `services/ds/src/commit.rs` (the route),
+`ownership.rs` (`append_needs_commit`, the binding cleared on a Replace),
+`journal.rs` (`insert_row` inside the transaction); `lakko-ds-proof`
+`commit.rs` (the body and the statement); `DsStatementSigner.commit` on
+UniFFI and wasm (the `register_epoch` builder is removed from both). On the
+clients: the DeviceGroup commit outbox (web
+`devices/device-group-commit.ts` + `device-group-commit-runtime.ts`, iOS
+`Devices/DeviceGroupCommit.swift` + `DeviceGroupCommitRuntime.swift`,
+Android `devices/DeviceGroupCommit.kt` + `DeviceGroupCommits.kt`): the entry
+beside the N snapshot, the commit route, N+1 made current fail-closed, the
+Welcome, the entry deleted; `409` deletes the entry; an owed entry is
+finished before any new DeviceGroup commit and on every sync pass. Ordinary
+groups: a direct commit is STAGED (`lakko-mls` `stage_add_members`,
+`stage_remove_member`, `stage_set_group_roles`, an invariant-#3 change of
+the same day with the property tests in `tests/staged_direct_commit.rs`),
+its ADR-0040 entry and the snapshot carrying the staged commit are written
+fail-closed, then the commit route is called, and only an answer merges it;
+the ADR-0045 staged sweep does the same. On both, a `409` or a definitive
+refusal abandons (per group) and drops the entry, and a network failure
+leaves the entry and the staged commit for the owed verdict, which re-sends
+the same row. PublisherGroup commits
+(C-82) send their journal step through the same route. Pinned by the
+DB-gated tests in `services/ds/src/commit.rs` (fields pinned, row and key
+appended together, a rolled-back transaction leaves neither, the identical
+re-send, conflicts, every rank, a higher-rank Replace still repairs, a plain
+Append refused while claim and Replace work) and by the outbox, sweep and
+direct-commit suites of the three clients. Host-tested on 2026-10-18; not
+walked live, not deployed.
+
+**What this does NOT do.** A claim registers its first epoch without a row,
+and a Replace re-registers an epoch without one; both are owner- or
+admin-rank acts the rest of ADR-0057 governs. It does not undo a
+PublisherGroup commit that lost its epoch: that group merges eagerly, so the
+owner's group stays ahead of its journal (its subscribers are resealed
+regardless). A staged commit freezes the group's membership operations until
+its verdict; on Android the owed verdict runs at chat open and after a
+membership action, not at every poll. The DS still never reads the row
+(invariant #2).
 
 ## Invite links that make contacts (C-83)
 

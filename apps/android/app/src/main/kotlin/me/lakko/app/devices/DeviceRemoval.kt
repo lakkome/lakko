@@ -161,81 +161,33 @@ public object DeviceRemoval {
         // carried in the journal envelope so peers can verify the removal when
         // the DeviceGroup policy requires it. `null` for OPAQUE-only accounts.
         attestation: ByteArray? = null,
+        /** ADR-0081 decision 4 — the removal of a rejoining device's previous
+         *  leaf (diagnostics only). */
+        rejoin: Boolean = false,
     ) {
-        val seed = DeviceIdentityStore.ensureDeviceIdentitySeed(
-            context = context,
-            accountIdB64 = accountIdB64,
-        )
-        val ensured = DeviceGroupLifecycle.ensureDeviceGroup(
+        // ADR-0081 decision 2 — through the DeviceGroup commit outbox: the
+        // entry (the ADR-0015 envelope around the Remove, with the
+        // attestation) beside the N snapshot, the commit and the N+1
+        // registration in one request, then N+1 made current and the sync
+        // runtime reopened. Nothing that reads the snapshot can see N+1 before
+        // the DS has the commit.
+        val result = DeviceGroupCommits.commitChange(
             context = context,
             accountIdBytes = accountIdBytes,
             accountIdB64 = accountIdB64,
-            deviceIdentitySeed = seed,
-        )
-        seed.fill(0)
-
-        try {
-            // ADR-0057 finding 3 — a founding not yet claimed is claimed first.
-            DsClient().use { ds ->
-                DeviceGroupJournalAccess.claimFoundingIfUnconfirmed(
-                    context = context,
-                    accountIdB64 = accountIdB64,
-                    group = ensured.group,
+            build = { ensured ->
+                val commitBytes = ensured.group.removeDeviceAt(
                     identity = ensured.identity,
-                    ds = ds,
+                    leafIndex = leafIndex,
                 )
-            }
-            val signerBeforeCommit = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity)
-            val commitBytes = ensured.group.removeDeviceAt(
-                identity = ensured.identity,
-                leafIndex = leafIndex,
-            )
-            val groupId = ensured.group.groupId()
-            // ADR-0053 client contract point 3 — epoch N+1's key registered
-            // before the commit is published or persisted; a refusal throws with
-            // nothing on the wire (this handle is throwaway).
-            val commitSigner = DsClient().use { ds ->
-                DeviceGroupJournalAccess.registerNext(
-                    ds = ds,
-                    groupId = groupId,
-                    before = signerBeforeCommit,
-                    after = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity),
-                    root = DeviceGroupJournalAccess.rootOf(context, accountIdB64, ensured.group.groupId()),
+                DeviceGroupCommits.Built(
+                    kind = if (rejoin) DeviceGroupCommitEntry.Kind.REJOIN_REMOVE else DeviceGroupCommitEntry.Kind.REMOVE,
+                    row = DeviceGroupJournalEnvelope.encode(commitBytes, attestation),
                 )
-            }
-
-            // Broadcast to the DeviceGroup journal. The DS treats the
-            // deterministic 32-byte group_id as opaque bytes. G-13
-            // (ADR-0015): wrap the commit + removal attestation in the journal
-            // envelope so peers can verify the removal under the policy.
-            //
-            // G-7 — the advanced state is on disk, and the sync runtime has
-            // reopened its handle from it, before the commit is published.
-            // Otherwise its handle stays an epoch behind and the next add from
-            // this device reads a snapshot the removal never reached (the web
-            // twin registered an epoch the DS already held: 409, 2026-09-29).
-            DeviceGroupLifecycle.persistSnapshot(
-                context = context,
-                identity = ensured.identity,
-                accountIdB64 = accountIdB64,
-            )
-            DeviceGroupSyncRepository.active?.onLocalMembershipChanged()
-            val envelope = DeviceGroupJournalEnvelope.encode(commitBytes, attestation)
-            DsClient().use { ds ->
-                ds.publishGroup(groupId = groupId, payload = envelope, signer = commitSigner)
-            }
-        } finally {
-            try {
-                ensured.group.close()
-            } catch (_: Throwable) {
-                // best-effort
-            }
-            try {
-                ensured.identity.close()
-            } catch (_: Throwable) {
-                // best-effort
-            }
-        }
+            },
+            after = { },
+        )
+        if (result?.outcome is DeviceGroupCommitOutcome.Lost) throw DeviceGroupCommits.Lost()
     }
 
     /**
@@ -322,34 +274,8 @@ public object DeviceRemoval {
             deviceIdentitySeed = seed,
         )
         seed.fill(0)
-        try {
-            if (ensured.group.requireAttestedRemovals()) {
-                return
-            }
-            val signerBeforeCommit = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity)
-            val commit = ensured.group.setRequireAttestedRemovals(ensured.identity)
-            val groupId = ensured.group.groupId()
-            // The policy commit removes nothing, so it carries no attestation.
-            val envelope = DeviceGroupJournalEnvelope.encode(commit, null)
-            DsClient().use { ds ->
-                // ADR-0053 client contract point 3 — register N+1 first.
-                val commitSigner = DeviceGroupJournalAccess.registerNext(
-                    ds = ds,
-                    groupId = groupId,
-                    before = signerBeforeCommit,
-                    after = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity),
-                    root = DeviceGroupJournalAccess.rootOf(context, accountIdB64, ensured.group.groupId()),
-                )
-                // G-7 — on disk and the sync runtime reopened before the
-                // publish (see `removeDeviceAt`).
-                DeviceGroupLifecycle.persistSnapshot(
-                    context = context,
-                    identity = ensured.identity,
-                    accountIdB64 = accountIdB64,
-                )
-                DeviceGroupSyncRepository.active?.onLocalMembershipChanged()
-                ds.publishGroup(groupId = groupId, payload = envelope, signer = commitSigner)
-            }
+        val alreadyOn = try {
+            ensured.group.requireAttestedRemovals()
         } finally {
             try {
                 ensured.group.close()
@@ -362,5 +288,28 @@ public object DeviceRemoval {
                 // best-effort
             }
         }
+        if (alreadyOn) return
+        // ADR-0081 decision 2 — through the DeviceGroup commit outbox.
+        val result = DeviceGroupCommits.commitChange(
+            context = context,
+            accountIdBytes = accountIdBytes,
+            accountIdB64 = accountIdB64,
+            build = { fresh ->
+                // Another device enabled it meanwhile.
+                if (fresh.group.requireAttestedRemovals()) {
+                    null
+                } else {
+                    // The policy commit removes nothing, so it carries no attestation.
+                    DeviceGroupCommits.Built(
+                        kind = DeviceGroupCommitEntry.Kind.POLICY,
+                        row = DeviceGroupJournalEnvelope.encode(
+                            fresh.group.setRequireAttestedRemovals(fresh.identity), null,
+                        ),
+                    )
+                }
+            },
+            after = { },
+        )
+        if (result?.outcome is DeviceGroupCommitOutcome.Lost) throw DeviceGroupCommits.Lost()
     }
 }

@@ -64,7 +64,7 @@
  * blocked", which fails with `DEADLOCK` if the lock is re-keyed globally.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fakeAccessSigner } from "../ds/access-test-doubles";
+import { fakeAccessSigner, withCommitRoute, withStagedTwins } from "../ds/access-test-doubles";
 
 vi.mock("./commit-outbox", () => ({
   markAcked: async () => {},
@@ -139,7 +139,7 @@ function stampingGroup(
   merge: () => void;
 } {
   let epoch = startEpoch;
-  const group = {
+  const group = withStagedTwins({
     get groupId(): Uint8Array {
       return groupId;
     },
@@ -157,7 +157,7 @@ function stampingGroup(
       // `create_message` advances the sender ratchet, never the epoch.
       return new Uint8Array([TAG_APP, epoch]);
     }),
-  } as unknown as WasmGroup;
+  }) as unknown as WasmGroup;
   return {
     group,
     epoch: () => epoch,
@@ -174,13 +174,13 @@ function stampingGroup(
  *  real DS assigns ids in and therefore the order every peer replays. */
 function journalDs(): { ds: DsClient; journal: Uint8Array[] } {
   const journal: Uint8Array[] = [];
-  const ds = {
+  const ds = withCommitRoute({
     publishGroup: vi.fn(async (_gid: Uint8Array, bytes: Uint8Array) => {
       journal.push(bytes);
       return { id: journal.length, createdAt: "t" };
     }),
     registerGroupEpoch: vi.fn(async () => {}),
-  } as unknown as DsClient;
+  }) as unknown as DsClient;
   return { ds, journal };
 }
 
@@ -227,7 +227,7 @@ describe("the send path never straddles an epoch change", () => {
 
     const contacts = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      {
+      withCommitRoute({
         publishGroup: vi.fn(async (_gid: Uint8Array, bytes: Uint8Array) => {
           // A slow DS round-trip: the commit is built and eager-merged, but has
           // not reached the journal yet.
@@ -236,7 +236,7 @@ describe("the send path never straddles an epoch change", () => {
           return { id: journal.length, createdAt: "t" };
         }),
         registerGroupEpoch: vi.fn(async () => {}),
-      } as unknown as DsClient,
+      }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},
@@ -296,14 +296,14 @@ describe("the send path never straddles an epoch change", () => {
 
     const contacts = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      {
+      withCommitRoute({
         publishGroup: vi.fn(async (_gid: Uint8Array, bytes: Uint8Array) => {
           await publishGate.promise;
           journal.push(bytes);
           return { id: journal.length, createdAt: "t" };
         }),
         registerGroupEpoch: vi.fn(async () => {}),
-      } as unknown as DsClient,
+      }) as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},
