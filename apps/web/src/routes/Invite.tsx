@@ -54,7 +54,6 @@ import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/accoun
 import { groupIdHex } from "../devices/sync/state";
 import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
-import { INVITE_INLINE_MIN_LEN } from "../contacts/invite";
 import { invitePageView, type InvitePageView } from "../contacts/invite-page";
 import { addThroughInviteLink } from "../contacts/invite-add";
 import { DiscoveryClient, isDiscoveryRateLimited } from "../discovery/client";
@@ -78,9 +77,8 @@ import { PublicLayout } from "../ui/PublicLayout";
 
 interface DecodedInvite {
   cap: WasmInviteCapability;
-  /** The 8-character ledger id when the slug is a pointer; `null` for an
-   *  inline link (no server row, no consume). */
-  blobId: Uint8Array | null;
+  /** The 6-byte ledger id the slug names (every link is a ledger pointer). */
+  blobId: Uint8Array;
   /** The plaintext capability wire (the joiner tag is computed over it). */
   capabilityBytes: Uint8Array;
   /** The 12-byte link secret from the fragment: the link answer's secret. */
@@ -114,7 +112,6 @@ export default function Invite(): JSX.Element {
           slug,
           hash,
           widths,
-          inlineMinLen: INVITE_INLINE_MIN_LEN,
           what: "invite",
           fetchPointer: (blobId) => discovery.fetchInvite(blobId),
           open: (sealed, secret) => wasm.InviteCapability.openLink(sealed, secret),
@@ -340,14 +337,10 @@ function AddPanel(props: {
       await props.client.refuseContactRequestToUnverifiedKeys(cap.ownerAccountId, cap.ownerSignaturePubkey);
       const blobId = props.invite.blobId;
       const outcome = await addThroughInviteLink({
-        // The ledger's soft use count (a pointer link only). A link this
-        // account used before is sent again: the inviter's device answers it
-        // either way.
-        consume:
-          blobId === null
-            ? null
-            : async () =>
-                (await props.discovery.consumeInvite(blobId, props.invite.capabilityBytes, secrets.accountId)).kind,
+        // The ledger's soft use count. A link this account used before is
+        // sent again: the inviter's device answers it either way.
+        consume: async () =>
+          (await props.discovery.consumeInvite(blobId, props.invite.capabilityBytes, secrets.accountId)).kind,
         // ADR-0079 section 5 — the inviter is this account's contact from now
         // on, written only once the link was found live.
         recordPending: async () =>

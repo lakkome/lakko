@@ -92,7 +92,7 @@ import { A } from "@solidjs/router";
 
 import { cameraStartFailure } from "./capture-fallback";
 import { composeAndUploadCallInvite } from "./composer";
-import { inlineLinkSlug, rememberMintedLink } from "../contacts/minted-links";
+import { rememberMintedLink } from "../contacts/minted-links";
 import {
   CALL_INVITE_LABEL,
   callInviteMaxUses,
@@ -2550,9 +2550,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       void rememberMintedLink(
         base64Encode(secrets.accountId),
         "call",
-        minted.blobId === null
-          ? inlineLinkSlug(base64UrlEncodeNoPad(minted.linkId))
-          : base64UrlEncodeNoPad(minted.blobId),
+        base64UrlEncodeNoPad(minted.blobId),
         {
           linkSecret: minted.linkSecret,
           linkId: minted.linkId,

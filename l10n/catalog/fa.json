@@ -2306,10 +2306,6 @@
       "text": "اطلاعات گروه",
       "status": "machine"
     },
-    "chat.invite_link.cleared": {
-      "text": "پیوند پاک شد (پیوند درون‌خطی چیزی برای لغو ندارد).",
-      "status": "machine"
-    },
     "chat.invite_link.copy": {
       "text": "کپی پیوند",
       "status": "machine"
@@ -6132,10 +6128,6 @@
     },
     "invite.links.for_new_user": {
       "text": "برای کسی که تازه به Lakko آمده",
-      "status": "machine"
-    },
-    "invite.links.inline_note": {
-      "text": "Lakko نتوانست این پیوند را کوتاه کند، برای همین طولانی است. به همان شکل کار می‌کند و نمی‌توان آن را لغو کرد.",
       "status": "machine"
     },
     "invite.links.label_field": {

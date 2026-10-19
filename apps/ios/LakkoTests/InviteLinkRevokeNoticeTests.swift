@@ -5,14 +5,15 @@ import XCTest
 @testable import Lakko
 
 /// The confirmation after revoking a group invite link (the web and Android
-/// rule): a ledger pointer link is revoked, an inline link is only cleared.
+/// rule): a link whose ledger row was deleted is revoked; one this device has
+/// no revocation key for is only cleared.
 final class InviteLinkRevokeNoticeTests: XCTestCase {
 
     func testALedgerLinkReadsRevoked() {
         XCTAssertEqual(ChatViewModel.inviteLinkRevokeNotice(revoked: true), "chat.invite_link.revoked")
     }
 
-    func testAnInlineLinkReadsClearedNotRevoked() {
+    func testALinkWithNoKeptKeyReadsClearedNotRevoked() {
         XCTAssertEqual(ChatViewModel.inviteLinkRevokeNotice(revoked: false), "chat.invite_link.cleared")
     }
 

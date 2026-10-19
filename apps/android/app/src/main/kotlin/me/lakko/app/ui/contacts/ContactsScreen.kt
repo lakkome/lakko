@@ -187,9 +187,7 @@ public fun ContactsScreen(
             onRevoke = { row ->
                 val session = state.outstandingInvites.firstOrNull { it.blobIdSlug == row.slug }
                 if (session != null) {
-                    // An inline link (upload failed in transport) has no ledger
-                    // row, so there is nothing to revoke.
-                    session.blobId?.let(viewModel::onRevokeInviteClicked)
+                    viewModel.onRevokeInviteClicked(session.blobId)
                 } else {
                     viewModel.onRevokeActiveInviteClicked(row.slug)
                 }

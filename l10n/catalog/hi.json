@@ -2306,10 +2306,6 @@
       "text": "ग्रुप की जानकारी",
       "status": "machine"
     },
-    "chat.invite_link.cleared": {
-      "text": "लिंक हटा दिया गया (इनलाइन लिंक में रद्द करने के लिए कुछ नहीं होता)।",
-      "status": "machine"
-    },
     "chat.invite_link.copy": {
       "text": "लिंक कॉपी करें",
       "status": "machine"
@@ -6132,10 +6128,6 @@
     },
     "invite.links.for_new_user": {
       "text": "Lakko पर नए व्यक्ति के लिए",
-      "status": "machine"
-    },
-    "invite.links.inline_note": {
-      "text": "Lakko इस लिंक को छोटा नहीं कर सका, इसलिए यह लंबा है। यह उसी तरह काम करता है और इसे रद्द नहीं किया जा सकता।",
       "status": "machine"
     },
     "invite.links.label_field": {

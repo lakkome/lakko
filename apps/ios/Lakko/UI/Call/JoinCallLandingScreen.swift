@@ -371,8 +371,6 @@ public final class JoinCallLandingViewModel: ObservableObject {
                     return
                 }
                 capabilityBytes = fetched
-            case .inline(let bytes):
-                capabilityBytes = bytes
             }
             let cap: CallInviteCapability
             do {

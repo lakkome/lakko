@@ -7,7 +7,6 @@ import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.discovery.InviteLinkLengths
 import me.lakko.app.discovery.SealedInviteUpload
 import me.lakko.app.discovery.composeSealedInviteUrl
-import me.lakko.app.discovery.isInviteUploadTransportFailure
 import uniffi.lakko_ffi_uniffi.FfiCallInviteMedia
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.composeCallInviteCapability
@@ -54,13 +53,12 @@ public class CallInviteComposer(
      * revoke would name.
      */
     public data class Composed(
-        /** Raw 6-byte server-assigned `blob_id`, or `null` for an inline link
-         *  (the upload failed in transport). */
-        val blobId: ByteArray?,
+        /** Raw 6-byte server-assigned `blob_id`. */
+        val blobId: ByteArray,
         /** The full `<origin>/c/<slug>#<secret>` URL the owner shares. */
         val url: String,
-        /** The sealed link bytes (what the ledger holds, or what the inline
-         *  slug carries); the plaintext capability never leaves the device. */
+        /** The sealed link bytes (what the ledger holds); the plaintext
+         *  capability never leaves the device. */
         val capabilityBytes: ByteArray,
         /** ADR-0078 section 10: the seed of the link's own revocation key,
          *  which the caller keeps in its [me.lakko.app.contacts.OwnLinkStore]
@@ -95,7 +93,8 @@ public class CallInviteComposer(
      *   2. `composeCallInviteCapability(...)` via UniFFI — wire bytes signed
      *      under the owner's Ed25519 key, with the section-4 values.
      *   3. [DiscoveryClient.uploadCallInvite] — pushes the SEALED bytes to the
-     *      ledger; only a transport failure falls back to the inline form.
+     *      ledger; any failure, a network one included, throws and mints no
+     *      link (the inline form was removed on 2026-10-19).
      *   4. The `<origin>/c/<slug>#<secret>` URL (sealed links, 2026-09-28).
      *
      * Must be driven from a background coroutine: the upload is a network
@@ -151,20 +150,14 @@ public class CallInviteComposer(
         // ADR-0078 section 10: the row carries a key minted for this link
         // alone, never the owner's identity key.
         val (revocationSeed, revocationPubkey) = me.lakko.app.contacts.OwnLinks.freshRevocationKey()
-        val blobId: ByteArray? = try {
-            discoveryClient.uploadCallInvite(
-                SealedInviteUpload(
-                    sealed = mint.sealed,
-                    revocationPubkey = revocationPubkey,
-                    expiryMs = expiryMs,
-                    maxUses = maxUses.toLong(),
-                ),
-            )
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            if (!isInviteUploadTransportFailure(e)) throw e
-            null
-        }
+        val blobId: ByteArray = discoveryClient.uploadCallInvite(
+            SealedInviteUpload(
+                sealed = mint.sealed,
+                revocationPubkey = revocationPubkey,
+                expiryMs = expiryMs,
+                maxUses = maxUses.toLong(),
+            ),
+        )
 
         // ---- 4. URL build --------------------------------------
         return Composed(
@@ -173,7 +166,6 @@ public class CallInviteComposer(
                 origin = origin,
                 prefix = CALL_INVITE_URL_PREFIX,
                 blobId = blobId,
-                sealed = mint.sealed,
                 linkSecret = mint.linkSecret,
                 lengths = lengths,
             ),

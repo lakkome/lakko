@@ -59,18 +59,18 @@ class SealedInviteLinkTest {
     @Test
     fun `the pointer link is the id plus the secret`() {
         val id = ByteArray(6) { 5 }
-        val url = composeSealedInviteUrl("https://lakko.me", "/g/", id, byteArrayOf(9), secret, L)
+        val url = composeSealedInviteUrl("https://lakko.me", "/g/", id, secret, L)
         assertEquals("https://lakko.me/g/${base64UrlEncodeNoPad(id)}#$secretText", url)
         assertEquals(8 + 16 + "https://lakko.me/g/#".length, url.length)
     }
 
+    /** There is no link without a ledger id (the inline form was removed on
+     *  2026-10-19). */
     @Test
-    fun `the inline fallback carries the sealed bytes and the secret`() {
-        val sealed = ByteArray(150) { it.toByte() }
-        val url = composeSealedInviteUrl("https://lakko.me", "/c/", null, sealed, secret, L)
-        val argument = InviteLinkArgument.decode(url.substringAfter("/c/"))
-        assertArrayEquals(sealed, base64UrlDecodeNoPad(argument.slug))
-        assertEquals(secretText, argument.fragment)
+    fun `a ledger id of another width never produces a link`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            composeSealedInviteUrl("https://lakko.me", "/c/", ByteArray(150), secret, L)
+        }
     }
 
     @Test
@@ -87,13 +87,6 @@ class SealedInviteLinkTest {
         assertEquals(arg, InviteLinkArgument.decode(arg.encode()))
         assertEquals(InviteLinkArgument("abc", null), InviteLinkArgument.decode("abc#"))
         assertEquals("abc", InviteLinkArgument("abc", "").encode())
-    }
-
-    @Test
-    fun `only a transport failure falls back to the inline form`() {
-        assertTrue(isInviteUploadTransportFailure(DiscoveryNetworkError("/discovery/invite", java.io.IOException("no route"))))
-        assertFalse(isInviteUploadTransportFailure(DiscoveryHttpError(401, "/discovery/invite", "")))
-        assertFalse(isInviteUploadTransportFailure(IllegalStateException("x")))
     }
 
     @Test

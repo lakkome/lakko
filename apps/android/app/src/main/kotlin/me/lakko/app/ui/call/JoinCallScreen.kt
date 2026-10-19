@@ -573,7 +573,6 @@ internal suspend fun decodeCallLink(
                     discovery.close()
                 }
             }
-            is ParsedCallInvite.Inline -> parsed.capabilityBytes
         }
         me.lakko.app.discovery.openSealedInviteLink(sealedBytes, secret) { bytes, key ->
             CallInviteCapability.openLink(bytes, key)

@@ -2306,10 +2306,6 @@
       "text": "Grup bilgisi",
       "status": "machine"
     },
-    "chat.invite_link.cleared": {
-      "text": "Bağlantı temizlendi (satır içi bir bağlantıda iptal edilecek bir şey yoktur).",
-      "status": "machine"
-    },
     "chat.invite_link.copy": {
       "text": "Bağlantıyı kopyala",
       "status": "machine"
@@ -6132,10 +6128,6 @@
     },
     "invite.links.for_new_user": {
       "text": "Lakko'da yeni olan biri için",
-      "status": "machine"
-    },
-    "invite.links.inline_note": {
-      "text": "Lakko bu bağlantıyı kısaltamadı, bu yüzden uzun. Aynı şekilde çalışır ve iptal edilemez.",
       "status": "machine"
     },
     "invite.links.label_field": {

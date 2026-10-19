@@ -142,34 +142,71 @@ public object CoPublisher {
         }
     }
 
-    /** Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`.
-     *  A non-member opens it, requests to join, and the owner approves (reusing
-     *  the ADR-0027/0028 external-join machinery). `0` = never expires.
+    /** Mint a co-publisher invite capability over the PublisherGroup's MLS
+     *  `group_id`, sealed under a fresh link secret. A non-member opens the
+     *  link, requests to join, and the owner approves (reusing the
+     *  ADR-0027/0028 external-join machinery). `0` = never expires.
      *  ADR-0078 section 6 — the joiner cannot recover the channel id from the
      *  group id, so the capability's sealed preview carries it (and the
-     *  channel's name when known). */
-    public fun createCoPublisherLink(
+     *  channel's name when known). Upload it with [uploadCoPublisherLink],
+     *  outside the identity lock. */
+    public fun mintCoPublisherLink(
         identity: Identity,
         publisherGroup: PublisherGroup,
         channelName: String? = null,
-        origin: String = DEFAULT_ORIGIN,
-    ): String {
-        val groupId = publisherGroup.groupId()
-        val mint = composeCoPublisherInviteCapability(
+    ): uniffi.lakko_ffi_uniffi.InviteLinkMint =
+        composeCoPublisherInviteCapability(
             identity.ed25519Seed(),
-            groupId,
+            publisherGroup.groupId(),
             0uL,
             publisherGroup.channelId(),
             channelName?.takeIf { it.isNotBlank() },
         )
-        // Sealed links (2026-09-28): the inline form carries the SEALED
-        // capability, and the fragment carries the secret that opens it. A
-        // co-publisher link has never gone through the ledger; that is
-        // unchanged.
-        return me.lakko.app.discovery.appendInviteLinkSecret(
-            "$origin$URL_PREFIX${base64UrlEncode(mint.sealed)}",
-            mint.linkSecret,
-        )
+
+    /** Upload a minted co-publisher link to the group-invite ledger like any
+     *  `/g/` link and answer `<origin>/g/<id>#<secret>`. It was always the
+     *  inline form until 2026-10-19, when the inline form was removed: any
+     *  failed upload, a network one included, throws and mints no link. The
+     *  link's revocation seed is kept in this device's record of its links
+     *  for [accountIdB64], as for a group link. No use limit: the owner's
+     *  approval is the boundary. */
+    public suspend fun uploadCoPublisherLink(
+        sealed: ByteArray,
+        linkSecret: ByteArray,
+        discovery: me.lakko.app.discovery.DiscoveryClient,
+        accountIdB64: String?,
+        origin: String = DEFAULT_ORIGIN,
+    ): String {
+        val (seed, revocationPubkey) = me.lakko.app.contacts.OwnLinks.freshRevocationKey()
+        try {
+            val blobId = discovery.uploadGroupInvite(
+                me.lakko.app.discovery.SealedInviteUpload(
+                    sealed = sealed,
+                    revocationPubkey = revocationPubkey,
+                    expiryMs = 0L,
+                    maxUses = 0xFFFFFFFFL,
+                ),
+            )
+            if (accountIdB64 != null) {
+                me.lakko.app.contacts.OwnLinkStores.current.put(
+                    accountIdB64,
+                    me.lakko.app.contacts.OwnLinks.record(
+                        kind = me.lakko.app.contacts.OwnLink.KIND_GROUP,
+                        blobId = blobId,
+                        seed = seed,
+                        maxUses = 0xFFFFFFFFL,
+                    ),
+                )
+            }
+            return me.lakko.app.discovery.composeSealedInviteUrl(
+                origin = origin,
+                prefix = URL_PREFIX,
+                blobId = blobId,
+                linkSecret = linkSecret,
+            )
+        } finally {
+            seed.fill(0)
+        }
     }
 
     /** Poll the PublisherGroup's DS journal and apply incoming MLS messages
@@ -639,6 +676,8 @@ public object CoPublisher {
          *  written ([ChannelPublisherIdentity.withIdentityPersistingFirst]).
          *  Called after the proposal is built and before it is knocked. */
         persistProposalKeys: () -> Unit,
+        /** The ledger fetch of a `/g/` row by its id; `null` when it is gone. */
+        fetchSealed: suspend (blobId: ByteArray) -> ByteArray?,
     ): CoPublishRequest {
         val idx = link.lastIndexOf(URL_PREFIX)
         if (idx < 0) throw CoPublisherException.NotACoPublisherLink(link)
@@ -648,8 +687,15 @@ public object CoPublisher {
         // Sealed links: the fragment opens the capability; a missing or
         // malformed one is refused before any request.
         val secret = me.lakko.app.discovery.requireInviteLinkSecret(argument.fragment)
-        val sealed = base64UrlDecode(argument.slug.trimEnd('/'))
-            ?: throw CoPublisherException.NotACoPublisherLink(link)
+        // The slug is the ledger id; an inline slug (the form removed on
+        // 2026-10-19) or a row that is gone is not a co-publisher link.
+        val blobId = try {
+            (me.lakko.app.chat.parseGroupInviteSlug(argument.slug.trimEnd('/')) as
+                me.lakko.app.chat.ParsedGroupInvite.Pointer).blobId
+        } catch (_: me.lakko.app.chat.GroupInviteUrlException) {
+            throw CoPublisherException.NotACoPublisherLink(link)
+        }
+        val sealed = fetchSealed(blobId) ?: throw CoPublisherException.NotACoPublisherLink(link)
         val cap = me.lakko.app.discovery.openSealedInviteLink(sealed, secret) { bytes, key ->
             GroupInviteCapability.openLink(bytes, key)
         }
@@ -857,11 +903,4 @@ public object CoPublisher {
     /** Bytes of a channel id. */
     private const val CHANNEL_ID_LEN: Int = 16
 
-    private fun base64UrlEncode(bytes: ByteArray): String =
-        Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.URL_SAFE or Base64.NO_PADDING)
-
-    private fun base64UrlDecode(slug: String): ByteArray? =
-        runCatching {
-            Base64.decode(slug, Base64.URL_SAFE or Base64.NO_PADDING)
-        }.getOrNull()
 }

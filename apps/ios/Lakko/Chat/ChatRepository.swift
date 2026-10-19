@@ -2151,7 +2151,7 @@ public final class ChatRepository: ObservableObject {
     public func requestToJoinFromLink(
         capabilityWire: Data,
         nowMs: UInt64,
-        blobId: Data? = nil
+        blobId: Data
     ) async throws -> (groupId: Data, joinerSignatureKey: Data) {
         guard let identity = canonicalIdentity, let joinerAccountIdB64 = currentAccountIdB64 else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
@@ -2168,13 +2168,11 @@ public final class ChatRepository: ObservableObject {
         // `identity` is this binding's: the request is never continued with
         // another account's reply key, nor persisted into its snapshot.
         let bound = binding.capture()
-        // ADR-0028 OQ1 — when the link was a server-backed pointer, register one
-        // consume against the ledger's soft `max_uses` ceiling before posting
-        // the request (anti-abuse defence-in-depth; the admin approval gate
-        // remains the real boundary). A repeat from this joiner is idempotent.
-        // Inline links (no `blobId`) skip this — there is no ledger row.
-        if let blobId,
-           let accountIdB64 = currentAccountIdB64,
+        // ADR-0028 OQ1 — register one consume against the ledger's soft
+        // `max_uses` ceiling before posting the request (anti-abuse
+        // defence-in-depth; the admin approval gate remains the real
+        // boundary). A repeat from this joiner is idempotent.
+        if let accountIdB64 = currentAccountIdB64,
            let joinerAccountId = base64Decode(accountIdB64) {
             let outcome: ConsumeInviteResult
             do {
@@ -3322,8 +3320,9 @@ public final class ChatRepository: ObservableObject {
     /// the issuer) inside the signed capability, and the secret rides the URL
     /// **fragment** - `https://lakko.me/g/<8-char id>#<16-char secret>` - which never
     /// reaches the discovery ledger (the pointer upload carries the ciphertext
-    /// only) and is never logged. Both the pointer form and the inline fallback
-    /// carry it; `Copy link` copies the whole string. A name the display-name
+    /// only) and is never logged; `Copy link` copies the whole string. A failed
+    /// upload, a network one included, mints no link (the inline form was
+    /// removed on 2026-10-19). A name the display-name
     /// rule refuses fails the mint rather than minting a link that says
     /// something else.
     public func createGroupInviteLink(groupIdHex: String) async throws -> String {
@@ -3358,10 +3357,7 @@ public final class ChatRepository: ObservableObject {
         //
         // The upload is session-gated (`require_session` on discovery), so it
         // goes out on a bearer copy of the client; with no session at all the
-        // mint fails here rather than quietly producing the long inline link.
-        // Only a TRANSPORT failure (a censored / offline network) falls back to
-        // the inline form, which carries the sealed blob; a refusal from the
-        // server (401, 400, 5xx) surfaces.
+        // mint fails here. Any upload failure surfaces and mints nothing.
         let bearer = try bearerDiscovery()
         // ADR-0078 section 10: the ledger row carries a key minted for this
         // link alone, never the issuer's identity key; its seed is kept in
@@ -3384,11 +3380,6 @@ public final class ChatRepository: ObservableObject {
                     label: "", expiryMs: 0, maxUses: Int64(UInt32.max), bootstrapReferral: false,
                     mintedAtMs: Int64(Date().timeIntervalSince1970 * 1000)))
             }
-        } catch let error where Self.groupInviteUploadFallsBackInline(error) {
-            NSLog("group invite upload failed (\(Self.discoveryFailureSummary(error))); "
-                + "sharing the inline link")
-            base = (try? GroupInviteUrl.composeInlineGroupInviteUrl(capabilityBytes: mint.sealed))
-                ?? (GroupInviteUrl.defaultOrigin + GroupInviteUrl.urlPrefix + base64UrlEncodeNoPad(mint.sealed))
         } catch {
             NSLog("group invite upload failed (\(Self.discoveryFailureSummary(error)))")
             throw ChatError.wrapped("group invite upload failed", underlying: error)
@@ -3415,16 +3406,6 @@ public final class ChatRepository: ObservableObject {
         return discovery.withSessionToken(token)
     }
 
-    /// Whether a group-invite upload failure may fall back to the inline link:
-    /// only when the request never got an answer (DNS, TLS, no route, a
-    /// censored network). Any HTTP status is the server's answer and surfaces.
-    static func groupInviteUploadFallsBackInline(_ error: Error) -> Bool {
-        if let discovery = error as? DiscoveryClientError, case .network = discovery {
-            return true
-        }
-        return false
-    }
-
     /// A log-safe summary of a discovery failure: the kind and the HTTP
     /// status, never a body or an argument message (either may echo the
     /// capability).
@@ -3439,11 +3420,9 @@ public final class ChatRepository: ObservableObject {
     }
 
     /// ADR-0028 revoke — the issuer revokes a previously-created group invite
-    /// link. Only the server-backed pointer form (a 6-byte `blob_id`) is
-    /// revocable; an inline link has no ledger row. Returns `true` when a ledger
-    /// row was revoked, `false` for an inline / malformed link, or one this
-    /// device keeps no revocation key for (ADR-0078 section 10: it lives until
-    /// it expires).
+    /// link. Returns `true` when its ledger row was revoked, `false` for a
+    /// malformed link, or one this device keeps no revocation key for
+    /// (ADR-0078 section 10: it lives until it expires).
     public func revokeGroupInviteLink(link: String) async throws -> Bool {
         guard let accountIdB64 = currentAccountIdB64 else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
@@ -3462,8 +3441,6 @@ public final class ChatRepository: ObservableObject {
             return false
         }
         switch parsed {
-        case .inline:
-            return false
         case .pointer(let blobId):
             // Session-gated like the upload (`require_session`); the signature
             // by the link's own revocation key is the authorisation, the
@@ -3483,15 +3460,14 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the SEALED link blob
-    /// (ADR-0028 amendment 2026-09-28), fetching from the discovery ledger when
-    /// the slug is a 6-byte pointer (the production form) or passing the bytes
-    /// straight through when it is an inline blob (the transport-failure
-    /// fallback). The caller opens it with the fragment's secret. Returns the `blobId`
-    /// (non-nil only for the pointer form) so the caller can drive the consume
-    /// gate before requesting to join.
+    /// ADR-0028 (G-3) — resolve a `/g/<slug>` slug (a 6-byte ledger id) to the
+    /// SEALED link blob (ADR-0028 amendment 2026-09-28), fetched from the
+    /// discovery ledger. The caller opens it with the fragment's secret.
+    /// Returns the `blobId` so the caller can drive the consume gate before
+    /// requesting to join.
     ///
-    /// A slug of any other shape (the retired 43-character id included) throws
+    /// A slug of any other shape (the retired 43-character id and an inline
+    /// sealed blob, the form removed on 2026-10-19, included) throws
     /// ``GroupInviteLinkError/malformed`` without a request, and a ledger 404
     /// throws ``GroupInviteLinkError/notFound``; both are "invalid or expired"
     /// to a person. A `429` surfaces as a wrapped
@@ -3499,7 +3475,7 @@ public final class ChatRepository: ObservableObject {
     /// "invalid".
     public func resolveGroupInviteSlug(
         slug: String
-    ) async throws -> (sealed: Data, blobId: Data?) {
+    ) async throws -> (sealed: Data, blobId: Data) {
         let parsed: GroupInviteUrl.ParsedGroupInvite
         do {
             parsed = try GroupInviteUrl.parseGroupInviteSlug(slug)
@@ -3507,8 +3483,6 @@ public final class ChatRepository: ObservableObject {
             throw GroupInviteLinkError.malformed
         }
         switch parsed {
-        case .inline(let capabilityBytes):
-            return (capabilityBytes, nil)
         case .pointer(let blobId):
             let fetched: Data?
             do {

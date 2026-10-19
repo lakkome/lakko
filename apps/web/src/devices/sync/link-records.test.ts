@@ -59,7 +59,7 @@ describe("link records (ADR-0079 section 4)", () => {
     const s = new SyncedState();
     const id = new Uint8Array(16).fill(3);
     const secret = new Uint8Array(12).fill(4);
-    const record = new LinkRecord(id, secret, LinkRecordKind.Contact, new Uint8Array(0), new Uint8Array(0), 1_000n, 5, 1n, "");
+    const record = new LinkRecord(id, secret, LinkRecordKind.Contact, new Uint8Array(6).fill(6), new Uint8Array(32).fill(0x11), 1_000n, 5, 1n, "");
     expect(s.setLinkRecord(5n, record)).toBe(true);
     const bob = new Uint8Array(32).fill(0xb0);
     // Add pressed before the expiry; this device online long after it: accepted.

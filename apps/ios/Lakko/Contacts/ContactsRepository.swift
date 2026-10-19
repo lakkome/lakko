@@ -1374,8 +1374,9 @@ public final class ContactsRepository: ObservableObject {
         }
 
         // ADR-0028 amendment 2026-09-28 — the ledger gets the SEALED blob and
-        // the clear fields; the link carries the secret in its fragment. A
-        // contact invite has no inline form, so an upload failure is an error.
+        // the clear fields; the link carries the secret in its fragment. An
+        // upload failure is an error and mints no link (there is no inline
+        // form).
         let discovery = authenticatedDiscoveryClient()
         // ADR-0078 section 10: the ledger row carries a key minted for this
         // link alone, never the account key; the seed stays on this device.
@@ -1580,7 +1581,8 @@ public final class ContactsRepository: ObservableObject {
                     outstandingInvites: state.outstandingInvites.filter { $0.blobId != link.blobId })
             }
         }
-        // A scope with no ledger row (an inline link) has nothing to revoke.
+        // A scope with no ledger row (a link whose upload never landed) has
+        // nothing to revoke.
         for link in reach.spentLinks where link.blobIdB64 == nil {
             reach.forgetSpentLink(linkIdB64: link.linkIdB64)
         }
@@ -1737,8 +1739,8 @@ public final class ContactsRepository: ObservableObject {
 
     /// The 6-byte ledger id an `/i/<slug>` names, or `nil` for any other slug:
     /// exactly 8 base64url characters decoding to ``DiscoveryClient`` 's id
-    /// width. A contact invite has no inline form, so the retired 43-character
-    /// id and everything else are refused before any request.
+    /// width. The retired 43-character id, an inline sealed blob (the removed
+    /// form) and everything else are refused before any request.
     public nonisolated static func parseInviteSlug(_ slug: String) -> Data? {
         guard slug.count == Int(inviteBlobIdUrlLen()),
               isBase64Url(slug),

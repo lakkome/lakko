@@ -174,7 +174,7 @@ store gate and persist-before-publish rules).
 | C-27 | Cross-party `CallKey` seeds agree across the bootstrap path |
 | C-28 | Owner fingerprint enables OOB anti-phishing verification |
 | C-29 | Server-side call-invite ledger handler invariants |
-| C-30 | `/c/<slug>` URL plumbing — discrimination contract |
+| C-30 | `/c/<slug>` URL plumbing — discrimination contract (since 2026-10-19 every link is the 6-byte ledger pointer; an inline slug is refused before any request and a failed upload mints no link) |
 | C-31 | Composer + acceptor pipelines — single-call surface contract |
 | C-32 | Call-Welcome envelope reuses ContactRequest transport with domain separation |
 | C-33 | Call KeyPackage-forward envelope for subsequent joiners |

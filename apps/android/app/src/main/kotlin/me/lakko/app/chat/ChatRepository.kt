@@ -3692,12 +3692,11 @@ public class ChatRepository(
         // the server-side anti-abuse surface (per-joiner consume dedup + soft
         // max_uses) -- and share the short pointer URL. The upload is
         // bearer-gated, so it runs on a client carrying the session token read
-        // NOW; no session is a loud failure. Only a transport failure (a
-        // censored / offline network) falls back to the inline form over the
-        // sealed bytes; a server refusal is thrown. `max_uses` is a soft
-        // throttle, not an access control: the admin approval gate stays the
-        // boundary. Either form carries the fragment; `Copy link` copies the
-        // whole string.
+        // NOW; no session is a loud failure, and so is any failed upload, a
+        // network one included (no link is minted; the inline form was
+        // removed on 2026-10-19). `max_uses` is a soft throttle, not an
+        // access control: the admin approval gate stays the boundary. The
+        // link carries the fragment; `Copy link` copies the whole string.
         // ADR-0078 section 10: the ledger row carries a key minted for this
         // link alone, never the issuer's identity key; its seed is kept in
         // this device's record of the link and is the only thing that
@@ -3709,14 +3708,14 @@ public class ChatRepository(
             expiryMs = 0L,
             maxUses = 0xFFFFFFFFL,
         )
-        val blobId = uploadGroupInviteOrNull(
+        val blobId = uploadGroupInvite(
             sessionToken = keyPackageAccount.get()?.sessionToken,
             clientFactory = keyPackageDiscoveryFactory,
             upload = { client -> client.uploadGroupInvite(upload) },
             log = { message -> android.util.Log.w("ChatRepository", message) },
         )
         val accountIdB64 = currentAccountIdB64.get()
-        if (blobId != null && accountIdB64 != null) {
+        if (accountIdB64 != null) {
             me.lakko.app.contacts.OwnLinkStores.current.put(
                 accountIdB64,
                 me.lakko.app.contacts.OwnLinks.record(
@@ -3732,18 +3731,15 @@ public class ChatRepository(
             origin = GROUP_INVITE_DEFAULT_ORIGIN,
             prefix = GROUP_INVITE_URL_PREFIX,
             blobId = blobId,
-            sealed = mint.sealed,
             linkSecret = mint.linkSecret,
         )
     }
 
     /**
      * ADR-0028 revoke — the issuer revokes a previously-created group invite
-     * link. Only the server-backed pointer form (a 6-byte ledger id) is
-     * revocable; an inline link has no ledger row. Returns `true` when a ledger
-     * row was revoked, `false` for an inline / malformed link, or one this
-     * device keeps no revocation key for (ADR-0078 section 10: it lives until
-     * it expires).
+     * link. Returns `true` when its ledger row was revoked, `false` for a
+     * malformed link, or one this device keeps no revocation key for
+     * (ADR-0078 section 10: it lives until it expires).
      */
     public suspend fun revokeGroupInviteLink(link: String): Boolean =
         forSession { revokeGroupInviteLinkOnMlsThread(link = link) }
@@ -3761,7 +3757,6 @@ public class ChatRepository(
             return false
         }
         return when (parsed) {
-            is ParsedGroupInvite.Inline -> false
             is ParsedGroupInvite.Pointer -> {
                 val store = me.lakko.app.contacts.OwnLinkStores.current
                 val ownSlug = me.lakko.app.auth.base64UrlEncodeNoPad(parsed.blobId)
@@ -3793,26 +3788,23 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the SEALED link bytes,
-     * fetching from the discovery ledger when the slug is a 6-byte ledger-id
-     * pointer (the production form) or passing the bytes
-     * straight through when it is an inline sealed link (the censored-region
-     * fallback). Returns the sealed bytes + the `blobId` (non-null only for the
-     * pointer form) so the caller can open them under the fragment
+     * ADR-0028 (G-3) — resolve a `/g/<slug>` slug (a 6-byte ledger id) to the
+     * SEALED link bytes, fetched from the discovery ledger. Returns the sealed
+     * bytes + the `blobId` so the caller can open them under the fragment
      * ([inspectGroupInvite]) and drive the consume gate before requesting to
-     * join.
+     * join. Any other slug (an inline sealed blob, the form removed on
+     * 2026-10-19, included) is malformed.
      */
-    public suspend fun resolveGroupInviteSlug(slug: String): Pair<ByteArray, ByteArray?> =
+    public suspend fun resolveGroupInviteSlug(slug: String): Pair<ByteArray, ByteArray> =
         forSession { resolveGroupInviteSlugOnMlsThread(slug = slug) }
 
-    private suspend fun resolveGroupInviteSlugOnMlsThread(slug: String): Pair<ByteArray, ByteArray?> {
+    private suspend fun resolveGroupInviteSlugOnMlsThread(slug: String): Pair<ByteArray, ByteArray> {
         val parsed = try {
             parseGroupInviteSlug(slug)
         } catch (e: GroupInviteUrlException) {
             throw ChatError("group invite link is malformed", e)
         }
         return when (parsed) {
-            is ParsedGroupInvite.Inline -> Pair(parsed.capabilityBytes, null)
             is ParsedGroupInvite.Pointer -> {
                 val fetched = try {
                     discovery.fetchGroupInvite(parsed.blobId)
@@ -3899,14 +3891,14 @@ public class ChatRepository(
     public suspend fun requestToJoinFromLink(
         capabilityWire: ByteArray,
         nowMs: ULong,
-        blobId: ByteArray? = null,
+        blobId: ByteArray,
     ): Pair<ByteArray, ByteArray> =
         forSession { requestToJoinFromLinkOnMlsThread(capabilityWire = capabilityWire, nowMs = nowMs, blobId = blobId) }
 
     private suspend fun requestToJoinFromLinkOnMlsThread(
         capabilityWire: ByteArray,
         nowMs: ULong,
-        blobId: ByteArray? = null,
+        blobId: ByteArray,
     ): Pair<ByteArray, ByteArray> {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException(
@@ -3931,13 +3923,12 @@ public class ChatRepository(
                 IllegalStateException("expired"),
             )
         }
-        // ADR-0028 OQ1 -- when the link was a server-backed pointer, register one
-        // consume against the ledger's soft `max_uses` ceiling before posting the
-        // request (anti-abuse defence-in-depth; the admin approval gate remains
-        // the real boundary). A repeat from this joiner is idempotent. Inline
-        // links (no `blobId`) skip this -- there is no ledger row.
+        // ADR-0028 OQ1 -- register one consume against the ledger's soft
+        // `max_uses` ceiling before posting the request (anti-abuse
+        // defence-in-depth; the admin approval gate remains the real
+        // boundary). A repeat from this joiner is idempotent.
         val accountIdB64 = currentAccountIdB64.get()
-        if (blobId != null && accountIdB64 != null) {
+        if (accountIdB64 != null) {
             val joinerAccountId = me.lakko.app.auth.base64Decode(accountIdB64)
             val outcome = try {
                 discovery.consumeGroupInvite(

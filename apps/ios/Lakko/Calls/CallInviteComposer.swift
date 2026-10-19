@@ -56,16 +56,12 @@ public enum CallInviteComposer {
     /// revoke flow, and keeps ``callId`` around for the in-
     /// call signaling layer.
     public struct Composed: Sendable, Equatable {
-        /// Raw 6-byte ledger `blob_id` the server minted, or `nil`
-        /// for the inline link a TRANSPORT failure of the upload
-        /// falls back to (no ledger row, nothing to revoke). Pass
-        /// a present id to
+        /// Raw 6-byte ledger `blob_id` the server minted. Pass it to
         /// ``DiscoveryClient/revokeCallInvite(blobId:signingSeed:)``
         /// with ``revocationSeed`` when the owner cancels the link.
-        public let blobId: Data?
+        public let blobId: Data
         /// The full `<origin>/c/<slug>#<secret>` URL the owner
-        /// shares — base64url-no-pad of ``blobId`` (or of the
-        /// sealed link bytes for the inline form), the link
+        /// shares — base64url-no-pad of ``blobId``, the link
         /// secret after `#`.
         public let url: String
         /// The 16-byte `call_id` embedded in the capability —
@@ -179,14 +175,12 @@ public enum CallInviteComposer {
 
         // ---- 3. uploadCallInvite via HTTP --------------------
         // ADR-0028 amendment 2026-09-28 — the ledger gets the SEALED blob and
-        // the clear fields only. Only a TRANSPORT failure (a censored or
-        // offline network) falls back to the inline form, which carries the
-        // sealed blob in the URL; a refusal from the server surfaces.
-        // ADR-0078 section 10: the ledger row carries a key minted for this
-        // link alone, never the owner's identity key.
+        // the clear fields only. Any failed upload, a network one included,
+        // mints no link and surfaces (the inline form was removed on
+        // 2026-10-19). ADR-0078 section 10: the ledger row carries a key
+        // minted for this link alone, never the owner's identity key.
         let revocation = try LinkRevocationKey.fresh()
-        let (blobId, base) = try await pointerOrInlineBase(
-            sealed: mint.sealed,
+        let (blobId, base) = try await pointerBase(
             origin: origin,
             upload: {
                 try await discoveryClient.uploadCallInvite(
@@ -214,31 +208,16 @@ public enum CallInviteComposer {
 
 extension CallInviteComposer {
     /// Upload the sealed link and build the pointer base
-    /// `<origin>/c/<id>`; on a TRANSPORT failure of the upload
-    /// only, the inline base `<origin>/c/<b64url sealed>` with no
-    /// ledger id (web and Android do the same). Any other upload
-    /// error is rethrown. Split out so the rule is host-testable.
-    static func pointerOrInlineBase(
-        sealed: Data,
+    /// `<origin>/c/<id>`. Every upload error, a network one
+    /// included, is rethrown: there is no link without a ledger
+    /// row (web and Android do the same). Split out so the rule
+    /// is host-testable.
+    static func pointerBase(
         origin: String,
         upload: () async throws -> Data
-    ) async throws -> (blobId: Data?, base: String) {
-        do {
-            let blobId = try await upload()
-            return (blobId, try CallInviteUrl.composePointerCallInviteUrl(blobId: blobId, origin: origin))
-        } catch let error where uploadFallsBackInline(error) {
-            NSLog("call invite upload failed (network); sharing the inline link")
-            let base = (try? CallInviteUrl.composeInlineCallInviteUrl(capabilityBytes: sealed, origin: origin))
-                ?? CallInviteUrl.composeCallInviteUrl(sealed, origin: origin)
-            return (nil, base)
-        }
-    }
-
-    /// Whether an upload error is a transport failure (the one case that
-    /// falls back to the inline link).
-    static func uploadFallsBackInline(_ error: Swift.Error) -> Bool {
-        if let discovery = error as? DiscoveryClientError, case .network = discovery { return true }
-        return error is URLError
+    ) async throws -> (blobId: Data, base: String) {
+        let blobId = try await upload()
+        return (blobId, try CallInviteUrl.composePointerCallInviteUrl(blobId: blobId, origin: origin))
     }
 }
 

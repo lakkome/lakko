@@ -4,9 +4,9 @@
 //! The sealed form every invite link carries (`/i/`, `/c/`, `/g/`) — the
 //! 2026-09-28 security-pass amendment of ADR-0028 and ADR-0009.
 //!
-//! A link is `https://<host>/<k>/<id>#<secret>` (a pointer into the discovery
-//! ledger) or `https://<host>/<k>/<sealed blob>#<secret>` (the inline
-//! fallback when the upload failed). Either way the **signed capability is
+//! A link is `https://<host>/<k>/<id>#<secret>`, a pointer into the discovery
+//! ledger (the inline form that carried the sealed blob in the path was
+//! removed on 2026-10-19: a failed upload mints no link). The **signed capability is
 //! encrypted** under a key derived from a random [`LINK_SECRET_LEN`]-byte
 //! secret that rides in the URL **fragment**. A fragment never reaches a
 //! server, so the discovery ledger stores ciphertext only, and a link without

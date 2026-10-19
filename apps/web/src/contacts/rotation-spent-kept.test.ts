@@ -17,8 +17,6 @@ import {
 import {
   decodeMintedLink,
   encodeMintedLink,
-  inlineLinkSlug,
-  isInlineLinkSlug,
   parseMintedRowKey,
 } from "./minted-links";
 import {
@@ -197,13 +195,6 @@ describe("the links this device minted itself", () => {
     expect(parseMintedRowKey(`${ACCOUNT}|group|slug`, ACCOUNT)).toEqual({ kind: "group", blobIdSlug: "slug" });
     expect(parseMintedRowKey(`${ACCOUNT}|other|slug`, ACCOUNT)).toBeNull();
     expect(parseMintedRowKey(`${ACCOUNT}|call|`, ACCOUNT)).toBeNull();
-  });
-
-  it("a call link minted while the ledger was unreachable has a row with no ledger id", () => {
-    const slug = inlineLinkSlug("AAAA");
-    expect(isInlineLinkSlug(slug)).toBe(true);
-    expect(isInlineLinkSlug("AAAA")).toBe(false);
-    expect(parseMintedRowKey(`${ACCOUNT}|call|${slug}`, ACCOUNT)).toEqual({ kind: "call", blobIdSlug: slug });
   });
 });
 

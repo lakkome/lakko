@@ -2,14 +2,12 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `ContactsClient.createGroupInviteLink` — when the short ledger link is
- * given up for the inline one.
+ * `ContactsClient.createGroupInviteLink` — the short ledger link, or an
+ * error.
  *
- * The inline form is for a TRANSPORT failure only (a censored or offline
- * network). A server answer — a 401 from a client with no session token, a
- * 429, a 5xx — surfaces as an error instead: silently falling back is how a
- * missing bearer token went unnoticed, every link coming out as the huge
- * inline URL. The log names the status and never the capability.
+ * There is no inline form (removed 2026-10-19): any failed upload, a network
+ * one included, mints no link and surfaces as an error the page shows with a
+ * retry. The log names the status and never the capability.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -59,7 +57,7 @@ afterEach(() => {
   uploaded = [];
 });
 
-describe("createGroupInviteLink — pointer, inline, or an error", () => {
+describe("createGroupInviteLink — pointer, or an error", () => {
   it("returns the short pointer link when the upload lands", async () => {
     const client = clientWith(async () => new Uint8Array(6).fill(0xff));
     const link = await client.createGroupInviteLink(null, GROUP, 0n, "https://x.test", PREVIEW, 7);
@@ -79,16 +77,17 @@ describe("createGroupInviteLink — pointer, inline, or an error", () => {
     ]);
   });
 
-  it("falls back to the inline link on a transport failure", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("mints no link on a network failure: the error surfaces", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const client = clientWith(async () => {
       throw new DiscoveryNetworkError("/discovery/group-invite", new TypeError("offline"));
     });
-    const link = await client.createGroupInviteLink(null, GROUP, 0n, "https://x.test", PREVIEW);
-    const [slug, fragment] = (link.split("/g/")[1] ?? "").split("#");
-    expect((slug ?? "").length).toBeGreaterThan(43);
-    // The inline sealed form carries the secret too; without it nothing opens.
-    expect(fragment).toBe("BwcHBwcHBwcHBwcH");
+    await expect(
+      client.createGroupInviteLink(null, GROUP, 0n, "https://x.test", PREVIEW),
+    ).rejects.toThrow();
+    const logged = warn.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
+    expect(logged).toContain("network");
+    expect(logged).not.toContain("QUFB");
   });
 
   it("surfaces a server refusal and logs its status, never the capability", async () => {

@@ -2306,10 +2306,6 @@
       "text": "Про групу",
       "status": "machine"
     },
-    "chat.invite_link.cleared": {
-      "text": "Посилання прибрано (у вбудованого посилання нічого відкликати).",
-      "status": "machine"
-    },
     "chat.invite_link.copy": {
       "text": "Копіювати посилання",
       "status": "machine"
@@ -6132,10 +6128,6 @@
     },
     "invite.links.for_new_user": {
       "text": "Для новачка в Lakko",
-      "status": "machine"
-    },
-    "invite.links.inline_note": {
-      "text": "Lakko не вдалося скоротити це посилання, тому воно довге. Воно працює так само, але його не можна відкликати.",
       "status": "machine"
     },
     "invite.links.label_field": {

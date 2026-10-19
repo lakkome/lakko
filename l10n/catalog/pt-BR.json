@@ -2306,10 +2306,6 @@
       "text": "Informações do grupo",
       "status": "machine"
     },
-    "chat.invite_link.cleared": {
-      "text": "Link removido (um link direto não tem nada a revogar).",
-      "status": "machine"
-    },
     "chat.invite_link.copy": {
       "text": "Copiar link",
       "status": "machine"
@@ -6132,10 +6128,6 @@
     },
     "invite.links.for_new_user": {
       "text": "Para alguém novo no Lakko",
-      "status": "machine"
-    },
-    "invite.links.inline_note": {
-      "text": "O Lakko não conseguiu encurtar este link, por isso ele é longo. Ele funciona do mesmo jeito e não pode ser revogado.",
       "status": "machine"
     },
     "invite.links.label_field": {

@@ -865,6 +865,14 @@ lakko-svc-discovery test count: 28 → 38.
 
 ### C-30: `/c/<slug>` URL plumbing — discrimination contract
 
+**Amended 2026-10-19 (the inline form is removed, ADR-0028 / ADR-0009 head
+notes).** There is no discrimination left: a `/c/`, `/g/` or `/i/` slug is
+the 6-byte ledger id (8 base64url characters) or it is refused before any
+request, so a link in the old inline shape opens as a dead link; a failed
+upload mints no link on any client. The byte-length rule, the inline floor
+and the inline tests below are history (the 32-byte id was already replaced
+by the 6-byte one on 2026-09-27).
+
 The owner-shared URL has the shape
 `<origin>/c/<base64url>`. The joiner-side dispatcher
 discriminates pointer (server-backed) vs. inline (censored-

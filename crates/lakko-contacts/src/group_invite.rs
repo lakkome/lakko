@@ -55,8 +55,8 @@
 //!
 //! The whole signed capability now travels sealed under the same link secret
 //! ([`crate::link_seal`], [`seal_link`] / [`open_link`]): the discovery
-//! ledger stores the sealed blob only, a link is `/g/<id>#<secret>` or (the
-//! inline fallback) `/g/<sealed blob>#<secret>`, and a link without its
+//! ledger stores the sealed blob only, a link is `/g/<id>#<secret>` (the inline
+//! form was removed on 2026-10-19), and a link without its
 //! fragment is damaged rather than accepting whatever capability the ledger
 //! returns. The preview stays sealed separately INSIDE the capability, not
 //! folded into its plaintext, because the plaintext capability travels

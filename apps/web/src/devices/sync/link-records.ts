@@ -32,7 +32,7 @@ export interface LinkRecordModel {
   /** The link's 12-byte secret (the URL fragment). SECRET. */
   readonly linkSecret: Uint8Array;
   readonly kind: LinkRecordKind;
-  /** The 6-byte ledger id, empty for an inline link. */
+  /** The 6-byte ledger id. */
   readonly ledgerId: Uint8Array;
   /** The 32-byte seed that deletes the ledger row (ADR-0078 section 10),
    *  empty when there is no row. SECRET. */
@@ -58,7 +58,7 @@ export interface NewLinkRecord {
   readonly linkSecret: Uint8Array;
   readonly kind: LinkRecordKind;
   readonly ledgerId: Uint8Array;
-  /** The seed the ledger row was created under; empty for an inline link. */
+  /** The 32-byte seed the ledger row was created under. */
   readonly revocationSeed: Uint8Array;
   readonly expiryMs: number;
   readonly maxUses: number;

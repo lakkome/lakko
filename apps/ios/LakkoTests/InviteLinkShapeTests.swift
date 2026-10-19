@@ -66,12 +66,20 @@ final class InviteLinkShapeTests: XCTestCase {
         XCTAssertEqual(link.count, "https://lakko.me/g/".count + 8 + 1 + 16)
     }
 
-    func testAGroupInlineLinkParsesBackToTheSealedBlob() throws {
-        let wire = try mintWithPreview(groupId: Data(repeating: 7, count: 32)).sealed
-        let url = try GroupInviteUrl.composeInlineGroupInviteUrl(
-            capabilityBytes: wire, origin: "https://lakko.me")
-        let slug = String(url.dropFirst("https://lakko.me/g/".count))
-        XCTAssertEqual(try GroupInviteUrl.parseGroupInviteSlug(slug), .inline(capabilityBytes: wire))
+    /// The inline form is gone (2026-10-19): a sealed blob in the path is a
+    /// malformed slug on every kind, so the link opens as a dead one.
+    func testAnInlineSlugIsRefusedOnEveryKind() throws {
+        let sealed = try mintWithPreview(groupId: Data(repeating: 7, count: 32)).sealed
+        let slug = base64UrlEncodeNoPad(sealed)
+        XCTAssertThrowsError(try GroupInviteUrl.parseGroupInviteSlug(slug))
+        XCTAssertThrowsError(try CallInviteUrl.parseCallInviteSlug(slug))
+        XCTAssertNil(ContactsRepository.parseInviteSlug(slug))
+        for len in [100, 400, 938] {
+            let other = base64UrlEncodeNoPad(Data(repeating: 0x33, count: len))
+            XCTAssertThrowsError(try GroupInviteUrl.parseGroupInviteSlug(other))
+            XCTAssertThrowsError(try CallInviteUrl.parseCallInviteSlug(other))
+            XCTAssertNil(ContactsRepository.parseInviteSlug(other))
+        }
     }
 
     func testAGroupSlugOfAnyOtherShapeIsRefused() {
@@ -102,14 +110,6 @@ final class InviteLinkShapeTests: XCTestCase {
         let slug = String(url.dropFirst("https://lakko.me/c/".count))
         XCTAssertEqual(slug.count, 8)
         XCTAssertEqual(try CallInviteUrl.parseCallInviteSlug(slug), .pointer(blobId: blobId))
-    }
-
-    func testACallInlineLinkParsesBack() throws {
-        let bytes = Data(repeating: 0x33, count: CallInviteUrl.inlineMinLen)
-        let url = try CallInviteUrl.composeInlineCallInviteUrl(
-            capabilityBytes: bytes, origin: "https://lakko.me")
-        let slug = String(url.dropFirst("https://lakko.me/c/".count))
-        XCTAssertEqual(try CallInviteUrl.parseCallInviteSlug(slug), .inline(capabilityBytes: bytes))
     }
 
     func testACallSlugOfTheRetiredWidthIsRefused() {
@@ -206,23 +206,38 @@ final class InviteLinkShapeTests: XCTestCase {
 
     // MARK: - The landing, end to end
 
-    func testTheLandingRefusesAWrongSecretOnAnInlineLink() async throws {
+    func testTheLandingRefusesAWrongSecret() async throws {
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
         let vm = try landing(
-            slug: base64UrlEncodeNoPad(mint.sealed),
+            slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug,
             fragment: anySecretShape,
-            scope: GroupInviteDiscoveryURLProtocol.freshScope(.ok))
+            scope: GroupInviteDiscoveryURLProtocol.freshScope(.capability(mint.sealed)))
         await vm.run()
         XCTAssertEqual(vm.state, .damaged)
         XCTAssertNil(vm.preview)
     }
 
-    func testTheLandingShowsThePreviewUnderTheRightSecret() async throws {
+    /// An inline `/g/` link (the removed form) opens as an invalid link and
+    /// asks the ledger nothing, even under its own secret.
+    func testTheLandingTreatsAnInlineLinkAsDead() async throws {
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
+        let scope = GroupInviteDiscoveryURLProtocol.freshScope(.capability(mint.sealed))
         let vm = try landing(
             slug: base64UrlEncodeNoPad(mint.sealed),
             fragment: base64UrlEncodeNoPad(mint.linkSecret),
-            scope: GroupInviteDiscoveryURLProtocol.freshScope(.ok))
+            scope: scope)
+        await vm.run()
+        XCTAssertEqual(vm.state, .invalid)
+        XCTAssertTrue(GroupInviteDiscoveryURLProtocol.requests(scope)
+            .filter { $0.path.hasPrefix("/discovery/") }.isEmpty)
+    }
+
+    func testTheLandingShowsThePreviewUnderTheRightSecret() async throws {
+        let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
+        let vm = try landing(
+            slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug,
+            fragment: base64UrlEncodeNoPad(mint.linkSecret),
+            scope: GroupInviteDiscoveryURLProtocol.freshScope(.capability(mint.sealed)))
         await vm.run()
         XCTAssertEqual(vm.state, .ready)
         XCTAssertEqual(vm.preview?.groupName, "Hiking club")

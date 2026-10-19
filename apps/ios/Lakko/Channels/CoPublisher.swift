@@ -118,9 +118,12 @@ public enum CoPublisher {
     /// the ADR-0027/0028 external-join machinery). `0` = never expires.
     ///
     /// ADR-0028 amendment 2026-09-28 — the capability is sealed under a 12-byte
-    /// link secret that rides the fragment. A co-publisher link was never put
-    /// on the discovery ledger, so it keeps the inline shape:
-    /// `<origin>/g/<b64url sealed>#<secret>`.
+    /// link secret that rides the fragment, and the sealed blob is uploaded to
+    /// the group-invite ledger like any `/g/` link: `<origin>/g/<id>#<secret>`.
+    /// It was always the inline form until 2026-10-19, when the inline form
+    /// was removed: a failed upload, a network one included, mints no link and
+    /// throws. The link's revocation seed is kept in this device's record of
+    /// its links (``OwnLinkStore``) for `accountIdB64`, as for a group link.
     ///
     /// ADR-0078 section 6 — the joiner cannot recover the channel id from the
     /// group id any more, so the capability's sealed preview carries it (and
@@ -129,8 +132,10 @@ public enum CoPublisher {
         identity: Identity,
         publisherGroup: PublisherGroup,
         channelName: String? = nil,
-        origin: String = defaultOrigin
-    ) throws -> String {
+        origin: String = defaultOrigin,
+        discovery: DiscoveryClient = DiscoveryClient(sessionToken: AmbientSessionToken.shared.current),
+        accountIdB64: String?
+    ) async throws -> String {
         let groupId = try publisherGroup.groupId()
         let mint = try composeCoPublisherInviteCapability(
             issuerSigningSeed: identity.ed25519Seed(),
@@ -139,8 +144,19 @@ public enum CoPublisher {
             channelId: try publisherGroup.channelId(),
             channelName: channelName
         )
+        // ADR-0078 section 10: the ledger row carries a key minted for this
+        // link alone. No use limit: the owner's approval is the boundary.
+        let revocation = try LinkRevocationKey.fresh()
+        let blobId = try await discovery.uploadGroupInvite(
+            mint: mint, revocationPubkey: revocation.publicKey, expiryMs: 0, maxUses: UInt32.max)
+        if let accountIdB64 {
+            OwnLinkStore.shared.put(accountIdB64: accountIdB64, OwnLink(
+                kind: .group, slug: base64UrlEncodeNoPad(blobId), revocationSeed: revocation.seed,
+                label: "", expiryMs: 0, maxUses: Int64(UInt32.max), bootstrapReferral: false,
+                mintedAtMs: Int64(Date().timeIntervalSince1970 * 1000)))
+        }
         return InviteLinkSecret.link(
-            base: "\(origin)\(urlPrefix)\(Self.base64UrlEncode(mint.sealed))",
+            base: try GroupInviteUrl.composePointerGroupInviteUrl(blobId: blobId, origin: origin),
             secret: mint.linkSecret)
     }
 
@@ -481,22 +497,26 @@ public enum CoPublisher {
         identity: Identity,
         accountIdB64: String?,
         link: String,
+        discovery: DiscoveryClient = DiscoveryClient(),
         persistProposalKeys: @escaping @MainActor () throws -> Void = {
             try ChannelPublisherIdentity.shared.persistOrThrow()
         }
     ) async throws -> CoPublishRequest {
-        // ADR-0028 amendment 2026-09-28 — `<origin>/g/<b64url sealed>#<secret>`:
-        // the capability is sealed under the fragment's secret.
+        // ADR-0028 amendment 2026-09-28 — `<origin>/g/<id>#<secret>`: the
+        // sealed capability is fetched from the ledger and opened under the
+        // fragment's secret. An inline slug (the form removed on 2026-10-19)
+        // is not a co-publisher link.
         let parts = InviteLinkSecret.split(link)
-        guard let idx = parts.base.range(of: urlPrefix, options: .backwards) else {
-            throw CoPublisherError.notACoPublisherLink(parts.base)
-        }
-        let slug = String(parts.base[idx.upperBound...])
-        guard let sealed = Self.base64UrlDecode(slug) else {
-            throw CoPublisherError.notACoPublisherLink(parts.base)
+        guard let idx = parts.base.range(of: urlPrefix, options: .backwards),
+              case .pointer(let blobId) = try? GroupInviteUrl.parseGroupInviteSlug(
+                String(parts.base[idx.upperBound...])) else {
+            throw CoPublisherError.notACoPublisherLink
         }
         guard let secret = InviteLinkSecret.read(parts.fragment) else {
             throw CoPublisherError.linkDamaged
+        }
+        guard let sealed = try await discovery.fetchGroupInvite(blobId: blobId) else {
+            throw CoPublisherError.notACoPublisherLink
         }
         let cap: GroupInviteCapability
         do {
@@ -704,7 +724,8 @@ public enum CoPublisherError: Error, LocalizedError {
     case badChannelId(String)
     case unexpectedServerEpoch(UInt32)
     case malformedSubscriberHex(String)
-    case notACoPublisherLink(String)
+    /// Not a `/g/` ledger link, or one whose row is gone (revoked, expired).
+    case notACoPublisherLink
     case notAChannelGroup
     /// ADR-0028 amendment 2026-09-28 — the link's secret is missing or the
     /// capability does not open under it.
@@ -718,8 +739,8 @@ public enum CoPublisherError: Error, LocalizedError {
             return "unexpected server epoch \(epoch) — cannot reseal"
         case .malformedSubscriberHex(let hex):
             return "subscriber pubkey hex is not valid: \(hex)"
-        case .notACoPublisherLink(let link):
-            return "not a /g/ co-publisher link: \(link)"
+        case .notACoPublisherLink:
+            return "not a live /g/ co-publisher link"
         case .notAChannelGroup:
             return "co-publisher link does not target a channel PublisherGroup"
         case .linkDamaged:

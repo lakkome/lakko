@@ -172,8 +172,8 @@ fn invite_link_error(e: ContactError) -> JsValue {
 }
 
 /// What every invite compose returns (`/i/`, `/c/`, `/g/`): the sealed blob
-/// to upload (or base64url-encode into the inline `/<k>/<sealed>#<secret>`
-/// link), the fresh 12-byte link secret for the URL fragment only, and the
+/// to upload to the ledger (no inline form since 2026-10-19), the fresh
+/// 12-byte link secret for the URL fragment only, and the
 /// issuer's 32-byte Ed25519 key the upload carries in clear for the revoke.
 #[wasm_bindgen(js_name = InviteLinkMint)]
 pub struct WasmInviteLinkMint {
@@ -1618,8 +1618,8 @@ impl InviteCapability {
         })
     }
 
-    /// Joiner-side: open an `/i/` link's sealed blob (fetched by id, or the
-    /// inline path segment) with the 12-byte secret from the URL fragment and
+    /// Joiner-side: open an `/i/` link's sealed blob (fetched from the
+    /// ledger by id) with the 12-byte secret from the URL fragment and
     /// verify the capability inside. Does NOT check expiry.
     ///
     /// # Errors
@@ -1882,7 +1882,7 @@ pub fn compute_joiner_invite_tag(
 /// Compose + sign a call-invite capability (Phase 3c3) and seal it for a
 /// `/c/` link under a fresh link secret (the 2026-09-28 security pass).
 /// Returns an `InviteLinkMint`; the link is `/c/<id>#<secret>` after the
-/// upload, or `/c/<base64url sealed>#<secret>` inline.
+/// upload.
 ///
 /// Same shape as `composeInviteCapability` but for a
 /// link-based group-call invite. The owner embeds a

@@ -31,8 +31,8 @@ import me.lakko.app.l10n.UiText
  */
 
 /**
- * Append the link secret to a finished `/g/<slug>` URL as its fragment. Both
- * the pointer and the inline form take the same suffix; `Copy link` copies it
+ * Append the link secret to a finished `/g/<slug>` URL as its fragment:
+ * the link takes the suffix; `Copy link` copies it
  * whole.
  *
  * @throws IllegalArgumentException when [linkSecret] is not the core's secret

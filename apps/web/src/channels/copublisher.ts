@@ -13,7 +13,7 @@
  *
  *   - `openPublisherGroup` — open/create the persistent PublisherGroup handle.
  *   - `createCoPublisherLink` — mint a `/g/<slug>` invite over the
- *     PublisherGroup's MLS `group_id` (an inline link; the owner shares it).
+ *     PublisherGroup's MLS `group_id`, uploaded to the group-invite ledger.
  *   - `pollCoPublisherJournal` — poll the PublisherGroup's DS journal and apply
  *     incoming MLS messages (external-join proposals + co-publisher commits) via
  *     the role-gated path, surfacing pending requests.
@@ -82,7 +82,10 @@ import {
 } from "../ds/access";
 import { openOwnRow, sealRowFor } from "../contacts/mailbox-row";
 import { takeKnockReadSlot } from "../chat/knock-cursor";
-import { base64Encode } from "../auth/account-id";
+import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
+import type { DiscoveryClient } from "../discovery/client";
+import { rememberMintedLink } from "../contacts/minted-links";
+import { newRevocationKey } from "../contacts/own-links";
 import { withGroupMlsLock } from "../mls/group-lock";
 import { appointCoPublisher, fetchEpoch, rememberPublisherRole } from "./api";
 import { channelsActions, channelsState } from "../state/channels-state";
@@ -190,22 +193,27 @@ export function registerPublisherGroupAccess(
 
 /** Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`. A
  *  non-member opens it, requests to join, and the owner approves (reusing the
- *  ADR-0027/0028 external-join machinery). Inline link — the channel owner
- *  shares it out-of-band; `0n` = never expires. The capability is sealed under
- *  a fresh link secret carried in the fragment (2026-09-28 security pass):
- *  `<origin>/g/<sealed>#<secret>`. */
+ *  ADR-0027/0028 external-join machinery); `0n` = never expires. The
+ *  capability is sealed under a fresh link secret carried in the fragment
+ *  (2026-09-28 security pass) and uploaded to the group-invite ledger like any
+ *  `/g/` link: `<origin>/g/<id>#<secret>`. It was always the inline form until
+ *  2026-10-19, when the inline form was removed; a failed upload mints no link
+ *  and throws. This device keeps the link's revocation seed in its record of
+ *  minted links (`accountIdB64`), as for a group link. */
 export async function createCoPublisherLink(
   identity: Identity,
   publisherGroup: PublisherGroup,
   origin: string,
+  discovery: Pick<DiscoveryClient, "uploadGroupInvite">,
+  accountIdB64: string | null,
 ): Promise<string> {
   const wasm = await loadWasm();
   const groupId = publisherGroup.groupId();
   const channelId = publisherGroup.channelId();
   // Sealed-link amendment of ADR-0028 (2026-09-28): the capability is sealed
-  // under a fresh link secret that rides in the fragment. Always the inline
-  // form (never uploaded to the ledger). ADR-0078 section 6: the channel id
-  // (and its name) ride the sealed preview; the group id names no channel.
+  // under a fresh link secret that rides in the fragment. ADR-0078 section 6:
+  // the channel id (and its name) ride the sealed preview; the group id names
+  // no channel.
   const name = channelsState.metaByChannel().get(bytesToHex(channelId))?.name;
   const mint = wasm.composeCoPublisherInviteCapability(
     identity.ed25519Seed,
@@ -214,18 +222,34 @@ export async function createCoPublisherLink(
     channelId,
     name === undefined || name.length === 0 ? undefined : name,
   );
-  try {
-    return composeSealedInviteLink({
-      origin,
-      prefix: GROUP_INVITE_URL_PREFIX,
-      blobId: null,
-      sealed: mint.sealed,
-      secret: mint.linkSecret,
-      widths: inviteLinkWidths(wasm),
+  const sealed = mint.sealed;
+  const linkSecret = mint.linkSecret;
+  mint.free();
+  // ADR-0078 section 10: the ledger row carries a key minted for this link
+  // alone. No use limit: the owner's approval is the boundary.
+  const revocation = await newRevocationKey();
+  const maxUses = 0xff_ff_ff_ff;
+  const blobId = await discovery.uploadGroupInvite({
+    sealed,
+    revocationPubkey: revocation.publicKey,
+    expiryMs: 0n,
+    maxUses,
+  });
+  if (accountIdB64 !== null) {
+    await rememberMintedLink(accountIdB64, "group", base64UrlEncodeNoPad(blobId), {
+      linkSecret,
+      linkId: new Uint8Array(),
+      revocationSeed: revocation.seed,
+      facts: { label: "", expiryMs: 0, maxUses, bootstrapReferral: false },
     });
-  } finally {
-    mint.free();
   }
+  return composeSealedInviteLink({
+    origin,
+    prefix: GROUP_INVITE_URL_PREFIX,
+    blobId,
+    secret: linkSecret,
+    widths: inviteLinkWidths(wasm),
+  });
 }
 
 /** Co-publisher keys read off knock queues, keyed `groupIdB64:joinerKeyHex`
@@ -605,21 +629,23 @@ export async function requestToCoPublish(
   identity: Identity,
   link: string,
   persistBeforeKnock: () => Promise<void>,
+  discovery: Pick<DiscoveryClient, "fetchGroupInvite">,
 ): Promise<{ groupId: Uint8Array; channelIdHex: string; joinerKey: Uint8Array }> {
   const wasm = await loadWasm();
-  // The shared `/g/` shape rules (ADR-0028 short-link amendment): the slug
-  // ends at the fragment, and a co-publisher link is always the inline form
-  // (the owner never uploads it to the ledger).
+  // The shared `/g/` shape rules (ADR-0028 short-link amendment): the slug is
+  // the 8-character ledger id and ends at the fragment. An inline slug (the
+  // removed form) is refused here as malformed.
   const widths = inviteLinkWidths(wasm);
   const split = splitGroupInviteLink(link, widths);
   if (split === null) throw new Error("not a /g/ co-publisher link");
   // A missing or malformed fragment is damaged before anything else runs.
   if (split.fragment.kind !== "secret") throw new InviteLinkDamagedError();
   const parsed = parseGroupInviteSlug(split.slug, widths);
-  if (parsed.kind !== "inline") throw new Error("co-publisher link is not an inline capability");
+  const sealed = await discovery.fetchGroupInvite(parsed.blobId);
+  if (sealed === null) throw new Error("co-publisher link not found or revoked");
   const cap = openSealedInvite(
-    (sealed, secret) => wasm.GroupInviteCapability.openLink(sealed, secret),
-    parsed.sealed,
+    (b, secret) => wasm.GroupInviteCapability.openLink(b, secret),
+    sealed,
     split.fragment,
   );
   let groupId: Uint8Array;

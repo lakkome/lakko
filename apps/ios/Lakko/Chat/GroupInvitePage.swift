@@ -70,8 +70,9 @@ public enum GroupInviteLink {
 
 /// Why a `/g/` link resolved to nothing: both read as "invalid or expired".
 public enum GroupInviteLinkError: Error, Equatable {
-    /// The slug is neither a 6-byte pointer nor an inline capability (the
-    /// retired 43-character id included). Refused before any request.
+    /// The slug is not a 6-byte ledger id (the retired 43-character id and an
+    /// inline sealed blob, the form removed on 2026-10-19, included). Refused
+    /// before any request.
     case malformed
     /// The ledger has no row for the id (never issued, revoked or expired).
     case notFound

@@ -2306,10 +2306,6 @@
       "text": "פרטי הקבוצה",
       "status": "machine"
     },
-    "chat.invite_link.cleared": {
-      "text": "הקישור נמחק (לקישור מוטבע אין מה לבטל).",
-      "status": "machine"
-    },
     "chat.invite_link.copy": {
       "text": "העתקת הקישור",
       "status": "machine"
@@ -6132,10 +6128,6 @@
     },
     "invite.links.for_new_user": {
       "text": "למישהו חדש ב-Lakko",
-      "status": "machine"
-    },
-    "invite.links.inline_note": {
-      "text": "Lakko לא הצליחה לקצר את הקישור הזה, ולכן הוא ארוך. הוא עובד באותו אופן ואי אפשר לבטל אותו.",
       "status": "machine"
     },
     "invite.links.label_field": {

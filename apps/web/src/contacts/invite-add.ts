@@ -8,8 +8,8 @@
  * (`ContactsRepository.addThroughInviteLink`) and Android
  * (`ContactsRepository.addThroughInviteLink`) keep the same order.
  *
- *   1. the ledger's consume (a pointer link only): a link used up or gone
- *      since the page opened is dead, and NOTHING is kept: no pending
+ *   1. the ledger's consume: a link used up or gone since the page opened is
+ *      dead, and NOTHING is kept: no pending
  *      contact, no held message; the page takes the visitor to Contacts;
  *   2. only then the pending contact is written, before the request is sent
  *      so an answer that comes back at once finds it;
@@ -20,9 +20,8 @@
 export type InviteConsume = "consumed" | "already-consumed" | "exhausted" | "not-found";
 
 export interface InviteAddDeps {
-  /** The ledger consume, or `null` for an inline link (no server row; the
-   *  inviter's device counts its uses). */
-  readonly consume: (() => Promise<InviteConsume>) | null;
+  /** The ledger consume (every link has a ledger row). */
+  readonly consume: () => Promise<InviteConsume>;
   /** Write the pending contact; `false` when it was not kept. */
   readonly recordPending: () => Promise<boolean>;
   /** Send the request carrying the link answer. */
@@ -36,10 +35,8 @@ export interface InviteAddDeps {
 export type InviteAddOutcome = "added" | "dead";
 
 export async function addThroughInviteLink(d: InviteAddDeps): Promise<InviteAddOutcome> {
-  if (d.consume !== null) {
-    const result = await d.consume();
-    if (result === "exhausted" || result === "not-found") return "dead";
-  }
+  const result = await d.consume();
+  if (result === "exhausted" || result === "not-found") return "dead";
   const recorded = await d.recordPending();
   try {
     await d.sendRequest();

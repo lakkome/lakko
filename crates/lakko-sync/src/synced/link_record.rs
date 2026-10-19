@@ -217,12 +217,13 @@ pub struct LinkRecordEntry {
     pub link_secret: [u8; LINK_RECORD_SECRET_LEN],
     /// Which ledger the link lives in.
     pub kind: LinkRecordKind,
-    /// The ledger id, empty for a link that has no ledger row (an inline
-    /// link).
+    /// The ledger id: exactly [`LINK_RECORD_LEDGER_ID_LEN`] bytes. Every
+    /// link has a ledger row; the inline form, a link with none, was removed
+    /// on 2026-10-19.
     pub ledger_id: Vec<u8>,
     /// The seed whose Ed25519 key the ledger row was created under
     /// (ADR-0078 section 10): any device holding it can delete the row.
-    /// Empty when the link has no ledger row. SECRET.
+    /// Exactly [`LINK_RECORD_REVOCATION_SEED_LEN`] bytes. SECRET.
     pub revocation_seed: Vec<u8>,
     /// UNIX millis after which the link no longer works; 0 = never.
     pub expiry_ms: u64,
@@ -267,12 +268,10 @@ impl LinkRecordEntry {
     /// [`BoundsError::LinkRecordRevocationSeedLength`],
     /// [`BoundsError::LinkRecordLabel`] or [`BoundsError::LinkRecordAnswered`].
     pub fn validate(&self) -> Result<(), BoundsError> {
-        if !self.ledger_id.is_empty() && self.ledger_id.len() != LINK_RECORD_LEDGER_ID_LEN {
+        if self.ledger_id.len() != LINK_RECORD_LEDGER_ID_LEN {
             return Err(BoundsError::LinkRecordLedgerIdLength);
         }
-        if !self.revocation_seed.is_empty()
-            && self.revocation_seed.len() != LINK_RECORD_REVOCATION_SEED_LEN
-        {
+        if self.revocation_seed.len() != LINK_RECORD_REVOCATION_SEED_LEN {
             return Err(BoundsError::LinkRecordRevocationSeedLength);
         }
         if self.label.len() > LINK_RECORD_LABEL_MAX_BYTES {
@@ -385,7 +384,7 @@ impl LinkRecordEntry {
         out.push(u8::from(self.revoked));
         out.extend_from_slice(&self.link_secret);
         out.push(self.kind.to_wire());
-        // Validated: 0 or 6 bytes, a seed of 0 or 32, a label of at most 64, at most 16 keys.
+        // Validated: 6 bytes, a seed of 32, a label of at most 64, at most 16 keys.
         out.push(u8::try_from(self.ledger_id.len()).unwrap_or(u8::MAX));
         out.extend_from_slice(&self.ledger_id);
         out.push(u8::try_from(self.revocation_seed.len()).unwrap_or(u8::MAX));
@@ -416,12 +415,12 @@ impl LinkRecordEntry {
         link_secret.copy_from_slice(take_n(cur, LINK_RECORD_SECRET_LEN)?);
         let kind = LinkRecordKind::from_wire(take_u8(cur)?)?;
         let ledger_len = usize::from(take_u8(cur)?);
-        if ledger_len != 0 && ledger_len != LINK_RECORD_LEDGER_ID_LEN {
+        if ledger_len != LINK_RECORD_LEDGER_ID_LEN {
             return Err(BoundsError::LinkRecordLedgerIdLength.into());
         }
         let ledger_id = take_n(cur, ledger_len)?.to_vec();
         let seed_len = usize::from(take_u8(cur)?);
-        if seed_len != 0 && seed_len != LINK_RECORD_REVOCATION_SEED_LEN {
+        if seed_len != LINK_RECORD_REVOCATION_SEED_LEN {
             return Err(BoundsError::LinkRecordRevocationSeedLength.into());
         }
         let revocation_seed = take_n(cur, seed_len)?.to_vec();
@@ -635,14 +634,12 @@ mod tests {
         full.answered = (0u8..16).map(|i| [i; 32]).collect();
         full.label = "x".repeat(LINK_RECORD_LABEL_MAX_BYTES);
         full.revoked = true;
-        let mut inline = record(3);
-        inline.ledger_id.clear();
-        inline.revocation_seed.clear();
-        inline.kind = LinkRecordKind::Call;
-        let entries = [st(5, full.clone()), st(2, inline.clone())];
+        let mut call = record(3);
+        call.kind = LinkRecordKind::Call;
+        let entries = [st(5, full.clone()), st(2, call.clone())];
         let wire = compose_link_record_envelope(&entries).unwrap();
         let back = decode_link_record_envelope(&wire).unwrap();
-        assert_eq!(back, vec![st(2, inline), st(5, full)]);
+        assert_eq!(back, vec![st(2, call), st(5, full)]);
         assert_eq!(compose_link_record_envelope(&back).unwrap(), wire);
     }
 
@@ -655,6 +652,19 @@ mod tests {
         assert_eq!(
             compose_link_record_envelope(&[st(1, record(1)), st(2, record(1))]),
             Err(LinkRecordEnvelopeError::NotCanonical)
+        );
+        // A link with no ledger row (the removed inline form) is refused.
+        let mut inline = record(1);
+        inline.ledger_id.clear();
+        assert_eq!(
+            compose_link_record_envelope(&[st(1, inline)]),
+            Err(LinkRecordEnvelopeError::Entry)
+        );
+        let mut seedless = record(1);
+        seedless.revocation_seed.clear();
+        assert_eq!(
+            seedless.validate(),
+            Err(BoundsError::LinkRecordRevocationSeedLength)
         );
         let mut bad = record(1);
         bad.ledger_id = vec![1; 5];
@@ -814,7 +824,7 @@ mod tests {
             0u32..5,
             any::<bool>(),
             prop::collection::btree_set(any::<[u8; 32]>(), 0..4),
-            prop::option::of(any::<[u8; LINK_RECORD_REVOCATION_SEED_LEN]>()),
+            any::<[u8; LINK_RECORD_REVOCATION_SEED_LEN]>(),
         )
             .prop_map(
                 |(
@@ -832,8 +842,8 @@ mod tests {
                         link_id,
                         link_secret,
                         kind,
-                        ledger_id: vec![],
-                        revocation_seed: seed.map(|s| s.to_vec()).unwrap_or_default(),
+                        ledger_id: vec![7; LINK_RECORD_LEDGER_ID_LEN],
+                        revocation_seed: seed.to_vec(),
                         expiry_ms,
                         max_uses,
                         uses,

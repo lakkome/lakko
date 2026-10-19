@@ -643,22 +643,31 @@ extension LinkCallHost {
                     throw LinkCallHostError.identityUnavailable
                 }
                 var mintedLinkId: Data?
-                let composed = try await CallInviteComposer.composeAndUpload(
-                    callId: callId,
-                    ownerSigningSeed: identity.ed25519Seed(),
-                    ownerAccountId: secrets.accountId,
-                    identity: identity,
-                    discoveryClient: DiscoveryClient(sessionToken: secrets.sessionToken),
-                    linkGrant: { linkId, expiresAtMs in
-                        mintedLinkId = linkId
-                        return try await ReachCenter.shared.newLinkGrant(
-                            linkId: linkId, expiresAtMs: expiresAtMs)
-                    }
-                )
+                let composed: CallInviteComposer.Composed
+                do {
+                    composed = try await CallInviteComposer.composeAndUpload(
+                        callId: callId,
+                        ownerSigningSeed: identity.ed25519Seed(),
+                        ownerAccountId: secrets.accountId,
+                        identity: identity,
+                        discoveryClient: DiscoveryClient(sessionToken: secrets.sessionToken),
+                        linkGrant: { linkId, expiresAtMs in
+                            mintedLinkId = linkId
+                            return try await ReachCenter.shared.newLinkGrant(
+                                linkId: linkId, expiresAtMs: expiresAtMs)
+                        }
+                    )
+                } catch {
+                    // No link was minted (a failed upload mints nothing, the
+                    // inline form is gone): the key registered for it goes.
+                    if let mintedLinkId { ReachCenter.shared.removeLink(linkId: mintedLinkId) }
+                    throw error
+                }
+                let blobId = composed.blobId
                 // ADR-0074 section 3.5a rule 5 — the ledger id is kept with
                 // the link's reach scope, so a key rotation can revoke the
-                // link at the call-invite ledger (an inline link has no row).
-                if let mintedLinkId, let blobId = composed.blobId {
+                // link at the call-invite ledger.
+                if let mintedLinkId {
                     ReachCenter.shared.attachBlob(
                         linkId: mintedLinkId, blobId: blobId, kind: LinkReach.callKind)
                     // ADR-0078 section 10: the link's own revocation seed,

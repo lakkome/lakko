@@ -21,7 +21,6 @@ import type { DiscoveryClient, RevokeInviteResult } from "../discovery/client";
 import { reachSession } from "../reach/reach-service";
 import {
   forgetMintedLink,
-  isInlineLinkSlug,
   listMintedLinks,
   type MintedLinkRow,
 } from "./minted-links";
@@ -49,42 +48,39 @@ export type OwnLinkRevokeOutcome =
   | "no-key";
 
 /** Revoke one link this device minted, with its own revocation seed, then
- *  drop its reach key and its record. An inline link (no ledger row) only
- *  loses its key and record. */
+ *  drop its reach key and its record. */
 export async function revokeMintedLink(
   discovery: DiscoveryClient,
   accountIdB64: string,
   link: MintedLinkRow,
 ): Promise<OwnLinkRevokeOutcome> {
   let outcome: OwnLinkRevokeOutcome = "done";
-  if (!isInlineLinkSlug(link.blobIdSlug)) {
-    if (link.revocationSeed === null) {
-      outcome = "no-key";
-    } else {
-      let blobId: Uint8Array;
+  if (link.revocationSeed === null) {
+    outcome = "no-key";
+  } else {
+    let blobId: Uint8Array;
+    try {
+      blobId = base64UrlDecodeNoPad(link.blobIdSlug);
+    } catch {
+      blobId = new Uint8Array();
+    }
+    if (blobId.length > 0) {
       try {
-        blobId = base64UrlDecodeNoPad(link.blobIdSlug);
-      } catch {
-        blobId = new Uint8Array();
-      }
-      if (blobId.length > 0) {
-        try {
-          const revoke = (): Promise<RevokeInviteResult> => {
-            const seed = link.revocationSeed as Uint8Array;
-            switch (link.kind) {
-              case "contact":
-                return discovery.revokeInvite(blobId, seed);
-              case "call":
-                return discovery.revokeCallInvite(blobId, seed);
-              case "group":
-                return discovery.revokeGroupInvite(blobId, seed);
-            }
-          };
-          await revoke();
-        } catch (err) {
-          if (err instanceof Error && err.name === "DiscoveryNetworkError") return "unreachable";
-          throw err;
-        }
+        const revoke = (): Promise<RevokeInviteResult> => {
+          const seed = link.revocationSeed as Uint8Array;
+          switch (link.kind) {
+            case "contact":
+              return discovery.revokeInvite(blobId, seed);
+            case "call":
+              return discovery.revokeCallInvite(blobId, seed);
+            case "group":
+              return discovery.revokeGroupInvite(blobId, seed);
+          }
+        };
+        await revoke();
+      } catch (err) {
+        if (err instanceof Error && err.name === "DiscoveryNetworkError") return "unreachable";
+        throw err;
       }
     }
   }
@@ -98,9 +94,9 @@ export async function revokeMintedLink(
 /** What {@link deleteLedgerRowOfRecord} needs from a link record. */
 export interface LedgerRowRef {
   readonly kind: "contact" | "call";
-  /** The 6-byte ledger id; empty for an inline link (no row). */
+  /** The 6-byte ledger id. */
   readonly ledgerId: Uint8Array;
-  /** The seed the row was created under; empty when none is held. */
+  /** The 32-byte seed the row was created under. */
   readonly revocationSeed: Uint8Array;
 }
 
@@ -108,14 +104,13 @@ export interface LedgerRowRef {
  * ADR-0079 (reworked 2026-10-17) - delete a link's ledger row with the
  * revocation seed its synced record carries. Any device of the account holds
  * the seed, so the device that revokes deletes the row itself, at once.
- * `"done"` also when there is no row (an inline link) or the ledger has no
- * row any more. Never throws for the ledger's answer.
+ * `"done"` also when the ledger has no row any more. Never throws for the
+ * ledger's answer.
  */
 export async function deleteLedgerRowOfRecord(
   discovery: Pick<DiscoveryClient, "revokeInvite" | "revokeCallInvite">,
   record: LedgerRowRef,
 ): Promise<OwnLinkRevokeOutcome> {
-  if (record.ledgerId.length === 0) return "done";
   if (record.revocationSeed.length === 0) return "no-key";
   try {
     if (record.kind === "contact") await discovery.revokeInvite(record.ledgerId, record.revocationSeed);

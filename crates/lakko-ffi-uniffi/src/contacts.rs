@@ -160,8 +160,8 @@ impl From<ContactError> for FfiError {
 // ============================================================================
 
 /// What every invite compose returns (`/i/`, `/c/`, `/g/`): the sealed blob
-/// the client uploads (or, when the upload fails, base64url-encodes into the
-/// inline `/<k>/<sealed>#<secret>` link), the fresh 12-byte link secret the
+/// the client uploads to the ledger (a failed upload mints no link; there is
+/// no inline form since 2026-10-19), the fresh 12-byte link secret the
 /// client puts in the URL fragment and nowhere a server reads, and the
 /// issuer's 32-byte Ed25519 key the upload carries in clear for the revoke.
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
@@ -1383,8 +1383,8 @@ impl InviteCapability {
         Ok(Self { inner, wire })
     }
 
-    /// Joiner-side: open an `/i/` link's sealed blob (fetched by id, or the
-    /// inline path segment) with the link secret from the URL fragment, and
+    /// Joiner-side: open an `/i/` link's sealed blob (fetched from the
+    /// ledger by id) with the link secret from the URL fragment, and
     /// verify the capability inside. Does **not** check expiry.
     ///
     /// # Errors
@@ -1855,7 +1855,7 @@ impl FfiCallInviteMedia {
 /// Compose + sign a call-invite capability (Phase 3c3) and seal it for a
 /// `/c/` link under a fresh link secret (the 2026-09-28 security pass).
 /// Returns the [`InviteLinkMint`]; the link is `https://<host>/c/<id>#<secret>`
-/// after the upload, or `/c/<base64url sealed>#<secret>` inline.
+/// after the upload.
 ///
 /// `owner_signing_seed` is the 32-byte Ed25519 seed (same
 /// source as `compose_invite_capability`).
@@ -3200,8 +3200,7 @@ pub fn committer_beacon_envelope_len() -> u32 {
 /// `issuer_signing_seed` is the 32-byte Ed25519 seed of the owner/admin minting
 /// the link; `group_id` is the target group's opaque MLS `GroupId` bytes;
 /// `expiry_ms` is UNIX millis (`0` = never expires). Returns the
-/// [`InviteLinkMint`]; the link is `/g/<id>#<secret>` after the upload, or
-/// `/g/<base64url sealed>#<secret>` inline.
+/// [`InviteLinkMint`]; the link is `/g/<id>#<secret>` after the upload.
 ///
 /// # Errors
 ///

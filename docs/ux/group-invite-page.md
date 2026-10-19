@@ -95,10 +95,13 @@ the join lands.
 
 ## 4. What the link looks like
 
-`https://lakko.me/g/<slug>#<link secret, base64url, 16 chars>` for both the
-pointer form (`<slug>` = the ledger id, 8 chars) and the inline form (`<slug>` =
-the whole SEALED capability, base64url). A pointer link is therefore about 45
-characters (ADR-0028 amendment of 2026-09-27). `Copy link` copies the fragment
+`https://lakko.me/g/<slug>#<link secret, base64url, 16 chars>`, `<slug>` = the
+ledger id, 8 chars, so a link is about 45 characters (ADR-0028 amendment of
+2026-09-27). There is no other form (the inline form that carried the whole
+sealed capability in the path was removed on 2026-10-19): when the upload
+fails, a network failure included, no link is made and the person sees the
+ordinary error with the button back for another try; a link in the old inline
+shape opens as an invalid link. `Copy link` copies the fragment
 with it, and must: since 2026-09-28 a link without its fragment opens nothing
 and is shown as damaged. The same shape holds for `/i/` and `/c/`.
 

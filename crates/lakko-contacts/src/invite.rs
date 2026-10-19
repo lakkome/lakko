@@ -45,9 +45,9 @@
 //!     2026-09-27 short-link amendment of ADR-0028, no longer a
 //!     hash of the bytes) and serves it from
 //!     `GET /discovery/invite/{blob_id}`, so a client can embed
-//!     the short `/i/<blob_id>` pointer instead of the ~150-220
-//!     char inline form. The capability struct is unchanged
-//!     either way — only the URL shape differs. The id binds
+//!     the short `/i/<blob_id>` pointer (the only link form
+//!     since 2026-10-19; the inline form that carried the
+//!     capability in the path is removed). The id binds
 //!     nothing on its own; since the 2026-09-28 security pass
 //!     the ledger stores the capability SEALED under a secret
 //!     in the link fragment ([`crate::link_seal`], see
@@ -155,13 +155,13 @@
 //! let secret = lakko_contacts::link_seal::generate_link_secret();
 //! let sealed = lakko_contacts::invite::seal_link(&secret, &bytes)?;
 //! // Upload `sealed` to the ledger and get an id back; the link is
-//! // https://lakko.me/i/<id>#<secret>, or /i/<sealed>#<secret> inline.
+//! // https://lakko.me/i/<id>#<secret>.
 //! ```
 //!
 //! Receiver side:
 //!
 //! ```ignore
-//! let sealed = /* fetched by id, or base64url_decode(slug) inline */;
+//! let sealed = /* fetched from the ledger by id */;
 //! let secret = lakko_contacts::link_seal::link_secret_from_slice(&fragment_bytes)?;
 //! let (cap, wire) = lakko_contacts::invite::open_link(&secret, &sealed)?;
 //! if !cap.is_valid_now(now_ms) { /* expired */ }

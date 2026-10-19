@@ -2050,17 +2050,17 @@ public final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// The confirmation shown after Revoke (the web and Android rule): a
-    /// pointer link had a ledger row the server deleted, so the link is
-    /// revoked; an inline link (the censored-region fallback) had nothing to
-    /// revoke, so it is only cleared from the screen and must not claim more.
+    /// The confirmation shown after Revoke (the web and Android rule): a link
+    /// whose ledger row the server deleted is revoked; one this device holds
+    /// no revocation key for (or a malformed one) is only cleared from the
+    /// screen and must not claim more.
     nonisolated static func inviteLinkRevokeNotice(revoked: Bool) -> String {
         revoked ? "chat.invite_link.revoked" : "chat.invite_link.cleared"
     }
 
     /// ADR-0028 revoke — revoke the currently-shown group invite link (issuer
-    /// only). A pointer link carries a ledger blob the server deletes; an inline
-    /// link has nothing to revoke (we just clear the field). Fail-closed.
+    /// only): the server deletes its ledger row; without a kept revocation key
+    /// the field is only cleared. Fail-closed.
     func onRevokeInviteLink() {
         guard let link = inviteLink else { return }
         membershipError = nil

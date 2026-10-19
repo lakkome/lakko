@@ -18,12 +18,11 @@ import me.lakko.app.discovery.InviteLinkLengths
  * manifest can branch on the path segment without parsing the
  * slug.
  *
- * URL plumbing only: [composePointerCallInviteUrl] for the
- * production short form (`/c/<blob_id_b64url>`),
- * [composeInlineCallInviteUrl] for the censored-region fallback
- * (the bytes are encoded into the URL itself, no
- * `/discovery/call-invite` round-trip needed), and
- * [parseCallInviteSlug] for the joiner-side dispatcher.
+ * URL plumbing only: [composePointerCallInviteUrl] for the link
+ * (`/c/<blob_id_b64url>`) and [parseCallInviteSlug] for the
+ * joiner-side dispatcher. The inline form that carried the
+ * capability in the URL was removed on 2026-10-19: a failed upload
+ * mints no link, and an inline slug is malformed (a dead link).
  *
  * The form-side enums that used to live here — media, expiry and
  * max-uses presets, and the label cap — are gone with the form
@@ -41,32 +40,9 @@ public const val CALL_INVITE_URL_PREFIX: String = "/c/"
 public val CALL_INVITE_DEFAULT_ORIGIN: String
     get() = me.lakko.app.config.ApiEndpoints.webOrigin
 
-/** Lower bound on the inline-bytes form. The 3c3 wire format
- *  with a 256-byte one-time KP tops out around 500 bytes; we
- *  pin the floor at 400 to leave headroom for KP formats that
- *  might shrink slightly. */
-public const val CALL_INVITE_INLINE_MIN_LEN: Int = 400
-
 // =============================================================
 // URL builders
 // =============================================================
-
-/**
- * Auto-pick the URL form by argument shape — pointer (the
- * 6-byte ledger id) when the caller has uploaded the capability and
- * wants the short form, inline-bytes (≥ 400 bytes) when the
- * caller is staying server-free.
- *
- * Both produce a `<origin>/c/<base64url>` shape; the joiner
- * side discriminates via [parseCallInviteSlug] on the byte
- * length.
- */
-public fun composeCallInviteUrl(
-    bytes: ByteArray,
-    origin: String = CALL_INVITE_DEFAULT_ORIGIN,
-): String {
-    return "$origin$CALL_INVITE_URL_PREFIX${base64UrlEncodeNoPad(bytes)}"
-}
 
 /**
  * Builder for the **pointer** URL form — the short
@@ -87,36 +63,14 @@ public fun composePointerCallInviteUrl(
             got = blobId.size,
         )
     }
-    return composeCallInviteUrl(blobId, origin)
-}
-
-/**
- * Builder for the **inline-bytes** URL form — the long shape
- * that carries the capability inside the URL itself, no
- * server round-trip on open. Reserved for the censored-region
- * fallback; the pointer form is the production default.
- *
- * @throws CallInviteUrlException.InlineTooSmall when
- *         `capabilityBytes.size < 400`.
- */
-public fun composeInlineCallInviteUrl(
-    capabilityBytes: ByteArray,
-    origin: String = CALL_INVITE_DEFAULT_ORIGIN,
-): String {
-    if (capabilityBytes.size < CALL_INVITE_INLINE_MIN_LEN) {
-        throw CallInviteUrlException.InlineTooSmall(
-            minimum = CALL_INVITE_INLINE_MIN_LEN,
-            got = capabilityBytes.size,
-        )
-    }
-    return composeCallInviteUrl(capabilityBytes, origin)
+    return "$origin$CALL_INVITE_URL_PREFIX${base64UrlEncodeNoPad(blobId)}"
 }
 
 // =============================================================
 // URL parsing
 // =============================================================
 
-/** Discriminated parse result for a `/c/<slug>` segment. */
+/** Parse result for a `/c/<slug>` segment: always the ledger id. */
 public sealed class ParsedCallInvite {
     /** Short form — [blobId] is the 6-byte server-
      *  assigned ledger id. Joiner fetches via
@@ -131,31 +85,17 @@ public sealed class ParsedCallInvite {
 
         override fun hashCode(): Int = blobId.contentHashCode()
     }
-
-    /** Long form — the bytes are the wire-format
-     *  `CallInviteCapability`. Joiner runs
-     *  `CallInviteCapability.decodeAndVerify(...)` directly. */
-    public data class Inline(val capabilityBytes: ByteArray) : ParsedCallInvite() {
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (other !is Inline) return false
-            return capabilityBytes.contentEquals(other.capabilityBytes)
-        }
-
-        override fun hashCode(): Int = capabilityBytes.contentHashCode()
-    }
 }
 
 /**
- * Discriminated parse of a URL slug. The dispatch rule is a
- * clean byte-length test: the ledger-id width (6) ⇒ pointer,
- * ≥ 400 ⇒ inline (3c3 wire-format minimum). Anything else is
- * invalid, the pre-amendment 32-byte pointer included.
+ * Parse a URL slug into its ledger id (the core's width, 6
+ * bytes). Anything else is invalid: the pre-amendment 32-byte
+ * pointer and an inline sealed blob included.
  *
  * @throws CallInviteUrlException.InvalidBase64Url when the
  *         slug doesn't decode.
  * @throws CallInviteUrlException.SlugWrongLength when the
- *         decoded byte count falls outside both branches.
+ *         decoded byte count is not the ledger-id width.
  */
 public fun parseCallInviteSlug(
     slug: String,
@@ -173,15 +113,10 @@ public fun parseCallInviteSlug(
     } catch (e: IllegalArgumentException) {
         throw CallInviteUrlException.InvalidBase64Url
     }
-    return when {
-        bytes.size == lengths.blobIdLen -> ParsedCallInvite.Pointer(bytes)
-        bytes.size >= CALL_INVITE_INLINE_MIN_LEN -> ParsedCallInvite.Inline(bytes)
-        else -> throw CallInviteUrlException.SlugWrongLength(
-            blobIdLen = lengths.blobIdLen,
-            inlineMinLen = CALL_INVITE_INLINE_MIN_LEN,
-            got = bytes.size,
-        )
+    if (bytes.size != lengths.blobIdLen) {
+        throw CallInviteUrlException.SlugWrongLength(blobIdLen = lengths.blobIdLen, got = bytes.size)
     }
+    return ParsedCallInvite.Pointer(bytes)
 }
 
 // =============================================================
@@ -194,19 +129,11 @@ public sealed class CallInviteUrlException(message: String) : Exception(message)
         val got: Int,
     ) : CallInviteUrlException("blobId must be $expected bytes, got $got")
 
-    public data class InlineTooSmall(
-        val minimum: Int,
-        val got: Int,
-    ) : CallInviteUrlException("capabilityBytes must be >= $minimum bytes, got $got")
-
     public object InvalidBase64Url :
         CallInviteUrlException("slug is not valid base64url-no-pad")
 
     public data class SlugWrongLength(
         val blobIdLen: Int,
-        val inlineMinLen: Int,
         val got: Int,
-    ) : CallInviteUrlException(
-        "call-invite slug decoded to $got bytes — neither a $blobIdLen-byte pointer nor a >= $inlineMinLen-byte inline capability",
-    )
+    ) : CallInviteUrlException("call-invite slug decoded to $got bytes, not a $blobIdLen-byte ledger id")
 }

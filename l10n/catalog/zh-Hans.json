@@ -2306,10 +2306,6 @@
       "text": "群组信息",
       "status": "machine"
     },
-    "chat.invite_link.cleared": {
-      "text": "链接已清除（内嵌链接没有可撤销的内容）。",
-      "status": "machine"
-    },
     "chat.invite_link.copy": {
       "text": "复制链接",
       "status": "machine"
@@ -6132,10 +6128,6 @@
     },
     "invite.links.for_new_user": {
       "text": "给刚接触 Lakko 的人",
-      "status": "machine"
-    },
-    "invite.links.inline_note": {
-      "text": "Lakko 无法缩短此链接，所以它较长。它的作用相同，但无法撤销。",
       "status": "machine"
     },
     "invite.links.label_field": {

@@ -2306,10 +2306,6 @@
       "text": "معلومات المجموعة",
       "status": "machine"
     },
-    "chat.invite_link.cleared": {
-      "text": "تم مسح الرابط (لا يوجد ما يُبطل في الرابط المضمَّن).",
-      "status": "machine"
-    },
     "chat.invite_link.copy": {
       "text": "نسخ الرابط",
       "status": "machine"
@@ -6132,10 +6128,6 @@
     },
     "invite.links.for_new_user": {
       "text": "لشخص جديد على Lakko",
-      "status": "machine"
-    },
-    "invite.links.inline_note": {
-      "text": "تعذّر على Lakko تقصير هذا الرابط، لذا فهو طويل. يعمل بالطريقة نفسها ولا يمكن إبطاله.",
       "status": "machine"
     },
     "invite.links.label_field": {

@@ -11,9 +11,9 @@ import Security
 /// sent to a server (a browser does not send it, and this app never uploads
 /// it).
 ///
-///   * pointer: `https://<host>/<k>/<8-char id>#<16-char secret>`
-///   * inline:  `https://<host>/<k>/<b64url sealed>#<16-char secret>`, only
-///     when the upload failed on transport
+///   * `https://<host>/<k>/<8-char id>#<16-char secret>`, a ledger pointer
+///     (the inline form that carried the sealed blob in the path was removed
+///     on 2026-10-19)
 ///
 /// A link whose fragment is missing or is not exactly 16 base64url characters
 /// decoding to 12 bytes is DAMAGED, on every kind, and so is a blob that does

@@ -75,24 +75,11 @@ export interface MintedLink {
  *  it: where it lives and when this device minted it. */
 export interface MintedLinkRow extends MintedLink {
   readonly kind: MintedLinkKind;
-  /** The ledger id as the URL slug, or {@link inlineLinkSlug} for a link
-   *  that has no ledger row. */
+  /** The ledger id as the URL slug (every link has a ledger row). */
   readonly blobIdSlug: string;
   /** When this device minted it; `null` for a row kept before the time was
    *  recorded (older than any rotation this build can observe). */
   readonly mintedAtMs: number | null;
-}
-
-const INLINE_SLUG_PREFIX = "inline:";
-
-/** The row name of a link with no ledger row (a call link minted while the
- *  ledger was unreachable): only its reach key can be revoked. */
-export function inlineLinkSlug(linkIdB64Url: string): string {
-  return `${INLINE_SLUG_PREFIX}${linkIdB64Url}`;
-}
-
-export function isInlineLinkSlug(slug: string): boolean {
-  return slug.startsWith(INLINE_SLUG_PREFIX);
 }
 
 /** Split a row key back into its parts; `null` for a key of another shape

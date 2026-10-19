@@ -101,11 +101,10 @@ type JoinPhase = "idle" | "requesting" | "waiting" | "joined" | "error";
 
 interface DecodedTicket {
   /** The plaintext capability wire the sealed link opened to (the blob
-   *  fetched from the ledger for a pointer, the slug itself when inline). */
+   *  fetched from the ledger). */
   wire: Uint8Array;
-  /** Non-null only for the server-backed pointer form; drives the consume gate
-   *  (ADR-0028 OQ1). */
-  blobId: Uint8Array | null;
+  /** The ledger id; drives the consume gate (ADR-0028 OQ1). */
+  blobId: Uint8Array;
   fingerprint: string;
   valid: boolean;
   /** The sealed preview, opened with the link secret from the URL fragment,
@@ -134,7 +133,7 @@ export default function JoinGroup() {
     onPersist: durableSnapshotHook(chats, () => sessionAccountOf(auth.state())),
   });
 
-  // Resolve the slug (pointer => ledger fetch, inline => passthrough), then
+  // Resolve the slug (a ledger fetch; an inline slug is malformed), then
   // decode + verify the capability in a memo-driven resource so the panel
   // renders the right state without imperative juggling. Re-runs on navigation
   // — of the slug or of the fragment, since the fragment holds the link key.

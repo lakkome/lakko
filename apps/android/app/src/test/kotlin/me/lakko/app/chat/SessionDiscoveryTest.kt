@@ -64,7 +64,7 @@ class SessionDiscoveryTest {
     @Test
     fun `the upload request carries the session token`() = runTest {
         val seen = mutableListOf<String?>()
-        val blobId = uploadGroupInviteOrNull("tok-1", factory(seen), upload) {}
+        val blobId = uploadGroupInvite("tok-1", factory(seen), upload) {}
         assertArrayEquals(ByteArray(6), blobId)
         assertEquals(listOf<String?>("Bearer tok-1"), seen)
     }
@@ -74,9 +74,9 @@ class SessionDiscoveryTest {
         val seen = mutableListOf<String?>()
         var current = "old"
         val f = factory(seen)
-        uploadGroupInviteOrNull(current, f, upload) {}
+        uploadGroupInvite(current, f, upload) {}
         current = "renewed"
-        uploadGroupInviteOrNull(current, f, upload) {}
+        uploadGroupInvite(current, f, upload) {}
         assertEquals(listOf<String?>("Bearer old", "Bearer renewed"), seen)
     }
 
@@ -84,32 +84,38 @@ class SessionDiscoveryTest {
     fun `no session fails loudly before any request`() = runTest {
         val seen = mutableListOf<String?>()
         assertThrows(ChatError::class.java) {
-            kotlinx.coroutines.runBlocking { uploadGroupInviteOrNull(null, factory(seen), upload) {} }
+            kotlinx.coroutines.runBlocking { uploadGroupInvite(null, factory(seen), upload) {} }
         }
         assertThrows(ChatError::class.java) {
-            kotlinx.coroutines.runBlocking { uploadGroupInviteOrNull("", factory(seen), upload) {} }
+            kotlinx.coroutines.runBlocking { uploadGroupInvite("", factory(seen), upload) {} }
         }
         assertTrue(seen.isEmpty())
     }
 
     @Test
-    fun `a refusal is thrown with its status, never turned into an inline link`() = runTest {
+    fun `a refusal is thrown with its status`() = runTest {
         val seen = mutableListOf<String?>()
         val logged = mutableListOf<String>()
         val error = assertThrows(ChatError::class.java) {
             kotlinx.coroutines.runBlocking {
-                uploadGroupInviteOrNull("tok", factory(seen, status = HttpStatusCode.Unauthorized), upload) { logged += it }
+                uploadGroupInvite("tok", factory(seen, status = HttpStatusCode.Unauthorized), upload) { logged += it }
             }
         }
         assertTrue(error.message!!.contains("401"))
         assertEquals(listOf("group invite upload refused: HTTP 401"), logged)
     }
 
+    /** The inline form is gone (2026-10-19): an unreachable ledger mints no
+     *  link, the failure surfaces like any other. */
     @Test
-    fun `a transport failure answers null so the caller shares the inline link`() = runTest {
+    fun `a transport failure is thrown and mints no link`() = runTest {
         val seen = mutableListOf<String?>()
         val logged = mutableListOf<String>()
-        assertNull(uploadGroupInviteOrNull("tok", factory(seen, fail = true), upload) { logged += it })
+        assertThrows(ChatError::class.java) {
+            kotlinx.coroutines.runBlocking {
+                uploadGroupInvite("tok", factory(seen, fail = true), upload) { logged += it }
+            }
+        }
         assertEquals(1, logged.size)
         assertTrue(logged.single().startsWith("group invite upload unreachable"))
     }

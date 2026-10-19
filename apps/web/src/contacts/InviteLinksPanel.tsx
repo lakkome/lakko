@@ -11,9 +11,9 @@
  * seal the capability in the core, upload the sealed blob to the discovery
  * service for the short pointer URL (the secret stays in the fragment and in
  * this device's record of the link, `minted-links.ts`, beside the link's
- * reach scope id and its own revocation seed), fall back to the
- * self-contained inline URL only on a network failure (a rejected upload is a
- * real error; the same bytes would be rejected again by whoever opens them).
+ * reach scope id and its own revocation seed). Any failed upload, a network
+ * one included, mints no link and shows the error; Create stays open for
+ * another try (the inline form was removed on 2026-10-19).
  *
  * ADR-0078 section 10: the ledger rows name no owner, so there is no owner
  * query. ADR-0079 section 4 replaced "the links made on this device": the
@@ -53,14 +53,12 @@ import {
 import { hexOf } from "../devices/sync/link-records";
 import {
   appendInviteLinkSecret,
-  composeSealedInviteLink,
   inviteLinkWidths,
   type InviteLinkWidths,
 } from "./invite-link";
 import { forgetInviteLinkSecret } from "./invite-link-secrets";
 import {
   composePointerInviteUrl,
-  INVITE_URL_PREFIX,
   expiryPresetToMs,
   INVITE_LABEL_MAX_LEN,
   maxUsesPresetToValue,
@@ -72,9 +70,7 @@ import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { listedContactLinks, type LinkRecordModel } from "../devices/sync/link-records";
 import { useProfiles } from "../profile/ProfileContext";
 
-/** A link this panel can show: one this device minted and keeps a record
- *  of, or the inline fallback minted a moment ago (no server row, so it
- *  cannot be revoked). */
+/** A link this panel can show: one in the account's link-record register. */
 interface LinkRow {
   readonly key: string;
   readonly url: string | null;
@@ -83,16 +79,13 @@ interface LinkRow {
   readonly label: string | null;
   /** The facts under the title, rendered in the current language. */
   readonly meta: () => string;
-  readonly revocable: boolean;
-  /** The register record the revoke acts on; `null` for the inline
-   *  fallback. */
-  readonly record: LinkRecordModel | null;
+  /** The register record the revoke acts on. */
+  readonly record: LinkRecordModel;
 }
 
-/** A row for one register record, or `null` for an inline link (no ledger
- *  row to point at) or a ledger id of another width. Pure. */
+/** A row for one register record, or `null` for a ledger id of another
+ *  width. Pure. */
 function rowOfRecord(record: LinkRecordModel, nowMs: number, widths: InviteLinkWidths): LinkRow | null {
-  if (record.ledgerId.length === 0) return null;
   let url: string;
   try {
     const pointer = composePointerInviteUrl(record.ledgerId, widths);
@@ -113,7 +106,6 @@ function rowOfRecord(record: LinkRecordModel, nowMs: number, widths: InviteLinkW
     url,
     label: record.label.length > 0 ? record.label : null,
     meta,
-    revocable: true,
     record,
   };
 }
@@ -133,7 +125,6 @@ export function InviteLinksPanel(): JSX.Element {
   const [links, setLinks] = createSignal<MintedLinkRow[]>([]);
   const [widths, setWidths] = createSignal<InviteLinkWidths | null>(null);
   const [loaded, setLoaded] = createSignal(false);
-  const [inlineLink, setInlineLink] = createSignal<LinkRow | null>(null);
   const [error, setError] = createLiveText();
   const [notice, setNotice] = createLiveText();
   const [busyKey, setBusyKey] = createSignal<string | null>(null);
@@ -151,14 +142,11 @@ export function InviteLinksPanel(): JSX.Element {
     const w = widths();
     // ADR-0079: the register's live contact links (a used-up single-use link
     // and a revoked one leave the list), newest first.
-    const listed =
-      w === null
-        ? []
-        : listedContactLinks(sync.linkRecords(), now)
-            .map((r) => rowOfRecord(r, now, w))
-            .filter((r): r is LinkRow => r !== null);
-    const inline = inlineLink();
-    return inline === null ? listed : [inline, ...listed];
+    return w === null
+      ? []
+      : listedContactLinks(sync.linkRecords(), now)
+          .map((r) => rowOfRecord(r, now, w))
+          .filter((r): r is LinkRow => r !== null);
   };
 
   onMount(() => {
@@ -210,7 +198,6 @@ export function InviteLinksPanel(): JSX.Element {
         throw new KeyedError("common.error.starting_up");
       }
       const wasm = await loadWasm();
-      const widths = inviteLinkWidths(wasm);
       const expiryMs = expiryPresetToMs(expiry(), Date.now());
       const maxUsesValue = maxUsesPresetToValue(maxUses());
       const linkId = wasm.generateLinkId();
@@ -286,46 +273,12 @@ export function InviteLinksPanel(): JSX.Element {
           mintedAtMs: Date.now(),
           label: label(),
         });
-        setInlineLink(null);
         await load();
       } catch (uploadErr) {
-        const isNetwork =
-          uploadErr instanceof Error && uploadErr.name === "DiscoveryNetworkError";
-        if (!isNetwork) {
-          // Nothing was handed out: the key goes with the failed link.
-          await session.revokeLink(linkId).catch(() => undefined);
-          throw uploadErr;
-        }
-        // eslint-disable-next-line no-console
-        console.warn("invite upload network-failed; falling back to the inline link");
-        // An inline link has no ledger row; its record is what lets a device
-        // of this account take a request sent through it.
-        await sync.setLinkRecord({
-          linkId,
-          linkSecret,
-          kind: "contact",
-          ledgerId: new Uint8Array(0),
-          revocationSeed: new Uint8Array(0),
-          expiryMs: Number(expiryMs),
-          maxUses: maxUsesValue,
-          mintedAtMs: Date.now(),
-          label: label(),
-        });
-        setInlineLink({
-          key: "inline",
-          url: composeSealedInviteLink({
-            origin: location.origin,
-            prefix: INVITE_URL_PREFIX,
-            blobId: null,
-            sealed,
-            secret: linkSecret,
-            widths,
-          }),
-          label: label().length > 0 ? label() : null,
-          meta: () => t("invite.links.inline_note"),
-          revocable: false,
-          record: null,
-        });
+        // Any failure, a network one included, mints no link: nothing was
+        // handed out, so the key goes with it and the error is shown.
+        await session.revokeLink(linkId).catch(() => undefined);
+        throw uploadErr;
       }
       setCreating(false);
       setLabel("");
@@ -351,7 +304,6 @@ export function InviteLinksPanel(): JSX.Element {
 
   async function onRevoke(row: LinkRow): Promise<void> {
     const record = row.record;
-    if (record === null) return;
     setError(null);
     setNotice(null);
     setBusyKey(row.key);
@@ -494,17 +446,15 @@ export function InviteLinksPanel(): JSX.Element {
                         </>
                       )}
                     </Show>
-                    <Show when={row.revocable}>
-                      <button
-                        type="button"
-                        class="ghost small"
-                        style={{ color: "var(--danger)" }}
-                        disabled={busyKey() !== null}
-                        onClick={() => void onRevoke(row)}
-                      >
-                        {busyKey() === row.key ? t("invite.links.revoking") : t("chat.invite_link.revoke")}
-                      </button>
-                    </Show>
+                    <button
+                      type="button"
+                      class="ghost small"
+                      style={{ color: "var(--danger)" }}
+                      disabled={busyKey() !== null}
+                      onClick={() => void onRevoke(row)}
+                    >
+                      {busyKey() === row.key ? t("invite.links.revoking") : t("chat.invite_link.revoke")}
+                    </button>
                   </div>
                 </li>
               )}

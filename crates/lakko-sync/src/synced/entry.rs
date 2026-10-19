@@ -212,7 +212,7 @@ pub enum BoundsError {
     /// A link record named a kind this build does not know (ADR-0079).
     #[error("unknown link record kind")]
     LinkRecordKind,
-    /// A link record's ledger id was neither empty nor 6 bytes.
+    /// A link record's ledger id was not 6 bytes.
     #[error("link record ledger id length is out of bounds")]
     LinkRecordLedgerIdLength,
     /// A link record's label was longer than 64 bytes.
@@ -221,7 +221,7 @@ pub enum BoundsError {
     /// A link record named more than 16 requesters, or one twice.
     #[error("link record requester list is out of bounds")]
     LinkRecordAnswered,
-    /// A link record's revocation seed was neither empty nor 32 bytes.
+    /// A link record's revocation seed was not 32 bytes.
     #[error("link record revocation seed length is out of bounds")]
     LinkRecordRevocationSeedLength,
 }

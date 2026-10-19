@@ -15,11 +15,11 @@ import LakkoCore
 /// path segment without parsing the slug.
 ///
 /// URL plumbing — ``composePointerCallInviteUrl(blobId:)``
-/// for the production short form (`/c/<blob_id_b64url>`),
-/// ``composeInlineCallInviteUrl(capabilityBytes:)`` for the
-/// censored-region fallback (the bytes are encoded into the URL
-/// itself, no `/discovery/call-invite` round-trip needed), and
+/// for the link (`/c/<blob_id_b64url>`) and
 /// ``parseCallInviteSlug(_:)`` for the joiner-side dispatcher.
+/// The inline form that carried the capability in the URL was
+/// removed on 2026-10-19: a failed upload mints no link, and an
+/// inline slug is refused as malformed (a dead link).
 ///
 /// The form-side enums that used to live here are gone with the
 /// form (`docs/ux/call-links.md` section 6): a link carries one
@@ -47,30 +47,7 @@ public enum CallInviteUrl {
     /// characters).
     public static var blobIdUrlLen: Int { Int(inviteBlobIdUrlLen()) }
 
-    /// Lower bound on the inline-bytes form. The 3c3 wire
-    /// format with a 256-byte one-time KP tops out around 500
-    /// bytes; we pin the floor at 400 to leave headroom for
-    /// KP formats that might shrink slightly. Anything < 400
-    /// that is not a 6-byte pointer is invalid input - the
-    /// retired 32-byte content-addressed id included.
-    public static let inlineMinLen: Int = 400
-
     // MARK: - URL builders
-
-    /// Auto-pick the URL form by argument shape — pointer
-    /// (6 bytes) when the caller has uploaded the capability
-    /// and wants the short form, inline-bytes (≥ 400 bytes)
-    /// when the caller is staying server-free.
-    ///
-    /// Both produce a `<origin>/c/<base64url>` shape; the
-    /// joiner side discriminates via
-    /// ``parseCallInviteSlug(_:)`` on the byte length.
-    public static func composeCallInviteUrl(
-        _ bytes: Data,
-        origin: String = defaultOrigin
-    ) -> String {
-        return "\(origin)\(urlPrefix)\(base64UrlEncodeNoPad(bytes))"
-    }
 
     /// Builder for the **pointer** URL form — the short
     /// `<origin>/c/<blob_id_b64url>` shape backed by
@@ -88,63 +65,29 @@ public enum CallInviteUrl {
                 got: blobId.count
             )
         }
-        return composeCallInviteUrl(blobId, origin: origin)
-    }
-
-    /// Builder for the **inline-bytes** URL form — the long
-    /// shape that carries the capability inside the URL
-    /// itself, no server round-trip on open. Reserved for the
-    /// censored-region fallback; the pointer form is the
-    /// production default.
-    ///
-    /// - Throws: ``CallInviteUrlError/inlineTooSmall`` when
-    ///   `capabilityBytes.count < 400`.
-    public static func composeInlineCallInviteUrl(
-        capabilityBytes: Data,
-        origin: String = defaultOrigin
-    ) throws -> String {
-        guard capabilityBytes.count >= inlineMinLen else {
-            throw CallInviteUrlError.inlineTooSmall(
-                minimum: inlineMinLen,
-                got: capabilityBytes.count
-            )
-        }
-        return composeCallInviteUrl(capabilityBytes, origin: origin)
+        return "\(origin)\(urlPrefix)\(base64UrlEncodeNoPad(blobId))"
     }
 
     // MARK: - URL parsing
 
-    /// Discriminated parse result for a `/c/<slug>` segment.
+    /// Parse result for a `/c/<slug>` segment: always the ledger id.
     public enum ParsedCallInvite: Equatable {
-        /// Short form — `blobId` is the 6-byte ledger id. Joiner fetches via
-        /// `DiscoveryClient.fetchCallInvite(blobId:)` →
-        /// `CallInviteCapability.decodeAndVerify(...)`.
+        /// `blobId` is the 6-byte ledger id. Joiner fetches via
+        /// `DiscoveryClient.fetchCallInvite(blobId:)` and opens it.
         case pointer(blobId: Data)
-        /// Long form — the bytes are the wire-format
-        /// `CallInviteCapability`. Joiner runs
-        /// `CallInviteCapability.decodeAndVerify(...)` directly.
-        case inline(capabilityBytes: Data)
     }
 
-    /// Discriminated parse of a URL slug. The dispatch rule
-    /// is a clean byte-length test: 6 bytes (exactly 8
-    /// characters) ⇒ pointer, ≥ 400 ⇒ inline (3c3 wire-format
-    /// minimum). Anything else is invalid input.
+    /// Parse a URL slug: exactly 8 characters decoding to 6
+    /// bytes. Anything else, the retired 32-byte id and an
+    /// inline sealed blob included, is invalid input.
     public static func parseCallInviteSlug(_ slug: String) throws -> ParsedCallInvite {
         guard isBase64Url(slug), let bytes = base64UrlDecodeNoPad(slug) else {
             throw CallInviteUrlError.invalidBase64Url
         }
-        if bytes.count == blobIdLen, slug.count == blobIdUrlLen {
-            return .pointer(blobId: bytes)
+        guard bytes.count == blobIdLen, slug.count == blobIdUrlLen else {
+            throw CallInviteUrlError.slugWrongLength(blobIdLen: blobIdLen, got: bytes.count)
         }
-        if bytes.count >= inlineMinLen {
-            return .inline(capabilityBytes: bytes)
-        }
-        throw CallInviteUrlError.slugWrongLength(
-            blobIdLen: blobIdLen,
-            inlineMinLen: inlineMinLen,
-            got: bytes.count
-        )
+        return .pointer(blobId: bytes)
     }
 }
 
@@ -152,20 +95,17 @@ public enum CallInviteUrl {
 
 public enum CallInviteUrlError: Error, Equatable, LocalizedError {
     case wrongBlobIdLength(expected: Int, got: Int)
-    case inlineTooSmall(minimum: Int, got: Int)
     case invalidBase64Url
-    case slugWrongLength(blobIdLen: Int, inlineMinLen: Int, got: Int)
+    case slugWrongLength(blobIdLen: Int, got: Int)
 
     public var errorDescription: String? {
         switch self {
         case .wrongBlobIdLength(let expected, let got):
             return "blobId must be \(expected) bytes, got \(got)"
-        case .inlineTooSmall(let minimum, let got):
-            return "capabilityBytes must be ≥ \(minimum) bytes, got \(got)"
         case .invalidBase64Url:
             return "slug is not valid base64url-no-pad"
-        case .slugWrongLength(let blobIdLen, let inlineMinLen, let got):
-            return "call-invite slug decoded to \(got) bytes — neither a \(blobIdLen)-byte pointer nor a ≥ \(inlineMinLen)-byte inline capability"
+        case .slugWrongLength(let blobIdLen, let got):
+            return "call-invite slug decoded to \(got) bytes, not a \(blobIdLen)-byte ledger id"
         }
     }
 }

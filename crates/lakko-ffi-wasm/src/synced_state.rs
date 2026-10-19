@@ -739,8 +739,9 @@ pub struct LinkRecord {
 #[wasm_bindgen]
 impl LinkRecord {
     /// A record for a link just minted: no use yet, not revoked. `linkId`
-    /// 16 bytes, `linkSecret` 12, `ledgerId` 6 or empty (an inline link),
-    /// `revocationSeed` 32 or empty (no ledger row; ADR-0078 section 10, it
+    /// 16 bytes, `linkSecret` 12, `ledgerId` 6 (every link has a ledger row;
+    /// the inline form was removed on 2026-10-19), `revocationSeed` 32
+    /// (ADR-0078 section 10, it
     /// lets any device of the account that revokes the link delete the row),
     /// `maxUses` as the capability carries it (0 = single use,
     /// `0xFFFFFFFF` = no limit), `expiryMs` 0 = never.
@@ -812,12 +813,12 @@ impl LinkRecord {
             core::LinkRecordKind::Call => LinkRecordKind::Call,
         }
     }
-    /// The 6-byte ledger id, or empty for an inline link.
+    /// The 6-byte ledger id.
     #[wasm_bindgen(getter, js_name = ledgerId)]
     pub fn ledger_id(&self) -> Vec<u8> {
         self.inner.value.ledger_id.clone()
     }
-    /// The 32-byte seed that deletes the ledger row, or empty. SECRET.
+    /// The 32-byte seed that deletes the ledger row. SECRET.
     #[wasm_bindgen(getter, js_name = revocationSeed)]
     pub fn revocation_seed(&self) -> Vec<u8> {
         self.inner.value.revocation_seed.clone()

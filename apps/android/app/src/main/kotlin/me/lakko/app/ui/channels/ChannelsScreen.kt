@@ -1975,8 +1975,21 @@ private fun CoPublishersCard(
                             // carries the channel id and its name.
                             val name = state.channels.value.firstOrNull { it.id == channelId }
                                 ?.let { it.sharedName.ifEmpty { it.localName } }
-                            link = pub.withIdentity(persist = false) { id ->
-                                CoPublisher.createCoPublisherLink(id, pg, name)
+                            val mint = pub.withIdentity(persist = false) { id ->
+                                CoPublisher.mintCoPublisherLink(id, pg, name)
+                            }
+                            // Uploaded to the group-invite ledger (no inline
+                            // form since 2026-10-19): any failed upload mints
+                            // nothing and shows the error; the button stays.
+                            val discovery = me.lakko.app.discovery.DiscoveryClient()
+                            discovery.setSessionToken(me.lakko.app.auth.SessionTokens.provider?.current())
+                            link = discovery.use { client ->
+                                CoPublisher.uploadCoPublisherLink(
+                                    mint.sealed,
+                                    mint.linkSecret,
+                                    client,
+                                    state.boundAccount,
+                                )
                             }
                         } catch (e: Throwable) {
                             me.lakko.app.rethrowIfCancelled(e)
@@ -2329,8 +2342,16 @@ public fun JoinCoPublisherScreen(
                         // live in the shared identity's provider; the join
                         // below must run on the SAME identity, and the
                         // joined group is persisted with it.
-                        val request = publisher.withIdentityPersistingFirst { identity, persistNow ->
-                            CoPublisher.requestToCoPublish(ds, identity, trimmed, coPublished, persistNow)
+                        val request = me.lakko.app.discovery.DiscoveryClient().use { discovery ->
+                            publisher.withIdentityPersistingFirst { identity, persistNow ->
+                                CoPublisher.requestToCoPublish(
+                                    ds,
+                                    identity,
+                                    trimmed,
+                                    coPublished,
+                                    persistNow,
+                                ) { blobId -> discovery.fetchGroupInvite(blobId) }
+                            }
                         }
                         status = UiText("channels.join.waiting")
                         var keys: ChannelPublisherKeys? = null

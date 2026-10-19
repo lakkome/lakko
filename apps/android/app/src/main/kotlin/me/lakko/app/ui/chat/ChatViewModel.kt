@@ -2284,8 +2284,8 @@ public class ChatViewModel(
 
     /**
      * ADR-0028 revoke — revoke the currently-shown group invite link (issuer
-     * only). A pointer link carries a ledger blob the server deletes; an inline
-     * link has nothing to revoke (we just clear the field). Fail-closed.
+     * only): the server deletes its ledger row; without a kept revocation key
+     * the field is only cleared. Fail-closed.
      */
     public fun onRevokeInviteLink() {
         val link = mutableInviteLink.value ?: return
@@ -3540,9 +3540,9 @@ public data class JoinableGroupCall(
 /**
  * What the group info says after Revoke on its invite link, the web rule
  * (`Chat.tsx` `onRevokeInviteLink`): a pointer link's ledger row was deleted,
- * so the link no longer works (`revoked`); an inline sealed link (the
- * censored-region fallback) has no server record, so the field was only
- * cleared (`cleared`). [revoked] is what `ChatRepository.revokeGroupInviteLink`
+ * so the link no longer works (`revoked`); a link this device keeps no
+ * revocation key for (or a malformed one) was only cleared from the field
+ * (`cleared`). [revoked] is what `ChatRepository.revokeGroupInviteLink`
  * returns.
  */
 internal fun inviteLinkRevokeNotice(revoked: Boolean): UiText =

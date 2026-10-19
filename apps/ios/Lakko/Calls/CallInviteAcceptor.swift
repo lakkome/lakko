@@ -12,17 +12,15 @@ import LakkoCore
 /// result so the `/c/<slug>` landing screen can render the
 /// right outcome copy without re-implementing the dispatch:
 ///
-///   1. ``CallInviteUrl/parseCallInviteSlug(_:)`` — pointer
-///      vs. inline.
-///   2. (pointer branch)
-///      ``DiscoveryClient/fetchCallInvite(blobId:)`` — bytes
+///   1. ``CallInviteUrl/parseCallInviteSlug(_:)`` — the ledger
+///      id (an inline slug, the removed form, is malformed).
+///   2. ``DiscoveryClient/fetchCallInvite(blobId:)`` — bytes
 ///      or 404.
 ///   3. `CallInviteCapability.decodeAndVerify(wire:)` — local
 ///      Ed25519 signature check (catches a malicious server
 ///      serving substituted bytes).
 ///   4. `capability.isValidNow(nowMs:)` — expiry filter.
-///   5. (pointer branch)
-///      ``DiscoveryClient/consumeCallInvite(blobId:capabilityBytes:joinerAccountId:)``
+///   5. ``DiscoveryClient/consumeCallInvite(blobId:capabilityBytes:joinerAccountId:)``
 ///      — atomic counter bump + per-joiner dedup tag.
 ///   6. `acceptCallInvite(capability:joinerIdentity:)` —
 ///      bootstrap a fresh MLS group with joiner as founder +
@@ -79,14 +77,6 @@ public enum CallInviteAcceptor {
 
     /// End-to-end "join call link" pipeline.
     ///
-    /// Inline-capability slugs (censored-region fallback)
-    /// skip the `fetch` + `consume` steps entirely — consume
-    /// on an inline capability has no server-side row to
-    /// bump. The acceptor surfaces this asymmetry as
-    /// `.accepted(...)` with `capabilityBytes` populated; the
-    /// `welcomeForOwner` still needs ferrying via whatever
-    /// transport the user has.
-    ///
     /// - Parameters:
     ///   - slug:            The `<slug>` segment from a
     ///                      `/c/<slug>` URL.
@@ -131,9 +121,9 @@ public enum CallInviteAcceptor {
             return .damaged
         }
 
-        // ---- 2. Pointer branch: fetch bytes -----------------
+        // ---- 2. Fetch the sealed bytes ----------------------
         let sealed: Data
-        var blobId: Data? = nil
+        let blobId: Data
         switch parsed {
         case .pointer(let id):
             blobId = id
@@ -156,8 +146,6 @@ public enum CallInviteAcceptor {
                 return .failed(message: (error as? LocalizedError)?.errorDescription
                     ?? String(describing: error))
             }
-        case .inline(let bytes):
-            sealed = bytes
         }
 
         // ---- 3. open (decrypt + verify) ---------------------
@@ -183,8 +171,8 @@ public enum CallInviteAcceptor {
             return .expired
         }
 
-        // ---- 5. Pointer branch: consume ----------------------
-        if let blobId = blobId {
+        // ---- 5. Consume ---------------------------------------
+        do {
             let consumeResult: ConsumeInviteResult
             do {
                 consumeResult = try await discoveryClient.consumeCallInvite(

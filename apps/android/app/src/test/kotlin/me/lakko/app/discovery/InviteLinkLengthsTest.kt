@@ -51,6 +51,15 @@ class InviteLinkLengthsTest {
         assertNull(decodeInviteBlobId("AAAA*AAA", TEST_INVITE_LINK_LENGTHS))
     }
 
+    /** The inline form is gone (2026-10-19): an `/i/` slug carrying a sealed
+     *  blob is no ledger id, so the contact invite page treats it as dead. */
+    @Test
+    fun `an inline contact slug is refused`() {
+        for (len in listOf(100, 224, 254, 693)) {
+            assertNull(decodeInviteBlobId(base64UrlEncodeNoPad(ByteArray(len) { 3 }), TEST_INVITE_LINK_LENGTHS))
+        }
+    }
+
     @Test
     fun `a 429 anywhere in the cause chain reads as rate limited`() {
         val limited = DiscoveryHttpError(429, "/discovery/group-invite/x (GET)", "")

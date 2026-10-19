@@ -51,7 +51,6 @@ import { mintedLinkFor, rememberMintedLink } from "./minted-links";
 import { newRevocationKey, revokeMintedLink } from "./own-links";
 import {
   appendGroupInviteLinkSecret,
-  composeInlineGroupInviteUrl,
   composePointerGroupInviteUrl,
   parseGroupInviteSlug,
   splitGroupInviteLink,
@@ -4325,8 +4324,7 @@ export class ContactsClient {
    *  member count at mint time. Since the 2026-09-28 security pass the WHOLE
    *  capability is sealed under a fresh 12-byte link secret that rides the
    *  URL **fragment** (`#<secret>`), which no browser sends and no ledger
-   *  stores; the same secret opens the preview. Both the pointer and the
-   *  inline form carry the same fragment. A name the display-name rule
+   *  stores; the same secret opens the preview. A name the display-name rule
    *  refuses is left out rather than failing the mint: the page then shows no
    *  name, never a guess.
    *
@@ -4382,13 +4380,10 @@ export class ContactsClient {
     // pointer URL. `max_uses` is a soft throttle, not an access control: the
     // admin approval gate stays the security boundary.
     //
-    // The inline form is the fallback for a TRANSPORT failure only (a
-    // censored / offline network), where the link must still work without the
-    // round-trip. A server answer (a 401 from a client with no session token,
-    // a 429, a 5xx) surfaces instead: falling back there silently hands the
-    // user the huge inline URL for a defect that should be fixed. The log
-    // names the status and never the capability. Both forms carry the link
-    // secret as the fragment; without it the link opens nothing.
+    // Any failed upload, a network one included, mints no link: the error
+    // surfaces and the person tries again (the inline form was removed on
+    // 2026-10-19). The log names the status and never the capability. The
+    // link carries the secret as the fragment; without it it opens nothing.
     const widths = inviteLinkWidths(wasm);
     let url: string;
     try {
@@ -4408,30 +4403,28 @@ export class ContactsClient {
         });
       }
     } catch (err) {
-      if (!(err instanceof DiscoveryNetworkError)) {
-        const status = (err as { status?: unknown }).status;
-        // eslint-disable-next-line no-console
-        console.warn(
-          `group-invite: ledger upload failed (${
-            typeof status === "number" ? `HTTP ${status}` : "local error"
-          })`,
-        );
-        throw ContactsError.wrap(err);
-      }
+      const status = (err as { status?: unknown }).status;
       // eslint-disable-next-line no-console
-      console.warn("group-invite: ledger unreachable, using the inline link");
-      url = composeInlineGroupInviteUrl(sealed, origin);
+      console.warn(
+        `group-invite: ledger upload failed (${
+          err instanceof DiscoveryNetworkError
+            ? "network"
+            : typeof status === "number"
+              ? `HTTP ${status}`
+              : "local error"
+        })`,
+      );
+      throw ContactsError.wrap(err);
     }
     return appendGroupInviteLinkSecret(url, linkSecret, widths);
   }
 
   /** ADR-0028 revoke — the issuer revokes a previously-created group invite
-   *  link. Only the server-backed pointer form (a 6-byte ledger id) is
-   *  revocable; an inline link has no ledger row. Parses the `blob_id` out of
-   *  the `/g/<slug>` link, signs the revocation with the link's own revocation
-   *  seed from this device's record of it (ADR-0078 section 10), and DELETEs
-   *  the ledger row. Returns `false` (nothing to do) for an inline / malformed
-   *  link, or one this device keeps no key for (it lives until it expires). */
+   *  link. Parses the `blob_id` out of the `/g/<slug>` link, signs the
+   *  revocation with the link's own revocation seed from this device's record
+   *  of it (ADR-0078 section 10), and DELETEs the ledger row. Returns `false`
+   *  (nothing to do) for a malformed link, or one this device keeps no key
+   *  for (it lives until it expires). */
   async revokeGroupInviteLink(
     identity: IdentitySecrets | null,
     link: string,
@@ -4446,7 +4439,6 @@ export class ContactsClient {
     } catch {
       return false; // malformed, or a pre-amendment link
     }
-    if (parsed.kind !== "pointer") return false; // inline link — no ledger row
     if (identity === null) return false;
     const accountIdB64 = base64Encode(identity.accountId);
     const slug = base64UrlEncodeNoPad(parsed.blobId);
@@ -4465,25 +4457,20 @@ export class ContactsClient {
     }
   }
 
-  /** ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the SEALED link blob,
-   *  fetching from the discovery ledger when the slug is an 8-character
-   *  ledger id (the production form) or passing the bytes straight through
-   *  when it is the inline sealed blob (the upload-failed fallback). Returns
-   *  the `blobId` (non-null only for the pointer form) so the caller can drive
-   *  `consumeGroupInvite` before requesting to join. A 429 from the ledger
+  /** ADR-0028 (G-3) — resolve a `/g/<slug>` slug (an 8-character ledger id)
+   *  to the SEALED link blob, fetched from the discovery ledger. Returns the
+   *  `blobId` so the caller can drive `consumeGroupInvite` before requesting
+   *  to join. Any other slug, an inline sealed blob included, throws. A 429 from the ledger
    *  surfaces as a wrapped `DiscoveryRateLimitedError` (see
    *  `isDiscoveryRateLimited`), never as "not found". */
   async resolveGroupInviteSlug(
     slug: string,
-  ): Promise<{ sealed: Uint8Array; blobId: Uint8Array | null }> {
+  ): Promise<{ sealed: Uint8Array; blobId: Uint8Array }> {
     let parsed;
     try {
       parsed = parseGroupInviteSlug(slug, inviteLinkWidths(await loadWasm()));
     } catch (err) {
       throw ContactsError.wrap(err);
-    }
-    if (parsed.kind === "inline") {
-      return { sealed: parsed.sealed, blobId: null };
     }
     let fetched: Uint8Array | null;
     try {
@@ -4499,7 +4486,7 @@ export class ContactsClient {
 
   /** Sealed-link amendment of ADR-0028 (2026-09-28): open a `/g/` link. A
    *  missing or malformed fragment is refused as damaged BEFORE any request;
-   *  otherwise the sealed blob is resolved (ledger or inline) and opened with
+   *  otherwise the sealed blob is fetched from the ledger and opened with
    *  the fragment's secret, which also verifies the capability inside. Any
    *  open failure is `InviteLinkDamagedError`. The caller owns (and frees) the
    *  returned capability; `capabilityWire` is its PLAINTEXT wire, the value
@@ -4510,7 +4497,7 @@ export class ContactsClient {
   ): Promise<{
     capability: WasmGroupInviteCapability;
     capabilityWire: Uint8Array;
-    blobId: Uint8Array | null;
+    blobId: Uint8Array;
     linkSecret: Uint8Array;
   }> {
     const wasm = await loadWasm();
@@ -4566,8 +4553,7 @@ export class ContactsClient {
     // ADR-0028 OQ1 — when the link was a server-backed pointer, register one
     // consume against the ledger's soft `max_uses` ceiling before posting the
     // request (anti-abuse defence-in-depth; the admin approval gate remains the
-    // real boundary). A repeat from this joiner is idempotent. Inline links
-    // (no `blobId`) skip this — there is no ledger row to consume.
+    // real boundary). A repeat from this joiner is idempotent.
     if (opts?.blobId != null && opts.joinerAccountId != null) {
       let consume;
       try {

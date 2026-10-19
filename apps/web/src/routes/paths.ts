@@ -150,9 +150,8 @@ export const paths = {
   },
   /**
    * Multi-joiner call-invite landing (ADR-0032, G-21/G-22). `slug` is the
-   * base64url-no-pad of a `CallInviteCapability` blob_id (pointer form) or
-   * the inline capability bytes — the same `/c/<slug>` link
-   * `calls/invite.ts::composeCallInviteUrl` mints. The landing screen
+   * base64url-no-pad of a `CallInviteCapability` blob_id — the same
+   * `/c/<slug>` link `calls/invite.ts::composePointerCallInviteUrl` mints. The landing screen
    * decodes + verifies the capability and drives the joiner (or, when the
    * visitor is the owner, the host) flow.
    */
@@ -225,9 +224,8 @@ export const inviteRoutePattern = "/i/:slug" as const;
 /**
  * The matchable pattern for the group join-ticket route (ADR-0028, G-3) — the
  * `/g/<slug>#<secret>` link an owner mints for a non-member to request to
- * join. `slug` is the 8-character ledger id of the sealed capability, or the
- * sealed blob itself (inline); the fragment is the link secret it opens
- * under (2026-09-28 security pass).
+ * join. `slug` is the 8-character ledger id of the sealed capability; the
+ * fragment is the link secret it opens under (2026-09-28 security pass).
  */
 export const groupJoinRoutePattern = "/g/:slug" as const;
 
@@ -241,8 +239,8 @@ export const callRoutePattern = "/call/:id" as const;
 /**
  * The matchable pattern for the multi-joiner call-invite landing route
  * (ADR-0032, G-21/G-22) — must stay in sync with `paths.joinCall(...)`.
- * `slug` is the 8-character ledger id of a sealed `CallInviteCapability`, or
- * the sealed blob itself (inline); the fragment is the link secret.
+ * `slug` is the 8-character ledger id of a sealed `CallInviteCapability`;
+ * the fragment is the link secret.
  */
 export const callJoinRoutePattern = "/c/:slug" as const;
 

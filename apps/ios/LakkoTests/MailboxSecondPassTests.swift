@@ -401,7 +401,7 @@ final class MailboxSecondPassTests: XCTestCase {
                 SpentGrants.LinkToRevoke(blobId: invite, call: false, linkIdB64: "aQ=="),
                 SpentGrants.LinkToRevoke(blobId: call, call: true, linkIdB64: "Yw=="),
             ],
-            "an inline link has no ledger row")
+            "a link with no ledger row has nothing to revoke")
     }
 
     func testALinkLeavesTheListsOnlyWhenItIsGoneOrWasMintedHere() {

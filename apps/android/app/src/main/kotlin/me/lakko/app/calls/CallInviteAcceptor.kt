@@ -20,14 +20,15 @@ import uniffi.lakko_ffi_uniffi.acceptCallInvite
  * result so the `/c/<slug>` landing screen can render the
  * right outcome copy without re-implementing the dispatch:
  *
- *   1. [parseCallInviteSlug] — pointer vs. inline.
- *   2. (pointer branch) [DiscoveryClient.fetchCallInvite] —
+ *   1. [parseCallInviteSlug] — the ledger id (an inline slug, the
+ *      removed form, is malformed).
+ *   2. [DiscoveryClient.fetchCallInvite] —
  *      bytes or 404.
  *   3. [CallInviteCapability.openLink] under the fragment secret — local
  *      Ed25519 signature check (catches a malicious server
  *      serving substituted bytes).
  *   4. [CallInviteCapability.isValidNow] — expiry filter.
- *   5. (pointer branch) [DiscoveryClient.consumeCallInvite]
+ *   5. [DiscoveryClient.consumeCallInvite]
  *      — atomic counter bump + per-joiner dedup tag.
  *   6. [acceptCallInvite] — bootstrap a fresh MLS group with
  *      joiner as founder + owner added via the embedded KP.
@@ -129,14 +130,6 @@ public class CallInviteAcceptor(
     /**
      * End-to-end "join call link" pipeline.
      *
-     * Inline-capability slugs (censored-region fallback)
-     * skip the fetch + consume steps entirely — consume on
-     * an inline capability has no server-side row to bump.
-     * The acceptor surfaces this asymmetry as
-     * [Result.Accepted] with `capabilityBytes` populated;
-     * the `welcomeForOwner` still needs ferrying via
-     * whatever transport the user has.
-     *
      * @param slug             The `<slug>` segment from a
      *                         `/c/<slug>` URL.
      * @param joinerAccountId  Joiner's 16-byte UUIDv7
@@ -172,9 +165,9 @@ public class CallInviteAcceptor(
             return Result.MalformedSlug(reason = e.message ?: e::class.simpleName ?: "parse error")
         }
 
-        // ---- 2. Pointer branch: fetch the sealed bytes ------
+        // ---- 2. Fetch the sealed bytes ----------------------
         val sealedBytes: ByteArray
-        var blobId: ByteArray? = null
+        val blobId: ByteArray
         when (parsed) {
             is ParsedCallInvite.Pointer -> {
                 blobId = parsed.blobId
@@ -190,9 +183,6 @@ public class CallInviteAcceptor(
                     me.lakko.app.rethrowIfCancelled(e)
                     return Result.Failed(message = e.message ?: e.toString())
                 }
-            }
-            is ParsedCallInvite.Inline -> {
-                sealedBytes = parsed.capabilityBytes
             }
         }
 
@@ -218,9 +208,9 @@ public class CallInviteAcceptor(
             return Result.Expired
         }
 
-        // ---- 5. Pointer branch: consume ----------------------
+        // ---- 5. Consume ---------------------------------------
         val effectiveBlobId = blobId
-        if (effectiveBlobId != null) {
+        run {
             val consumeResult = try {
                 discoveryClient.consumeCallInvite(
                     blobId = effectiveBlobId,

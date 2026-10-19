@@ -6,8 +6,8 @@
 //!
 //! Every invite link (`/i/`, `/c/`, `/g/`) now carries its capability SEALED
 //! under a secret in the URL fragment. The sealed blob is what the discovery
-//! ledger serves under an id, or what an inline link carries in its path, so
-//! a malicious ledger or link-minter chooses every byte of it. The joiner
+//! ledger serves under an id, so a malicious ledger chooses every byte of
+//! it. The joiner
 //! opens it (kind/version gate, length split, HKDF, AEAD) and verifies the
 //! capability inside before any other step.
 //!

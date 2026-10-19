@@ -679,7 +679,7 @@ function ChatView(props: {
   // `chats.persistSnapshot` after every mutation.
   // The discovery client reads the session token at request time: the group
   // invite upload and revoke sit behind discovery's `require_session`, and a
-  // tokenless client made every upload a 401 that fell back to the inline link.
+  // tokenless client made every upload a 401.
   const contacts = new ContactsClient(
     new DiscoveryClient(undefined, {
       sessionToken: () => auth.identitySecrets()?.sessionToken ?? null,
@@ -5909,9 +5909,9 @@ function ChatView(props: {
     }
   }
 
-  // ADR-0028 revoke — kill the currently-shown group invite link. A pointer
-  // link carries a ledger blob the server deletes (issuer-signed); an inline
-  // link has no ledger row, so we just clear the field.
+  // ADR-0028 revoke — kill the currently-shown group invite link: the ledger
+  // row is deleted with this device's revocation seed; without a kept seed
+  // the field is only cleared.
   async function onRevokeInviteLink(): Promise<void> {
     const link = inviteLink();
     if (!link) return;

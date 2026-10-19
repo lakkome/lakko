@@ -2355,8 +2355,8 @@
       "comment": "Button in the conversation header and title of the layer it opens: the group's details and members."
     },
     "chat.invite_link.cleared": {
-      "text": "Link cleared (an inline link has nothing to revoke).",
-      "comment": "Notice after clearing an invite link that has no server record to revoke."
+      "text": "Link cleared. This device holds no key to revoke it, so it works until it expires.",
+      "comment": "Notice after clearing a group invite link this device cannot revoke at the server (it keeps no revocation key for it)."
     },
     "chat.invite_link.copy": {
       "text": "Copy link",
@@ -6399,11 +6399,6 @@
     "invite.links.for_new_user": {
       "text": "For someone new to Lakko",
       "comment": "Fact under an invite link made for someone without an account yet (a referral link)."
-    },
-    "invite.links.inline_note": {
-      "text": "Lakko could not shorten this link, so it is long. It works the same way and cannot be revoked.",
-      "comment": "Fact under an invite link that could not be registered with the server: it cannot be withdrawn later. Keep \"cannot be revoked\".",
-      "security_critical": true
     },
     "invite.links.label_field": {
       "text": "Label (optional)",

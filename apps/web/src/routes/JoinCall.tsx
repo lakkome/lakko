@@ -76,7 +76,6 @@ import {
   isInviteLinkDamaged,
   openInviteLinkFromUrl,
 } from "../contacts/invite-link";
-import { CALL_INVITE_INLINE_MIN_LEN } from "../calls/invite";
 import { useCallHost, type CallHostApi } from "../calls/CallHostContext";
 import { callIdHex } from "../calls/call-signaling-dispatch";
 import { hexKey } from "../calls/multi-joiner-election";
@@ -170,7 +169,6 @@ export default function JoinCall() {
           slug,
           hash,
           widths: inviteLinkWidths(wasm),
-          inlineMinLen: CALL_INVITE_INLINE_MIN_LEN,
           what: "call-invite",
           fetchPointer: (blobId) => discovery.fetchCallInvite(blobId),
           open: (sealed, secret) => wasm.CallInviteCapability.openLink(sealed, secret),

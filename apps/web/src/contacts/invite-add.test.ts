@@ -5,18 +5,15 @@ import { describe, expect, it } from "vitest";
 
 import { addThroughInviteLink, type InviteConsume } from "./invite-add";
 
-function deps(consume: InviteConsume | null, sendFails = false) {
+function deps(consume: InviteConsume, sendFails = false) {
   const log: string[] = [];
   return {
     log,
     d: {
-      consume:
-        consume === null
-          ? null
-          : async () => {
-              log.push(`consume:${consume}`);
-              return consume;
-            },
+      consume: async () => {
+        log.push(`consume:${consume}`);
+        return consume;
+      },
       recordPending: async () => {
         log.push("record");
         return true;
@@ -46,12 +43,6 @@ describe("Add on an invite page (ADR-0079 amendment of 2026-10-19)", () => {
     const { log, d } = deps("consumed");
     await expect(addThroughInviteLink(d)).resolves.toBe("added");
     expect(log).toEqual(["consume:consumed", "record", "send"]);
-  });
-
-  it("an inline link has no consume: the inviter's device decides", async () => {
-    const { log, d } = deps(null);
-    await expect(addThroughInviteLink(d)).resolves.toBe("added");
-    expect(log).toEqual(["record", "send"]);
   });
 
   it("removes the pending contact again when the send fails", async () => {

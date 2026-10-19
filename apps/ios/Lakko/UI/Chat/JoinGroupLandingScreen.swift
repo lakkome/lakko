@@ -91,7 +91,7 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     /// The opened (plaintext) capability bytes + the ledger pointer they came from, kept
     /// from `run()` so `Request to join` and `Request again` post against the
     /// bytes the person was shown, not a second fetch.
-    private var resolved: (capabilityWire: Data, blobId: Data?)?
+    private var resolved: (capabilityWire: Data, blobId: Data)?
     /// In flight, so `Request again` cannot be double-tapped into two journal
     /// rows. Separate from `state`, which STAYS `.waiting` across a re-request:
     /// going back through `.requesting` would hide the wait copy and read as a
@@ -121,8 +121,8 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         await load()
     }
 
-    /// Resolve the slug (a pointer fetches the sealed blob from the ledger; an
-    /// inline link carries it), open it under the fragment's link secret
+    /// Resolve the slug (the sealed blob is fetched from the ledger; an inline
+    /// slug, the removed form, is invalid), open it under the fragment's link secret
     /// (ADR-0028 amendment 2026-09-28 — this also verifies the signature),
     /// check the expiry and open the preview under the same secret. Nothing is
     /// posted here.
@@ -133,7 +133,7 @@ public final class JoinGroupLandingViewModel: ObservableObject {
             state = .damaged
             return
         }
-        let located: (sealed: Data, blobId: Data?)
+        let located: (sealed: Data, blobId: Data)
         do {
             located = try await repository.resolveGroupInviteSlug(slug: slug)
         } catch let error as GroupInviteLinkError {
@@ -219,8 +219,7 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         pollTask?.cancel()
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         do {
-            // Request to join — consuming the ledger row when the link was a
-            // pointer (ADR-0028 OQ1).
+            // Request to join — consuming the ledger row (ADR-0028 OQ1).
             let result = try await repository.requestToJoinFromLink(
                 capabilityWire: resolved.capabilityWire,
                 nowMs: nowMs,

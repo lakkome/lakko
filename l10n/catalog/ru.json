@@ -2306,10 +2306,6 @@
       "text": "О группе",
       "status": "machine"
     },
-    "chat.invite_link.cleared": {
-      "text": "Ссылка убрана (у встроенной ссылки нечего отзывать).",
-      "status": "machine"
-    },
     "chat.invite_link.copy": {
       "text": "Копировать ссылку",
       "status": "machine"
@@ -6184,10 +6180,6 @@
     },
     "invite.links.for_new_user": {
       "text": "Для новичка в Lakko",
-      "status": "machine"
-    },
-    "invite.links.inline_note": {
-      "text": "Lakko не удалось сократить эту ссылку, поэтому она длинная. Она работает так же, но её нельзя отозвать.",
       "status": "machine"
     },
     "invite.links.label_field": {

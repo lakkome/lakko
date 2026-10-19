@@ -155,43 +155,21 @@ public class SealedInviteUpload(
 )
 
 /**
- * The shareable URL for a minted link: the pointer form over [blobId] when the
- * upload landed, the inline form over [sealed] when it failed in transport;
- * either way with the fragment.
+ * The shareable URL for a minted link: the ledger id the upload returned, with
+ * the fragment. There is no link without a ledger id: a failed upload mints
+ * nothing (the inline form was removed on 2026-10-19).
  */
 public fun composeSealedInviteUrl(
     origin: String,
     prefix: String,
-    blobId: ByteArray?,
-    sealed: ByteArray,
+    blobId: ByteArray,
     linkSecret: ByteArray,
     lengths: InviteLinkLengths = InviteLinkLengths.core,
 ): String {
-    val slug = if (blobId != null) {
-        require(blobId.size == lengths.blobIdLen) {
-            "blobId must be ${lengths.blobIdLen} bytes, got ${blobId.size}"
-        }
-        base64UrlEncodeNoPad(blobId)
-    } else {
-        base64UrlEncodeNoPad(sealed)
+    require(blobId.size == lengths.blobIdLen) {
+        "blobId must be ${lengths.blobIdLen} bytes, got ${blobId.size}"
     }
-    return appendInviteLinkSecret("$origin$prefix$slug", linkSecret, lengths)
-}
-
-/**
- * `true` when an upload failure is a TRANSPORT failure (no route, DNS, TLS, a
- * timeout) — the only case a sealed link falls back to the inline form. A
- * server refusal (any HTTP status) is not.
- */
-public fun isInviteUploadTransportFailure(error: Throwable): Boolean {
-    var cause: Throwable? = error
-    val seen = HashSet<Throwable>()
-    while (cause != null && seen.add(cause)) {
-        if (cause is DiscoveryHttpError) return false
-        if (cause is DiscoveryNetworkError || cause is java.io.IOException) return true
-        cause = cause.cause
-    }
-    return false
+    return appendInviteLinkSecret("$origin$prefix${base64UrlEncodeNoPad(blobId)}", linkSecret, lengths)
 }
 
 /**

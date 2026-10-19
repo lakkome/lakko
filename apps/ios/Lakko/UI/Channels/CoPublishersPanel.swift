@@ -204,9 +204,13 @@ struct CoPublishersPanel: View {
             let (identity, publisherGroup) = try open()
             let channel = state.channels.first { $0.id == channelId }
             let name = channel.map { $0.sharedMeta?.name ?? $0.localName }
-            link = try CoPublisher.createCoPublisherLink(
+            // Uploaded to the group-invite ledger (no inline form since
+            // 2026-10-19): any failed upload mints nothing and shows the error;
+            // the button stays for another try.
+            link = try await CoPublisher.createCoPublisherLink(
                 identity: identity, publisherGroup: publisherGroup,
-                channelName: name?.isEmpty == false ? name : nil)
+                channelName: name?.isEmpty == false ? name : nil,
+                accountIdB64: AcceptedContactsStore.boundAccountIdB64)
         } catch {
             NSLog("Channels: create co-publisher link failed: %@", String(describing: error))
             self.error = .key("chat.error.create_link")

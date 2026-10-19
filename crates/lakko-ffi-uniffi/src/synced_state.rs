@@ -669,10 +669,11 @@ pub struct LinkRecord {
     pub link_secret: Vec<u8>,
     /// Which ledger.
     pub kind: LinkRecordKind,
-    /// The 6-byte ledger id, or empty for an inline link.
+    /// The 6-byte ledger id (every link has a ledger row; the inline form was
+    /// removed on 2026-10-19).
     pub ledger_id: Vec<u8>,
-    /// The 32-byte seed that deletes the ledger row (ADR-0078 section 10),
-    /// or empty when the link has no ledger row. Any device of the account
+    /// The 32-byte seed that deletes the ledger row (ADR-0078 section 10).
+    /// Any device of the account
     /// that revokes the link deletes the row with it.
     pub revocation_seed: Vec<u8>,
     /// UNIX millis after which the link no longer works; 0 = never.

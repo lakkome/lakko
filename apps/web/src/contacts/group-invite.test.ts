@@ -17,16 +17,13 @@ import { fileURLToPath } from "node:url";
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 import {
-  GROUP_INVITE_INLINE_MIN_LEN,
   appendGroupInviteLinkSecret,
-  composeInlineGroupInviteUrl,
   composePointerGroupInviteUrl,
   parseGroupInviteSlug,
   splitGroupInviteLink,
 } from "./group-invite";
-import { INVITE_INLINE_MIN_LEN, composePointerInviteUrl, parseInviteSlug } from "./invite";
+import { composePointerInviteUrl, parseInviteSlug } from "./invite";
 import {
-  CALL_INVITE_INLINE_MIN_LEN,
   composePointerCallInviteUrl,
   parseCallInviteSlug,
 } from "../calls/invite";
@@ -95,28 +92,40 @@ describe("pointer links are 8 characters, for all three kinds", () => {
   });
 });
 
-describe("inline links keep their shape", () => {
-  it("/g/ inline round-trips", () => {
-    const cap = bytes(150, 0x22);
-    const slug = composeInlineGroupInviteUrl(cap, ORIGIN).slice(`${ORIGIN}/g/`.length);
-    expect(parseGroupInviteSlug(slug, W)).toEqual({ kind: "inline", sealed: cap });
-  });
-
-  it("each kind's floor is inline, one byte less is refused", () => {
-    const cases: [(s: string) => unknown, number][] = [
-      [(s) => parseGroupInviteSlug(s, W), GROUP_INVITE_INLINE_MIN_LEN],
-      [(s) => parseInviteSlug(s, W), INVITE_INLINE_MIN_LEN],
-      [(s) => parseCallInviteSlug(s, W), CALL_INVITE_INLINE_MIN_LEN],
+describe("the inline form is gone (2026-10-19): an inline URL is a dead link", () => {
+  it("a sealed blob in the path is refused by all three parsers, before any request", () => {
+    const parsers: ((slug: string) => unknown)[] = [
+      (slug) => parseGroupInviteSlug(slug, W),
+      (slug) => parseInviteSlug(slug, W),
+      (slug) => parseCallInviteSlug(slug, W),
     ];
-    for (const [parse, floor] of cases) {
-      expect(floor).toBeGreaterThanOrEqual(100);
-      expect(parse(base64UrlEncodeNoPad(bytes(floor)))).toMatchObject({ kind: "inline" });
-      expect(() => parse(base64UrlEncodeNoPad(bytes(floor - 1)))).toThrow();
+    // The old floors (100 / 160 / 400 bytes) and a real sealed blob's width.
+    for (const len of [100, 160, 400, 938]) {
+      const slug = base64UrlEncodeNoPad(bytes(len, 0x22));
+      for (const parse of parsers) expect(() => parse(slug)).toThrow();
     }
   });
 
-  it("the inline composer refuses an under-minimum capability", () => {
-    expect(() => composeInlineGroupInviteUrl(bytes(50), ORIGIN)).toThrow();
+  it("an inline /g/ link opens nothing and asks the ledger nothing", async () => {
+    const m = wasm.composeGroupInviteCapability(bytes(32, 0x01), bytes(32, 0xa1), 0n);
+    const slug = base64UrlEncodeNoPad(m.sealed);
+    const hash = `#${base64UrlEncodeNoPad(m.linkSecret)}`;
+    m.free();
+    let requests = 0;
+    await expect(
+      openInviteLinkFromUrl({
+        slug,
+        hash,
+        widths: W,
+        what: "group-invite",
+        fetchPointer: async () => {
+          requests += 1;
+          return null;
+        },
+        open: (sealed, secret) => wasm.GroupInviteCapability.openLink(sealed, secret),
+      }),
+    ).rejects.toThrow();
+    expect(requests).toBe(0);
   });
 });
 
@@ -130,7 +139,7 @@ describe("old and malformed slugs are refused, fail-closed", () => {
     expect(() => parseCallInviteSlug(oldId, W)).toThrow();
   });
 
-  it("refuses widths between the pointer and the floor, and short slugs", () => {
+  it("refuses every width but the pointer's, short slugs included", () => {
     for (const len of [1, 5, 7, 10, 64, 99]) {
       expect(() => parseGroupInviteSlug(base64UrlEncodeNoPad(bytes(len)), W)).toThrow();
     }
@@ -298,15 +307,14 @@ describe("sealed links: compose, upload shape, open, damaged (all three kinds)",
     }
   });
 
-  it("the composed pointer and inline links carry the secret and open end to end", async () => {
+  it("the composed pointer link carries the secret and opens end to end", async () => {
     const g = mintGroup();
     const blobId = bytes(W.blobIdLen, 0x42);
-    for (const pointer of [blobId, null]) {
+    {
       const link = composeSealedInviteLink({
         origin: ORIGIN,
         prefix: "/g/",
-        blobId: pointer,
-        sealed: g.sealed,
+        blobId,
         secret: g.secret,
         widths: W,
       });
@@ -318,7 +326,6 @@ describe("sealed links: compose, upload shape, open, damaged (all three kinds)",
         slug: split.slug,
         hash,
         widths: W,
-        inlineMinLen: GROUP_INVITE_INLINE_MIN_LEN,
         what: "group-invite",
         fetchPointer: async (id) => {
           fetched.push(id);
@@ -329,8 +336,8 @@ describe("sealed links: compose, upload shape, open, damaged (all three kinds)",
       expect(opened.kind).toBe("opened");
       if (opened.kind !== "opened") throw new Error("unreachable");
       expect(opened.capability.groupId).toEqual(groupA);
-      expect(opened.blobId).toEqual(pointer);
-      expect(fetched).toEqual(pointer === null ? [] : [blobId]);
+      expect(opened.blobId).toEqual(blobId);
+      expect(fetched).toEqual([blobId]);
     }
   });
 
@@ -343,7 +350,6 @@ describe("sealed links: compose, upload shape, open, damaged (all three kinds)",
           slug: base64UrlEncodeNoPad(bytes(W.blobIdLen)),
           hash,
           widths: W,
-          inlineMinLen: GROUP_INVITE_INLINE_MIN_LEN,
           what: "group-invite",
           fetchPointer: async () => {
             requests += 1;
@@ -364,7 +370,6 @@ describe("sealed links: compose, upload shape, open, damaged (all three kinds)",
         slug: base64UrlEncodeNoPad(bytes(W.blobIdLen)),
         hash: `#${base64UrlEncodeNoPad(mine.secret)}`,
         widths: W,
-        inlineMinLen: GROUP_INVITE_INLINE_MIN_LEN,
         what: "group-invite",
         fetchPointer: async () => theirs.sealed,
         open: (sealed, secret) => wasm.GroupInviteCapability.openLink(sealed, secret),
@@ -378,7 +383,6 @@ describe("sealed links: compose, upload shape, open, damaged (all three kinds)",
       slug: base64UrlEncodeNoPad(bytes(W.blobIdLen)),
       hash: `#${base64UrlEncodeNoPad(g.secret)}`,
       widths: W,
-      inlineMinLen: GROUP_INVITE_INLINE_MIN_LEN,
       what: "group-invite",
       fetchPointer: async () => null,
       open: (sealed, secret) => wasm.GroupInviteCapability.openLink(sealed, secret),

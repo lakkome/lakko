@@ -87,6 +87,7 @@ import { isHiddenPostDecode, PostCard, toPostDecode, type PostDecode } from "../
 import { PublishComposer } from "../channels/PublishComposer";
 import { DsClient } from "../ds/client";
 import { useAuth } from "../auth/AuthContext";
+import { DiscoveryClient } from "../discovery/client";
 import { markChannelRead } from "../feed/feed-marks-store";
 import { useChats } from "../chat/ChatContext";
 import {
@@ -744,8 +745,15 @@ const JoinCoPublisher: Component = () => {
       // are written to disk before the knock that carries the proposal, so a
       // reload while waiting can still open the Welcome, and a request whose
       // keys could not be recorded is never sent.
-      const { groupId, channelIdHex, joinerKey } = await requestToCoPublish(ds, identity, l, () =>
-        channelsActions.persistPublisherGroupDurable(),
+      // The link names a ledger row (no inline form since 2026-10-19).
+      const discovery = new DiscoveryClient();
+      discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
+      const { groupId, channelIdHex, joinerKey } = await requestToCoPublish(
+        ds,
+        identity,
+        l,
+        () => channelsActions.persistPublisherGroupDurable(),
+        discovery,
       );
       if (!sameSession()) return;
       setStatus(() => t("channels.join.waiting"));

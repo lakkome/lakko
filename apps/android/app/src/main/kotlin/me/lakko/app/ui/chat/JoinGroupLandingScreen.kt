@@ -132,7 +132,7 @@ public class JoinGroupLandingViewModel(
 
     /** The OPENED capability's plaintext wire + the ledger blob id (pointer
      *  form only), kept so `Request again` does not re-resolve the slug. */
-    private var resolved: Pair<ByteArray, ByteArray?>? = null
+    private var resolved: Pair<ByteArray, ByteArray>? = null
 
     private val mutableRequesting: MutableStateFlow<Boolean> = MutableStateFlow(false)
 
@@ -166,10 +166,9 @@ public class JoinGroupLandingViewModel(
             repository.state.first { it.bootstrapped }
             val nowMs = System.currentTimeMillis().toULong()
             try {
-                // ADR-0028 OQ1 — resolve the slug (a 6-byte ledger-id
-                // pointer => fetch the sealed link from the ledger; an inline
-                // sealed link => pass through), then open it under the
-                // fragment's secret.
+                // ADR-0028 OQ1 — resolve the slug (a 6-byte ledger id: fetch
+                // the sealed link from the ledger; an inline slug, the removed
+                // form, is invalid), then open it under the fragment's secret.
                 val sealedAndBlob = repository.resolveGroupInviteSlug(slug)
                 val card = repository.inspectGroupInvite(sealedAndBlob.first, fragment, nowMs)
                 if (!card.valid) {
@@ -227,8 +226,7 @@ public class JoinGroupLandingViewModel(
             val groupId: ByteArray
             val joinerKey: ByteArray
             try {
-                // Request to join, registering a consume against the ledger
-                // when the link was a pointer.
+                // Request to join, registering a consume against the ledger.
                 val result = repository.requestToJoinFromLink(
                     ticket.first,
                     nowMs,

@@ -5,19 +5,20 @@
  * Web-side URL helpers for the group join-ticket flow (ADR-0028, G-3).
  *
  * Sibling of `apps/web/src/calls/invite.ts` for the `GroupInviteCapability`
- * ecosystem. The `/g/<slug>` slug comes in two forms, discriminated by the
- * shared rules of `invite-link.ts` (ADR-0028 short-link amendment,
- * 2026-09-27):
+ * ecosystem. The `/g/<slug>` slug is one form, checked by the shared rules of
+ * `invite-link.ts` (ADR-0028 short-link amendment, 2026-09-27):
  *
  *   * **pointer** — the 6-byte ledger id (8 base64url characters) the
  *     discovery service assigned at `DiscoveryClient.uploadGroupInvite(...)`.
  *     The production default; the joiner fetches the capability from
  *     `/discovery/group-invite/<id>`. This is the OQ1 indirection that adds the
  *     server-side anti-abuse ledger (consume dedup + soft max_uses).
- *   * **inline** — the whole SEALED link blob. The fallback for a transport
- *     failure at upload: the sealed capability rides inside the URL itself.
  *
- * Both forms carry the 12-byte **link secret** as the URL fragment
+ * The inline form (the whole sealed blob in the path) was removed on
+ * 2026-10-19: a failed upload mints no link, and an inline URL is refused as a
+ * malformed slug.
+ *
+ * The link carries the 12-byte **link secret** as the URL fragment
  * (`#<16 characters>`): the capability is sealed under it
  * (`GroupInviteCapability.openLink`) and the preview opens with the same
  * secret. A link without it is damaged.
@@ -39,10 +40,6 @@ import {
  *  landing dispatcher branches on the path segment without parsing the slug. */
 export const GROUP_INVITE_URL_PREFIX = "/g/";
 
-/** Floor on the inline-bytes form. The real minimum is 110 bytes (a 1-byte
- *  group_id); the discriminator floor is the shared 100. */
-export const GROUP_INVITE_INLINE_MIN_LEN = 100;
-
 function defaultOrigin(): string {
   return typeof location !== "undefined" ? location.origin : "https://lakko.me";
 }
@@ -58,33 +55,15 @@ export function composePointerGroupInviteUrl(
   return `${origin}${GROUP_INVITE_URL_PREFIX}${base64UrlEncodeNoPad(blobId)}`;
 }
 
-/** Build the **inline-bytes** URL form — the long shape that carries the
- *  capability inside the URL itself, no server round-trip on open. Used only
- *  when the upload failed on a transport error. */
-export function composeInlineGroupInviteUrl(
-  sealed: Uint8Array,
-  origin: string = defaultOrigin(),
-): string {
-  if (sealed.length < GROUP_INVITE_INLINE_MIN_LEN) {
-    throw new Error(
-      `sealed must be >= ${GROUP_INVITE_INLINE_MIN_LEN} bytes, got ${sealed.length}`,
-    );
-  }
-  return `${origin}${GROUP_INVITE_URL_PREFIX}${base64UrlEncodeNoPad(sealed)}`;
-}
-
-/** Discriminated parse of a `/g/<slug>` slug:
- *
- *    * `kind: "pointer"` — fetch the sealed blob from
- *      `DiscoveryClient.fetchGroupInvite(blobId)`, then open it with the
- *      fragment's secret (`GroupInviteCapability.openLink`).
- *    * `kind: "inline"` — the sealed blob is the slug itself.
- *
- *  Throws on anything else, the pre-amendment 43-character id included. */
+/** Parse a `/g/<slug>` slug into its ledger id: fetch the sealed blob from
+ *  `DiscoveryClient.fetchGroupInvite(blobId)`, then open it with the
+ *  fragment's secret (`GroupInviteCapability.openLink`). Throws on anything
+ *  else, the pre-amendment 43-character id and an inline sealed blob
+ *  included. */
 export type ParsedGroupInvite = ClassifiedInviteSlug;
 
 export function parseGroupInviteSlug(slug: string, widths: InviteLinkWidths): ParsedGroupInvite {
-  return classifyInviteSlug(slug, widths, GROUP_INVITE_INLINE_MIN_LEN, "group-invite");
+  return classifyInviteSlug(slug, widths, "group-invite");
 }
 
 // ----------------------------------------------------------------------------

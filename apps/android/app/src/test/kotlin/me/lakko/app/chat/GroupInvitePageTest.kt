@@ -55,14 +55,17 @@ class GroupInvitePageTest {
         assertEquals("https://lakko.me/g/".length + 8 + 1 + 16, url.length)
     }
 
+    /** The inline form is gone (2026-10-19): a `/g/` link carrying the
+     *  sealed blob in its path is refused as malformed, so it opens as a
+     *  dead link, its secret notwithstanding. */
     @Test
-    fun `the inline link carries the secret as its fragment too`() {
+    fun `an inline link is refused as malformed`() {
         val wire = ByteArray(160) { (it + 1).toByte() }
-        val url = appendGroupInviteLinkKey(composeInlineGroupInviteUrl(wire, origin), key, L)
-        assertEquals("$origin/g/${base64UrlEncodeNoPad(wire)}#$keyText", url)
-        // The slug still discriminates as inline once the fragment is stripped.
+        val url = appendGroupInviteLinkKey("$origin/g/${base64UrlEncodeNoPad(wire)}", key, L)
         val slug = groupInviteSlugOf(url)
-        assertEquals(ParsedGroupInvite.Inline(wire), parseGroupInviteSlug(slug!!, L))
+        assertThrows(GroupInviteUrlException.SlugWrongLength::class.java) {
+            parseGroupInviteSlug(slug!!, L)
+        }
     }
 
     @Test
@@ -199,9 +202,10 @@ class GroupInvitePageTest {
     }
 
     @Test
-    fun `a 100-byte slug is inline`() {
-        val wire = ByteArray(GROUP_INVITE_INLINE_MIN_LEN) { 4 }
-        assertEquals(ParsedGroupInvite.Inline(wire), parseGroupInviteSlug(base64UrlEncodeNoPad(wire), L))
+    fun `a 100-byte slug is refused, it is not a ledger id`() {
+        assertThrows(GroupInviteUrlException.SlugWrongLength::class.java) {
+            parseGroupInviteSlug(base64UrlEncodeNoPad(ByteArray(100) { 4 }), L)
+        }
     }
 
     // ---- 4. the revoke slug ---------------------------------------------

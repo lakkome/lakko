@@ -519,17 +519,17 @@ is judged dead). The rule is one function in the core,
 `SyncedState::link_answer_verdict(link_id, secret, requester, pressed_at_ms)`
 on both FFI surfaces; no client re-derives it.
 
-*The use limit.* A pointer link's ledger counts uses at Add (the existing
+*The use limit.* The link's ledger row counts uses at Add (the existing
 consume; at most `max_uses` Adds are admitted). The decision at A still uses
 the register's count of answered requests, now: an honest request the ledger
 admitted is within the limit, so it is never refused by that count, and the
-count stops a client that skipped the consume. An **inline link** (no ledger
-row; only web and Android can mint one when the upload failed) has no server
-count: A's register decides, the first requests answered win, and a request
-beyond the limit is refused. No server change was made. *Proposal, not
-built:* drop the inline fallback so that every contact link has a ledger row
-(a failed upload then fails the mint), which would make the count at Add the
-only one B can see.
+count stops a client that skipped the consume. No server change was made.
+*(Superseded the same day: this paragraph first described an inline link,
+which had no ledger row and was counted at A's register only, and proposed
+dropping the inline fallback. The maintainer decided it; the inline form is
+removed on all three clients (ADR-0028 head note of 2026-10-19), every
+contact link has a ledger row, the register requires a 6-byte ledger id and
+a 32-byte revocation seed (`lakko-sync`), and Add always consumes.)*
 
 A new verdict `Unknown` (wire code `unknown`) says this device holds no record
 of the link at all. A device in that state waits and never refuses: the

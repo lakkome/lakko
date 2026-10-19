@@ -670,7 +670,8 @@ internal class MultiJoinerLinkCallPort(
             discovery.setSessionToken(identity.sessionToken)
             discovery.use { client ->
                 var mintedLinkId: ByteArray? = null
-                val composed = CallInviteComposer(client).composeAndUpload(
+                val composed = try {
+                    CallInviteComposer(client).composeAndUpload(
                     ownerSigningSeed = own.ed25519Seed(),
                     ownerAccountId = identity.accountId,
                     identity = own,
@@ -683,18 +684,24 @@ internal class MultiJoinerLinkCallPort(
                         mintedLinkId = linkId
                         reach.mintLink(linkId, expiryMs.takeIf { it != 0L })
                     },
-                )
+                    )
+                } catch (e: Throwable) {
+                    // No link was minted (a failed upload mints nothing, the
+                    // inline form is gone): the key registered for it goes.
+                    mintedLinkId?.let { me.lakko.app.reach.ReachManager.peek()?.retireLink(it) }
+                    throw e
+                }
                 // ADR-0074 section 3.5a rule 5 - the ledger id is kept with
                 // the link's key, so a rotation of the account keys can
                 // revoke the link at the ledger.
                 val linkId = mintedLinkId
                 val blobId = composed.blobId
-                if (linkId != null && blobId != null) {
+                if (linkId != null) {
                     me.lakko.app.reach.ReachManager.peek()?.noteLinkBlob(linkId, blobId)
                 }
                 // ADR-0078 section 10: the link's revocation seed is kept on
                 // this device; the ledger names no owner.
-                if (blobId != null) {
+                run {
                     me.lakko.app.contacts.OwnLinkStores.current.put(
                         me.lakko.app.auth.base64Encode(identity.accountId),
                         me.lakko.app.contacts.OwnLinks.record(
