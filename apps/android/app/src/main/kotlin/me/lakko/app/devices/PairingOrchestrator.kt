@@ -12,7 +12,6 @@ import me.lakko.app.ds.DsClient
 import java.security.SecureRandom
 import uniffi.lakko_ffi_uniffi.DecodedPairingQr
 import uniffi.lakko_ffi_uniffi.DeviceGroup
-import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.loadDeviceGroupById
 import uniffi.lakko_ffi_uniffi.openWithKey
@@ -230,7 +229,9 @@ public object PairingOrchestrator {
             // Welcome against an account id this device does not have yet.
             // The exporter is the same one DeviceGroup.exportSecret
             // delegates to, so the recovery row opens under it.
-            val plain = Group.joinFromWelcome(welcome = welcomeBytes, identity = identity)
+            // ADR-0081 amendment — the DeviceGroup entry point:
+            // `Group.joinFromWelcome` refuses a Welcome with no role table.
+            val plain = uniffi.lakko_ffi_uniffi.deviceGroupJoinWelcomeByName(welcomeBytes, identity)
             try {
                 return runJoinByName(
                     object : JoinByNameSteps {

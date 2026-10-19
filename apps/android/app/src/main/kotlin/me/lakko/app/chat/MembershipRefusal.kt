@@ -6,6 +6,7 @@ package me.lakko.app.chat
 import me.lakko.app.l10n.UiText
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.FfiRefusalReason
+import uniffi.lakko_ffi_uniffi.RoleTable
 
 /*
  * ADR-0045 UX §6 / §12 item 6 — the typed membership-refusal table.
@@ -407,6 +408,25 @@ internal fun membershipRefusal(
  * builds and keeps a cyclic cause from spinning.
  */
 private const val MAX_WRAP_DEPTH = 4
+
+/**
+ * ADR-0081 amendment (2026-10-19) — the refusal a membership operation meets on
+ * a group with no role table: the core's typed `NoRoleTable`. The direct-commit
+ * path that used to serve such a group is gone; no client creates one, and
+ * `Group.joinFromWelcome` refuses its Welcome.
+ */
+internal fun noRoleTableRefusal(op: String): FfiException =
+    FfiException.MembershipNoRoleTable("$op refused: this group carries no role table, so it has no committer")
+
+/**
+ * Whether a group carries a role table, over an injected read. A torn read is
+ * "no", which refuses ([noRoleTableRefusal]) rather than guessing: fail closed.
+ */
+internal fun roleTablePresent(read: () -> RoleTable?): Boolean = try {
+    read() != null
+} catch (_: Throwable) {
+    false
+}
 
 /**
  * The core's refusal reason carried by [error], or `null` when [error] is not

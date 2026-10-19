@@ -673,7 +673,9 @@ public enum PairingOrchestrator {
     /// a plain group join, adopted afterwards by
     /// ``adoptJoinedDeviceGroup(identity:accountIdBytes:groupId:)``.
     static func joinWelcomeByName(welcomeBytes: Data, identity: Identity) throws -> Group {
-        try Group.joinFromWelcome(welcome: welcomeBytes, identity: identity)
+        // ADR-0081 amendment — the DeviceGroup entry point: `Group.joinFromWelcome`
+        // refuses a Welcome with no role table.
+        try deviceGroupJoinWelcomeByName(welcome: welcomeBytes, identity: identity)
     }
 
     /// ADR-0056 — adopt the group a join by name joined as the DeviceGroup

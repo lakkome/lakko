@@ -90,6 +90,10 @@ pub struct DecodedPairingQr {
     /// 32-byte rendezvous pseudonym the scanner posts the
     /// resulting Welcome to via the DS mailbox.
     pub rendezvous_pseudonym: RendezvousPseudonym,
+    /// ADR-0081 amendment — the rejoining device's self-removal proof
+    /// (exactly [`crate::SELF_REMOVAL_PROOF_LEN`] bytes) when the payload is
+    /// a DeviceGroup rejoin knock that carries one. Not verified here.
+    pub self_removal_proof: Option<Vec<u8>>,
 }
 
 /// Fresh-device side: build the wire-format payload.
@@ -111,11 +115,54 @@ pub fn encode(
     key_package_bytes: &[u8],
     rendezvous_pseudonym: &RendezvousPseudonym,
 ) -> Result<Vec<u8>> {
+    encode_payload(
+        login_handle,
+        key_package_bytes,
+        rendezvous_pseudonym,
+        Vec::new(),
+    )
+}
+
+/// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload
+/// plus the device's self-removal proof for `key_package_bytes`.
+///
+/// # Errors
+///
+/// [`Error::Codec`] when `self_removal_proof` is not exactly
+/// [`crate::SELF_REMOVAL_PROOF_LEN`] bytes, or on a prost-encode failure.
+pub fn encode_rejoin_knock(
+    login_handle: &LoginHandle,
+    key_package_bytes: &[u8],
+    rendezvous_pseudonym: &RendezvousPseudonym,
+    self_removal_proof: &[u8],
+) -> Result<Vec<u8>> {
+    if self_removal_proof.len() != crate::SELF_REMOVAL_PROOF_LEN {
+        return Err(Error::Codec(format!(
+            "rejoin knock: a self-removal proof is {} bytes, got {}",
+            crate::SELF_REMOVAL_PROOF_LEN,
+            self_removal_proof.len()
+        )));
+    }
+    encode_payload(
+        login_handle,
+        key_package_bytes,
+        rendezvous_pseudonym,
+        self_removal_proof.to_vec(),
+    )
+}
+
+fn encode_payload(
+    login_handle: &LoginHandle,
+    key_package_bytes: &[u8],
+    rendezvous_pseudonym: &RendezvousPseudonym,
+    self_removal_proof: Vec<u8>,
+) -> Result<Vec<u8>> {
     let payload = lakko_proto::wire::device_pairing::v1::PairingQr {
         version: PAIRING_VERSION,
         key_package: key_package_bytes.to_vec(),
         rendezvous_pseudonym: rendezvous_pseudonym.to_vec(),
         login_handle: login_handle.to_vec(),
+        self_removal_proof,
     };
     let mut buf = Vec::with_capacity(payload.encoded_len());
     payload
@@ -172,9 +219,20 @@ pub fn decode(bytes: &[u8], expected_login_handle: &LoginHandle) -> Result<Decod
                 payload.rendezvous_pseudonym.len()
             ))
         })?;
+    let self_removal_proof = match payload.self_removal_proof.len() {
+        0 => None,
+        crate::SELF_REMOVAL_PROOF_LEN => Some(payload.self_removal_proof),
+        other => {
+            return Err(Error::Codec(format!(
+                "PairingQr self_removal_proof length {other} != {}",
+                crate::SELF_REMOVAL_PROOF_LEN
+            )))
+        },
+    };
     Ok(DecodedPairingQr {
         key_package: payload.key_package,
         rendezvous_pseudonym: rendezvous,
+        self_removal_proof,
     })
 }
 
@@ -275,6 +333,7 @@ mod tests {
                 key_package: vec![0u8; 32],
                 rendezvous_pseudonym: fixture_rendezvous().to_vec(),
                 login_handle: handle.to_vec(),
+                self_removal_proof: Vec::new(),
             });
             match decode(&buf, &handle) {
                 Ok(_) => panic!("decode should reject version {version}"),
@@ -329,6 +388,7 @@ mod tests {
                 key_package: vec![0u8; 32],
                 rendezvous_pseudonym: fixture_rendezvous().to_vec(),
                 login_handle: vec![0xab; len],
+                self_removal_proof: Vec::new(),
             });
             match decode(&buf, &handle) {
                 Ok(_) => panic!("decode should reject a {len}-byte handle"),
@@ -348,6 +408,7 @@ mod tests {
             key_package: vec![0u8; 32],
             rendezvous_pseudonym: vec![0xee; 16],
             login_handle: handle.to_vec(),
+            self_removal_proof: Vec::new(),
         });
         match decode(&buf, &handle) {
             Ok(_) => panic!("decode should reject short rendezvous_pseudonym"),
@@ -397,6 +458,45 @@ mod tests {
         ) {
             let _ = decode(&bytes, &fixture_handle());
             prop_assert!(crate::fuzz_api::pairing_qr_acceptance_is_bound(&bytes));
+        }
+    }
+
+    // ---- ADR-0081 amendment: the rejoin knock carries a self-removal proof ----
+
+    #[test]
+    fn a_rejoin_knock_carries_its_proof_and_a_pairing_payload_none() {
+        let handle = fixture_handle();
+        let proof = vec![0x5a; crate::SELF_REMOVAL_PROOF_LEN];
+        let knock =
+            encode_rejoin_knock(&handle, &[1, 2, 3], &fixture_rendezvous(), &proof).unwrap();
+        let decoded = decode(&knock, &handle).unwrap();
+        assert_eq!(decoded.self_removal_proof, Some(proof));
+        assert_eq!(decoded.key_package, vec![1, 2, 3]);
+        let plain = encode(&handle, &[1, 2, 3], &fixture_rendezvous()).unwrap();
+        assert_eq!(decode(&plain, &handle).unwrap().self_removal_proof, None);
+    }
+
+    #[test]
+    fn a_self_removal_proof_of_the_wrong_length_is_refused_both_ways() {
+        let handle = fixture_handle();
+        assert!(encode_rejoin_knock(&handle, &[1], &fixture_rendezvous(), &[0u8; 10]).is_err());
+        for len in [
+            1usize,
+            64,
+            crate::SELF_REMOVAL_PROOF_LEN - 1,
+            crate::SELF_REMOVAL_PROOF_LEN + 1,
+        ] {
+            let buf = encode_raw(&PairingQr {
+                version: PAIRING_VERSION,
+                key_package: vec![0u8; 32],
+                rendezvous_pseudonym: fixture_rendezvous().to_vec(),
+                login_handle: handle.to_vec(),
+                self_removal_proof: vec![0u8; len],
+            });
+            assert!(
+                matches!(decode(&buf, &handle), Err(Error::Codec(_))),
+                "len {len}"
+            );
         }
     }
 }

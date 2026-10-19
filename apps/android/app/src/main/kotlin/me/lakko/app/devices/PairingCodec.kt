@@ -68,6 +68,24 @@ public object PairingCodec {
     )
 
     /**
+     * ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload
+     * plus this device's self-removal proof (signed with its old leaf key,
+     * which is its device identity's key) for `keyPackage`. A parsed knock
+     * returns it as `DecodedPairingQr.selfRemovalProof` (not verified there).
+     */
+    public fun buildRejoinKnockPayload(
+        loginHandle: ByteArray,
+        keyPackage: ByteArray,
+        rendezvousPseudonym: ByteArray,
+        selfRemovalProof: ByteArray,
+    ): ByteArray = uniffi.lakko_ffi_uniffi.buildRejoinKnock(
+        loginHandle = loginHandle,
+        keyPackage = keyPackage,
+        rendezvousPseudonym = rendezvousPseudonym,
+        selfRemovalProof = selfRemovalProof,
+    )
+
+    /**
      * Parse a pairing payload and check it names this account: the
      * embedded login handle must equal `expectedLoginHandle`, the
      * handle of this account's own username. Throws `FfiException`:

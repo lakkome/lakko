@@ -32,6 +32,18 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 > The threat analysis below — *why* the delete-passkey grant mechanism does not
 > transfer to device removal — is unchanged and is still the most useful part
 > of this record.
+
+> **AMENDED 2026-10-19 by [ADR-0081](./0081-devicegroup-commits-cannot-strand.md)
+> ("Amendment (2026-10-19)").** Under the policy the apply-path gate also
+> accepts a removal covered by a **self-removal proof**: a signature by the
+> removed leaf's own key naming the epoch the commit leaves and the
+> KeyPackage that replaces the leaf, honoured only when that commit leaves
+> that epoch and adds that KeyPackage. It rides in the same envelope slot as
+> an attestation (137 bytes under its own domain, against the attestation's
+> 121). It lets a device that lost its DeviceGroup state
+> replace its own old leaf without a passkey; it authorises no other
+> removal, so every removal of a device by someone else still needs an
+> attestation. C-85.
 - **Context:** G-13 (`docs/security/known-gaps.md`) — the WebAuthn
   action-binding work added a *client-side* passkey gate before removing a
   device from the DeviceGroup. This ADR asks whether that gate can be made

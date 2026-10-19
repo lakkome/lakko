@@ -11,7 +11,7 @@ import kotlinx.coroutines.sync.withLock
  * hold.
  *
  * A pure orchestration over injected steps, for the same reason
- * [runCrashSafeCommit] and [runSplitPoll] are: the property being fixed is an
+ * [prepareCrashSafeCommit] and [runSplitPoll] are: the property being fixed is an
  * ORDERING property between a lock, an MLS state mutation and a network write,
  * and an ordering property is only actually pinned if a test can run it.
  *

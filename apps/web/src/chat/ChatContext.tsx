@@ -66,9 +66,8 @@ import type {
   Group as WasmGroup,
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
-import { base64Decode, base64Encode } from "../auth/account-id";
+import { base64Encode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
-import { loadWasm } from "../wasm";
 import { dsAccess } from "../ds/access";
 import {
   clearDsAccess,
@@ -76,7 +75,6 @@ import {
   installPredecessorChainAccess,
 } from "../ds/session-access";
 import {
-  loadMlsSnapshot,
   saveMlsSnapshot,
   saveSnapshotWithCommitEntry,
 } from "./mls-store";
@@ -203,27 +201,6 @@ export interface ChatApi {
     accountIdB64: string,
     entry: NewCommitEntry,
   ): Promise<void>;
-  /** ADR-0040 F1 (lakko-security) — reset the in-memory group `groupIdB64` back
-   *  to the last durable snapshot (epoch N), dropping an un-published eager
-   *  merge. A group-membership commit path calls this (via
-   *  `ContactsClient.onCommitPersistAbort`) after a FAIL-CLOSED persist-abort:
-   *  the core create-commit already eager-merged N -> N+1 in the shared provider,
-   *  but the atomic persist threw so the durable snapshot stays at N with no
-   *  outbox entry — leaving the in-memory group poisoned at an un-published N+1.
-   *  Left alone, a subsequent same-session commit would build on N+1 and publish
-   *  a commit peers (still at N) drop as wrong-epoch, stranding the WHOLE group
-   *  ("device-ahead"), and the outbox sweep cannot catch it (a clean atomic abort
-   *  wrote no entry). This restores the shared provider from the durable N
-   *  snapshot and RELOADS the group via `Group.load`, replacing the cached
-   *  registry reference so `props.entry.group` (read reactively via `get`) sees
-   *  the epoch-N group on the next access. THROWS (fail-safe) when there is no
-   *  canonical Identity / device key / durable snapshot — these four paths all
-   *  operate on a created-and-persisted group, so a missing snapshot is a hard,
-   *  surfaced error, never a silent leave-poisoned. */
-  resetGroupToDurableSnapshot(
-    accountIdB64: string,
-    groupIdB64: string,
-  ): Promise<void>;
   /** Wipe every active group AND the canonical Identity —
    *  called from `AuthProvider.logout` / `forgetDevice`. */
   clear(): void;
@@ -314,8 +291,8 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
   // ADR-0053 contract point 1 — every request to a conversation group's
   // journal is proven under the access key of the epoch that group is at.
   // The DS client resolves the signer through this source at the moment of
-  // each request, so a group reloaded by `resetGroupToDurableSnapshot` or
-  // replaced by an upsert is picked up without re-registering.
+  // each request, so a group replaced by an upsert is picked up without
+  // re-registering.
   const unregisterSource = dsAccess.registerGroupSource((groupId) => {
     const id = identity();
     if (id === null) return null;
@@ -493,64 +470,6 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
         full,
         base64Encode(id.signaturePublicKey),
       );
-    },
-    async resetGroupToDurableSnapshot(accountIdB64, groupIdB64) {
-      // FAIL-SAFE throughout: a poisoned in-memory N+1 group that we cannot
-      // reset must surface a HARD error, never be silently left in place.
-      const canonical = identity();
-      if (canonical === null) {
-        throw new Error(
-          "resetGroupToDurableSnapshot: no canonical Identity — cannot reset (ADR-0040 F1)",
-        );
-      }
-      const deviceKey = await getDeviceKey(accountIdB64);
-      if (deviceKey === null) {
-        throw new Error(
-          "resetGroupToDurableSnapshot: no device key — cannot reset (ADR-0040 F1)",
-        );
-      }
-      const snapshot = await loadMlsSnapshot(accountIdB64, deviceKey);
-      if (snapshot === null) {
-        // These four commit paths only run on a created-and-persisted group, so
-        // the durable snapshot MUST exist. Its absence is an unrecoverable
-        // inconsistency — throw rather than leave the group poisoned at N+1.
-        throw new Error(
-          "resetGroupToDurableSnapshot: no durable snapshot for an existing group " +
-            "— in-memory group left at an un-published N+1 (ADR-0040 F1)",
-        );
-      }
-      // Restore the WHOLE shared provider back to the durable state. This drops
-      // THIS group's un-published eager merge (N+1 -> N). Other groups are
-      // restored to their own last-durable epoch too, which — because every
-      // successful mutation persists the whole provider — matches their cached
-      // in-memory structs in the steady state (see the report's flagged edge:
-      // a second concurrent group also mid-failed-persist).
-      canonical.restoreStorage(snapshot.snapshotBytes);
-      // Rebuild the in-memory MlsGroup for this id from the just-restored
-      // provider (the exact `rehydrateMlsState` idiom) — it comes back at N.
-      const wasm = await loadWasm();
-      const groupIdBytes = base64Decode(groupIdB64);
-      const reloaded = wasm.Group.load(canonical, groupIdBytes);
-      if (reloaded === undefined) {
-        throw new Error(
-          "resetGroupToDurableSnapshot: Group.load returned undefined after restore " +
-            `for ${groupIdB64} (ADR-0040 F1)`,
-        );
-      }
-      // Replace the cached registry reference, preserving the existing label +
-      // creation time. `props.entry.group` (read via `get`) is reactive on the
-      // `groups` signal, so every consumer sees the epoch-N group next access.
-      const existing = groups().find((g) => g.groupIdB64 === groupIdB64);
-      const rest = groups().filter((g) => g.groupIdB64 !== groupIdB64);
-      setGroups([
-        ...rest,
-        {
-          groupIdB64,
-          label: existing?.label ?? `Group ${groupIdB64.slice(0, 6)}`,
-          group: reloaded,
-          createdAtMs: existing?.createdAtMs ?? Date.now(),
-        },
-      ]);
     },
     clear() {
       setGroups([]);

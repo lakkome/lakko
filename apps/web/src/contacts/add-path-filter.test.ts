@@ -94,7 +94,7 @@ function client(devices: readonly Uint8Array[]): ContactsClient {
   );
 }
 
-/** A group with no role table whose add records what it was handed. */
+/** A role-table group whose Add proposal records what it was handed. */
 function group(added: Uint8Array[]): WasmGroup {
   return withStagedTwins({
     get groupId(): Uint8Array {
@@ -104,10 +104,11 @@ function group(added: Uint8Array[]): WasmGroup {
       return 5n;
     },
     members: () => [],
-    roleTableOwner: () => undefined,
+    roleTableOwner: () => new Uint8Array(32).fill(1),
+    roleTableAdmins: () => new Uint8Array(0),
     pendingProposals: () => [],
     dsAccessSigner: fakeAccessSigner(() => 5n),
-    addMember: (_id: unknown, keyPackage: Uint8Array) => {
+    proposeAddMember: (_id: unknown, keyPackage: Uint8Array) => {
       added.push(keyPackage);
       throw new Sentinel("add reached");
     },

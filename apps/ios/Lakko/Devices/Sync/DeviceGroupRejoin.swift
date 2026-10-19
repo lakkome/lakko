@@ -52,15 +52,22 @@ import Foundation
 /// not listed); the knock is newer than every addition of that key this
 /// device has seen and newer than when it started watching; this device is
 /// the designated admitter (the lowest leaf other than the knocking key) or
-/// the knock has waited ``fallbackAdmitAfterMs``. To admit it removes the
-/// key's previous leaf if still in the roster, then adds the KeyPackage — two
-/// ordinary DeviceGroup commits through the outbox (``DeviceGroupCommits``),
-/// so the DS arbitrates two siblings acting at once — and the Welcome goes to
-/// the knock's rendezvous.
+/// the knock has waited ``fallbackAdmitAfterMs``. To admit it replaces the
+/// key's previous leaf, if still in the roster, by the KeyPackage in ONE
+/// commit (`replaceDeviceAt`), or adds the KeyPackage when no previous leaf
+/// is there — one ordinary DeviceGroup commit through the outbox
+/// (``DeviceGroupCommits``), so the DS arbitrates two siblings acting at once
+/// — and the Welcome goes to the knock's rendezvous.
 ///
-/// Under the ADR-0015 policy a removal needs a passkey attestation, which a
-/// sibling cannot obtain without the person; a knock whose previous leaf is
-/// still present is then left waiting (verdict ``AdmissionVerdict/needsAttestation``).
+/// Under the ADR-0015 policy a removal needs a passkey attestation OR
+/// (ADR-0081 amendment) the device's own self-removal proof: the rejoining
+/// device signs, with its old leaf key, that its leaf may be replaced by the
+/// KeyPackage it knocks with, and the proof rides in the commit's
+/// removal-authorisation slot. A knock without a proof the sibling verified,
+/// whose previous leaf is present, is left waiting under the policy (verdict
+/// ``AdmissionVerdict/needsAttestation``): a device that no longer holds its
+/// old key is a new device, its KeyPackage key matches no leaf, and it is
+/// simply added.
 public enum DeviceGroupRejoin {
 
     /// How long a rejoining device waits for a Welcome before knocking again
@@ -108,8 +115,9 @@ public enum DeviceGroupRejoin {
         case notListed
         /// Waiting for the designated admitter.
         case notMineYet
-        /// The previous leaf is present and the policy wants a passkey
-        /// attestation for its removal, which this device cannot obtain.
+        /// The previous leaf is present, the policy wants its removal
+        /// authorised, and the knock carries no self-removal proof that
+        /// covers it; a passkey attestation this device cannot obtain.
         case needsAttestation
     }
 
@@ -139,12 +147,22 @@ public enum DeviceGroupRejoin {
         /// The directory lists the key with a binding under the account key.
         public var listed: Bool
         public var policyRequiresAttestation: Bool
+        /// The knock carries a self-removal proof that covers replacing the
+        /// previous leaf by its KeyPackage (checked with
+        /// `deviceGroupSelfRemovalCovers`).
+        public var selfRemovalProofCovers: Bool
+        /// A leaf of the DeviceGroup already carries the knock's KeyPackage
+        /// leaf (`containsLeafOfKeyPackage`): another sibling answered it. A
+        /// replacement keeps the key (often the leaf index too), so the roster
+        /// of keys cannot tell.
+        public var keyPackageAlreadyIn: Bool
         public var nowMs: Int64
 
         public init(
             knockId: Int64, knockAtMs: Int64, key: Data, ownKey: Data, roster: [RosterMember],
             handled: Set<Int64>, watchingSinceMs: Int64, lastAddedAtMs: Int64?, listed: Bool,
-            policyRequiresAttestation: Bool, nowMs: Int64
+            policyRequiresAttestation: Bool, selfRemovalProofCovers: Bool = false,
+            keyPackageAlreadyIn: Bool = false, nowMs: Int64
         ) {
             self.knockId = knockId
             self.knockAtMs = knockAtMs
@@ -156,6 +174,8 @@ public enum DeviceGroupRejoin {
             self.lastAddedAtMs = lastAddedAtMs
             self.listed = listed
             self.policyRequiresAttestation = policyRequiresAttestation
+            self.selfRemovalProofCovers = selfRemovalProofCovers
+            self.keyPackageAlreadyIn = keyPackageAlreadyIn
             self.nowMs = nowMs
         }
     }
@@ -165,6 +185,7 @@ public enum DeviceGroupRejoin {
         if input.handled.contains(input.knockId) { return .handled }
         if input.key == input.ownKey { return .ownKey }
         if input.knockAtMs < input.watchingSinceMs { return .beforeWatching }
+        if input.keyPackageAlreadyIn { return .alreadyAdmitted }
         if let added = input.lastAddedAtMs, added >= input.knockAtMs { return .alreadyAdmitted }
         if !input.listed { return .notListed }
         let others = input.roster.filter { $0.key != input.key }
@@ -172,7 +193,7 @@ public enum DeviceGroupRejoin {
         let designated = lowest?.key == input.ownKey
         if !designated, input.nowMs - input.knockAtMs < fallbackAdmitAfterMs { return .notMineYet }
         let present = input.roster.contains { $0.key == input.key }
-        if present, input.policyRequiresAttestation { return .needsAttestation }
+        if present, input.policyRequiresAttestation, !input.selfRemovalProofCovers { return .needsAttestation }
         return .admit
     }
 }

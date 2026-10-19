@@ -1763,9 +1763,9 @@ public object GroupPushRouting {
      * wrong and the stamp is the PRE-removal epoch, which TIES with a
      * stale secret minted at that same epoch — the tie falls to the 32
      * secret bytes and the rotation may simply LOSE. The guarantee
-     * degrades from "always wins" to "coin flip", silently. Use
-     * [publishRemoveThenRotate] at the call site, which is where that
-     * ordering is pinned by a test.
+     * degrades from "always wins" to "coin flip", silently. Since the
+     * ADR-0081 amendment (2026-10-19) every removal is a sweep, and the
+     * rotation is started from the sweep's tail, after the merged commit.
      *
      * The steps, in the one order that works:
      *
@@ -1859,75 +1859,6 @@ public object GroupPushRouting {
                 }
             }
         }
-    }
-
-    /**
-     * **C-61 — publish the Remove commit, THEN rotate.** The single call
-     * site for this device's own removal path, and the reason that
-     * ordering is testable at all rather than being two adjacent
-     * statements anyone can reorder.
-     *
-     * Both halves of what C-61 buys depend on [publishRemove] having
-     * RETURNED before [rotate] is even started:
-     *
-     *   - **Forward secrecy (ADR-0043).** The rotation envelope is an MLS
-     *     application message. Sealed before the Remove commit it is
-     *     sealed at the pre-removal epoch, where the evicted member is
-     *     still a member and can open it — learning the very secret the
-     *     rotation exists to deny it.
-     *   - **Recency (ADR-0044).** [rotate] stamps the new secret with
-     *     `Group.epoch()` read at mint time. After the commit that is the
-     *     POST-removal epoch, so the rotation strictly out-ranks the
-     *     secret it replaces and a stale re-broadcast of that older secret
-     *     is refused [ReceiveVerdict.REJECT_STALE] by every member. Before
-     *     the commit it is the PRE-removal epoch — the same epoch the
-     *     stale secret carries — so the two TIE, the tie falls to the 32
-     *     secret bytes, and the rotation wins or loses by a coin flip with
-     *     no signal either way.
-     *
-     * ADR-0043 required this ordering but enforced it only structurally,
-     * by call-site sequencing, with no test on any client. ADR-0044
-     * promotes it from a property that protects one guarantee to a
-     * precondition of two, so it is pinned here — where a test can drive
-     * both callbacks and observe which epoch the emitted envelope was
-     * STAMPED at.
-     *
-     * The rotation is deliberately fire-and-forget on [scope]: push is
-     * best-effort and a rotation failure must never unwind the membership
-     * change that triggered it. "Ordered" means the rotation is not
-     * STARTED until the removal has landed, not that the caller waits for
-     * it.
-     *
-     * @param scope the (long-lived, app-scoped) scope the rotation runs
-     *   on — never the caller's, which may complete first.
-     * @param publishRemove applies + publishes the Remove commit,
-     *   advancing the local MLS epoch. Its throw PROPAGATES — a removal
-     *   that failed must not rotate.
-     * @param rotate started ONLY after [publishRemove] returned. `null`
-     *   skips the rotation entirely (no session / no group record —
-     *   nothing to rotate for).
-     * @param onRotationError receives a rotation failure. The removal
-     *   itself is already durable.
-     * @return whatever [publishRemove] returned, so the caller keeps its
-     *   commit id (echo suppression, notices).
-     */
-    public suspend fun <T> publishRemoveThenRotate(
-        scope: CoroutineScope,
-        publishRemove: suspend () -> T,
-        rotate: (suspend () -> RotationOutcome)?,
-        onRotationError: ((Throwable) -> Unit)? = null,
-    ): T {
-        val result = publishRemove()
-        if (rotate != null) {
-            scope.launch {
-                try {
-                    rotate()
-                } catch (cause: Throwable) {
-                    onRotationError?.invoke(cause)
-                }
-            }
-        }
-        return result
     }
 
     /**

@@ -3626,6 +3626,17 @@ has to be re-seamed onto the sweep, and the ones that matter are the ones whose
 correctness argument mentions an epoch.** The named-seam requirement and the
 test-pinning above are unchanged; what changed is which operation the seam wraps.
 
+**AMENDED 2026-10-19 by the [ADR-0081](../adr/0081-devicegroup-commits-cannot-strand.md)
+second amendment.** The direct-commit removal is deleted on all three clients
+(a group with no role table is refused, C-86), and with it
+`publishRemoveThenRotate`, the seam tests listed above and their inverted-order
+companions. A rotation now starts only from the sweep's tail (the committing
+device) and the poll's membership-shrink diff (every other member). Both fire
+only after the roster shrank, so the rotation follows the Remove commit by
+construction, and there is no removal call site left that a refactor could
+reorder against it. The shrink entry point keeps its own tests on each client;
+the enforcement table above describes the state before this amendment.
+
 Invariants: **#2** (the envelope is opaque to the DS and to push-gw either way —
 this is not a server-visible property but a client sequencing one), **#4** (a
 member without the current secret defers rather than downgrading; the rotation adds
@@ -4823,7 +4834,9 @@ every other member's device then accepted.
 
 - `join_from_welcome` refuses a Welcome whose GroupContext carries the `0xFF02`
   role table but no readable `0xFF03` (plain `Error::Group`), so no device ever
-  holds a conversation it cannot classify;
+  holds a conversation it cannot classify; since 2026-10-19 it also refuses a
+  Welcome with no role table at all, and neither refusal leaves anything in
+  the provider (C-86);
 - `group_kind_unchanged` at the peer commit gate and `proposal_keeps_group_kind`
   at the receipt gate and in the sweep refuse a `GroupContextExtensions` rewrite
   that changes or drops the kind (`GroupKindChanged`); the four role rewrites
@@ -5563,3 +5576,105 @@ publish came from one address (ADR-0078 class (c)). A device's card is its
 own statement; nothing checks that the model or city are true. The web
 client has no anti-censorship connection, so its locate always uses its own
 address unless the switch is off.
+
+## A device replaces only its own leaf without a passkey (C-85)
+
+### C-85: Under the attested-removal policy a DeviceGroup removal merges only with an attestation or the removed leaf's own proof naming the commit's epoch and a KeyPackage it adds
+
+[ADR-0081](../adr/0081-devicegroup-commits-cannot-strand.md) "Amendment
+(2026-10-19)", amending [ADR-0015](../adr/0015-device-removal-authorization.md);
+closes G-52.
+
+**The rule.** When a DeviceGroup carries the ADR-0015 policy,
+`DeviceGroup::process_incoming_verifying_removals` merges a commit that
+removes leaves only when each removed leaf is covered: by an ADR-0015
+attestation bound to the account, `SHA-256("lakko/action/remove-device/v1" ‖
+pubkey)` and freshness; or by a self-removal proof that names this
+DeviceGroup's id, the epoch the commit leaves, the removed leaf's signature
+key and the `KeyPackageRef` of a KeyPackage the same commit adds, and
+verifies under that removed leaf's key. The proof
+(`crates/lakko-mls/src/self_removal.rs`) is 137 bytes,
+`version ‖ epoch ‖ removed_pubkey ‖ key_package_ref ‖ signature`, over
+`"lakko/devicegroup/self-removal/v1\0" ‖ group_id_len ‖ group_id ‖ epoch ‖
+removed_pubkey ‖ key_package_ref`. The epoch makes a proof single-use: the
+replacement keeps the removed leaf's signature key, so without it a member
+holding a used proof could later remove the rejoined device by re-adding the
+stale KeyPackage (OpenMLS builds that commit), and an epoch has one commit
+(C-80); the attestation is 121 bytes under
+`lakko/device-attest/v1`, and the gate tries each entry of the envelope's
+removal-authorisation slot as both, so neither stands in for the other.
+
+**Where it is enforced.** The gate in `device_group.rs` over the removed
+leaves and added refs `Group::process_incoming_gated` hands it; the
+one-commit replacement `Group::replace_member` /
+`DeviceGroup::replace_device_at` (`replaceDeviceAt` on UniFFI and wasm); the
+knock field `self_removal_proof = 16` of `PairingQr`
+(`buildRejoinKnock` / `encodeRejoinKnock`, decoded as exactly 0 or 137 bytes;
+the device reads the epoch with an empty knock, a probe);
+the sibling's check before it builds (`deviceGroupSelfRemovalCovers`) and its
+answered-knock check (`containsLeafOfKeyPackage`). Clients: web
+`devices/device-group-rejoin.ts` and `devices/sync/DeviceGroupSyncContext.tsx`;
+iOS `Devices/Sync/DeviceGroupRejoin.swift` and
+`DeviceGroupSyncRepository.checkKnocks`; Android
+`devices/sync/DeviceGroupRejoin.kt` and `DeviceGroupSyncRepository.checkKnocks`.
+Pinned by the self-removal tests in `device_group.rs`, the codec tests in
+`self_removal.rs`, the pairing tests in `pairing.rs`, fuzz
+`self_removal_proof_decode`, and each client's admission-verdict suite.
+Host-tested 2026-10-19; not walked live, not deployed.
+
+**What this does NOT do.** It lets the holder of a leaf's key replace that
+leaf by a KeyPackage it chose, in one commit at one epoch; a member holding
+its key can already commit adds, so this gives it nothing it lacked, and it
+never authorises the removal of another device. A device that no longer holds its old leaf key is a new device: it
+is only added, and the old leaf stays until a person removes it with the
+passkey flow. Whether a knock is admitted at all is the sibling's directory,
+binding and tombstone check (ADR-0081 decision 4), not the proof.
+
+
+## A conversation is joined only from a Welcome with a role table and a kind (C-86)
+
+### C-86: `join_from_welcome` refuses a Welcome without the `0xFF02` role table or a readable `0xFF03` kind, and leaves nothing behind
+
+[ADR-0081](../adr/0081-devicegroup-commits-cannot-strand.md) "Amendment
+(2026-10-19, second)", amending [ADR-0062](../adr/0062-conversation-kind.md).
+
+**The rule.** A device holds an ordinary conversation only if the Welcome it
+joined from carries the ADR-0022 role table and the ADR-0062 kind. A Welcome
+without the role table is refused with the typed `RefusalReason::NoRoleTable`;
+one with the table and no readable kind is refused as under C-70. Either
+refusal leaves nothing in the OpenMLS provider: no group state, and the
+KeyPackage the Welcome was sealed to stays usable. The two groups that carry
+no role table by design join only through their own entry points, and those
+refuse a conversation Welcome.
+
+**Why it is indexed.** Every membership change of a conversation is a proposal
+(ADR-0045), and a group with no role table has no owner, no rank 0 and no
+committer, so its membership could only change by a direct commit. Before this,
+`join_from_welcome` checked the kind only when a role table was present and
+accepted a table-less Welcome outright, and no client checked after joining;
+so the clients kept a direct-commit path for a group they could be handed. With
+the admission closed, those paths were deleted.
+
+**Where it is enforced.** `crates/lakko-mls/src/group.rs`: `join_admitted`
+runs `admit_welcome` (the role-table and kind decision), the expected-group-id
+check of a table-less entry point, and the ADR-0050 binding check on
+`StagedWelcome` before `into_group`. Entry points:
+`Group::join_from_welcome` (a conversation), `PublisherGroup::join_from_welcome`
+(the ADR-0028 OQ3 co-publisher join; refuses a Welcome for another group id),
+`DeviceGroup::join_from_welcome` and `DeviceGroup::join_welcome_before_account`
+(the ADR-0056 by-name pairing join). FFI: `publisherGroupJoinFromWelcome` /
+`deviceGroupJoinWelcomeByName` on UniFFI, `PublisherGroup.joinFromWelcome` /
+`DeviceGroup.joinWelcomeByName` on wasm; the NSE surface exposes no join. On the
+clients every membership operation refuses a group with no role table with the
+same typed refusal (web `noRoleTableRefusal`, iOS `requireRoleTable`, Android
+`noRoleTableRefusal`). Pinned by the admission tests and the proptest
+`welcome_admission_follows_the_table` in `group.rs`, the entry-point tests in
+`device_group.rs` and `publisher_group.rs`, and one refusal test per client.
+Host-tested 2026-10-19; not walked live, not deployed.
+
+**What this does NOT do.** It does not stop a client running other code from
+creating a table-less group and committing in it; it keeps every device that
+runs these checks out of such a group, and refuses any membership operation
+on one if it were reached. It changes nothing for a PublisherGroup or a
+DeviceGroup. Invariants **#3** (a join condition; external review under G-39)
+and **#4** (refuse, never fall back); **#2** and **#5** untouched.

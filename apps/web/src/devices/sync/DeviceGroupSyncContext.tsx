@@ -108,9 +108,14 @@ import {
   commitDeviceGroupChange,
   resendOwedDeviceGroupCommitFor,
 } from "../device-group-commit-runtime";
-import { removeDeviceAt } from "../remove";
 import { DiscoveryClient } from "../../discovery/client";
-import { buildPairingQrPayload, generateRendezvousPseudonym, ownPairingHandle, parsePairingQrPayload } from "../pairing";
+import {
+  buildPairingQrPayload,
+  buildRejoinKnockPayload,
+  generateRendezvousPseudonym,
+  ownPairingHandle,
+  parsePairingQrPayload,
+} from "../pairing";
 import { pollForWelcome } from "../welcome-courier";
 import { base64Decode } from "../../auth/account-id";
 import {
@@ -1933,9 +1938,11 @@ export function DeviceGroupSyncProvider(props: {
 
   /**
    * A sibling's side of ADR-0081 decision 4: read the DeviceGroup's knocks
-   * and admit each one {@link admissionVerdict} allows - remove the device's
-   * previous leaf if it is still in the roster, then add its KeyPackage, two
-   * commits through the outbox, the Welcome to the knock's rendezvous.
+   * and admit each one {@link admissionVerdict} allows - replace the device's
+   * previous leaf, if it is still in the roster, by its KeyPackage in one
+   * commit carrying its self-removal proof (ADR-0081 amendment), else add
+   * the KeyPackage; one commit through the outbox, the Welcome to the knock's
+   * rendezvous.
    */
   async function checkKnocks(
     g: WasmDeviceGroup,
@@ -1971,10 +1978,17 @@ export function DeviceGroupSyncProvider(props: {
       } catch {
         continue; // not a payload for this account (or not a pairing payload)
       }
-      const keyHex = bytesToHex(wasm.keyPackageSignatureKey(decoded.keyPackage));
+      const keyBytes = wasm.keyPackageSignatureKey(decoded.keyPackage);
+      const keyHex = bytesToHex(keyBytes);
       if (directory === null) directory = await ownDirectory(accountBytes, accountIdB64, deviceKey);
       const listedKp = directory.get(keyHex);
       const knockAtMs = Date.parse(knock.createdAt);
+      // Checked BEFORE a commit is built: a commit the DS takes but every
+      // peer refuses would leave this device ahead of them.
+      const proof = decoded.selfRemovalProof;
+      const proofCovers =
+        proof !== null &&
+        wasm.deviceGroupSelfRemovalCovers(id, proof, g.groupId(), g.epoch(), keyBytes, decoded.keyPackage);
       const verdict = admissionVerdict({
         knockId: knock.id,
         knockAtMs: Number.isFinite(knockAtMs) ? knockAtMs : 0,
@@ -1986,26 +2000,51 @@ export function DeviceGroupSyncProvider(props: {
         lastAddedAtMs: admissions.lastAddedAtMs[keyHex],
         listed: listedKp !== undefined,
         policyRequiresAttestation: policy,
+        selfRemovalProofCovers: proofCovers,
+        keyPackageAlreadyIn: g.containsLeafOfKeyPackage(id, decoded.keyPackage),
         nowMs: Date.now(),
       });
       if (verdict !== "admit") continue;
       const account = { accountIdBytes: accountBytes, accountIdB64, deviceKey };
-      const previous = roster.find((m) => m.keyHex === keyHex);
-      if (previous !== undefined) {
-        await removeDeviceAt({ ...account, leafIndex: previous.leaf, attestation: null, rejoin: true });
-      }
       const added = await commitDeviceGroupChange(
         account,
         (fresh) => {
+          // Another sibling answered it meanwhile.
+          if (fresh.group.containsLeafOfKeyPackage(fresh.identity, decoded.keyPackage)) return null;
           const before = membersOfEnsured(fresh) ?? [];
-          // Another sibling admitted it meanwhile.
-          if (before.some((m) => m.key === keyHex)) return null;
-          const addition = fresh.group.addDeviceFromWire(fresh.identity, decoded.keyPackage);
+          const previous = before.find((m) => m.key === keyHex);
+          const priorLeaves = before.map((m) => m.leaf).sort((a, b) => a - b);
+          if (previous === undefined) {
+            const addition = fresh.group.addDeviceFromWire(fresh.identity, decoded.keyPackage);
+            return {
+              kind: "rejoin-add",
+              row: encodeJournalEntry(addition.commit, null),
+              welcome: { bytes: addition.welcome, rendezvous: decoded.rendezvousPseudonym },
+              priorLeaves,
+            };
+          }
+          // ADR-0081 amendment — the previous leaf out and the new one in, in
+          // ONE commit; the proof rides in the removal-authorisation slot.
+          // Re-checked at the epoch this commit leaves: a proof names one
+          // epoch, and peers refuse it at any other. Under the policy a
+          // removal it does not cover would be refused by every peer.
+          const covers =
+            proof !== null &&
+            wasm.deviceGroupSelfRemovalCovers(
+              fresh.identity,
+              proof,
+              fresh.group.groupId(),
+              fresh.group.epoch(),
+              keyBytes,
+              decoded.keyPackage,
+            );
+          if (!covers && fresh.group.requireAttestedRemovals()) return null;
+          const replaced = fresh.group.replaceDeviceAt(fresh.identity, previous.leaf, decoded.keyPackage);
           return {
-            kind: "rejoin-add",
-            row: encodeJournalEntry(addition.commit, null),
-            welcome: { bytes: addition.welcome, rendezvous: decoded.rendezvousPseudonym },
-            priorLeaves: before.map((m) => m.leaf).sort((a, b) => a - b),
+            kind: "rejoin-replace",
+            row: encodeJournalEntry(replaced.commit, covers ? proof : null),
+            welcome: { bytes: replaced.welcome, rendezvous: decoded.rendezvousPseudonym },
+            priorLeaves,
           };
         },
         async (_fresh, outcome) => outcome,
@@ -2159,7 +2198,23 @@ export function DeviceGroupSyncProvider(props: {
         try {
           const keyPackage = joiner.createKeyPackage();
           const rendezvous = generateRendezvousPseudonym();
-          const payload = await buildPairingQrPayload(loginHandle, keyPackage, rendezvous);
+          // ADR-0081 amendment — the device identity's key IS this device's
+          // old DeviceGroup leaf key: it signs that its leaf may be replaced
+          // by this KeyPackage in the commit leaving the journal's latest
+          // epoch (an empty knock is a probe that names it), which lets a
+          // sibling readmit it under the attested-removal policy without a
+          // passkey. An unclaimed journal names no epoch: no proof.
+          const ds = new DsClient();
+          const probe = await ds.knock(groupId, []);
+          const payload =
+            probe.epoch === null
+              ? await buildPairingQrPayload(loginHandle, keyPackage, rendezvous)
+              : await buildRejoinKnockPayload(
+                  loginHandle,
+                  keyPackage,
+                  rendezvous,
+                  wasm.signDeviceGroupSelfRemoval(joiner, groupId, BigInt(probe.epoch), keyPackage),
+                );
           const state = {
             v: 1 as const,
             rendezvousB64: base64Encode(rendezvous),
@@ -2169,7 +2224,7 @@ export function DeviceGroupSyncProvider(props: {
           // Kept BEFORE the knock: the joiner's provider is the only thing
           // that can open the Welcome a sibling sends.
           await putDeviceGroupPending(account, "rejoin", encodeRejoinState(state), deviceKey);
-          await new DsClient().knock(groupId, [payload]);
+          await ds.knock(groupId, [payload]);
           return state;
         } finally {
           joiner.free();

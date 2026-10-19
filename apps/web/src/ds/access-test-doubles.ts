@@ -177,6 +177,10 @@ const STAGED_TWINS: Readonly<Record<string, string>> = {
  * again after an abandon. `dsAccessSigner` follows the epoch the group
  * reads. A second stage while one is pending throws, as the core refuses it.
  * A fake that already defines the lifecycle (a sweep double) keeps its own.
+ *
+ * No client calls the staged twins since the ADR-0081 amendment of 2026-10-19
+ * deleted the direct-commit paths; what the suites still use here is the
+ * pending-commit lifecycle the ADR-0045 sweep reaches.
  */
 export function withStagedTwins<T extends object>(group: T): T {
   let offset = 0n;

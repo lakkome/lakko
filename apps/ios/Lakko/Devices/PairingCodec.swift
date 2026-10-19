@@ -62,6 +62,24 @@ public enum PairingCodec {
         )
     }
 
+    /// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload
+    /// plus this device's self-removal proof (signed with its old leaf key,
+    /// which is its device identity's key) for `keyPackage`. A parsed knock
+    /// returns it as `DecodedPairingQr.selfRemovalProof` (not verified there).
+    public static func buildRejoinKnockPayload(
+        loginHandle: Data,
+        keyPackage: Data,
+        rendezvousPseudonym: Data,
+        selfRemovalProof: Data
+    ) throws -> Data {
+        return try buildRejoinKnock(
+            loginHandle: loginHandle,
+            keyPackage: keyPackage,
+            rendezvousPseudonym: rendezvousPseudonym,
+            selfRemovalProof: selfRemovalProof
+        )
+    }
+
     /// Parse a pairing QR payload and check it names this device's own
     /// account. `expectedLoginHandle` is the confirming device's handle,
     /// computed from its own username. Throws on:

@@ -22,7 +22,7 @@ import org.junit.Test
  *
  * `ChatRepository` itself needs an Android `Context` and live FFI handles, so the
  * ordering it performs is extracted into [runSplitPoll] — a pure orchestration
- * over injected steps, the same seam `runCrashSafeCommit` uses for the ADR-0040
+ * over injected steps, the same seam `prepareCrashSafeCommit` uses for the ADR-0040
  * commit ordering. These tests drive the REAL production function, not a
  * re-implementation of it.
  *

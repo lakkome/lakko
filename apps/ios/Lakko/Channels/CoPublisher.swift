@@ -627,12 +627,19 @@ public enum CoPublisher {
         // per-device signing key so this device can publish. Newest first,
         // and a Welcome sealed to a KeyPackage this identity does not hold is
         // skipped rather than ending the wait.
+        // ADR-0081 amendment — a PublisherGroup carries no role table, so it
+        // joins through its own entry point: `Group.joinFromWelcome` refuses
+        // its Welcome, and this one refuses a Welcome for any other group (or
+        // a chat's) before anything is written.
+        guard let channelId = Self.hexToData(channelIdHex) else {
+            throw CoPublisherError.badChannelId(channelIdHex)
+        }
         var joined = false
         for welcome in candidates.reversed() {
             // Only this channel's PublisherGroup counts: `identity` may hold
             // the keys of other requests.
-            if let group = try? Group.joinFromWelcome(welcome: welcome, identity: identity),
-               (try? group.groupId()) == groupId {
+            if (try? publisherGroupJoinFromWelcome(
+                identity: identity, welcome: welcome, groupId: groupId, channelId: channelId)) != nil {
                 joined = true
                 break
             }

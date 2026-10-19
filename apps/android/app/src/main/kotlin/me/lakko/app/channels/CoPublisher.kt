@@ -18,7 +18,6 @@ import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsJournalSigner
 import me.lakko.app.ds.FfiDsJournalSigner
 import uniffi.lakko_ffi_uniffi.dsMailboxSigner
-import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.GroupInviteCapability
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.PublisherGroup
@@ -774,10 +773,16 @@ public object CoPublisher {
         // and a Welcome this identity cannot open (a chat Welcome sharing
         // the mailbox, or one sealed to a KeyPackage it no longer holds) is
         // skipped rather than ending the wait.
+        // ADR-0081 amendment — a PublisherGroup carries no role table, so it
+        // joins through its own entry point: `Group.joinFromWelcome` refuses
+        // its Welcome, and this one refuses a Welcome for any other group (or
+        // a chat's) before anything is written.
+        val channelId = hexToBytes(channelIdHex)
+            ?: throw CoPublisherException.BadChannelId(channelIdHex)
         var joined = false
         for (welcome in candidates.asReversed()) {
             try {
-                Group.joinFromWelcome(welcome, identity).close()
+                uniffi.lakko_ffi_uniffi.publisherGroupJoinFromWelcome(identity, welcome, groupId, channelId).close()
                 joined = true
                 break
             } catch (_: Throwable) {

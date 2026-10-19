@@ -75,7 +75,7 @@ entry's status line, not a mechanical fact.
 | [G-49](./known-gaps.md#g-49) | An overtaken sign-in can already have changed server state; binding residuals | Open | see the entry |
 | [G-50](./known-gaps.md#g-50) | Channel PublisherGroup commits publish before they persist | Closed in code (2026-10-16) | a durable commit record on web, iOS and Android; host-tested, not walked |
 | [G-51](./known-gaps.md#g-51) | Channel publish counters restart at 0 after Forget device | Not real as reported | the reported path holds on none of the three; two adjacent reuse paths were fixed |
-| [G-52](./known-gaps.md#g-52) | ADR-0081 residual: a rejoin under the attested-removal policy waits for a person | Open | see the entry |
+| [G-52](./known-gaps.md#g-52) | ADR-0081 residual: a rejoin under the attested-removal policy waits for a person | Closed in code (2026-10-19) | a self-removal proof (C-85); host-tested, not walked |
 
 ## MLS state machine
 
@@ -1857,6 +1857,10 @@ two**, and landed the regression tests in the same arc rather than deferring the
   independently — e.g. iOS
   `PushGroupRouting.publishRemoveThenRotate(publishRemove:rotate:onRotationStarted:)`,
   whose sole production call site is `ChatRepository.removeMemberFromGroup`.
+  (Deleted 2026-10-19 with the direct-commit removal it wrapped, by the ADR-0081
+  second amendment; the rotation now starts only from the sweep's tail and the
+  membership-shrink diff, after the roster shrank, so it follows the Remove
+  commit by construction.)
 - **The assertion is on the emitted envelope's `mint_epoch` stamp, not on call
   order** — a strictly stronger check, since it fails on any path that reaches the
   broadcast with a pre-removal epoch, however the reordering happened.
@@ -3147,7 +3151,9 @@ web.
 <a id="g-52"></a>
 ### G-52: ADR-0081 residual
 
-**Status:** **OPEN** (minted 2026-10-18 with the ADR-0081 build; host-tested, not walked live, not deployed)
+**Status:** **CLOSED in code (2026-10-19)** by the ADR-0081 amendment, the
+self-removal proof (C-85); host-tested, not walked live, not deployed.
+Minted 2026-10-18 with the ADR-0081 build.
 
 ADR-0081 binds every new epoch to its commit row on the DS (C-80) and gives
 the DeviceGroup a commit outbox and a rejoin. One path it leaves:
@@ -3158,8 +3164,20 @@ the DeviceGroup a commit outbox and a rejoin. One path it leaves:
   attestation a sibling cannot obtain alone. No flow asks the person for
   it, so such an account rejoins only after the leaf was removed by hand.
 
-**Closing:** a person-driven removal step in the rejoin flow when the policy
-is on.
+**Closing (as recorded at minting):** a person-driven removal step in the
+rejoin flow when the policy is on.
+
+**Closed differently (2026-10-19, maintainer).** No person is asked. The
+rejoining device signs, with its old leaf key, a self-removal proof naming
+the journal's latest epoch (read with a knock probe) and the KeyPackage it
+knocks with; the knock carries it, the sibling verifies it
+and builds ONE commit that removes the old leaf and adds the new one, with
+the proof in the envelope's removal-authorisation slot, and every peer's
+ADR-0015 gate accepts a removal so covered (`lakko-mls` `self_removal.rs`,
+`DeviceGroup::replace_device_at`, C-85). A device that no longer holds its
+old leaf key (a reinstall) is a new device: the sibling only adds it, and the
+old leaf stays until a person removes it with the passkey flow, which is the
+intended behaviour rather than a gap.
 
 **Closed the same day (2026-10-18, maintainer).** The first build left two
 more residuals, both closed before merge:

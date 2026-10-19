@@ -83,7 +83,23 @@ final class DeviceGroupRejoinTests: XCTestCase {
         XCTAssertEqual(DeviceGroupRejoin.admissionVerdict(input { $0.roster = roster; $0.ownKey = self.lost }), .ownKey)
     }
 
-    func testUnderTheAttestedRemovalPolicyAPresentPreviousLeafWaitsForThePerson() {
+    func testUnderThePolicyASelfRemovalProofThatCoversTheReplacementAdmits() {
+        // ADR-0081 amendment.
+        XCTAssertEqual(DeviceGroupRejoin.admissionVerdict(input {
+            $0.policyRequiresAttestation = true
+            $0.selfRemovalProofCovers = true
+        }), .admit)
+    }
+
+    func testAKnockWhoseKeyPackageIsAlreadyALeafWasAnswered() {
+        XCTAssertEqual(DeviceGroupRejoin.admissionVerdict(input { $0.keyPackageAlreadyIn = true }), .alreadyAdmitted)
+        XCTAssertEqual(DeviceGroupRejoin.admissionVerdict(input {
+            $0.keyPackageAlreadyIn = true
+            $0.selfRemovalProofCovers = true
+        }), .alreadyAdmitted)
+    }
+
+    func testUnderTheAttestedRemovalPolicyAPresentPreviousLeafWithoutACoveringProofWaitsForThePerson() {
         XCTAssertEqual(DeviceGroupRejoin.admissionVerdict(input { $0.policyRequiresAttestation = true }), .needsAttestation)
         XCTAssertEqual(DeviceGroupRejoin.admissionVerdict(input {
             $0.policyRequiresAttestation = true

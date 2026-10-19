@@ -68,6 +68,8 @@ function input(overrides: Partial<AdmissionInput> = {}): AdmissionInput {
     lastAddedAtMs: undefined,
     listed: true,
     policyRequiresAttestation: false,
+    selfRemovalProofCovers: false,
+    keyPackageAlreadyIn: false,
     nowMs: 1_000_100,
     ...overrides,
   };
@@ -117,7 +119,20 @@ describe("a sibling's admission rule", () => {
     expect(admissionVerdict(input({ roster, ownKeyHex: LOST }))).toBe("own-key");
   });
 
-  it("under the attested-removal policy a present previous leaf waits for the person", () => {
+  it("under the attested-removal policy a self-removal proof that covers the replacement admits (ADR-0081 amendment)", () => {
+    expect(
+      admissionVerdict(input({ policyRequiresAttestation: true, selfRemovalProofCovers: true })),
+    ).toBe("admit");
+  });
+
+  it("a knock whose KeyPackage is already a leaf was answered, whatever the roster's keys say", () => {
+    expect(admissionVerdict(input({ keyPackageAlreadyIn: true }))).toBe("already-admitted");
+    expect(
+      admissionVerdict(input({ keyPackageAlreadyIn: true, selfRemovalProofCovers: true })),
+    ).toBe("already-admitted");
+  });
+
+  it("under the attested-removal policy a present previous leaf without a covering proof waits for the person", () => {
     expect(admissionVerdict(input({ policyRequiresAttestation: true }))).toBe("needs-attestation");
     expect(
       admissionVerdict(

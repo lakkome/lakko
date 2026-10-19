@@ -83,6 +83,8 @@ use lakko_crypto::signing::VerifyingKey;
 use crate::error::{Error, Result};
 use crate::group::{Group, Incoming, MemberAddition, MemberRecord};
 use crate::identity::Identity;
+use crate::self_removal::SelfRemovalProof;
+use openmls_traits::OpenMlsProvider as _;
 
 /// Custom GroupContext extension type carrying the DeviceGroup removal
 /// policy (G-13, [ADR-0015]). `0xFF01` is in the private-use range, so
@@ -267,11 +269,32 @@ impl DeviceGroup {
         identity: &Identity,
         account_id: &AccountId,
     ) -> Result<Self> {
-        let inner = Group::join_from_welcome(welcome_bytes, identity)?;
+        // ADR-0081 amendment — a DeviceGroup carries no role table, so it is
+        // not joined by the conversation rule of `Group::join_from_welcome`.
+        let inner = Group::join_table_less_from_welcome(welcome_bytes, identity, None)?;
         Ok(Self {
             inner,
             account_id: *account_id,
         })
+    }
+
+    /// ADR-0056 join by name — join a DeviceGroup Welcome BEFORE the account
+    /// is known (a fresh device that typed a username): the group is joined
+    /// and persisted, and handed back as a plain [`Group`] whose exporter
+    /// opens the recovery row; [`DeviceGroup::load_by_group_id`] adopts it once
+    /// the account is known. Joins through the table-less entry point
+    /// ([ADR-0081] amendment of 2026-10-19), so a conversation's Welcome is
+    /// refused here and a DeviceGroup's is refused by
+    /// [`Group::join_from_welcome`].
+    ///
+    /// # Errors
+    ///
+    /// As [`DeviceGroup::join_from_welcome`], plus [`Error::Group`] for a
+    /// Welcome that carries a role table.
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    pub fn join_welcome_before_account(welcome_bytes: &[u8], identity: &Identity) -> Result<Group> {
+        Group::join_table_less_from_welcome(welcome_bytes, identity, None)
     }
 
     /// Load the DeviceGroup of the account whose seed is `account_seed`
@@ -459,6 +482,68 @@ impl DeviceGroup {
         crate::group::encode_message(&commit_out)
     }
 
+    /// Replace the device at `leaf_index` by the device whose wire-format
+    /// KeyPackage is `key_package_bytes`, in ONE commit ([ADR-0081]
+    /// amendment). This is the commit a sibling builds to readmit a device
+    /// that lost its DeviceGroup state: under the attested-removal policy the
+    /// removal is accepted by peers when the rejoining device's
+    /// [self-removal proof](crate::self_removal) for this KeyPackage travels
+    /// with the commit. Returns the commit and the Welcome; merges eagerly
+    /// (the client's DeviceGroup outbox keeps the durable state at N until the
+    /// Delivery Service took the commit).
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] for this device's own leaf or an unknown leaf, plus
+    /// what [`crate::group::Group::replace_member`] returns;
+    /// [`Error::KeyPackage`] for a KeyPackage that does not validate.
+    pub fn replace_device_at(
+        &mut self,
+        identity: &Identity,
+        leaf_index: u32,
+        key_package_bytes: &[u8],
+    ) -> Result<MemberAddition> {
+        if leaf_index == self.inner.own_leaf_index().u32() {
+            return Err(Error::Group(
+                "DeviceGroup replace_device_at: cannot replace own leaf".into(),
+            ));
+        }
+        if !self
+            .inner
+            .members()
+            .iter()
+            .any(|m| m.leaf_index == leaf_index)
+        {
+            return Err(Error::Group(format!(
+                "DeviceGroup replace_device_at: no such device leaf {leaf_index}"
+            )));
+        }
+        let kp_in = crate::key_package::deserialize(key_package_bytes)?;
+        let kp = kp_in
+            .validate(
+                identity.provider.crypto(),
+                openmls::prelude::ProtocolVersion::Mls10,
+            )
+            .map_err(|e| Error::KeyPackage(format!("validate: {e:?}")))?;
+        self.inner
+            .replace_member(identity, LeafNodeIndex::new(leaf_index), kp)
+    }
+
+    /// `true` when a device leaf carries the leaf node of this wire-format
+    /// KeyPackage, i.e. a knock with it was already admitted (ADR-0081
+    /// amendment; see [`crate::group::Group::contains_leaf_of_key_package`]).
+    #[must_use]
+    pub fn contains_leaf_of_key_package(
+        &self,
+        identity: &Identity,
+        key_package_bytes: &[u8],
+    ) -> bool {
+        self.inner
+            .contains_leaf_of_key_package(identity, key_package_bytes)
+    }
+
     /// Flip this DeviceGroup's policy to **require peer-verified attestation
     /// for device removals** (G-13, ADR-0015). Returns the wire-encoded
     /// commit to broadcast over the DeviceGroup journal; every device that
@@ -535,11 +620,26 @@ impl DeviceGroup {
     ) -> Result<Incoming> {
         let require = self.require_attested_removals();
         let account_id = self.account_id;
+        let group_id = self.inner.group_id();
+        // The epoch the commit leaves (the gate runs before the merge).
+        let epoch = self.inner.epoch();
         self.inner
-            .process_incoming_gated(identity, commit_bytes, |removed| {
+            .process_incoming_gated(identity, commit_bytes, |commit| {
+                let removed = &commit.removed;
                 if !require || removed.is_empty() {
                     return Ok(());
                 }
+                // ADR-0081 amendment — each entry is an ADR-0015 action
+                // attestation (the passkey path) OR a self-removal proof
+                // signed by the removed leaf's own key that names this
+                // epoch and a KeyPackage the same commit adds (the rejoin
+                // path). The two
+                // have different fixed lengths and domains, so trying both
+                // never lets one stand in for the other.
+                let proofs: Vec<SelfRemovalProof> = attestations
+                    .iter()
+                    .filter_map(|entry| SelfRemovalProof::decode(entry).ok())
+                    .collect();
                 for (leaf, pubkey) in removed {
                     let action_hash = remove_device_action_hash(pubkey);
                     let covered = attestations.iter().any(|att| {
@@ -551,6 +651,8 @@ impl DeviceGroup {
                             now_unix_secs,
                         )
                         .is_ok()
+                    }) || proofs.iter().any(|p| {
+                        p.covers(&group_id, epoch, pubkey, &commit.added_key_package_refs)
                     });
                     if !covered {
                         return Err(Error::Group(format!(
@@ -2123,6 +2225,432 @@ mod tests {
                 parsed.body,
                 DeviceGroupBody::ServiceEnvelope { envelope: nested }
             );
+        }
+    }
+
+    // ---- ADR-0081 amendment (2026-10-19): Welcome admission ----
+
+    /// A DeviceGroup Welcome carries no role table: the conversation rule of
+    /// `Group::join_from_welcome` refuses it (typed) and writes nothing, and
+    /// `DeviceGroup::join_from_welcome` joins it.
+    #[test]
+    fn a_device_group_welcome_joins_only_through_its_own_entry_point() {
+        let account = fixture_account_id();
+        let id_a = Identity::generate("A").unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
+        let id_b = Identity::generate("B").unwrap();
+        let add_b = group_a
+            .add_device(&id_a, id_b.create_key_package().unwrap())
+            .unwrap();
+        let welcome = crate::group::encode_message(&add_b.welcome).unwrap();
+
+        let err = Group::join_from_welcome(&welcome, &id_b)
+            .err()
+            .expect("refused as a chat");
+        assert_eq!(
+            err.refusal_reason(),
+            Some(crate::RefusalReason::NoRoleTable),
+            "typed: {err}"
+        );
+        assert!(
+            Group::load(&id_b, &group_a.group_id()).unwrap().is_none(),
+            "a refused join leaves no group in storage"
+        );
+
+        let joined = DeviceGroup::join_from_welcome(&welcome, &id_b, &account).expect("joins");
+        assert_eq!(joined.as_group().epoch(), group_a.as_group().epoch());
+    }
+
+    /// ADR-0056 join by name goes through the same table-less entry point:
+    /// a DeviceGroup Welcome joins, a conversation's is refused and leaves
+    /// nothing.
+    #[test]
+    fn a_join_by_name_takes_a_device_group_welcome_and_refuses_a_chat() {
+        let account = fixture_account_id();
+        let id_a = Identity::generate("A").unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
+        let id_b = Identity::generate("B").unwrap();
+        let add_b = group_a
+            .add_device(&id_a, id_b.create_key_package().unwrap())
+            .unwrap();
+        let welcome = crate::group::encode_message(&add_b.welcome).unwrap();
+        let plain = DeviceGroup::join_welcome_before_account(&welcome, &id_b).expect("joins");
+        assert_eq!(plain.group_id(), group_a.group_id());
+
+        let mut chat = Group::create(&id_a, crate::GroupKind::Group).unwrap();
+        let id_c = Identity::generate("C").unwrap();
+        let add_c = chat
+            .add_member_from_wire(
+                &id_a,
+                &crate::key_package::serialize(&id_c.create_key_package().unwrap()).unwrap(),
+            )
+            .unwrap();
+        let chat_welcome = crate::group::encode_message(&add_c.welcome).unwrap();
+        assert!(DeviceGroup::join_welcome_before_account(&chat_welcome, &id_c).is_err());
+        assert!(Group::load(&id_c, &chat.group_id()).unwrap().is_none());
+    }
+
+    // ---- ADR-0081 amendment: the self-removal proof (closes G-52) ----
+
+    use crate::self_removal::{sign_self_removal, statement, SelfRemovalProof};
+    use openmls_traits::signatures::Signer as _;
+
+    /// A policy-on DeviceGroup: A (founder, the admitting sibling), B (the
+    /// verifying peer) and C (the device that will rejoin), all in lockstep.
+    struct SelfRemovalScene {
+        account: AccountId,
+        id_a: Identity,
+        group_a: DeviceGroup,
+        id_b: Identity,
+        group_b: DeviceGroup,
+        id_c: Identity,
+        c_leaf: u32,
+    }
+
+    fn self_removal_scene(policy: bool) -> SelfRemovalScene {
+        let account = fixture_account_id();
+        let id_a = Identity::generate("A").unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account, &fixture_seed()).unwrap();
+        let id_b = Identity::generate("B").unwrap();
+        let add_b = group_a
+            .add_device(&id_a, id_b.create_key_package().unwrap())
+            .unwrap();
+        let mut group_b = DeviceGroup::join_from_welcome(
+            &crate::group::encode_message(&add_b.welcome).unwrap(),
+            &id_b,
+            &account,
+        )
+        .unwrap();
+        let id_c = Identity::generate("C").unwrap();
+        let add_c = group_a
+            .add_device(&id_a, id_c.create_key_package().unwrap())
+            .unwrap();
+        group_b
+            .process_incoming(&id_b, &crate::group::encode_message(&add_c.commit).unwrap())
+            .unwrap();
+        if policy {
+            let commit = group_a.set_require_attested_removals(&id_a).unwrap();
+            group_b.process_incoming(&id_b, &commit).unwrap();
+            assert!(group_b.require_attested_removals());
+        }
+        let c_leaf = leaf_of(&group_a, id_c.signature_public_key());
+        SelfRemovalScene {
+            account,
+            id_a,
+            group_a,
+            id_b,
+            group_b,
+            id_c,
+            c_leaf,
+        }
+    }
+
+    fn leaf_of(group: &DeviceGroup, pubkey: &[u8]) -> u32 {
+        group
+            .devices()
+            .into_iter()
+            .find(|m| m.signature_public_key == pubkey)
+            .expect("leaf present")
+            .leaf_index
+    }
+
+    fn epoch_of(group: &DeviceGroup) -> u64 {
+        group.as_group().epoch()
+    }
+
+    fn kp_wire(id: &Identity) -> Vec<u8> {
+        crate::key_package::serialize(&id.create_key_package().unwrap()).unwrap()
+    }
+
+    fn verify_on_b(
+        sc: &mut SelfRemovalScene,
+        commit: &[u8],
+        entries: &[Vec<u8>],
+    ) -> Result<Incoming> {
+        let vk = SigningKey::from_seed(&REMOVAL_ATTEST_SEED).verifying_key();
+        sc.group_b
+            .process_incoming_verifying_removals(&sc.id_b, commit, entries, &vk, 100)
+    }
+
+    #[test]
+    fn a_self_removal_proof_admits_the_replacement_of_its_own_leaf() {
+        let mut sc = self_removal_scene(true);
+        let gid = sc.group_a.group_id();
+        // C lost its DeviceGroup state but kept its device identity: a new
+        // KeyPackage from the same identity, and a proof naming it.
+        let kp = kp_wire(&sc.id_c);
+        let proof = sign_self_removal(&sc.id_c, &gid, epoch_of(&sc.group_a), &kp).unwrap();
+        let replaced = sc
+            .group_a
+            .replace_device_at(&sc.id_a, sc.c_leaf, &kp)
+            .unwrap();
+        let commit = crate::group::encode_message(&replaced.commit).unwrap();
+
+        let incoming =
+            verify_on_b(&mut sc, &commit, &[proof]).expect("the self-removal proof covers it");
+        assert!(matches!(incoming, Incoming::Commit));
+        assert_eq!(sc.group_b.as_group().epoch(), sc.group_a.as_group().epoch());
+        // A second sibling can tell the knock was answered, though the
+        // roster's keys did not change (same key, often the same leaf).
+        assert!(sc.group_b.contains_leaf_of_key_package(&sc.id_b, &kp));
+        assert!(!sc
+            .group_b
+            .contains_leaf_of_key_package(&sc.id_b, &kp_wire(&sc.id_c)));
+        assert_eq!(
+            sc.group_b.devices().len(),
+            3,
+            "the old leaf is gone and the new one is in: still three devices"
+        );
+        // The rejoining device opens the Welcome into the same epoch.
+        let rejoined = DeviceGroup::join_from_welcome(
+            &crate::group::encode_message(&replaced.welcome).unwrap(),
+            &sc.id_c,
+            &sc.account,
+        )
+        .unwrap();
+        assert_eq!(rejoined.as_group().epoch(), sc.group_a.as_group().epoch());
+        assert_eq!(
+            rejoined
+                .export_secret(&sc.id_c, "t", b"c", 32)
+                .unwrap()
+                .to_vec(),
+            sc.group_b
+                .export_secret(&sc.id_b, "t", b"c", 32)
+                .unwrap()
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn a_self_removal_proof_never_covers_a_plain_removal() {
+        // The proof names a KeyPackage; a commit that only removes adds none.
+        let mut sc = self_removal_scene(true);
+        let gid = sc.group_a.group_id();
+        let proof =
+            sign_self_removal(&sc.id_c, &gid, epoch_of(&sc.group_a), &kp_wire(&sc.id_c)).unwrap();
+        let commit = sc.group_a.remove_device_at(&sc.id_a, sc.c_leaf).unwrap();
+        assert!(verify_on_b(&mut sc, &commit, &[proof]).is_err());
+        assert!(b_still_has(&sc.group_b, sc.id_c.signature_public_key()));
+    }
+
+    #[test]
+    fn a_proof_replayed_with_another_key_package_is_refused() {
+        // A proof made for one rejoin cannot authorise a later replacement:
+        // the KeyPackage it names is not the one the commit adds.
+        let mut sc = self_removal_scene(true);
+        let gid = sc.group_a.group_id();
+        let old_proof =
+            sign_self_removal(&sc.id_c, &gid, epoch_of(&sc.group_a), &kp_wire(&sc.id_c)).unwrap();
+        let later_kp = kp_wire(&sc.id_c);
+        let replaced = sc
+            .group_a
+            .replace_device_at(&sc.id_a, sc.c_leaf, &later_kp)
+            .unwrap();
+        let commit = crate::group::encode_message(&replaced.commit).unwrap();
+        assert!(verify_on_b(&mut sc, &commit, &[old_proof]).is_err());
+        assert!(b_still_has(&sc.group_b, sc.id_c.signature_public_key()));
+    }
+
+    #[test]
+    fn a_proof_made_at_one_epoch_never_covers_a_commit_at_another() {
+        // Signed at epoch E; another commit lands first, so the replacement
+        // leaves E+1. The proof is stale: the device knocks again.
+        let mut sc = self_removal_scene(true);
+        let gid = sc.group_a.group_id();
+        let kp = kp_wire(&sc.id_c);
+        let proof = sign_self_removal(&sc.id_c, &gid, epoch_of(&sc.group_a), &kp).unwrap();
+        let id_d = Identity::generate("D").unwrap();
+        let add_d = sc
+            .group_a
+            .add_device(&sc.id_a, id_d.create_key_package().unwrap())
+            .unwrap();
+        sc.group_b
+            .process_incoming(
+                &sc.id_b,
+                &crate::group::encode_message(&add_d.commit).unwrap(),
+            )
+            .unwrap();
+        let replaced = sc
+            .group_a
+            .replace_device_at(&sc.id_a, sc.c_leaf, &kp)
+            .unwrap();
+        let commit = crate::group::encode_message(&replaced.commit).unwrap();
+        assert!(verify_on_b(&mut sc, &commit, &[proof]).is_err());
+        assert!(b_still_has(&sc.group_b, sc.id_c.signature_public_key()));
+    }
+
+    #[test]
+    fn a_used_proof_cannot_remove_the_rejoined_device_later() {
+        // The replacement leaf keeps C's signature key, so a proof that
+        // named only the key and the KeyPackage would let any member later
+        // remove the rejoined device and re-add the stale KeyPackage, a
+        // removal the policy forbids. The epoch makes the proof single-use.
+        let mut sc = self_removal_scene(true);
+        let gid = sc.group_a.group_id();
+        let kp = kp_wire(&sc.id_c);
+        let proof = sign_self_removal(&sc.id_c, &gid, epoch_of(&sc.group_a), &kp).unwrap();
+        let replaced = sc
+            .group_a
+            .replace_device_at(&sc.id_a, sc.c_leaf, &kp)
+            .unwrap();
+        let commit = crate::group::encode_message(&replaced.commit).unwrap();
+        verify_on_b(&mut sc, &commit, std::slice::from_ref(&proof)).expect("first use");
+        let new_leaf = leaf_of(&sc.group_a, sc.id_c.signature_public_key());
+        // The same proof with the same KeyPackage, one epoch later: OpenMLS
+        // builds this commit, so only the gate can refuse it.
+        let again = sc
+            .group_a
+            .replace_device_at(&sc.id_a, new_leaf, &kp)
+            .expect("the replay commit builds");
+        let commit = crate::group::encode_message(&again.commit).unwrap();
+        assert!(verify_on_b(&mut sc, &commit, &[proof]).is_err());
+        assert!(b_still_has(&sc.group_b, sc.id_c.signature_public_key()));
+    }
+
+    #[test]
+    fn a_proof_for_one_leaf_never_covers_another() {
+        // C's proof, valid for C, carried with a commit that replaces B.
+        let mut sc = self_removal_scene(true);
+        let gid = sc.group_a.group_id();
+        let kp = kp_wire(&sc.id_c);
+        let proof = sign_self_removal(&sc.id_c, &gid, epoch_of(&sc.group_a), &kp).unwrap();
+        let b_leaf = leaf_of(&sc.group_a, sc.id_b.signature_public_key());
+        // A verifier other than B is needed (B is the leaf being replaced):
+        // C applies it.
+        let replaced = sc
+            .group_a
+            .replace_device_at(
+                &sc.id_a,
+                b_leaf,
+                &kp_wire(&Identity::generate("D").unwrap()),
+            )
+            .unwrap();
+        let commit = crate::group::encode_message(&replaced.commit).unwrap();
+        let vk = SigningKey::from_seed(&REMOVAL_ATTEST_SEED).verifying_key();
+        let res =
+            sc.group_b
+                .process_incoming_verifying_removals(&sc.id_b, &commit, &[proof], &vk, 100);
+        assert!(res.is_err(), "C's proof must not authorise removing B");
+        assert!(b_still_has(&sc.group_b, sc.id_b.signature_public_key()));
+    }
+
+    #[test]
+    fn a_proof_signed_by_another_devices_key_is_refused() {
+        // B forges a statement naming C's key and C's replacement.
+        let mut sc = self_removal_scene(true);
+        let gid = sc.group_a.group_id();
+        let kp = kp_wire(&sc.id_c);
+        let reference = crate::self_removal::key_package_ref(&sc.id_c, &kp).unwrap();
+        let c_key: [u8; 32] = sc.id_c.signature_public_key().try_into().unwrap();
+        let epoch = epoch_of(&sc.group_a);
+        let message = statement(&gid, epoch, &c_key, &reference).unwrap();
+        let forged_sig: [u8; 64] = sc
+            .id_b
+            .signature_keys
+            .sign(&message)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let forged = SelfRemovalProof {
+            epoch,
+            removed_signature_pubkey: c_key,
+            key_package_ref: reference,
+            signature: forged_sig,
+        }
+        .encode();
+        let replaced = sc
+            .group_a
+            .replace_device_at(&sc.id_a, sc.c_leaf, &kp)
+            .unwrap();
+        let commit = crate::group::encode_message(&replaced.commit).unwrap();
+        assert!(verify_on_b(&mut sc, &commit, &[forged]).is_err());
+        assert!(b_still_has(&sc.group_b, sc.id_c.signature_public_key()));
+    }
+
+    #[test]
+    fn a_proof_for_another_device_group_is_refused() {
+        let mut sc = self_removal_scene(true);
+        let kp = kp_wire(&sc.id_c);
+        let proof = sign_self_removal(&sc.id_c, &[0x42; 32], epoch_of(&sc.group_a), &kp).unwrap();
+        let replaced = sc
+            .group_a
+            .replace_device_at(&sc.id_a, sc.c_leaf, &kp)
+            .unwrap();
+        let commit = crate::group::encode_message(&replaced.commit).unwrap();
+        assert!(verify_on_b(&mut sc, &commit, &[proof]).is_err());
+    }
+
+    #[test]
+    fn a_replacement_without_any_proof_is_refused_under_the_policy() {
+        let mut sc = self_removal_scene(true);
+        let replaced = sc
+            .group_a
+            .replace_device_at(&sc.id_a, sc.c_leaf, &kp_wire(&sc.id_c))
+            .unwrap();
+        let commit = crate::group::encode_message(&replaced.commit).unwrap();
+        assert!(verify_on_b(&mut sc, &commit, &[]).is_err());
+        assert!(b_still_has(&sc.group_b, sc.id_c.signature_public_key()));
+    }
+
+    #[test]
+    fn an_attestation_still_authorises_a_replacement() {
+        let mut sc = self_removal_scene(true);
+        let sk = SigningKey::from_seed(&REMOVAL_ATTEST_SEED);
+        let att = make_attestation(
+            &sc.account,
+            remove_device_action_hash(sc.id_c.signature_public_key()),
+            &sk,
+        );
+        let replaced = sc
+            .group_a
+            .replace_device_at(
+                &sc.id_a,
+                sc.c_leaf,
+                &kp_wire(&Identity::generate("D").unwrap()),
+            )
+            .unwrap();
+        let commit = crate::group::encode_message(&replaced.commit).unwrap();
+        assert!(verify_on_b(&mut sc, &commit, &[att]).is_ok());
+        assert!(!b_still_has(&sc.group_b, sc.id_c.signature_public_key()));
+    }
+
+    #[test]
+    fn the_policy_off_path_is_unchanged() {
+        let mut sc = self_removal_scene(false);
+        let commit = sc.group_a.remove_device_at(&sc.id_a, sc.c_leaf).unwrap();
+        assert!(verify_on_b(&mut sc, &commit, &[]).is_ok());
+        assert!(!b_still_has(&sc.group_b, sc.id_c.signature_public_key()));
+    }
+
+    #[test]
+    fn replace_device_at_refuses_its_own_leaf_and_an_unknown_one() {
+        let mut sc = self_removal_scene(false);
+        let own = sc.group_a.own_leaf_index();
+        assert!(sc
+            .group_a
+            .replace_device_at(&sc.id_a, own, &kp_wire(&sc.id_c))
+            .is_err());
+        assert!(sc
+            .group_a
+            .replace_device_at(&sc.id_a, 99, &kp_wire(&sc.id_c))
+            .is_err());
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig { cases: 16, .. proptest::prelude::ProptestConfig::default() })]
+
+        /// Any single-byte change to a valid proof makes it cover nothing.
+        #[test]
+        fn a_tampered_proof_covers_nothing(position in 0usize..crate::self_removal::SELF_REMOVAL_PROOF_LEN, flip in 1u8..=255) {
+            let id = Identity::generate("C").unwrap();
+            let kp = kp_wire(&id);
+            let gid = [9u8; 32];
+            let reference = crate::self_removal::key_package_ref(&id, &kp).unwrap().to_vec();
+            let mut wire = sign_self_removal(&id, &gid, 3, &kp).unwrap();
+            wire[position] ^= flip;
+            let covered = SelfRemovalProof::decode(&wire)
+                .is_ok_and(|p| p.covers(&gid, 3, id.signature_public_key(), &[reference]));
+            proptest::prop_assert!(!covered);
         }
     }
 }

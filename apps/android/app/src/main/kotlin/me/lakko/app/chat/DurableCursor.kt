@@ -35,7 +35,7 @@ package me.lakko.app.chat
  * ## Why an ordering rule rather than one atomic write
  *
  * ADR-0040 closed the same shape on the SEND side with atomicity
- * ([runCrashSafeCommit] and its durable outbox entry). The receive side cannot
+ * ([prepareCrashSafeCommit] and its durable outbox entry). The receive side cannot
  * copy that: the MLS snapshot is one file under `noBackupFilesDir` and the
  * cursor lives inside the [MessageLogStore] envelope, a different file with no
  * cross-store transaction available at any price. Web is no better off — its two
@@ -151,7 +151,7 @@ public class DurableCursorGate {
  * ADR-0045 committer sweep cannot drift and a test can drive the rule itself
  * rather than a paraphrase of it.
  *
- * Same reason [runSplitPoll] and [runCrashSafeCommit] are shaped this way: the
+ * Same reason [runSplitPoll] and [prepareCrashSafeCommit] are shaped this way: the
  * property being defended is an ORDERING between a state mutation, a durable
  * write and a cursor advance, and an ordering property is only actually pinned
  * if a test can run it. `ChatRepository` needs an Android `Context` and live FFI

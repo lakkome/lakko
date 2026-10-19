@@ -291,15 +291,12 @@ import { mayLookUp, usernameReason } from "../profile/rules";
 import {
   ensureGroupPushRouting,
   memberSignatureKeys,
-  publishRemoveThenRotate,
   sealedWakeForGroup,
   readPushRotationRole,
   receivePushRoutingSecretGated,
   redistributeSecretToGroup,
   retireOldPushGid,
-  rotatePushRoutingSecret,
   rotatePushRoutingSecretIfMembershipShrank,
-  type PushRotationOutcome,
 } from "../push/group-routing";
 import { getGroupRoutingSecretForAccount } from "../push/group-routing-store";
 import { createPushWakeReach } from "../push/wake-reach";
@@ -704,19 +701,6 @@ function ChatView(props: {
           throw new Error("no active session — commit aborted (ADR-0040)");
         }
         await chats.persistSnapshotWithCommit(s.account.accountId, entry);
-      },
-      // ADR-0040 F1 (lakko-security) — on a FAIL-CLOSED commit persist-abort, reset
-      // the in-memory group back to the last durable snapshot (epoch N), dropping
-      // the un-published eager merge. Reloads the group from IDB + replaces the
-      // cached registry reference so the next `props.entry.group` read (reactive
-      // via `chats.get`) sees the epoch-N group — a subsequent commit builds on N,
-      // not the poisoned N+1 that would strand the whole group.
-      onCommitPersistAbort: async (groupIdB64) => {
-        const s = auth.state();
-        if (s.kind !== "session") {
-          throw new Error("no active session — cannot reset group (ADR-0040 F1)");
-        }
-        await chats.resetGroupToDurableSnapshot(s.account.accountId, groupIdB64);
       },
     },
   );
@@ -2111,10 +2095,11 @@ function ChatView(props: {
   // ADR-0045 — proposal-based membership
   // -------------------------------------------------------------------------
 
-  /** Does this group route membership through proposals? A group with NO role
-   *  table has no owner, hence no rank 0, hence no committer — and every peer's
-   *  receipt gate drops proposals in it — so it keeps direct commits. A torn
-   *  read is treated as "no role table", which keeps the direct path working. */
+  /** Does this group carry a role table, and so a committer? A group with NO
+   *  role table has no owner, hence no rank 0, hence no committer, and every
+   *  peer's receipt gate drops proposals in it; since the ADR-0081 amendment of
+   *  2026-10-19 a membership change in it is refused (the direct-commit path is
+   *  deleted) and no client reaches one. A torn read is "no role table". */
   const usesProposalPath = (): boolean => {
     try {
       return props.entry.group.roleTableOwner() !== undefined;
@@ -5681,120 +5666,47 @@ function ChatView(props: {
     setNotice(null);
     setBusy(true);
     try {
-      // C-61 — rotate STRICTLY AFTER the Remove commit is published. Both
-      // guarantees the ordering buys depend on it:
-      //
-      //   - forward secrecy (ADR-0043): the distribution envelope is an MLS
-      //     application message, so sealed BEFORE the commit it is readable
-      //     by the member being evicted (still in that epoch) and the
-      //     rotation buys nothing;
-      //   - recency (ADR-0044): the new secret is stamped with `group.epoch`
-      //     at mint time, so after the commit it strictly out-ranks the
-      //     secret it replaces. Before it, it would TIE with a stale secret
-      //     minted at the same epoch and win or lose on the byte tiebreak.
-      //
-      // The sequencing lives in `publishRemoveThenRotate` rather than in two
-      // adjacent statements here, so it is pinned by a test instead of by
-      // convention.
-      //
-      // Owner-or-admin (ADR-0043 ratified option (b)) — the gate lives inside
-      // `rotatePushRoutingSecret`, which also no-ops when this device holds no
-      // secret, so rotation never becomes a second mint path.
-      //
-      // Fire-and-forget: push is best-effort and a failed rotation must not
-      // unwind the removal. A failed BROADCAST leaves the row pending, and
-      // the existing `ensureGroupPushRouting` re-broadcast branch re-sends it
-      // on the next chat-open / launch.
-      const session = auth.state();
-
-      // ADR-0045 — on the proposal path the removal does NOT happen here: this
-      // publishes a request, and the member leaves the group only when a
-      // committer sweeps it. That moves C-61 with it.
-      //
-      // C-61 requires the rotation to follow the Remove COMMIT, because the
-      // distribution envelope is an MLS application message: sealed before the
-      // commit, it is readable by the leaf being evicted and the rotation buys
-      // nothing. Rotating after publishing a *proposal* would do exactly that —
-      // the proposal advances no epoch, so the evicted member is still in the
-      // one the new secret would be sealed at.
-      //
-      // So the rotation moves to where the removal actually lands: the sweep,
-      // via the same membership-SHRINK detection the poll loop already runs for
-      // someone else's removal. `sweepNow` captures the roster either side and
-      // rotates when it shrinks, which keeps the ordering correct by
-      // construction rather than by an argument about two adjacent statements.
-      if (usesProposalPath()) {
-        // ADR-0045 UX §7 — armed against the member's signature key, resolved
-        // now and re-resolved to a leaf at fire time. A torn roster read means
-        // no retry for this attempt rather than a retry against a guess.
-        const targetKeyB64 = rosterViews().find(
-          (m) => m.leafIndex === leafIndex,
-        )?.signatureKeyB64;
-        const removeRun = () =>
-          contacts.removeMemberFromGroup(
-            props.requireIdentity(),
-            props.entry.group,
-            leafIndex,
-          );
-        const proposed =
-          targetKeyB64 === undefined
-            ? await removeRun()
-            : await withMembershipRetry(
-                { kind: "remove", subjectKeyB64: targetKeyB64 },
-                removeRun,
-              );
-        chat.markOwnPublishedCommit(
-          props.entry.groupIdB64,
-          proposed.kind === "committed"
-            ? proposed.commitMessageId
-            : proposed.proposalMessageId,
+      // ADR-0045 — the removal does NOT happen here: this publishes a request,
+      // and the member leaves the group only when a committer sweeps it. That
+      // moves C-61 with it: the push-routing rotation must follow the Remove
+      // COMMIT (an envelope sealed before it is readable by the leaf being
+      // evicted, and stamped at an epoch that only ties with the secret it
+      // still holds), so it runs where the removal lands — the sweep, via the
+      // membership-shrink detection `sweepNow` and the poll loop share.
+      // ADR-0081 amendment (2026-10-19): there is no direct-commit removal any
+      // more; a group with no role table is refused by `removeMemberFromGroup`.
+      // ADR-0045 UX §7 — armed against the member's signature key, resolved
+      // now and re-resolved to a leaf at fire time. A torn roster read means
+      // no retry for this attempt rather than a retry against a guess.
+      const targetKeyB64 = rosterViews().find(
+        (m) => m.leafIndex === leafIndex,
+      )?.signatureKeyB64;
+      const removeRun = () =>
+        contacts.removeMemberFromGroup(
+          props.requireIdentity(),
+          props.entry.group,
+          leafIndex,
         );
-        if (proposed.kind === "proposed") noteOwnRequest(`remove:${leafIndex}`);
-        const swept = await sweepNow();
-        setMemberCount(peopleCountOf(props.entry.group));
-        setMembersVersion(membersVersion() + 1);
-        const removeLanded = swept?.kind === "committed";
-        setNotice(() =>
-          removeLanded ? t("chat.members.remove.done") : t("chat.members.remove.requested"),
-        );
-        void refresh();
-        return;
-      }
-
-      const result = await publishRemoveThenRotate({
-        publishRemove: async () => {
-          const removed = await contacts.removeMemberFromGroup(
-            props.requireIdentity(),
-            props.entry.group,
-            leafIndex,
-          );
-          if (removed.kind === "committed") {
-            chat.markOwnPublishedCommit(props.entry.groupIdB64, removed.commitMessageId);
-          }
-          return removed;
-        },
-        rotate:
-          session.kind === "session"
-            ? async (): Promise<PushRotationOutcome> =>
-                rotatePushRoutingSecret(
-                  session.account.accountId,
-                  props.entry.group,
-                  // Live role read, same reason as the poll path: the
-                  // `ownRole()` signal can still hold a pre-commit value.
-                  await readOwnRoleNow(),
-                  broadcastToGroup,
-                )
-            : undefined,
-        onRotationError: (err) => {
-          // eslint-disable-next-line no-console
-          console.warn("push-routing rotation failed", err);
-        },
-      });
+      const proposed =
+        targetKeyB64 === undefined
+          ? await removeRun()
+          : await withMembershipRetry(
+              { kind: "remove", subjectKeyB64: targetKeyB64 },
+              removeRun,
+            );
+      chat.markOwnPublishedCommit(
+        props.entry.groupIdB64,
+        proposed.kind === "committed"
+          ? proposed.commitMessageId
+          : proposed.proposalMessageId,
+      );
+      if (proposed.kind === "proposed") noteOwnRequest(`remove:${leafIndex}`);
+      const swept = await sweepNow();
       setMemberCount(peopleCountOf(props.entry.group));
       setMembersVersion(membersVersion() + 1);
-      const removeCommitted = result.kind === "committed";
+      const removeLanded = swept?.kind === "committed";
       setNotice(() =>
-        removeCommitted ? t("chat.members.remove.done") : t("chat.members.remove.requested_short"),
+        removeLanded ? t("chat.members.remove.done") : t("chat.members.remove.requested"),
       );
       void refresh();
     } catch (err) {

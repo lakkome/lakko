@@ -224,7 +224,8 @@ export interface BackgroundReceiveApi {
    * this device is in. Waits, bounded, for the new device's conversation
    * KeyPackage to appear in the directory (it publishes it once it has landed),
    * then per chat: a self-service Add proposal, swept here when this device is
-   * the acting committer, or a direct commit on a table-less group. Chats whose
+   * the acting committer (a table-less group is refused, ADR-0081 amendment
+   * of 2026-10-19). Chats whose
    * view is open are proposed to and left to that view's own sweep.
    *
    * Resolves with a tally once every chat has been offered; rejects when the

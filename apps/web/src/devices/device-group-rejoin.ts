@@ -47,15 +47,21 @@
  * listed); the knock is newer than every addition of that key this device has
  * seen and newer than when it started watching; this device is the
  * designated admitter (the lowest leaf other than the knocking key) or the
- * knock has waited {@link FALLBACK_ADMIT_AFTER_MS}. To admit it removes the
- * key's previous leaf if still in the roster, then adds the KeyPackage - two
- * ordinary DeviceGroup commits through the outbox (`device-group-commit.ts`),
- * so the DS arbitrates two siblings acting at once - and the Welcome goes to
- * the knock's rendezvous.
+ * knock has waited {@link FALLBACK_ADMIT_AFTER_MS}. To admit it replaces the
+ * key's previous leaf, if still in the roster, by the KeyPackage in ONE
+ * commit (`replaceDeviceAt`), or adds the KeyPackage when no previous leaf is
+ * there - one ordinary DeviceGroup commit through the outbox
+ * (`device-group-commit.ts`), so the DS arbitrates two siblings acting at
+ * once - and the Welcome goes to the knock's rendezvous.
  *
- * Under the ADR-0015 policy a removal needs a passkey attestation, which a
- * sibling cannot obtain without the person; a knock whose previous leaf is
- * still present is then left waiting (verdict `needs-attestation`).
+ * Under the ADR-0015 policy a removal needs a passkey attestation OR (ADR-0081
+ * amendment) the device's own self-removal proof: the rejoining device signs,
+ * with its old leaf key, that its leaf may be replaced by the KeyPackage it
+ * knocks with, and the proof rides in the commit's removal-authorisation slot.
+ * A knock without a proof that the sibling verified, whose previous leaf is
+ * present, is left waiting under the policy (verdict `needs-attestation`): a
+ * device that no longer holds its old key is a new device, its KeyPackage key
+ * matches no leaf, and it is simply added.
  */
 
 /** How long a rejoining device waits for a Welcome before knocking again
@@ -125,6 +131,15 @@ export interface AdmissionInput {
   /** The directory lists the key with a binding under the account key. */
   readonly listed: boolean;
   readonly policyRequiresAttestation: boolean;
+  /** The knock carries a self-removal proof that covers replacing the
+   *  previous leaf by its KeyPackage (checked with
+   *  `deviceGroupSelfRemovalCovers`). */
+  readonly selfRemovalProofCovers: boolean;
+  /** A leaf of the DeviceGroup already carries the knock's KeyPackage leaf
+   *  (`containsLeafOfKeyPackage`): another sibling answered it. A
+   *  replacement keeps the key (often the leaf index too), so the roster of
+   *  keys cannot tell. */
+  readonly keyPackageAlreadyIn: boolean;
   readonly nowMs: number;
 }
 
@@ -133,6 +148,7 @@ export function admissionVerdict(input: AdmissionInput): AdmissionVerdict {
   if (input.handled.has(input.knockId)) return "handled";
   if (input.keyHex === input.ownKeyHex) return "own-key";
   if (input.knockAtMs < input.watchingSinceMs) return "before-watching";
+  if (input.keyPackageAlreadyIn) return "already-admitted";
   if (input.lastAddedAtMs !== undefined && input.lastAddedAtMs >= input.knockAtMs) {
     return "already-admitted";
   }
@@ -145,7 +161,7 @@ export function admissionVerdict(input: AdmissionInput): AdmissionVerdict {
   const designated = lowest !== null && lowest.keyHex === input.ownKeyHex;
   if (!designated && input.nowMs - input.knockAtMs < FALLBACK_ADMIT_AFTER_MS) return "not-mine-yet";
   const present = input.roster.some((m) => m.keyHex === input.keyHex);
-  if (present && input.policyRequiresAttestation) return "needs-attestation";
+  if (present && input.policyRequiresAttestation && !input.selfRemovalProofCovers) return "needs-attestation";
   return "admit";
 }
 

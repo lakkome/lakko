@@ -110,7 +110,7 @@ package me.lakko.app.chat
  * Everything here is expressed over injected ports so the whole orchestration is
  * host-testable on the plain JVM — no `Context`, no UniFFI `.so`, no network.
  * [ChatRepository] supplies the thin adapters. Same rationale (and same shape)
- * as [runCrashSafeCommit] and [runSplitPoll].
+ * as [prepareCrashSafeCommit] and [runSplitPoll].
  */
 
 /**
@@ -124,8 +124,10 @@ package me.lakko.app.chat
  * UX spec forbids.
  */
 public sealed class MembershipOutcome {
-    /** A direct commit landed. Only reachable in a group with NO role table,
-     *  where ADR-0045's proposal path does not apply. */
+    /** A direct commit landed. No membership call returns this since the
+     *  ADR-0081 amendment of 2026-10-19 deleted the direct-commit paths (a
+     *  group with no role table is refused); kept so the outcome consumers
+     *  keep one shape. */
     data class Committed(
         val commitMessageId: Long,
         val welcomeMessageId: Long?,

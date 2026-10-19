@@ -130,6 +130,44 @@ impl DecodedPairingQr {
     pub fn rendezvous_pseudonym(&self) -> Vec<u8> {
         self.inner.rendezvous_pseudonym.to_vec()
     }
+
+    /// ADR-0081 amendment — on a DeviceGroup rejoin knock, the rejoining
+    /// device's self-removal proof (137 bytes, not verified here), else
+    /// `undefined`.
+    #[wasm_bindgen(getter, js_name = selfRemovalProof)]
+    pub fn self_removal_proof(&self) -> Option<Vec<u8>> {
+        self.inner.self_removal_proof.clone()
+    }
+}
+
+/// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload plus
+/// the device's self-removal proof (`signDeviceGroupSelfRemoval`, exactly 137
+/// bytes) for `keyPackage`.
+///
+/// # Errors
+///
+/// `JsError` on a wrong-length handle, rendezvous pseudonym or proof.
+#[wasm_bindgen(js_name = encodeRejoinKnock)]
+pub fn encode_rejoin_knock(
+    login_handle: &[u8],
+    key_package: &[u8],
+    rendezvous_pseudonym: &[u8],
+    self_removal_proof: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let handle: inner::LoginHandle = login_handle.try_into().map_err(|_| {
+        JsError::new(&format!(
+            "login_handle must be {} bytes",
+            inner::LOGIN_HANDLE_LEN
+        ))
+    })?;
+    let rendezvous: inner::RendezvousPseudonym = rendezvous_pseudonym.try_into().map_err(|_| {
+        JsError::new(&format!(
+            "rendezvous_pseudonym must be {} bytes",
+            inner::RENDEZVOUS_PSEUDONYM_LEN
+        ))
+    })?;
+    inner::encode_rejoin_knock(&handle, key_package, &rendezvous, self_removal_proof)
+        .map_err(|e| JsError::new(&e.to_string()))
 }
 
 #[cfg(test)]

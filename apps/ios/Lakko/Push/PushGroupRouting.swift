@@ -1868,9 +1868,9 @@ public final class PushGroupRouting {
     /// replaces. Get the order wrong and the stamp is the pre-removal epoch,
     /// which TIES with a stale secret minted at the same epoch — the tie
     /// falls to the byte comparison and the rotation may simply lose. The
-    /// guarantee degrades from "always wins" to "coin flip", silently. Use
-    /// ``publishRemoveThenRotate(publishRemove:rotate:onRotationError:)`` at
-    /// the call site, which is where that ordering is pinned by a test.
+    /// guarantee degrades from "always wins" to "coin flip", silently. Since
+    /// the ADR-0081 amendment (2026-10-19) every removal is a sweep, and the
+    /// rotation is started from the sweep's tail, after the merged commit.
     ///
     /// The steps, in the one order that works:
     ///
@@ -2050,73 +2050,6 @@ public final class PushGroupRouting {
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex, ownRole: ownRole,
                 mintEpoch: mintEpoch, broadcast: broadcast)
         }
-    }
-
-    // MARK: - C-61: the rotation broadcast STRICTLY FOLLOWS the Remove commit
-
-    /// **C-61 — publish the Remove commit, THEN rotate.** The single call
-    /// site for this device's own removal path, and the reason that ordering
-    /// is testable at all rather than being two adjacent statements anyone
-    /// can reorder.
-    ///
-    /// Both halves of what C-61 buys depend on `publishRemove` having
-    /// RESOLVED before `rotate` is even started:
-    ///
-    ///   * **Forward secrecy (ADR-0043).** The rotation envelope is an MLS
-    ///     application message. Sealed before the Remove commit it is sealed
-    ///     at the pre-removal epoch, where the evicted member is still a
-    ///     member and can open it — learning the very secret the rotation
-    ///     exists to deny it.
-    ///   * **Recency (ADR-0044).**
-    ///     ``rotateSecret(accountIdB64:groupIdHex:ownRole:mintEpoch:broadcast:)``
-    ///     stamps the new secret with the epoch its `mintEpoch` provider
-    ///     reports at mint time. After the commit that is the post-removal
-    ///     epoch, so the rotation strictly out-ranks the secret it replaces
-    ///     and a stale re-broadcast of that older secret is refused
-    ///     ``SecretVerdict/rejectStale`` by every member. Before the commit it
-    ///     is the PRE-removal epoch — the same epoch the stale secret carries
-    ///     — so the two TIE, the tie falls to the 32 secret bytes, and the
-    ///     rotation wins or loses by a coin flip with no signal either way.
-    ///
-    /// ADR-0043 required this ordering but enforced it only structurally, by
-    /// call-site sequencing, with no test on any client. ADR-0044 promotes it
-    /// from a property that protects one guarantee to a precondition of two,
-    /// so it is pinned here — where a test can drive both callbacks and
-    /// observe which epoch the emitted envelope was stamped at.
-    ///
-    /// The rotation is deliberately fire-and-forget: push is best-effort and
-    /// a rotation failure must never unwind the membership change that
-    /// triggered it. "Ordered" means the rotation is not STARTED until the
-    /// removal has landed, not that the caller waits for it.
-    ///
-    /// - Parameters:
-    ///   - publishRemove: applies + publishes the Remove commit, advancing
-    ///     the local MLS epoch. Its throw propagates — a removal that failed
-    ///     must not rotate.
-    ///   - rotate: started ONLY after `publishRemove` returned. `nil` skips
-    ///     the rotation entirely (no session — nothing to rotate for). It
-    ///     never throws: ``rotateSecret(accountIdB64:groupIdHex:ownRole:mintEpoch:broadcast:)``
-    ///     reports every failure as an outcome, so there is no error channel
-    ///     to plumb back at the removal's caller.
-    ///   - onRotationStarted: handed the detached rotation `Task` the instant
-    ///     it is spawned. Production ignores it (fire-and-forget); a test uses
-    ///     it to await the rotation and read its outcome.
-    /// - Returns: whatever `publishRemove` returned, so the caller keeps its
-    ///   commit id (echo suppression, notices).
-    @discardableResult
-    public static func publishRemoveThenRotate<T>(
-        publishRemove: () async throws -> T,
-        rotate: (@MainActor () async -> PushRotationOutcome)?,
-        onRotationStarted: ((Task<PushRotationOutcome, Never>) -> Void)? = nil
-    ) async rethrows -> T {
-        // The `await` here is the whole mechanism: nothing about the rotation
-        // is reachable until the removal has actually landed.
-        let result = try await publishRemove()
-        if let rotate {
-            let task = Task { @MainActor in await rotate() }
-            onRotationStarted?(task)
-        }
-        return result
     }
 
     // MARK: - Store passthrough

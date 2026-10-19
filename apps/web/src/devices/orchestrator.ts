@@ -621,8 +621,10 @@ export async function prepareAnonymousJoinFlow(args: {
         throw new Error("join session already disposed");
       }
       const liveIdentity = identity;
-      // No account id yet: join the plain MLS group, bind it below.
-      const joined = wasm.Group.joinFromWelcome(welcomeBytes, liveIdentity);
+      // No account id yet: join the DeviceGroup Welcome as a plain group and
+      // bind it below. ADR-0081 amendment — through the DeviceGroup entry
+      // point: `Group.joinFromWelcome` refuses a Welcome with no role table.
+      const joined = wasm.DeviceGroup.joinWelcomeByName(welcomeBytes, liveIdentity);
       let recovery: JoinRecoveryOutcome | null;
       try {
         recovery = await runJoinerRecovery({

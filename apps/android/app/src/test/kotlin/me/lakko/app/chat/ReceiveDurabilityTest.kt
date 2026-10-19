@@ -37,7 +37,7 @@ import org.junit.Test
  * [applyDurableCursorBatch] — the REAL production ordering function, the same
  * one `ChatRepository.pollGroup` and the ADR-0045 verdict apply call. The
  * repository needs an Android `Context` and live FFI handles, so the ordering it
- * performs is extracted, exactly as [runSplitPoll] and [runCrashSafeCommit] are;
+ * performs is extracted, exactly as [runSplitPoll] and [prepareCrashSafeCommit] are;
  * a test that re-implemented the sequence would prove nothing about production.
  *
  * The device around it models its DURABLE state separately from its in-memory

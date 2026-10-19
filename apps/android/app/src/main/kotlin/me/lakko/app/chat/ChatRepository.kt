@@ -626,11 +626,12 @@ public class ChatRepository(
      *    into it. A snapshot taken by group A part-way through group B's
      *    multi-write operation would capture B TORN, and that torn blob is what
      *    a later restore / restart would load.
-     *  - worse, `restoreStorage` — the ADR-0040 F1 abort path
-     *    ([resetGroupToDurableSnapshotOrThrow]) — replaces every group's state
-     *    at once. Running it while another group sits at an un-persisted N+1
-     *    would ROLL THAT GROUP BACK, re-opening the exact nonce-reuse /
-     *    device-behind window ADR-0040 closes.
+     *  - worse, `restoreStorage` replaces every group's state at once (the
+     *    ADR-0040 F1 abort path used it until the ADR-0081 amendment of
+     *    2026-10-19 deleted the direct commits it served). Running it while
+     *    another group sits at an un-persisted N+1 would ROLL THAT GROUP BACK,
+     *    re-opening the exact nonce-reuse / device-behind window ADR-0040
+     *    closes.
      *
      * Both were impossible before only because ONE mutex covered every group.
      * This lock keeps them impossible: every provider-touching region takes it,
@@ -2920,49 +2921,9 @@ public class ChatRepository(
                         MembershipOutcome.Proposed(publish.id) as MembershipOutcome
                     }
                 }
-                val signerBeforeCommit = currentJournalSigner(groupIdHex)
-                // ADR-0081 — STAGED: the group stays at N until the DS took it.
-                val commitBytes = try {
-                    record.group.stageSetGroupRoles(identity, table.owner, admins)
-                } catch (e: FfiException) {
-                    throw ChatError("setGroupRoles failed", e)
-                }
-                // The entry build can throw (`requireAccountId`, `group.epoch()`):
-                // abandon the staged commit then (ADR-0040 F1, per group).
-                val entry = withPrePersistReset(
-                    reset = { abandonStagedDirect(record, groupIdHex, identity, entryId = null) },
-                ) {
-                    PendingCommitEntry(
-                        id = newOutboxEntryId(),
-                        accountId = requireAccountId(),
-                        groupId = outboxB64(record.groupId),
-                        // The epoch the staged commit was built against (N).
-                        targetEpoch = record.group.epoch().toString(),
-                        commitB64 = outboxB64(commitBytes),
-                        isSweep = true,
-                    )
-                }
-                // ADR-0081 over ADR-0040 — the staged commit is recorded (entry +
-                // the snapshot carrying it, fail-closed), then the commit row and
-                // the N+1 registration go out in ONE request proven under N, then
-                // the merge ([commitStagedDirect]). A lost commit is abandoned; an
-                // unanswered one stays recorded and staged for the owed verdict.
-                val committed = commitStagedDirect(
-                    record, groupIdHex, identity, signerBeforeCommit, entry,
-                    row = commitBytes, removedLeaves = emptyList(), welcomeOwed = false,
-                )
-                // Returning normally means BOTH durable writes landed, so the
-                // commit is now safe to put on the wire — the ADR-0040 §2 ordering,
-                // unchanged, just expressed across the lock release.
-                suspend {
-                    val commitPublish = committed
-                    // Published for the account that asked. What follows files the row
-                    // (echo filter, retry records, lists) and is that account's alone.
-                    ensureSession()
-                    ackCommitBestEffort(entry.id, commitPublish.id, null)
-                    publishThreadList()
-                    MembershipOutcome.Committed(commitPublish.id, null) as MembershipOutcome
-                }
+                // ADR-0081 amendment (2026-10-19) — the direct-commit path for a
+                // group with no role table is gone: refused, fail closed.
+                throw noRoleTableRefusal("role change")
             }
             publishStep()
         }
@@ -3130,9 +3091,9 @@ public class ChatRepository(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
         // ADR-0050 — a person is added as ALL of their devices, each its own
-        // leaf: one proposal (or, in a table-less group, one direct commit) per
-        // device KeyPackage. The outcome reported is the last device's; every
-        // earlier one either landed or threw.
+        // leaf: one proposal per device KeyPackage (a table-less group is
+        // refused). The outcome reported is the last device's; every earlier
+        // one was published or threw.
         // ADR-0073 rule 2 — the directory is not trusted to say whose devices
         // it returned: a device whose KeyPackage binding names another
         // account key than the expected person's (the key the caller named,
@@ -3161,31 +3122,6 @@ public class ChatRepository(
             "every device of the recipient is already in the group",
             IllegalStateException("no add performed"),
         )
-        // ADR-0042 — re-broadcast the CURRENT push-routing secret so the
-        // newly-added member learns it on their next poll (no-op if this
-        // device holds no secret; idempotent for existing members). Runs
-        // AFTER the add commit so the new member is already in the group.
-        // Fire-and-forget. A SUCCESS flags the secret distributed, so this
-        // path also heals a mint whose own broadcast failed. A FAILURE flags
-        // the row PENDING, so the launch / chat-open sweep re-broadcasts it
-        // until one lands. Without that rewind a group whose mint DID land
-        // was already flagged distributed, so nothing ever re-sent and the
-        // newly-added member never learned the secret at all — they defer
-        // forever (never a fallback to the leaky group_id). Only the OWNER's
-        // sweep acts on the pending flag; an ADMIN may also reach this path
-        // (ADR-0022 lets an admin add members) and its mark is inert.
-        // ADR-0045 — only when the ADD actually LANDED. On the proposal path
-        // nobody has been added yet, so there is no new member to teach the
-        // secret to; the redistribute is driven by whichever device sweeps the
-        // proposal (see [sweepIfCommitter]).
-        ensureSession()
-        if (outcome is MembershipOutcome.Committed) {
-            redistributePushRoutingBestEffort(groupIdHex)
-            // ADR-0048 §2 — the add landed, so the newcomer needs this
-            // device's profile. The direct path has no before/after roster
-            // diff of its own; a Committed add IS growth.
-            profileRepublish.onGrowth(groupIdHex)
-        }
         return outcome
     }
 
@@ -3289,131 +3225,26 @@ public class ChatRepository(
                         MembershipOutcome.Proposed(publish.id) as MembershipOutcome?
                     }
                 }
-                // 1. create-commit — STAGED (ADR-0081): the group stays at N.
-                val signerBeforeCommit = currentJournalSigner(groupIdHex)
-                val addResult = try {
-                    record.group.stageAddMemberFromWire(identity, keyPackageBytes)
-                } catch (e: FfiException) {
-                    throw ChatError("addMemberFromWire failed", e)
-                }
-                // Compute the second artifact (Welcome) + its mailbox destination
-                // UP-FRONT so the outbox entry holds the EXACT bytes the restart
-                // sweep will re-publish (no drift). The Welcome ships to the new
-                // member's stranger inbox, addressed by their pubkey pseudonym.
-                //
-                // 2. ADR-0040 (G-35) — durable pending-commit outbox: persist the
-                //    entry (commit + Welcome, BOTH artifacts) THEN the N+1 snapshot,
-                //    BOTH fail-closed, BEFORE any publish. A throw aborts the op (no
-                //    publish); the restart sweep re-publishes both. See [sweepPendingCommits].
-                //
-                // ADR-0040 F1 residual (lakko-security) — reset-guard the WHOLE
-                // pre-persist region (second-artifact compute + entry build): any throw
-                // here (welcomeMailboxFor, which throws when no binding is known / requireAccountId
-                // / group.epoch()) runs AFTER the eager merge (N -> N+1) and BEFORE
-                // runCrashSafeCommit, and would else strand the in-memory group at the
-                // un-published N+1. No outbox entry exists yet -> reset the group
-                // DIRECTLY. See [withPrePersistReset].
-                val (welcomeEnvelope, recipientPseudonym, entry) = withPrePersistReset(
-                    reset = { abandonStagedDirect(record, groupIdHex, identity, entryId = null) },
-                ) {
-                    // ADR-0078: the raw Welcome, sealed per mailbox when written.
-                    val welcomeEnvelope = addResult.welcome
-                    // ADR-0060 §6 (amending ADR-0050 §2.7): the Welcome goes to
-                    // the added leaf's ACCOUNT mailbox, resolved through the
-                    // leaf's device binding; every device of that account reads
-                    // it, and only this leaf's KeyPackage opens it.
-                    val recipientAccount = try {
-                        uniffi.lakko_ffi_uniffi.keyPackageAccountKey(keyPackageBytes)
-                    } catch (_: Throwable) {
-                        null
-                    } ?: deviceKey
-                    val recipientPseudonym = welcomeMailboxFor(recipientAccount)
-                    val entry = PendingCommitEntry(
-                        id = newOutboxEntryId(),
-                        accountId = requireAccountId(),
-                        groupId = outboxB64(record.groupId),
-                        targetEpoch = record.group.epoch().toString(),
-                        commitB64 = outboxB64(addResult.commit),
-                        secondArtifactB64 = outboxB64(welcomeEnvelope),
-                        secondArtifactKind = SecondArtifactKind.WELCOME,
-                        secondArtifactMailboxB64 = outboxB64(recipientPseudonym),
-                        secondArtifactAccountKeyB64 = outboxB64(recipientAccount),
-                        // ADR-0081 — owned by `resolveOwedVerdict` until merged;
-                        // the leaf key addresses the Welcome on a restart.
-                        isSweep = true,
-                        sweepWelcomeLeafKeysB64 = listOf(
-                            outboxB64(uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(keyPackageBytes)),
-                        ),
-                    )
-                    Triple(welcomeEnvelope, recipientPseudonym, entry)
-                }
-                // ADR-0081 over ADR-0040 — the staged commit is recorded (entry +
-                // the snapshot carrying it, fail-closed), then the commit row and
-                // the N+1 registration go out in ONE request proven under N, then
-                // the merge ([commitStagedDirect]). A lost commit is abandoned; an
-                // unanswered one stays recorded and staged for the owed verdict.
-                val committed = commitStagedDirect(
-                    record, groupIdHex, identity, signerBeforeCommit, entry,
-                    row = addResult.commit, removedLeaves = emptyList(), welcomeOwed = true,
-                )
-                // Returning normally means BOTH durable writes landed, so the
-                // commit is now safe to put on the wire — the ADR-0040 §2 ordering,
-                // unchanged, just expressed across the lock release.
-                suspend {
-                    // 3. publish artifact 1 (commit) then artifact 2 (Welcome).
-                    val commitPublish = committed
-                    // Published for the account that asked. What follows files the row
-                    // (echo filter, retry records, lists) and is that account's alone.
-                    ensureSession()
-                    val welcomePublish = try {
-                        publishWelcomeToMailbox(recipientPseudonym, welcomeEnvelope, groupIdHex, accountIdHint = accountId)
-                    } catch (e: Throwable) {
-                        throw ChatError(dsErrorMessage(e, "DS publishMailbox (Welcome) failed"), e)
-                    }
-                    ensureSession()
-                    // 4. both artifacts on the wire -> ack (best-effort).
-                    ackCommitBestEffort(entry.id, commitPublish.id, welcomePublish.id)
-                    publishThreadList()
-                    MembershipOutcome.Committed(commitPublish.id, welcomePublish.id) as MembershipOutcome?
-                }
+                // ADR-0081 amendment (2026-10-19) — the direct-commit path for a
+                // group with no role table is gone: refused, fail closed.
+                throw noRoleTableRefusal("add")
             }
             publishStep()
         }
     }
 
     /**
-     * Remove a member from an EXISTING group by leaf index. Publishes the
-     * removal commit to the group journal (own-marked for echo suppression).
-     * Returns the commit's DS message id.
+     * Remove a member from an EXISTING group by leaf index: one Remove
+     * proposal per leaf of the person (ADR-0045); a group with no role table
+     * is refused (ADR-0081 amendment of 2026-10-19).
      *
-     * ADR-0043 / ADR-0044 (**C-61**) — the push-routing re-key is started
-     * STRICTLY AFTER the Remove commit is published, and that ordering is
-     * expressed by the [GroupPushRouting.publishRemoveThenRotate] seam
-     * rather than by two adjacent statements. It is load-bearing twice
-     * over:
-     *
-     *   - the distribution envelope is an MLS application message, so
-     *     sealed at the PRE-removal epoch the member being evicted is
-     *     still in that epoch and can OPEN it — learning the new secret
-     *     and defeating the whole rotation. Sealed after, it is at the
-     *     post-removal epoch, which RFC 9420 forward secrecy denies the
-     *     removed leaf;
-     *   - ADR-0044 — the rotation STAMPS the new secret with
-     *     `Group.epoch()` read at mint time, so publishing first is also
-     *     what makes it strictly out-rank the secret it replaces. Before
-     *     the commit the stamp would be the PRE-removal epoch, which TIES
-     *     with the secret the evicted member holds; the tie falls to the
-     *     32 secret bytes and the rotation may simply LOSE, silently.
-     *
-     * Without a rotation at all the evicted device keeps deriving the
-     * current `push_gid` and push-gw keeps waking it, so it learns "this
-     * group was active at time T" on every send, forever — and nobody else
-     * can stop it, since unsubscribe only ever deletes the caller's OWN
-     * row.
-     *
-     * The rotation is fire-and-forget on the push scope: a failed rotation
-     * must not unwind the removal, and a failed BROADCAST leaves the row
-     * pending for the existing `ensure` re-broadcast branch.
+     * ADR-0043 / ADR-0044 (**C-61**) — the push-routing re-key must start
+     * strictly after the Remove commit lands, or the rotation envelope is
+     * sealed at an epoch the evicted member can open and stamped at one that
+     * only ties with the secret it still holds. Under ADR-0045 that commit is
+     * the sweep's, so the rotation starts from the sweep's tail (the
+     * committer) and from the poll's membership-shrink diff (every other
+     * member), never here.
      */
     public suspend fun removeMemberFromGroup(
         groupIdHex: String,
@@ -3429,83 +3260,41 @@ public class ChatRepository(
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
-        // ADR-0045 — on the PROPOSAL path nothing has been removed yet, so the
-        // rotation must NOT fire: the envelope would be sealed at the
-        // PRE-removal epoch, which the still-present target can open — the exact
-        // C-61 violation the seam below exists to prevent, reached from the
-        // other end. The branch cannot be taken before `publishRemove` runs
-        // (`usesProposalPath` is a provider read and the authoritative branch is
-        // taken under the group lock inside it), so it is recorded BY that call
-        // and consulted by the rotate step — which `publishRemoveThenRotate`
-        // invokes strictly afterwards, so the flag is always settled by then.
-        // The removal that DOES land is rotated by whichever device sweeps it
-        // (see [sweepIfCommitter]) or, for every other member, by the poll's
-        // membership-shrink diff.
-        var removalLanded = false
-        val step = rotationStepOrNull(groupIdHex)
-        return GroupPushRouting.publishRemoveThenRotate(
-            scope = pushScope,
-            // Owner-or-admin gated inside `GroupPushRouting.rotate`, which
-            // also no-ops when this device holds no secret, so rotation
-            // never becomes a second mint path.
-            rotate = if (step == null) {
-                null
-            } else {
-                suspend {
-                    if (removalLanded) {
-                        step()
-                    } else {
-                        GroupPushRouting.RotationOutcome.SKIP_NO_SHRINK
-                    }
+        // ADR-0050 — removing a member removes the PERSON: every leaf of the
+        // account the named leaf belongs to (leaving removes every own
+        // device). Each leaf is a proposal; leaves are re-resolved by key
+        // before each step. ADR-0045 + ADR-0081 amendment: nothing is rotated
+        // here, there is no Remove commit yet; the device that sweeps the
+        // proposal rotates (see [sweepIfCommitter]), every other member by the
+        // poll's membership-shrink diff.
+        val targets = groups[groupIdHex]?.let { record ->
+            providerLock.sessionLock {
+                val leaves = leavesOfSameAccount(record.group, leafIndex)
+                val roster = rosterOf(record.group)
+                leaves.mapNotNull { leaf ->
+                    roster.firstOrNull { it.leafIndex == leaf }?.signaturePublicKey
                 }
-            },
-            onRotationError = { cause ->
-                android.util.Log.w("ChatRepository", "push routing: rotation failed", cause)
-            },
-            publishRemove = {
-                // ADR-0050 — removing a member removes the PERSON: every leaf of
-                // the account the named leaf belongs to (leaving removes every
-                // own device). Leaves are re-resolved by key before each step
-                // because a direct commit renumbers the tree.
-                val targets = groups[groupIdHex]?.let { record ->
-                    providerLock.sessionLock {
-                        val leaves = leavesOfSameAccount(record.group, leafIndex)
-                        val roster = rosterOf(record.group)
-                        leaves.mapNotNull { leaf ->
-                            roster.firstOrNull { it.leafIndex == leaf }?.signaturePublicKey
-                        }
-                    }
-                }.orEmpty()
-                if (targets.size <= 1) {
-                    publishRemoveCommit(groupIdHex, identity, leafIndex).also {
-                        removalLanded = it is MembershipOutcome.Committed
-                    }
-                } else {
-                    var last: MembershipOutcome? = null
-                    for (key in targets) {
-                        val leaf = groups[groupIdHex]?.let { record ->
-                            providerLock.sessionLock { leafIndexOfSignatureKey(record.group, key) }
-                        } ?: continue
-                        last = publishRemoveCommit(groupIdHex, identity, leaf).also {
-                            if (it is MembershipOutcome.Committed) removalLanded = true
-                        }
-                    }
-                    last ?: throw ChatError(
-                        "no leaf of that member is in the group any more",
-                        IllegalStateException("remove targets vanished"),
-                    )
-                }
-            },
+            }
+        }.orEmpty()
+        if (targets.size <= 1) return proposeRemoveLeaf(groupIdHex, identity, leafIndex)
+        var last: MembershipOutcome? = null
+        for (key in targets) {
+            val leaf = groups[groupIdHex]?.let { record ->
+                providerLock.sessionLock { leafIndexOfSignatureKey(record.group, key) }
+            } ?: continue
+            last = proposeRemoveLeaf(groupIdHex, identity, leaf)
+        }
+        return last ?: throw ChatError(
+            "no leaf of that member is in the group any more",
+            IllegalStateException("remove targets vanished"),
         )
     }
 
     /**
-     * The Remove-commit half of [removeMemberFromGroup]: apply + durably
-     * record + publish the commit, returning its DS message id. Split out
-     * so the C-61 ordering can be expressed as one
-     * [GroupPushRouting.publishRemoveThenRotate] call.
+     * One leaf's Remove, as a proposal (ADR-0045); a group with no role table
+     * is refused (ADR-0081 amendment of 2026-10-19).
      */
-    private suspend fun publishRemoveCommit(
+    private suspend fun proposeRemoveLeaf(
         groupIdHex: String,
         identity: Identity,
         leafIndex: UInt,
@@ -3519,8 +3308,7 @@ public class ChatRepository(
                         "no live Group handle for $groupIdHex",
                         IllegalStateException("missing group record"),
                     )
-                // ADR-0045 obligation 5 — propose in a role-tabled group; the
-                // direct commit below survives verbatim for a group with none.
+                // ADR-0045 obligation 5 — propose in a role-tabled group.
                 if (usesProposalPath(record.group)) {
                     // ADR-0050 section 2.5a — the subject by SIGNATURE KEY, read
                     // before the proposal: a leaf is only a position, and the
@@ -3560,50 +3348,9 @@ public class ChatRepository(
                         MembershipOutcome.Proposed(publish.id) as MembershipOutcome
                     }
                 }
-                val signerBeforeCommit = currentJournalSigner(groupIdHex)
-                // ADR-0081 — STAGED: the group stays at N until the DS took it.
-                val commitBytes = try {
-                    record.group.stageRemoveMember(identity, leafIndex)
-                } catch (e: FfiException) {
-                    throw ChatError("removeMember failed", e)
-                }
-                // The entry build can throw: abandon the staged commit then.
-                val entry = withPrePersistReset(
-                    reset = { abandonStagedDirect(record, groupIdHex, identity, entryId = null) },
-                ) {
-                    PendingCommitEntry(
-                        id = newOutboxEntryId(),
-                        accountId = requireAccountId(),
-                        groupId = outboxB64(record.groupId),
-                        targetEpoch = record.group.epoch().toString(),
-                        commitB64 = outboxB64(commitBytes),
-                        isSweep = true,
-                    )
-                }
-                // ADR-0081 over ADR-0040 — the staged commit is recorded (entry +
-                // the snapshot carrying it, fail-closed), then the commit row and
-                // the N+1 registration go out in ONE request proven under N, then
-                // the merge ([commitStagedDirect]). A lost commit is abandoned; an
-                // unanswered one stays recorded and staged for the owed verdict.
-                val committed = commitStagedDirect(
-                    record, groupIdHex, identity, signerBeforeCommit, entry,
-                    row = commitBytes, removedLeaves = listOf(leafIndex), welcomeOwed = false,
-                )
-                // Returning normally means BOTH durable writes landed, so the
-                // commit is now safe to put on the wire — the ADR-0040 §2 ordering,
-                // unchanged, just expressed across the lock release. C-61 is
-                // untouched: the rotation is started by
-                // [GroupPushRouting.publishRemoveThenRotate] only after THIS
-                // function returns, i.e. still strictly after the publish.
-                suspend {
-                    val commitPublish = committed
-                    // Published for the account that asked. What follows files the row
-                    // (echo filter, retry records, lists) and is that account's alone.
-                    ensureSession()
-                    ackCommitBestEffort(entry.id, commitPublish.id, null)
-                    publishThreadList()
-                    MembershipOutcome.Committed(commitPublish.id, null) as MembershipOutcome
-                }
+                // ADR-0081 amendment (2026-10-19) — the direct-commit path for a
+                // group with no role table is gone: refused, fail closed.
+                throw noRoleTableRefusal("remove")
             }
             publishStep()
         }
@@ -7781,8 +7528,8 @@ public class ChatRepository(
         // repository-side push-routing call is `pushScope.launch`ed rather than
         // awaited under a group lock (`ensurePushRoutingBestEffort`,
         // `receivePushRoutingSecretBestEffort`, `rotatePushRoutingIfShrankBestEffort`,
-        // `redistributePushRoutingBestEffort`, and `publishRemoveThenRotate`'s
-        // own `scope.launch`), so no group -> routing edge exists and the global
+        // and `redistributePushRoutingBestEffort`), so no group -> routing
+        // edge exists and the global
         // order is routing -> group -> provider, consistent with group ->
         // provider everywhere else. It must stay that way: awaiting a
         // `GroupPushRouting` entry point under a group lock would close the
@@ -8047,54 +7794,6 @@ public class ChatRepository(
         }
 
     /**
-     * ADR-0043 / ADR-0044 (C-61) — the rotation STEP for [groupIdHex], as
-     * a suspending closure the caller hands to
-     * [GroupPushRouting.publishRemoveThenRotate], or `null` when there is
-     * no session / live group record to rotate for.
-     *
-     * Deliberately NOT a fire-and-forget helper that launches on its own.
-     * C-61 requires the rotation to be STARTED only after the Remove
-     * commit has been published, and under ADR-0044 that ordering carries
-     * two guarantees rather than one: the envelope's forward secrecy AND
-     * the epoch it is STAMPED with (the mint reads `Group.epoch()`, so a
-     * pre-commit rotation stamps the PRE-removal epoch, ties with the
-     * secret it is replacing, and may lose the byte tiebreak). Returning a
-     * closure instead of launching is what lets that ordering live in one
-     * seam a test can drive, instead of in two adjacent statements anyone
-     * can reorder.
-     *
-     * The ADR-0022 role is read INSIDE the closure — i.e. after the
-     * removal has landed — under [providerLock], the same discipline
-     * `broadcastControlToGroup` follows. Owner-or-admin gated inside
-     * [GroupPushRouting.rotate], which also no-ops when this device holds
-     * no secret, so rotation never becomes a second mint path.
-     */
-    private fun rotationStepOrNull(
-        groupIdHex: String,
-    ): (suspend () -> GroupPushRouting.RotationOutcome)? {
-        val identity = canonicalIdentity.get() ?: return null
-        val record = groups[groupIdHex] ?: return null
-        val accountIdB64 = currentAccountIdB64.get() ?: return null
-        // The step is run by the routing code on a scope of its own, after
-        // the removal: it carries the binding it was made under with it.
-        val work = SessionWork(sessionBinding.capture())
-        return {
-            withContext(work) {
-                // G-37 — provider lock only (a pure role-table read), released
-                // before `rotate` takes the routing lock, so no routing -> group
-                // edge is created. Same reasoning as `groupEpochFn`.
-                val role = providerLock.sessionLock { rotationRole(record.group, identity) }
-                GroupPushRouting.rotate(
-                    accountIdB64 = accountIdB64,
-                    groupIdHex = groupIdHex,
-                    ownRole = role,
-                    ports = pushRoutingPorts(groupIdHex, record.group, identity),
-                )
-            }
-        }
-    }
-
-    /**
      * ADR-0043 — the WIRE-OBSERVED rotation trigger: someone ELSE committed
      * a Remove and this poll batch applied it, so the membership SHRANK.
      *
@@ -8102,10 +7801,8 @@ public class ChatRepository(
      * (surfacing removed leaves from `lakko-mls` would be exact but is an
      * invariant-#3 change to the MLS state machine and needs its own ADR),
      * so the removal is INFERRED from the `members()` snapshot taken either
-     * side of the batch. This device's OWN removals never come through here
-     * — they were applied locally before the poll, so the baseline is
-     * already post-removal and shows no shrink; those rotate directly via
-     * [rotationStepOrNull] behind [GroupPushRouting.publishRemoveThenRotate].
+     * side of the batch. A removal this device swept itself is rotated from
+     * the sweep's tail (ADR-0081 amendment: no direct-commit removal remains).
      *
      * Fire-and-forget; never breaks the poll loop.
      */
@@ -9140,8 +8837,8 @@ public class ChatRepository(
     /**
      * ADR-0050 — retire ONE leaf (by its signature key) from [groupIdHex]. Unlike
      * [removeMemberFromGroup], which removes the PERSON, the account's other
-     * devices stay. `null` when no leaf holds that key. A direct commit on a
-     * table-less group is followed by the ADR-0043 rotation like any removal.
+     * devices stay. `null` when no leaf holds that key. A proposal; the device
+     * that sweeps it rotates the push routing secret (ADR-0043).
      */
     private suspend fun retireLeafFromGroup(
         groupIdHex: String,
@@ -9150,26 +8847,7 @@ public class ChatRepository(
     ): MembershipOutcome? {
         val record = groups[groupIdHex] ?: return null
         val leaf = providerLock.sessionLock { leafIndexOfSignatureKey(record.group, leafKey) } ?: return null
-        var removalLanded = false
-        val step = rotationStepOrNull(groupIdHex)
-        return GroupPushRouting.publishRemoveThenRotate(
-            scope = pushScope,
-            rotate = if (step == null) {
-                null
-            } else {
-                suspend {
-                    if (removalLanded) step() else GroupPushRouting.RotationOutcome.SKIP_NO_SHRINK
-                }
-            },
-            onRotationError = { cause ->
-                android.util.Log.w("ChatRepository", "push routing: rotation failed", cause)
-            },
-            publishRemove = {
-                publishRemoveCommit(groupIdHex, identity, leaf).also {
-                    removalLanded = it is MembershipOutcome.Committed
-                }
-            },
-        )
+        return proposeRemoveLeaf(groupIdHex, identity, leaf)
     }
 
     /**
@@ -9849,93 +9527,6 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0040 F1 (lakko-security) — the persist-abort handler [runCrashSafeCommit]
-     * invokes when a commit path's durable write throws (BEFORE any publish). Two
-     * steps, in order:
-     *
-     *   1. **best-effort** drop the just-written outbox [entryId]. `publish` never
-     *      ran, so the commit provably never reached the DS; deleting the entry
-     *      keeps the post-abort durable state "N, no entry" (matching the web
-     *      atomic-transaction reference). A leftover entry is ALSO safe — the
-     *      restart sweep DISCARDs it via [reconcileVerdict] (snapshot at N below
-     *      the entry's N+1 targetEpoch) — so a delete failure is swallowed.
-     *   2. **fail-safe (hard)** reset the in-memory group to the durable snapshot
-     *      (N) via [resetGroupToDurableSnapshotOrThrow]. A throw here is the
-     *      poisoned-group signal — [runCrashSafeCommit] surfaces it as the hard
-     *      error (never masks it).
-     */
-    private fun onCommitPersistAbort(groupIdHex: String, entryId: String) {
-        try {
-            outboxWrite { CommitOutboxStore.deleteEntry(applicationContext, entryId) }
-        } catch (_: Throwable) {
-            // best-effort — the restart sweep DISCARDs a torn orphan entry anyway.
-        }
-        resetGroupToDurableSnapshotOrThrow(groupIdHex)
-    }
-
-    /**
-     * ADR-0040 F1 (lakko-security) — reload the in-memory MLS state for [groupIdHex]
-     * from the durable snapshot, dropping the un-published eager merge.
-     *
-     * The core create-commit call eagerly merged the OpenMLS provider N -> N+1
-     * before the (now-failed) durable persist, so the in-memory provider + the
-     * cached [Group] handle sit at the unpublished N+1 while the durable snapshot
-     * on disk is still at N (its write failed / never ran). [Identity.restoreStorage]
-     * overwrites the whole provider from that N snapshot, then [loadGroup] rebuilds
-     * a fresh handle reading the restored (N) provider, which replaces the cached
-     * reference — so a subsequent same-session commit builds on N.
-     *
-     * Whole-provider restore note: `restoreStorage` is provider-wide (there is no
-     * per-group restore in the FFI). In the normal case the durable snapshot equals
-     * every OTHER group's current in-memory state (best-effort receive-path persists
-     * succeed), so only THIS group is rolled back; a group whose prior best-effort
-     * persist silently failed could be rolled back too — a pre-existing best-effort
-     * receive-path edge, out of scope for this commit-path fix, and self-healing on
-     * that group's next successful persist / poll.
-     *
-     * FAIL-SAFE: if the durable snapshot cannot be loaded, or has no such group,
-     * this THROWS a hard [ChatError] rather than leaving the eager-merged (N+1)
-     * handle in place — surfacing a "restart to recover" error to the caller. A
-     * restart then re-bootstraps cleanly from the durable snapshot (at N). "Should
-     * not happen" for an existing committed group, which always has a durable
-     * snapshot.
-     *
-     * Runs under [providerLock] (every commit call site holds it), so the provider
-     * restore + handle swap are serialised against all other MLS ops.
-     */
-    private fun resetGroupToDurableSnapshotOrThrow(groupIdHex: String) {
-        val identity = canonicalIdentity.get()
-            ?: throw IllegalStateException(
-                "cannot reset group after commit-abort — no canonical Identity",
-            )
-        val accountIdB64 = currentAccountIdB64.get()
-            ?: throw IllegalStateException(
-                "cannot reset group after commit-abort — no account id",
-            )
-        val record = groups[groupIdHex]
-            ?: throw IllegalStateException(
-                "cannot reset group after commit-abort — no live handle for $groupIdHex",
-            )
-        // The durable snapshot is still at N (the commit's persist failed), so
-        // restoring the provider from it DROPS the eager-merged N+1 for this group.
-        val blob = snapshotStore.getSnapshot(applicationContext, accountIdB64)
-            ?: throw ChatError(
-                "group state poisoned after commit-abort — no durable snapshot to " +
-                    "reset from; restart to recover",
-                IllegalStateException("missing durable snapshot for account"),
-            )
-        identity.restoreStorage(blob)
-        val fresh = loadGroup(identity, record.groupId)
-            ?: throw ChatError(
-                "group state poisoned after commit-abort — durable snapshot has no " +
-                    "group $groupIdHex; restart to recover",
-                IllegalStateException("loadGroup returned null after restore"),
-            )
-        // Swap the fresh (N) handle in; the record keeps its timeline + cursor.
-        record.replaceGroup(fresh)
-    }
-
-    /**
      * ADR-0040 (G-35) — restart / group-open sweep. Re-publishes every un-acked
      * pending-commit outbox entry for [groupIdHex] IDEMPOTENTLY, re-arming the
      * committer's own-echo filter ([ChatClient.markOwnPublishedCommit]) for the
@@ -10422,135 +10013,6 @@ public class ChatRepository(
         // finding 4) so does a takeover whose old root seed is still pending.
         scheduleRootHandover(groupIdHex)
         scheduleTakeover(groupIdHex)
-    }
-
-    /**
-     * ADR-0081 over ADR-0040 for a DIRECT commit (a group with no role table).
-     * The commit was STAGED by the caller, so the group is still at N:
-     *
-     *  1. the [entry] (`isSweep = true`, owned by [resolveOwedVerdict] until it
-     *     merges) and the snapshot carrying the staged commit are written,
-     *     FAIL-CLOSED: a failure abandons the staged commit and throws, so
-     *     nothing was sent;
-     *  2. the commit [row] and the N+1 key (from the staged commit) go out in
-     *     one `POST .../commit` proven by [before] (N), revoking the registrar
-     *     keys of the accounts [removedLeaves] evicts (owner only);
-     *  3. on an answer the staged commit is merged and the merge persisted,
-     *     fail-closed (a failed write throws with the merge standing; the
-     *     durable N + staged + entry is what a restart finishes: the re-send
-     *     answers the original row). A Welcome still owed ([welcomeOwed]) is
-     *     marked so [resolveOwedWelcomes] retries it;
-     *     on a LOST commit (409, a definitive refusal) it is abandoned and the
-     *     entry dropped; on anything else (the network) the entry and the
-     *     staged commit stay for the next pass (the owed verdict at the next
-     *     open or sweep re-sends the same row).
-     *
-     * Runs inside the provider lock (the caller's), so no sibling snapshot can
-     * interleave the record. No retry and no reset here.
-     */
-    private suspend fun commitStagedDirect(
-        record: GroupRecord,
-        groupIdHex: String,
-        identity: Identity,
-        before: DsJournalSigner?,
-        entry: PendingCommitEntry,
-        row: ByteArray,
-        removedLeaves: List<UInt>,
-        welcomeOwed: Boolean,
-    ): me.lakko.app.ds.DsCommitAnswer {
-        try {
-            CommitOutboxStore.putEntry(applicationContext, entry)
-            persistSnapshotDurableOrThrow()
-        } catch (cause: Throwable) {
-            withContext(kotlinx.coroutines.NonCancellable) {
-                abandonStagedDirect(record, groupIdHex, identity, entry.id)
-            }
-            if (cause is kotlinx.coroutines.CancellationException || cause is ChatError) throw cause
-            throw ChatError("The group change could not be recorded on this device. Nothing was sent.", cause)
-        }
-        val answer = try {
-            val next = record.group.dsStagedAccessSigner(identity)?.let(::FfiDsJournalSigner)
-            val evictees = me.lakko.app.ds.evictedAccounts(
-                before = rosterLeavesOrNull(record.group).orEmpty(),
-                removedLeaves = removedLeaves,
-            )
-            val revoke = revokeKeysFor(record, groupIdHex, evictees)
-            val rank = journalRepairRankFor(record, groupIdHex)
-            noteAppendConflict(groupIdHex, record.groupId, before, rank) {
-                me.lakko.app.ds.commitEpochWith(
-                    journalId = record.groupId,
-                    before = before,
-                    after = next,
-                    statements = commitStatementSignerFor(record, groupIdHex),
-                    revoke = revoke,
-                    row = row,
-                    post = { make, proof -> dsClient.postCommit(make, proof) },
-                )
-            }.also { forgetRevokedAppointments(groupIdHex, evictees, revoke) }
-        } catch (cause: kotlinx.coroutines.CancellationException) {
-            // Unanswered: the entry and the staged commit stay owed.
-            throw cause
-        } catch (cause: Throwable) {
-            if (cause is me.lakko.app.ds.DsCommitConflictError ||
-                SweepRegistrationBackoff.isBackoffRefusal(cause)
-            ) {
-                // Nothing of this commit is or will be on the DS.
-                abandonStagedDirect(record, groupIdHex, identity, entry.id)
-            }
-            if (cause is ChatError) throw cause
-            throw ChatError(
-                dsErrorMessage(cause, "The server did not accept the group change."),
-                cause,
-            )
-        }
-        chatClient.markOwnPublishedCommit(groupIdHex, answer.id)
-        try {
-            record.group.mergeStagedSweep(identity)
-            persistSnapshotDurableOrThrow()
-        } catch (cause: kotlinx.coroutines.CancellationException) {
-            throw cause
-        } catch (cause: ChatError) {
-            throw cause
-        } catch (cause: Throwable) {
-            throw ChatError("The group change was sent but could not be recorded on this device.", cause)
-        }
-        if (welcomeOwed) {
-            try {
-                CommitOutboxStore.markWelcomesOwed(applicationContext, entry.id, answer.id)
-            } catch (cause: Throwable) {
-                android.util.Log.w("ChatRepository", "ADR-0081: the owed Welcome was not recorded")
-            }
-        }
-        return answer
-    }
-
-    /**
-     * ADR-0081 — abandon a staged direct commit (per group,
-     * `clear_pending_commit`), persist that best effort, and drop its outbox
-     * entry ([entryId], when one was written). When the abandon itself fails
-     * the group is reloaded from its durable snapshot (ADR-0040 F1), which
-     * holds no unrecorded staged commit.
-     */
-    private fun abandonStagedDirect(
-        record: GroupRecord,
-        groupIdHex: String,
-        identity: Identity,
-        entryId: String?,
-    ) {
-        try {
-            record.group.abandonStagedSweep(identity)
-            persistSnapshotBestEffort()
-        } catch (cause: Throwable) {
-            android.util.Log.w("ChatRepository", "ADR-0081: abandoning a staged commit failed; resetting the group")
-            resetGroupToDurableSnapshotOrThrow(groupIdHex)
-        }
-        if (entryId != null) {
-            try {
-                CommitOutboxStore.deleteEntry(applicationContext, entryId)
-            } catch (_: Throwable) {
-                // An orphan entry is dropped by the owed-verdict path (nothing staged).
-            }
-        }
     }
 
     /**
@@ -11416,11 +10878,7 @@ public class ChatRepository(
         }
     }
 
-    private fun usesProposalPath(group: Group): Boolean = try {
-        group.groupRoles() != null
-    } catch (_: Throwable) {
-        false
-    }
+    private fun usesProposalPath(group: Group): Boolean = roleTablePresent { group.groupRoles() }
 
     /**
      * ADR-0045 S4b — the ONE place the FFI's `ActingCommitter` and the

@@ -12,13 +12,11 @@
  *
  * ## Which of these actually discriminate (MEASURED — each probe was run)
  *
- * 1. **`a group with NO role table still direct-commits`** — with
- *    `usesProposalPath` forced to `true`:
- *
- *        ContactsError: group.proposeRemoveMember is not a function
- *
- *    i.e. a legacy group would be routed into a path whose peers' receipt gates
- *    drop every proposal it emits, so nothing it asks for would ever apply.
+ * 1. **`a group with NO role table is refused`** (ADR-0081 amendment of
+ *    2026-10-19; replaced `a group with NO role table still direct-commits`,
+ *    whose probe was measured against the deleted direct path). Not
+ *    re-measured: it asserts the core's typed `noRoleTable` refusal and that
+ *    nothing is staged or published.
  *
  * 2. **`a role-table group PROPOSES rather than committing`** — with
  *    `usesProposalPath` forced to `false`. FIVE tests went red; the first:
@@ -123,6 +121,7 @@ vi.mock("../wasm", () => ({
   }),
 }));
 
+import { refusalReasonOf } from "../chat/membership-refusal";
 import { ContactsClient } from "./client";
 import type { ActingCommitter } from "../chat/committer-beacon";
 import type { IncomingChatEvent } from "../chat/client";
@@ -364,20 +363,22 @@ const DEFER_TO = (toRank: number) => async (): Promise<ActingCommitter> => ({
 });
 
 describe("ADR-0045 obligation 5 — which path a group takes", () => {
-  it("a group with NO role table still direct-commits", async () => {
+  it("a group with NO role table is refused: nothing is staged, recorded or published", async () => {
     const g = fakeGroup({ gid: freshGid(), roleTable: false });
     const c = client(g.order, ds(g.order));
 
-    const out = await c.removeMemberFromGroup(null, g.group, 4);
+    // ADR-0081 amendment (2026-10-19): a group with no role table has no
+    // owner, hence no committer, and every peer's receipt gate drops a
+    // proposal in it. The direct-commit path that used to serve it is deleted,
+    // so the call fails closed with the core's own typed refusal.
+    const err = await c.removeMemberFromGroup(null, g.group, 4).then(
+      () => null,
+      (e: unknown) => e,
+    );
 
-    expect(out).toMatchObject({ kind: "committed" });
-    // stage -> record -> publish (the commit route: registration + row) ->
-    // persist of the merge (ADR-0081). A legacy group has no owner, hence no
-    // committer, and every peer's receipt gate would drop a proposal it
-    // emitted — so routing it into the proposal path would mean nothing it
-    // asks for ever applies.
-    expect(g.order).toEqual(["removeMember", "record", "publish", "persist"]);
-    expect(g.epoch()).toBe(7n);
+    expect(refusalReasonOf(err)).toBe("noRoleTable");
+    expect(g.order).toEqual([]);
+    expect(g.epoch()).toBe(6n);
   });
 
   it("a role-table group PROPOSES rather than committing", async () => {
@@ -916,12 +917,12 @@ describe("ADR-0050 2.5a point 4 — every own proposal records its intent", () =
     ]);
   });
 
-  it("a direct commit (no role table) records nothing — it landed or threw", async () => {
+  it("a refused removal (no role table) records nothing", async () => {
     const f = fakeGroup({ gid: freshGid(), roleTable: false });
     Object.assign(f.group as unknown as Record<string, unknown>, {
       members: () => [{ leafIndex: 4, signaturePublicKey: BOB_LEAF, accountKey: BOB_ACCOUNT }],
     });
-    await ownClient(f.order).removeMemberFromGroup(SECRETS, f.group, 4);
+    await expect(ownClient(f.order).removeMemberFromGroup(SECRETS, f.group, 4)).rejects.toThrow();
     expect(await intents(f)).toEqual([]);
   });
 });

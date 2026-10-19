@@ -7,9 +7,14 @@
   register-and-commit route also for ordinary groups, open question 2; the
   DS refuses a plain `/access` Append for every journal, open question 1;
   direct commits of ordinary groups are staged, not eagerly merged, and the
-  PublisherGroup record keeps the epoch-N access seed, the same day).
-  Built 2026-10-18, see "As built"; host-tested only, not walked live, not
-  deployed.
+  PublisherGroup record keeps the epoch-N access seed, the same day; a
+  rejoin under the attested-removal policy carries a self-removal proof,
+  2026-10-18, see "Amendment (2026-10-19)"; a conversation is joined only
+  from a Welcome carrying a role table and a kind, and the clients'
+  ordinary-group direct-commit paths are deleted, 2026-10-19, see
+  "Amendment (2026-10-19, second)").
+  Built 2026-10-18, see "As built"; both amendments built 2026-10-19;
+  host-tested only, not walked live, not deployed.
 - **Date:** 2026-10-18
 - **Context:** multi-device (ADR-0007, ADR-0050), journal authorisation and
   ownership (ADR-0053, ADR-0057), the commit outbox of ordinary groups
@@ -21,7 +26,11 @@
   (the outbox publishes through the register-and-commit route, and a direct
   commit is staged and recorded before it is sent), ADR-0045 (the staged
   lifecycle of the sweep also carries direct commits), ADR-0050 (how a
-  device that lost its DeviceGroup state comes back)
+  device that lost its DeviceGroup state comes back), ADR-0015 (the
+  removal gate also accepts a self-removal proof, see the amendment),
+  ADR-0062 (a conversation Welcome needs the role table as well as the kind,
+  see the second amendment), ADR-0040 / ADR-0045 (the direct-commit paths
+  of ordinary groups are deleted on the clients, second amendment)
 
 ## Context
 
@@ -157,7 +166,9 @@ re-found-and-reset repair is removed.
 
 This uses only the existing `add_device_from_wire` and `remove_device`.
 It needs no external-join support in the DeviceGroup and no `lakko-mls`
-change.
+change. **Amended 2026-10-19:** the removal and the add are one commit, and
+under the ADR-0015 policy the knock carries the device's own self-removal
+proof, a `lakko-mls` change; see "Amendment (2026-10-19)".
 
 ## Alternatives
 
@@ -438,12 +449,11 @@ was deployed.
     present and adds the KeyPackage, two commits through the outbox; the DS
     arbitrates two siblings. The constants are chosen, not measured.
   - *Single-device account:* founds and claims as before.
-- **Not built:** under the ADR-0015 attested-removal policy, a knock whose
+- ~~**Not built:** under the ADR-0015 attested-removal policy, a knock whose
   previous leaf is still in the roster waits for a removal the person
-  authorises with a passkey; no flow asks the person for it, so such an
-  account rejoins only after that leaf was removed by hand. The re-found
-  repair and the unreadable-snapshot founder bootstrap are removed on all
-  three clients.
+  authorises with a passkey.~~ Closed by the amendment of 2026-10-19 (the
+  self-removal proof). The re-found repair and the unreadable-snapshot
+  founder bootstrap are removed on all three clients.
 
 ### Verified
 
@@ -464,6 +474,273 @@ green, `:app:testDebugUnitTest` 4362 tests, 0 failures, 1 skipped (counted
 from the XML reports; the host JVM loads no native core, so the staged
 direct-commit path of `ChatRepository` is not exercised there). Nothing was
 walked live and nothing was deployed.
+
+## Amendment (2026-10-19): a rejoin under the attested-removal policy carries its own proof
+
+Decided by the maintainer on 2026-10-18; closes G-52. Built 2026-10-19 in
+`lakko-mls`, `schemas/wire/device_pairing_v1.proto`, both FFI surfaces and
+web / iOS / Android; host-tested only, not walked live, not deployed. A
+`lakko-mls` change under invariant #3 (a new codec, a new commit and a
+widened apply-path gate, with property tests and a fuzz target), so the G-39
+surface grows. Indexed as C-85.
+
+**The gap.** Under the ADR-0015 policy every removal from a DeviceGroup
+needs a passkey attestation (`process_incoming_verifying_removals` refuses
+to merge one without it). Decision 4 readmits a lost device by removing its
+previous leaf and adding its new KeyPackage, and a sibling cannot obtain an
+attestation without the person, so an account with a passkey waited for a
+person to remove the old leaf by hand, and no flow asked for it.
+
+**Decision.** The gate also accepts a removal covered by a **self-removal
+proof**: an Ed25519 signature by the removed leaf's own signature key,
+naming the epoch the replacing commit leaves and the KeyPackage that
+replaces the leaf, honoured only when the commit leaves that epoch and adds
+that KeyPackage.
+
+- *The proof* (`crates/lakko-mls/src/self_removal.rs`): 137 bytes,
+  `version (0x01) ‖ epoch (8, big-endian) ‖ removed_signature_pubkey (32) ‖
+  key_package_ref (32) ‖ signature (64)`. The signature covers
+  `"lakko/devicegroup/self-removal/v1\0" ‖ group_id_len (1) ‖ group_id ‖
+  epoch ‖ removed_signature_pubkey ‖ key_package_ref`, where
+  `key_package_ref` is the RFC 9420 `KeyPackageRef` of the replacing
+  KeyPackage. The group id is bound but not carried.
+  `SelfRemovalProof::decode` is exact-length and version-checked and fails
+  closed; fuzz `self_removal_proof_decode`.
+- *Why the epoch (beyond the brief).* The brief named the group, the leaf
+  key and the KeyPackage. That proof is replayable: the replacement leaf
+  keeps the removed leaf's signature key (the same device identity), so any
+  member holding the old proof could later commit "remove the rejoined
+  device's leaf, add the same KeyPackage again", a removal of another device
+  without an attestation, which is exactly what the policy forbids. OpenMLS
+  builds that commit (`a_used_proof_cannot_remove_the_rejoined_device_later`
+  builds it). With the epoch in the statement the proof covers one commit
+  only, since an epoch has one commit (C-80). The device learns the epoch
+  with a knock probe (an empty knock, which the DS answers with the latest
+  registered epoch and stores nothing; it spends one `ds-knock` token). Cost:
+  when another DeviceGroup commit lands between the knock and the
+  admission, the proof is stale and the knock waits for the next re-knock
+  (30 minutes) under the policy; without the policy the sibling replaces the
+  leaf without a proof as before. An unclaimed journal names no epoch, and
+  the device knocks without a proof.
+- *The gate.* A removed leaf is covered when an ADR-0015 attestation covers
+  it, or when a self-removal proof names this group, the epoch the commit
+  leaves, that leaf's key, and a KeyPackage the same commit adds
+  (`Group::process_incoming_gated` now hands the gate the commit's added
+  KeyPackage refs beside the removed leaves). A proof alone (a plain
+  removal), a proof for another epoch, leaf, group or KeyPackage, and a
+  proof signed by any other key cover nothing. With the policy off nothing
+  changes.
+- *Where it travels.* In the DeviceGroup journal envelope's existing
+  removal-authorisation slot, beside or instead of an attestation: an
+  attestation is 121 bytes under its own domain and a proof is 137 bytes
+  under another, and the gate tries each entry as either, so neither can
+  stand in for the other. No envelope version bump and no change to
+  `processIncomingVerifyingRemovals` on any FFI surface.
+- *One commit.* `Group::replace_member` / `DeviceGroup::replace_device_at`
+  remove a leaf and add a KeyPackage in ONE commit with a Welcome
+  (`replaceDeviceAt` on both FFI surfaces). It refuses its own leaf, an
+  unknown leaf, a pending proposal or a staged commit, and a KeyPackage
+  without a device binding; like the other DeviceGroup commits it merges in
+  memory and goes through the DeviceGroup commit outbox (kind
+  `rejoin-replace`), so the durable state stays at N until the DS took it.
+- *The knock.* The rejoining device probes the knock for the latest epoch,
+  then signs the proof with its device identity, whose key is its old
+  DeviceGroup leaf key, over that epoch and the KeyPackage it knocks with
+  (`signDeviceGroupSelfRemoval`). The knock is the ADR-0056 pairing payload
+  with a new field `self_removal_proof = 16` (`buildRejoinKnock` /
+  `encodeRejoinKnock`); `decode` accepts it empty or exactly 137 bytes and
+  does not verify it. Fields 6 to 15 stay reserved.
+- *The sibling.* It checks the proof before building anything
+  (`deviceGroupSelfRemovalCovers`: the proof covers this group, its current
+  epoch, the knocking key and this KeyPackage), and again inside the
+  outbox's build at the epoch the commit will leave, because a commit the DS takes and every peer
+  refuses would leave the sibling ahead of them. The admission verdict reads
+  two more inputs: the proof covers (then a present previous leaf no longer
+  waits under the policy), and a leaf already carries this KeyPackage's leaf
+  node (`containsLeafOfKeyPackage`, then the knock was answered: a
+  replacement keeps the key and often the leaf index, so a roster of keys
+  cannot tell). It then builds one commit: `replaceDeviceAt` with the proof
+  in the envelope when the previous leaf is present, `addDeviceFromWire`
+  when it is not. The separate removal commit of decision 4 is no longer
+  made (the `rejoin-remove` kind is still read by an outbox that holds one).
+- *A device that no longer holds its old leaf key* (a reinstall, a wiped
+  device) has a new device identity. Its KeyPackage key matches no leaf, so
+  the sibling only adds it, and the old leaf stays until a person removes it
+  with the passkey flow of ADR-0015. This is the intended behaviour: the
+  person decides about a leaf whose key nobody holds.
+
+**What the proof can and cannot authorise.** It lets the holder of a leaf's
+key replace that one leaf by a KeyPackage it chose, in one commit at one
+epoch. A device holding its leaf key is a member and can
+already commit adds, so this gives it nothing it lacked; it cannot remove
+any other device, and a used or stale proof covers nothing (the epoch). A
+thief holding the old device's key could sign a proof for its own
+KeyPackage, but the sibling admits a knock only after the directory listing,
+binding and tombstone checks of decision 4, and a device the person removed
+is tombstoned.
+
+**Tests.** `crates/lakko-mls/src/device_group.rs`: a valid proof admits the
+replacement only together with the named KeyPackage's add (and the rejoiner
+joins from the Welcome with the same exporter secret); a proof never covers
+a plain removal; a proof replayed with another KeyPackage, a proof made at
+another epoch, a used proof replayed later with the same KeyPackage (the
+commit builds and every peer refuses it), a proof for another leaf, one
+signed by another device's key and one for another DeviceGroup are
+refused; a replacement without any proof is refused under
+the policy; an attestation still authorises a replacement; the policy-off
+path is unchanged; `replace_device_at` refuses its own and an unknown leaf;
+a proptest that a tampered proof covers nothing. Codec and signing tests in
+`self_removal.rs`; the pairing round trip and the wrong-length refusal in
+`pairing.rs`; the admission verdict in each client's rejoin suite.
+
+**Verified (2026-10-19, in the build worktree, results as printed).**
+`cargo test -p lakko-mls` 403 passed (lib 256 plus 13 integration
+binaries); `lakko-proto` 6, `lakko-ds-proof` 45, `lakko-svc-ds` against a
+local MariaDB 84, `lakko-ffi-uniffi` 391, `lakko-ffi-wasm` 278,
+`lakko-ffi-extension` 89, `lakko-log-hygiene --all-features` 17 passed;
+clippy `-D warnings` on those crates clean; the `lakko-mls` fuzz crate
+checks; `audit-index-check` clean. `LakkoCore.xcframework`, the extension
+framework and the Android native libraries rebuilt; web wasm rebuilt,
+`tsc --noEmit` clean, vitest 467 files, 6168 tests passed; Android
+`:app:compileDebugKotlin` green and `:app:testDebugUnitTest` 4364 tests, 0
+failures, 1 skipped (from the XML reports); iOS `xcodebuild
+build-for-testing` succeeded (tests not run). The fuzz target was compiled,
+not run. Nothing was walked live and nothing was deployed.
+
+## Amendment (2026-10-19, second): a conversation is joined only from a Welcome with a role table and a kind, and the clients' direct-commit paths are gone
+
+Decided by the maintainer on 2026-10-19 (option (b): close the core gap
+first, then delete). Built the same day in `lakko-mls`, both FFI surfaces
+and web / iOS / Android; host-tested only, not walked live, not deployed. A
+`lakko-mls` change under invariant #3 (a join condition), with property
+tests, so the G-39 surface grows. Indexed as C-86.
+
+**The gap.** The staged twins above served the ordinary-group direct commits
+of a group with no role table. A check of whether such a group could still
+reach a client found that it could: `Group::join_from_welcome` accepted a
+Welcome whose GroupContext carried no `0xFF02` role table (the kind check of
+ADR-0062 ran only when the table was there), and no client checked for a
+role table after joining. Deleting the direct paths before closing that would
+have left a joined table-less group with no way to change its membership.
+
+**Decision, core.** `Group::join_from_welcome` admits a Welcome as a
+conversation only when its GroupContext carries the `0xFF02` role table AND a
+readable `0xFF03` kind. A Welcome without the role table is refused with the
+typed `RefusalReason::NoRoleTable` (on UniFFI the existing
+`FfiError::MembershipNoRoleTable`, on wasm `refusalReason: "noRoleTable"`;
+no new `FfiError` variant); a Welcome with the table and no readable kind is
+refused as before (ADR-0062). The checks run on OpenMLS's staged welcome,
+before `into_group`, which is the call that writes the group state and
+consumes the KeyPackage, so **a refused join leaves nothing in the
+provider** (no group, and the KeyPackage stays usable). The ADR-0050 binding
+check moved onto the staged welcome for the same reason.
+
+The two table-less groups get their own entry points, and an ordinary-group
+Welcome is refused by both:
+
+- `PublisherGroup::join_from_welcome(identity, welcome, group_id,
+  channel_id)` (UniFFI `publisherGroupJoinFromWelcome`, wasm
+  `PublisherGroup.joinFromWelcome`): the co-publisher join of ADR-0028 OQ3.
+  It also refuses a Welcome for another group than the id the link conveyed,
+  before anything is written (Android's co-publisher join checked no group id
+  before this).
+- `DeviceGroup::join_from_welcome` (unchanged signature) and
+  `DeviceGroup::join_welcome_before_account(welcome, identity)` (UniFFI
+  `deviceGroupJoinWelcomeByName`, wasm `DeviceGroup.joinWelcomeByName`): the
+  by-name pairing join of ADR-0056, which receives the Welcome before it
+  knows the account id. Both web and the natives previously used the
+  ordinary `join_from_welcome` for it.
+
+The NSE surface (`lakko-ffi-extension`) exposes no join at all, and still
+does not.
+
+**Can the general mailbox intake join a PublisherGroup Welcome as a chat?**
+Before this change it could not in practice, for a reason that was not a
+guarantee: the intake skips `welcome-rendezvous` rows on all three clients
+(web `contacts/client.ts`, iOS `ContactsClient.swift`, Android
+`ContactsClient.kt`), and the co-publisher Welcome rides a rendezvous row; on
+iOS and Android it is also opened under a separate channel identity. Nothing
+in the core stopped a PublisherGroup Welcome delivered in an ordinary
+`Welcome` mailbox row from joining as a chat. Now the core refuses it: a
+PublisherGroup carries no role table, so `join_from_welcome` returns
+`NoRoleTable` whatever row it came in.
+
+**Decision, clients.** The direct add / remove / role-change paths for a
+group with no role table are deleted on all three clients, with their staged
+send-and-verdict plumbing and the C-61 seam that served only direct removals:
+web (`contacts/client.ts`: `addMemberToGroupLocked`,
+`removeMemberFromGroupLocked`, the direct role-change tail,
+`commitStagedDirect`, `abandonStagedOrReset`, `resetGroupAfterPersistAbort`,
+the `onCommitPersistAbort` option; `push/group-routing.ts`:
+`publishRemoveThenRotate`), iOS (`ChatRepository.swift` direct paths and
+`directCommitPathForTesting`, `DsProof.swift` `DirectCommitSteps`,
+`PushGroupRouting.publishRemoveThenRotate`, the table-less owed-verdict
+branch of `sweepIfCommitter`, the ADR-0040 F1 `resetGroupToDurableSnapshot`)
+and Android (`ChatRepository.kt` direct tails, `commitStagedDirect` /
+`abandonStagedDirect`, `rotationStepOrNull`, `onCommitPersistAbort` /
+`resetGroupToDurableSnapshotOrThrow`, `CommitOutbox.kt` `withPrePersistReset`,
+`runCrashSafeCommit` and the `onPersistAbort` hook of
+`prepareCrashSafeCommit`, `StagedDirectCommit.kt`,
+`GroupPushRouting.publishRemoveThenRotate`). The F1 in-memory reset existed
+for an eager merge before the record; the staged sweep has none, and is
+rolled back per group by `abandonStagedSweep`. In their place every membership
+operation refuses a group with no role table with the core's typed refusal,
+fail closed (web `noRoleTableRefusal` / `requireRoleTable`, iOS
+`requireRoleTable`, Android `noRoleTableRefusal` / `roleTablePresent`), one
+test per client. Kept: the ADR-0045 proposal and sweep path, PublisherGroup
+commits, the DeviceGroup outbox, and the shared runners still used
+(Android `prepareCrashSafeCommit`, used by the sweep). The core
+keeps the staged twins and their tests; their docs, and those of the FFI
+methods, now say that no client calls them. `MembershipOutcome`'s
+`committed` arm is kept on all three clients, documented as returned by no
+membership call, because its consumers share it with the sweep's result.
+
+**C-61 after the deletion.** The rotation of the push routing secret after a
+removal now starts only where a removal lands: the sweep's tail (the device
+that committed it) and the poll's membership-shrink diff (every other
+member). Both fire only after the roster shrank, so the rotation is sealed
+after the Remove commit by construction. The seam tests and their
+inverted-order companions went with `publishRemoveThenRotate`, because there
+is no longer a removal call site that a refactor could reorder against the
+rotation; the shrink entry point keeps its own tests on each client.
+
+**Tests changed.** Core: `a_welcome_without_a_role_table_is_refused_and_leaves_nothing`,
+`a_conversation_welcome_without_a_kind_leaves_nothing`,
+`a_chat_welcome_joins_and_the_table_less_entry_point_refuses_it_leaving_nothing`,
+`a_table_less_welcome_for_another_group_is_refused_before_anything_is_written`
+and the proptest `welcome_admission_follows_the_table` (group.rs);
+`a_device_group_welcome_joins_only_through_its_own_entry_point` and
+`a_join_by_name_takes_a_device_group_welcome_and_refuses_a_chat`
+(device_group.rs); `a_publisher_group_welcome_joins_only_through_its_own_entry_point`
+(publisher_group.rs). Call-group Welcomes (ADR-0032, `Group::create` with a
+role table and the kind) are covered by the `lakko-calls` link-invite tests.
+Client tests that exercised only the deleted direct paths were deleted (web
+`ds-access-commit.test.ts` and the direct cases of
+`commit-outbox-reorder.test.ts`, `commit-lock.test.ts`,
+`send-epoch-straddle.test.ts`, `proposal-membership.test.ts`; iOS
+`StagedDirectCommitTests.swift`, the `DirectCommitSteps` and C-61 seam cases;
+Android `StagedDirectCommitTest.kt`, the direct and C-61 seam cases, the
+F1 reset cases of `CommitOutboxTest.kt`, whose fail-closed cases now drive
+`prepareCrashSafeCommit`); tests
+that only used a direct removal to park a membership call (web
+`poll-lock.test.ts`, `add-path-filter.test.ts`) now park a proposal.
+
+**Verified (2026-10-19, in the build worktree, results as printed).**
+`cargo test -p lakko-mls` 411 passed (lib 264 plus 13 integration
+binaries); `lakko-calls` 227, `lakko-channels` 121, `lakko-svc-ds`
+against a local MariaDB 84, `lakko-ffi-uniffi` 391, `lakko-ffi-wasm` 278,
+`lakko-ffi-extension` 89 passed; clippy `-D warnings` on those crates
+clean; `cargo fmt --all --check` clean; the `lakko-mls` fuzz crate
+checks; `audit-index-check` clean (85 C). `LakkoCore.xcframework`, the
+extension framework and the Android native libraries rebuilt; web wasm
+rebuilt, `tsc --noEmit` clean, vitest 466 files, 6145 tests passed; Android
+`:app:compileDebugKotlin` green and `:app:testDebugUnitTest` 4347 tests, 0
+failures, 1 skipped (from the XML reports); iOS `xcodebuild
+build-for-testing` succeeded (tests not run). Two existing `lakko-mls`
+integration tests joined a table-less group through `join_from_welcome` and
+now join through `DeviceGroup::join_welcome_before_account`; one lib test
+(`a_table_less_group_refuses_the_proposal_approve_and_keeps_the_direct_one`)
+now joins through the crate's table-less entry point. Nothing was walked live and nothing was deployed.
 
 ## Documentation this ADR implies
 

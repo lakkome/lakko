@@ -1403,8 +1403,26 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 let joiner = try Identity.fromSeed(seed: seed)
                 let keyPackage = try joiner.createKeyPackage()
                 let rendezvous = PairingCodec.generateRendezvousPseudonym()
-                let payload = try PairingCodec.buildPairingQrPayload(
-                    loginHandle: loginHandle, keyPackage: keyPackage, rendezvousPseudonym: rendezvous)
+                // ADR-0081 amendment — the device identity's key IS this
+                // device's old DeviceGroup leaf key: it signs that its leaf may
+                // be replaced by this KeyPackage in the commit leaving the
+                // journal's latest epoch (an empty knock is a probe that names
+                // it), which lets a sibling readmit it under the
+                // attested-removal policy without a passkey. An unclaimed
+                // journal names no epoch: no proof.
+                let ds = DsClient()
+                let probe = try await ds.knock(groupId: groupId, payloads: [])
+                let payload: Data
+                if let epoch = probe.epoch {
+                    let proof = try signDeviceGroupSelfRemoval(
+                        oldIdentity: joiner, groupId: groupId, epoch: epoch, replacementKeyPackage: keyPackage)
+                    payload = try PairingCodec.buildRejoinKnockPayload(
+                        loginHandle: loginHandle, keyPackage: keyPackage, rendezvousPseudonym: rendezvous,
+                        selfRemovalProof: proof)
+                } else {
+                    payload = try PairingCodec.buildPairingQrPayload(
+                        loginHandle: loginHandle, keyPackage: keyPackage, rendezvousPseudonym: rendezvous)
+                }
                 let state = DeviceGroupRejoinState(
                     rendezvousB64: base64Encode(rendezvous),
                     joinerSnapshotB64: base64Encode(try joiner.snapshotStorage()),
@@ -1412,7 +1430,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 // Kept BEFORE the knock: the joiner's provider is the only
                 // thing that can open the Welcome a sibling sends.
                 try store.putPending(accountIdB64: accountIdB64, kind: .rejoin, blob: try state.encoded())
-                _ = try await DsClient().knock(groupId: groupId, payloads: [payload])
+                _ = try await ds.knock(groupId: groupId, payloads: [payload])
                 return state
             },
             awaitWelcome: { state, deadlineMs in
@@ -1495,9 +1513,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     }
 
     /// A sibling's side: read the DeviceGroup's knocks and admit each one
-    /// ``DeviceGroupRejoin/admissionVerdict(_:)`` allows — remove the device's
-    /// previous leaf if it is still in the roster, then add its KeyPackage,
-    /// two commits through the outbox, the Welcome to the knock's rendezvous.
+    /// ``DeviceGroupRejoin/admissionVerdict(_:)`` allows — replace the
+    /// device's previous leaf, if it is still in the roster, by its KeyPackage
+    /// in one commit carrying its self-removal proof (ADR-0081 amendment),
+    /// else add the KeyPackage; one commit through the outbox, the Welcome to
+    /// the knock's rendezvous.
     private func checkKnocks(accountIdB64: String, bound: BindingEpoch.Captured) async throws {
         guard let g = group, let id = identity, let accountId = activeAccountId, admissions != nil,
               let loginHandle = loginHandleProvider() else { return }
@@ -1513,6 +1533,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
         let ownKey = heldId.signaturePublicKey()
         let policy = (try? held.requireAttestedRemovals()) ?? false
+        let heldGroupId = try held.groupId()
+        let heldEpoch = try held.epoch()
         var directory: [Data: Data]?
         for knock in knocks.messages {
             guard let decoded = try? PairingCodec.parsePairingQrPayload(
@@ -1525,6 +1547,14 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             }
             guard let record = admissions else { return }
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            // Checked BEFORE a commit is built: a commit the DS takes but every
+            // peer refuses would leave this device ahead of them.
+            let proof = decoded.selfRemovalProof
+            let proofCovers = proof.map {
+                deviceGroupSelfRemovalCovers(
+                    identity: heldId, proof: $0, groupId: heldGroupId, epoch: heldEpoch,
+                    removedSignaturePubkey: key, keyPackage: decoded.keyPackage)
+            } ?? false
             let verdict = DeviceGroupRejoin.admissionVerdict(DeviceGroupRejoin.AdmissionInput(
                 knockId: knock.id,
                 knockAtMs: Self.parseMs(knock.createdAt) ?? 0,
@@ -1536,28 +1566,53 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 lastAddedAtMs: record.lastAddedAtMs[hexEncode(key)],
                 listed: directory?[key] != nil,
                 policyRequiresAttestation: policy,
+                selfRemovalProofCovers: proofCovers,
+                keyPackageAlreadyIn: (try? held.containsLeafOfKeyPackage(
+                    identity: heldId, keyPackage: decoded.keyPackage)) ?? false,
                 nowMs: nowMs))
             guard verdict == .admit else { continue }
-            if let previous = roster.first(where: { $0.key == key }) {
-                try await DeviceRemoval.removeDeviceAt(
-                    accountIdBytes: accountId, accountIdB64: accountIdB64,
-                    leafIndex: previous.leaf, attestation: nil, rejoin: true)
-                guard bound.isCurrent else { return }
-            }
             let added = try await DeviceGroupCommits.commitChange(
                 accountIdBytes: accountId,
                 accountIdB64: accountIdB64,
                 build: { fresh in
-                    // Another sibling admitted it meanwhile.
-                    if ((try? fresh.group.devices()) ?? []).contains(where: { $0.signaturePublicKey == key }) {
+                    // Another sibling answered it meanwhile.
+                    if (try? fresh.group.containsLeafOfKeyPackage(
+                        identity: fresh.identity, keyPackage: decoded.keyPackage)) ?? false {
                         return nil
                     }
-                    let addition = try fresh.group.addDeviceFromWire(
-                        identity: fresh.identity, keyPackage: decoded.keyPackage)
+                    let previous = ((try? fresh.group.devices()) ?? [])
+                        .first(where: { $0.signaturePublicKey == key })
+                    guard let previous else {
+                        let addition = try fresh.group.addDeviceFromWire(
+                            identity: fresh.identity, keyPackage: decoded.keyPackage)
+                        return DeviceGroupCommits.Built(
+                            kind: .rejoinAdd,
+                            row: DeviceGroupJournalEnvelope.encode(message: addition.commit, attestation: nil),
+                            welcome: addition.welcome,
+                            welcomeRendezvous: decoded.rendezvousPseudonym)
+                    }
+                    // ADR-0081 amendment — the previous leaf out and the new
+                    // one in, in ONE commit; the proof rides in the
+                    // removal-authorisation slot. Re-checked at the epoch this
+                    // commit leaves: a proof names one epoch, and peers refuse
+                    // it at any other. Under the policy a removal it does not
+                    // cover would be refused by every peer.
+                    let freshEpoch = try fresh.group.epoch()
+                    let freshGroupId = try fresh.group.groupId()
+                    let covers = proof.map {
+                        deviceGroupSelfRemovalCovers(
+                            identity: fresh.identity, proof: $0, groupId: freshGroupId, epoch: freshEpoch,
+                            removedSignaturePubkey: key, keyPackage: decoded.keyPackage)
+                    } ?? false
+                    if !covers, (try? fresh.group.requireAttestedRemovals()) ?? true { return nil }
+                    let replaced = try fresh.group.replaceDeviceAt(
+                        identity: fresh.identity, leafIndex: previous.leafIndex,
+                        keyPackage: decoded.keyPackage)
                     return DeviceGroupCommits.Built(
-                        kind: .rejoinAdd,
-                        row: DeviceGroupJournalEnvelope.encode(message: addition.commit, attestation: nil),
-                        welcome: addition.welcome,
+                        kind: .rejoinReplace,
+                        row: DeviceGroupJournalEnvelope.encode(
+                            message: replaced.commit, attestation: covers ? proof : nil),
+                        welcome: replaced.welcome,
                         welcomeRendezvous: decoded.rendezvousPseudonym)
                 },
                 after: { _ in () }

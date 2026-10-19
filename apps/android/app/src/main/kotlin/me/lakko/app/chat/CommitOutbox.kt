@@ -45,7 +45,7 @@ import kotlinx.serialization.json.Json
  *   2. the N+1 MLS snapshot.
  *
  * If EITHER write throws, the path ABORTS before publishing (see
- * [runCrashSafeCommit]). The one torn middle state — an entry present but the
+ * [prepareCrashSafeCommit]). The one torn middle state — an entry present but the
  * snapshot still at N (the snapshot write failed / crashed after the entry
  * write) — is reconciled on the restart sweep: because the publish is STRICTLY
  * after step 2 completes, that torn state provably means the commit was NEVER
@@ -244,137 +244,38 @@ internal fun reconcileVerdict(currentEpoch: ULong, entry: PendingCommitEntry): S
 }
 
 /**
- * The crash-safe commit ordering (ADR-0040 §2), as a pure orchestration over
- * injected steps so it is unit-testable without the FFI Group / Identity.
+ * The crash-safe commit ordering (ADR-0040 §2): the durable writes a commit makes
+ * before it may be published, as a pure function over injected steps so it is
+ * unit-testable without the FFI Group / Identity.
  *
  * Android has no cross-store atomic transaction (Open Question 1), so the two
- * durable writes run in order — the outbox ENTRY first, THEN the N+1 SNAPSHOT —
- * and BOTH are fail-closed. If EITHER durable write throws, [publish] is NEVER
- * invoked (abort before publish): on the next launch the device is at N with an
- * orphan-or-absent entry the sweep reconciles to "clean". The publish only ever
- * touches the wire AFTER both durable writes have returned.
+ * durable writes run in order — the outbox ENTRY first, THEN the SNAPSHOT — and
+ * BOTH are fail-closed. Returning normally is the signal that both landed and
+ * the commit is now safe to put on the wire; throwing means the op aborted and
+ * the caller publishes nothing (on the next launch the sweep reconciles the
+ * orphan-or-absent entry to "clean").
  *
- * ## ADR-0040 F1 (lakko-security) — reset the eager-merged in-memory group
+ * G-37 — split from the publish so the caller can release the repository's
+ * global provider lock before the DS publish. DELIBERATELY NOT `suspend`: both
+ * durable writes are synchronous and every caller runs it inside the provider
+ * critical section, so no network wait can be reintroduced here (a suspending
+ * call would not compile). Same device as [ChatClient.applyFetchedMessages].
  *
- * The core create-commit call EAGERLY MERGES the in-memory OpenMLS provider from
- * epoch N -> N+1 BEFORE this durable persist runs. So when a durable write throws
- * and this function aborts before publish, the in-memory group is left at the
- * un-published N+1 while the durable snapshot is still at N. If that persist
- * failure is TRANSIENT (a Keystore / file hiccup that then clears — not a crash)
- * and the user issues a SECOND membership commit in the SAME session, op B would
- * merge N+1 -> N+2 and publish `commit(N+1->N+2)`, which peers still at N drop as
- * wrong-epoch — stranding the WHOLE group (the "device-ahead" outcome ADR-0040
- * warns is worse than the single-device brick).
- *
- * [onPersistAbort] closes that window: it fires EXACTLY when one of the two
- * persists throws — BEFORE the exception propagates and while [publish] is
- * provably un-run (this catch wraps ONLY the two persists) — so the caller can
- * reset the in-memory group back to the durable snapshot (N), dropping the
- * un-published eager merge. It does NOT fire when [publish] throws: a publish
- * failure means the commit is durably recorded (entry + N+1 snapshot both landed)
- * and the device is legitimately at N+1, so the restart sweep re-publishes it —
- * resetting there would be wrong. If [onPersistAbort] ITSELF throws (a poisoned
- * group — the durable snapshot could not be loaded), THAT hard error propagates
- * (with the persist failure attached) rather than masking the poisoned state.
- */
-internal suspend fun <R> runCrashSafeCommit(
-    persistEntryOrThrow: () -> Unit,
-    persistSnapshotOrThrow: () -> Unit,
-    publish: suspend () -> R,
-    onPersistAbort: () -> Unit = {},
-): R {
-    prepareCrashSafeCommit(
-        persistEntryOrThrow = persistEntryOrThrow,
-        persistSnapshotOrThrow = persistSnapshotOrThrow,
-        onPersistAbort = onPersistAbort,
-    )
-    // 3. only now is it safe to advance the group on the wire.
-    return publish()
-}
-
-/**
- * G-37 — the DURABLE-WRITE half of [runCrashSafeCommit], split out so the caller
- * can release the repository's global provider lock before the DS publish.
- *
- * Returning normally is the signal that BOTH durable writes landed and the commit
- * is now safe to put on the wire; throwing means the op aborted with `publish`
- * provably un-run. The ADR-0040 §2 ordering is therefore UNCHANGED and still
- * expressed structurally — the publish simply cannot happen until this has
- * returned.
- *
- * DELIBERATELY NOT `suspend`. Both durable writes are synchronous, and every one
- * of its callers runs it inside the repository's provider critical section; a
- * non-suspending signature is a structural guarantee that no network wait can be
- * reintroduced between the eager merge and the durable record (a suspending call
- * would simply not compile here). Same device as [ChatClient.applyFetchedMessages].
+ * Since the ADR-0081 amendment of 2026-10-19 the only caller is the ADR-0045
+ * staged sweep: the clients' direct commits (which eager-merged N -> N+1 before
+ * this persist and needed an in-memory reset on an abort) are deleted. A staged
+ * sweep leaves the group at N, so an abort needs no reset here; the caller's
+ * per-group `abandonStagedSweep` is the rollback.
  */
 internal fun prepareCrashSafeCommit(
     persistEntryOrThrow: () -> Unit,
     persistSnapshotOrThrow: () -> Unit,
-    onPersistAbort: () -> Unit = {},
 ) {
-    try {
-        // 1. durable outbox entry (commit + second-artifact bytes, un-acked).
-        persistEntryOrThrow()
-        // 2. durable N+1 MLS snapshot. A throw from EITHER 1 or 2 is caught below
-        //    WITHOUT reaching `publish` — abort before publish.
-        persistSnapshotOrThrow()
-    } catch (persistFailure: Throwable) {
-        // ADR-0040 F1 — reset the eager-merged in-memory group (N+1) back to the
-        // durable snapshot (N) BEFORE re-throwing, so a subsequent same-session
-        // commit builds on N (the epoch peers are still at), not the unpublished
-        // N+1. `publish` was never reached, so the aborted commit never hit the DS.
-        try {
-            onPersistAbort()
-        } catch (resetFailure: Throwable) {
-            // Fail-safe: the reset failed (poisoned group). Surface THAT as the
-            // hard error, with the original persist failure attached, rather than
-            // returning a benign-looking persist error over a poisoned group.
-            resetFailure.addSuppressed(persistFailure)
-            throw resetFailure
-        }
-        throw persistFailure
-    }
-}
-
-/**
- * ADR-0040 F1 residual (lakko-security) — reset-guard the PRE-PERSIST window.
- *
- * The core create-commit call EAGERLY MERGES the in-memory OpenMLS provider N ->
- * N+1 before [runCrashSafeCommit] ever runs. Between that merge and the
- * [runCrashSafeCommit] call each two-artifact path still does work that can throw
- * — compute the Welcome envelope + its mailbox pseudonym (add) / wrap the Welcome
- * rendezvous (approve) — and every path builds the outbox entry (`requireAccountId`
- * / `group.epoch()`). A throw there aborted the op while leaving the in-memory
- * group at the UN-published N+1: a subsequent same-session commit would then build
- * on N+1 and publish `commit(N+1 -> N+2)`, which peers still at N drop as
- * wrong-epoch — the whole-group strand ADR-0040 F1 already closes for the
- * persist-abort window, re-opened on this rarer pre-persist window.
- *
- * This runs [prelude] (the pre-persist artifact-compute + entry build) and, on ANY
- * throw, invokes [reset] (the caller resets the in-memory group to the durable
- * snapshot at N, dropping the un-published eager merge) then re-throws the original
- * failure. NO outbox entry exists yet at this point, so the caller resets the group
- * DIRECTLY (not via the persist-abort handler, which also deletes an entry).
- *
- * Mirrors [runCrashSafeCommit]'s fail-safe: if [reset] ITSELF throws (a poisoned
- * group — the durable snapshot could not be loaded), THAT hard error propagates
- * with the original prelude failure attached as a suppressed exception, rather than
- * masking the poisoned state. Pure (no I/O, `reset` injected) so it is
- * unit-testable without the FFI Group / Identity.
- */
-internal fun <T> withPrePersistReset(reset: () -> Unit, prelude: () -> T): T {
-    return try {
-        prelude()
-    } catch (preludeFailure: Throwable) {
-        try {
-            reset()
-        } catch (resetFailure: Throwable) {
-            resetFailure.addSuppressed(preludeFailure)
-            throw resetFailure
-        }
-        throw preludeFailure
-    }
+    // 1. durable outbox entry (commit + second-artifact bytes, un-acked).
+    persistEntryOrThrow()
+    // 2. durable MLS snapshot carrying the staged commit. A throw from EITHER
+    //    step propagates before the caller can publish — abort before publish.
+    persistSnapshotOrThrow()
 }
 
 /**
@@ -473,7 +374,7 @@ public object CommitOutboxStore {
 
     /**
      * Persist one entry durably, FAIL-CLOSED (THROWS on write failure). The
-     * commit path calls this as step 1 of [runCrashSafeCommit], BEFORE any
+     * commit path calls this as step 1 of [prepareCrashSafeCommit], BEFORE any
      * publish; a throw aborts the op.
      *
      * @throws java.io.IOException on disk-write failure.

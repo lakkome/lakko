@@ -40,6 +40,12 @@ pub struct DecodedPairingQr {
     /// 32-byte rendezvous pseudonym for the DS-mailbox Welcome
     /// delivery slot.
     pub rendezvous_pseudonym: Vec<u8>,
+    /// ADR-0081 amendment — on a DeviceGroup rejoin knock, the rejoining
+    /// device's self-removal proof (137 bytes, not verified here: the
+    /// admitting sibling carries it with the replacement commit and every
+    /// peer's removal gate checks it). `None` on a pairing QR.
+    #[uniffi(default = None)]
+    pub self_removal_proof: Option<Vec<u8>>,
 }
 
 /// Build the wire-format pairing payload.
@@ -67,6 +73,37 @@ pub fn build_pairing_qr(
     Ok(inner::encode(&handle, &key_package, &rendezvous)?)
 }
 
+/// ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload plus
+/// the device's self-removal proof (`signDeviceGroupSelfRemoval`, exactly 137
+/// bytes) for `key_package`.
+///
+/// # Errors
+///
+/// [`FfiError::Codec`] on a wrong-length handle, rendezvous pseudonym or
+/// proof.
+#[uniffi::export]
+pub fn build_rejoin_knock(
+    login_handle: Vec<u8>,
+    key_package: Vec<u8>,
+    rendezvous_pseudonym: Vec<u8>,
+    self_removal_proof: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let handle = handle_array(&login_handle, "login_handle")?;
+    let rendezvous: inner::RendezvousPseudonym =
+        rendezvous_pseudonym.as_slice().try_into().map_err(|_| {
+            FfiError::Codec(format!(
+                "rendezvous_pseudonym must be {} bytes",
+                inner::RENDEZVOUS_PSEUDONYM_LEN,
+            ))
+        })?;
+    Ok(inner::encode_rejoin_knock(
+        &handle,
+        &key_package,
+        &rendezvous,
+        &self_removal_proof,
+    )?)
+}
+
 /// Confirming side: parse the wire bytes, verify the embedded
 /// login handle matches `expected_login_handle` (the handle of
 /// the local account's own username), return the decoded
@@ -90,6 +127,7 @@ pub fn parse_pairing_qr(
     Ok(DecodedPairingQr {
         key_package: decoded.key_package,
         rendezvous_pseudonym: decoded.rendezvous_pseudonym.to_vec(),
+        self_removal_proof: decoded.self_removal_proof,
     })
 }
 

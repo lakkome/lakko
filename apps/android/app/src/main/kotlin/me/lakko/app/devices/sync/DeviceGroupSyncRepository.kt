@@ -1970,7 +1970,24 @@ public class DeviceGroupSyncRepository(
             try {
                 val keyPackage = joiner.createKeyPackage()
                 val rendezvous = me.lakko.app.devices.PairingCodec.generateRendezvousPseudonym()
-                val payload = me.lakko.app.devices.PairingCodec.buildPairingQrPayload(loginHandle, keyPackage, rendezvous)
+                // ADR-0081 amendment — the device identity's key IS this
+                // device's old DeviceGroup leaf key: it signs that its leaf may
+                // be replaced by this KeyPackage in the commit leaving the
+                // journal's latest epoch (an empty knock is a probe that names
+                // it), which lets a sibling readmit it under the
+                // attested-removal policy without a passkey. An unclaimed
+                // journal names no epoch: no proof.
+                val probeEpoch = DsClient().use { ds -> ds.knock(groupId, emptyList()) }.epoch
+                val payload = if (probeEpoch == null) {
+                    me.lakko.app.devices.PairingCodec.buildPairingQrPayload(loginHandle, keyPackage, rendezvous)
+                } else {
+                    val proof = uniffi.lakko_ffi_uniffi.signDeviceGroupSelfRemoval(
+                        joiner, groupId, probeEpoch, keyPackage,
+                    )
+                    me.lakko.app.devices.PairingCodec.buildRejoinKnockPayload(
+                        loginHandle, keyPackage, rendezvous, proof,
+                    )
+                }
                 val snapshot = joiner.snapshotStorage()
                 val state = try {
                     RejoinState(
@@ -2109,9 +2126,10 @@ public class DeviceGroupSyncRepository(
 
     /**
      * A sibling's side: read the DeviceGroup's knocks and admit each one
-     * [admissionVerdict] allows — remove the device's previous leaf if it is
-     * still in the roster, then add its KeyPackage, two commits through the
-     * outbox, the Welcome to the knock's rendezvous.
+     * [admissionVerdict] allows — replace the device's previous leaf, if it
+     * is still in the roster, by its KeyPackage in one commit carrying its
+     * self-removal proof (ADR-0081 amendment), else add the KeyPackage; one
+     * commit through the outbox, the Welcome to the knock's rendezvous.
      */
     private suspend fun checkKnocks(accountIdBytes: ByteArray, accountIdB64: String, bound: me.lakko.app.Binding) {
         val g = group.get() ?: return
@@ -2126,6 +2144,8 @@ public class DeviceGroupSyncRepository(
         } ?: return
         val ownKeyHex = hexOf(id.signaturePublicKey())
         val policy = runCatching { g.requireAttestedRemovals() }.getOrDefault(false)
+        val heldGroupId = g.groupId()
+        val heldEpoch = g.epoch()
         var directory: Map<String, ByteArray>? = null
         for (knock in knocks.messages) {
             if (!bound.isCurrent) return
@@ -2134,8 +2154,15 @@ public class DeviceGroupSyncRepository(
             } catch (_: Throwable) {
                 continue // not a payload for this account (or not a pairing payload)
             }
-            val keyHex = runCatching { hexOf(uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(decoded.keyPackage)) }
+            val keyBytes = runCatching { uniffi.lakko_ffi_uniffi.keyPackageSignatureKey(decoded.keyPackage) }
                 .getOrNull() ?: continue
+            val keyHex = hexOf(keyBytes)
+            // Checked BEFORE a commit is built: a commit the DS takes but every
+            // peer refuses would leave this device ahead of them.
+            val proof = decoded.selfRemovalProof
+            val proofCovers = proof != null && uniffi.lakko_ffi_uniffi.deviceGroupSelfRemovalCovers(
+                id, proof, heldGroupId, heldEpoch, keyBytes, decoded.keyPackage,
+            )
             val dir = directory ?: ownDirectory(accountIdBytes, accountIdB64).also { directory = it }
             if (!bound.isCurrent) return
             val record = admissions ?: return
@@ -2153,37 +2180,66 @@ public class DeviceGroupSyncRepository(
                     listed = dir.containsKey(keyHex),
                     policyRequiresAttestation = policy,
                     nowMs = nowMs,
+                    selfRemovalProofCovers = proofCovers,
+                    keyPackageAlreadyIn = runCatching {
+                        g.containsLeafOfKeyPackage(id, decoded.keyPackage)
+                    }.getOrDefault(false),
                 ),
             )
             if (verdict != AdmissionVerdict.ADMIT) continue
-            roster.firstOrNull { it.keyHex == keyHex }?.let { previous ->
-                me.lakko.app.devices.DeviceRemoval.removeDeviceAt(
-                    context = applicationContext,
-                    accountIdBytes = accountIdBytes,
-                    accountIdB64 = accountIdB64,
-                    leafIndex = previous.leaf,
-                    attestation = null,
-                    rejoin = true,
-                )
-            }
             val added = me.lakko.app.devices.DeviceGroupCommits.commitChange(
                 context = applicationContext,
                 accountIdBytes = accountIdBytes,
                 accountIdB64 = accountIdB64,
                 build = { fresh ->
                     val before = runCatching { fresh.group.devices() }.getOrNull().orEmpty()
-                    // Another sibling admitted it meanwhile.
-                    if (before.any { hexOf(it.signaturePublicKey) == keyHex }) {
-                        null
-                    } else {
-                        val addition = fresh.group.addDeviceFromWire(fresh.identity, decoded.keyPackage)
-                        me.lakko.app.devices.DeviceGroupCommits.Built(
-                            kind = me.lakko.app.devices.DeviceGroupCommitEntry.Kind.REJOIN_ADD,
-                            row = DeviceGroupJournalEnvelope.encode(addition.commit, null),
-                            welcome = addition.welcome,
-                            welcomeRendezvous = decoded.rendezvousPseudonym,
-                            priorLeaves = before.map { it.leafIndex },
-                        )
+                    val previous = before.firstOrNull { hexOf(it.signaturePublicKey) == keyHex }
+                    val answered = runCatching {
+                        fresh.group.containsLeafOfKeyPackage(fresh.identity, decoded.keyPackage)
+                    }.getOrDefault(false)
+                    when {
+                        // Another sibling answered it meanwhile.
+                        answered -> null
+                        previous == null -> {
+                            val addition = fresh.group.addDeviceFromWire(fresh.identity, decoded.keyPackage)
+                            me.lakko.app.devices.DeviceGroupCommits.Built(
+                                kind = me.lakko.app.devices.DeviceGroupCommitEntry.Kind.REJOIN_ADD,
+                                row = DeviceGroupJournalEnvelope.encode(addition.commit, null),
+                                welcome = addition.welcome,
+                                welcomeRendezvous = decoded.rendezvousPseudonym,
+                                priorLeaves = before.map { it.leafIndex },
+                            )
+                        }
+                        else -> {
+                            // ADR-0081 amendment — the previous leaf out and the
+                            // new one in, in ONE commit; the proof rides in the
+                            // removal-authorisation slot. Re-checked at the
+                            // epoch this commit leaves: a proof names one
+                            // epoch, and peers refuse it at any other. Under
+                            // the policy a removal it does not cover would be
+                            // refused by every peer.
+                            val covers = proof != null && uniffi.lakko_ffi_uniffi.deviceGroupSelfRemovalCovers(
+                                fresh.identity, proof, fresh.group.groupId(), fresh.group.epoch(),
+                                keyBytes, decoded.keyPackage,
+                            )
+                            val policyNow = runCatching { fresh.group.requireAttestedRemovals() }.getOrDefault(true)
+                            if (!covers && policyNow) {
+                                null
+                            } else {
+                                val replaced = fresh.group.replaceDeviceAt(
+                                    fresh.identity, previous.leafIndex, decoded.keyPackage,
+                                )
+                                me.lakko.app.devices.DeviceGroupCommits.Built(
+                                    kind = me.lakko.app.devices.DeviceGroupCommitEntry.Kind.REJOIN_REPLACE,
+                                    row = DeviceGroupJournalEnvelope.encode(
+                                        replaced.commit, if (covers) proof else null,
+                                    ),
+                                    welcome = replaced.welcome,
+                                    welcomeRendezvous = decoded.rendezvousPseudonym,
+                                    priorLeaves = before.map { it.leafIndex },
+                                )
+                            }
+                        }
                     }
                 },
                 after = { },

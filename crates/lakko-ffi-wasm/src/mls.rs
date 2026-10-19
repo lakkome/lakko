@@ -1246,6 +1246,9 @@ impl Group {
     /// `409`. While it is staged every membership operation throws the
     /// `sweepAlreadyStaged` refusal. The staged commit is persisted with the
     /// group, so it survives `snapshotStorage` and a reload.
+    ///
+    /// No client calls the staged twins today: the ADR-0081 amendment of
+    /// 2026-10-19 deleted the direct-commit paths for ordinary groups.
     #[wasm_bindgen(js_name = stageAddMember)]
     pub fn stage_add_member(
         &self,
@@ -2281,6 +2284,28 @@ impl PublisherGroup {
         }
     }
 
+    /// ADR-0028 OQ3 / ADR-0081 amendment (2026-10-19) — join a PublisherGroup
+    /// as a co-publisher from the owner's Welcome. A PublisherGroup carries no
+    /// role table, so `Group.joinFromWelcome` refuses its Welcome
+    /// (`noRoleTable`); this is its entry point. A Welcome for another group
+    /// than `groupId`, or a conversation's Welcome, is refused before anything
+    /// is written. The joined state persists in `identity`'s provider
+    /// (`loadJoined` reopens it).
+    #[wasm_bindgen(js_name = joinFromWelcome)]
+    pub fn join_from_welcome(
+        identity: &Identity,
+        welcome: &[u8],
+        group_id: &[u8],
+        channel_id: &[u8],
+    ) -> Result<PublisherGroup, JsValue> {
+        let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
+        let inner = MlsPublisherGroup::join_from_welcome(&identity.inner, welcome, group_id, &cid)
+            .map_err(mls_err)?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
     /// ADR-0028 OQ3 / ADR-0078 section 6 — open a PublisherGroup this identity
     /// JOINED as a co-publisher, under the `group_id` its `/g/` capability
     /// conveyed and the `channel_id` that link's sealed preview carried (a
@@ -2589,6 +2614,62 @@ pub struct DeviceGroup {
     inner: Mutex<MlsDeviceGroup>,
 }
 
+/// ADR-0081 amendment — the DeviceGroup self-removal proof: a device that
+/// lost its DeviceGroup state signs, with its OLD leaf key (`oldIdentity`,
+/// the device identity it still holds), that in the DeviceGroup `groupId` its
+/// leaf may be replaced by the KeyPackage `replacementKeyPackage` in the
+/// commit that leaves `epoch` (the journal's latest epoch, from a knock
+/// probe). A fixed 137-byte blob carried with the knock; the admitting
+/// sibling puts it in the removal-authorisation slot of the replacement
+/// commit's envelope.
+#[wasm_bindgen(js_name = signDeviceGroupSelfRemoval)]
+pub fn sign_device_group_self_removal(
+    old_identity: &Identity,
+    group_id: &[u8],
+    epoch: u64,
+    replacement_key_package: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    lakko_mls::sign_self_removal(
+        &old_identity.inner,
+        group_id,
+        epoch,
+        replacement_key_package,
+    )
+    .map_err(mls_err)
+}
+
+/// ADR-0081 amendment — would `proof` cover replacing the leaf
+/// `removedSignaturePubkey` by `keyPackage` in the DeviceGroup `groupId`, in a
+/// commit leaving `epoch` (the sibling's current epoch)? The admitting
+/// sibling's check BEFORE it builds the replacement commit.
+/// `identity` supplies the crypto provider. Malformed input answers `false`.
+#[wasm_bindgen(js_name = deviceGroupSelfRemovalCovers)]
+#[must_use]
+pub fn device_group_self_removal_covers(
+    identity: &Identity,
+    proof: &[u8],
+    group_id: &[u8],
+    epoch: u64,
+    removed_signature_pubkey: &[u8],
+    key_package: &[u8],
+) -> bool {
+    lakko_mls::self_removal::covers_key_package(
+        &identity.inner,
+        proof,
+        group_id,
+        epoch,
+        removed_signature_pubkey,
+        key_package,
+    )
+}
+
+/// The wire length of a DeviceGroup self-removal proof (137).
+#[wasm_bindgen(js_name = deviceGroupSelfRemovalProofLen)]
+#[must_use]
+pub fn device_group_self_removal_proof_len() -> u32 {
+    u32::try_from(lakko_mls::SELF_REMOVAL_PROOF_LEN).unwrap_or(u32::MAX)
+}
+
 #[wasm_bindgen]
 impl DeviceGroup {
     /// Bootstrap a fresh DeviceGroup with `identity` as the
@@ -2627,6 +2708,21 @@ impl DeviceGroup {
         let inner =
             MlsDeviceGroup::join_from_welcome(welcome, &identity.inner, &acct).map_err(mls_err)?;
         Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// ADR-0056 join by name / ADR-0081 amendment (2026-10-19) - join a
+    /// DeviceGroup Welcome before the account is known. `Group.joinFromWelcome`
+    /// refuses a DeviceGroup Welcome (it carries no role table), so the by-name
+    /// flow joins here: the group is persisted and handed back as a plain
+    /// `Group` (its exporter opens the recovery row) for `loadDeviceGroupById` to
+    /// adopt. A conversation's Welcome is refused.
+    #[wasm_bindgen(js_name = joinWelcomeByName)]
+    pub fn join_welcome_by_name(welcome: &[u8], identity: &Identity) -> Result<Group, JsValue> {
+        let inner = MlsDeviceGroup::join_welcome_before_account(welcome, &identity.inner)
+            .map_err(mls_err)?;
+        Ok(Group {
             inner: Mutex::new(inner),
         })
     }
@@ -2770,6 +2866,59 @@ impl DeviceGroup {
             .map_err(|_| js_error("internal lock poisoned"))?;
         g.remove_device_at(&identity.inner, leaf_index)
             .map_err(mls_err)
+    }
+
+    /// ADR-0081 amendment — replace the device at `leafIndex` by the device
+    /// whose KeyPackage is `keyPackage`, in ONE commit (a remove and an add):
+    /// the commit a sibling builds to readmit a device that lost its
+    /// DeviceGroup state. Under the attested-removal policy peers accept the
+    /// removal when the rejoining device's self-removal proof for this
+    /// KeyPackage (`signDeviceGroupSelfRemoval`) travels in the envelope's
+    /// removal-authorisation slot. Merges eagerly, like the other DeviceGroup
+    /// commits.
+    #[wasm_bindgen(js_name = replaceDeviceAt)]
+    pub fn replace_device_at(
+        &self,
+        identity: &Identity,
+        leaf_index: u32,
+        key_package: &[u8],
+    ) -> Result<AddMember, JsValue> {
+        self.replace_device_at_inner(identity, leaf_index, key_package)
+    }
+
+    /// ADR-0081 amendment — `true` when a device leaf carries the leaf node
+    /// of `keyPackage`: a rejoin knock with it was already admitted (the
+    /// roster's keys cannot tell, the replaced leaf has the same key).
+    #[wasm_bindgen(js_name = containsLeafOfKeyPackage)]
+    pub fn contains_leaf_of_key_package(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<bool, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.contains_leaf_of_key_package(&identity.inner, key_package))
+    }
+
+    fn replace_device_at_inner(
+        &self,
+        identity: &Identity,
+        leaf_index: u32,
+        key_package: &[u8],
+    ) -> Result<AddMember, JsValue> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        let MemberAddition { commit, welcome } = g
+            .replace_device_at(&identity.inner, leaf_index, key_package)
+            .map_err(mls_err)?;
+        Ok(AddMember {
+            commit_bytes: group::encode_message(&commit).map_err(mls_err)?,
+            welcome_bytes: group::encode_message(&welcome).map_err(mls_err)?,
+        })
     }
 
     /// Derive the per-pairing history-bundle exporter secret

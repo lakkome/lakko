@@ -1999,6 +1999,9 @@ impl Group {
     /// membership operation is refused with
     /// [`FfiError::SweepAlreadyStaged`]. The staged commit is persisted with
     /// the group, so it survives `snapshotStorage` and a restart.
+    ///
+    /// No client calls the staged twins today: the ADR-0081 amendment of
+    /// 2026-10-19 deleted the direct-commit paths for ordinary groups.
     pub fn stage_add_member_from_wire(
         &self,
         identity: &Identity,
@@ -3158,6 +3161,45 @@ pub fn publisher_group_load_joined(
     }))
 }
 
+/// ADR-0056 join by name / ADR-0081 amendment (2026-10-19) — join a
+/// DeviceGroup Welcome before the account is known. `Group.joinFromWelcome`
+/// refuses a DeviceGroup Welcome (it carries no role table), so the by-name
+/// flow joins here: the group is persisted and handed back as a plain `Group`
+/// (its exporter opens the recovery row) for `loadDeviceGroupById` to adopt.
+/// A conversation's Welcome is refused.
+#[uniffi::export]
+pub fn device_group_join_welcome_by_name(
+    welcome: Vec<u8>,
+    identity: &Identity,
+) -> Result<Arc<Group>, FfiError> {
+    let inner = MlsDeviceGroup::join_welcome_before_account(&welcome, &identity.inner)?;
+    Ok(Arc::new(Group {
+        inner: Mutex::new(inner),
+    }))
+}
+
+/// ADR-0028 OQ3 / ADR-0081 amendment (2026-10-19) — join a PublisherGroup as
+/// a co-publisher from the owner's Welcome. A PublisherGroup carries no role
+/// table, so `Group.joinFromWelcome` refuses its Welcome (`NoRoleTable`); this
+/// is its entry point. `group_id` is the id the `/g/` capability conveyed and
+/// `channel_id` the one its sealed preview carried: a Welcome for any other
+/// group, or a conversation's Welcome, is refused before anything is written.
+/// The joined state persists in `identity`'s provider
+/// (`publisherGroupLoadJoined` reopens it).
+#[uniffi::export]
+pub fn publisher_group_join_from_welcome(
+    identity: &Identity,
+    welcome: Vec<u8>,
+    group_id: Vec<u8>,
+    channel_id: Vec<u8>,
+) -> Result<Arc<PublisherGroup>, FfiError> {
+    let cid = MlsChannelId::try_from_slice(&channel_id)?;
+    let inner = MlsPublisherGroup::join_from_welcome(&identity.inner, &welcome, &group_id, &cid)?;
+    Ok(Arc::new(PublisherGroup {
+        inner: Mutex::new(inner),
+    }))
+}
+
 /// ADR-0078 section 6 — the PublisherGroup id the account whose identity is
 /// `owner_identity` derives for `channel_id`
 /// (`BLAKE3-derive-key("lakko/pubgrp/id/v3", owner_seed || channel_id)`).
@@ -3303,6 +3345,61 @@ pub fn channel_rotation_state_after_post(state: ChannelRotationState) -> Channel
 #[derive(uniffi::Object)]
 pub struct DeviceGroup {
     inner: Mutex<MlsDeviceGroup>,
+}
+
+/// ADR-0081 amendment — the DeviceGroup self-removal proof: a device that
+/// lost its DeviceGroup state signs, with its OLD leaf key (`old_identity`,
+/// the device identity it still holds), that in the DeviceGroup `group_id`
+/// its leaf may be replaced by the KeyPackage `replacement_key_package` in
+/// the commit that leaves `epoch` (the journal's latest epoch, read with a
+/// knock probe). A fixed 137-byte blob carried with the knock; the admitting
+/// sibling puts it in the removal-authorisation slot of the replacement
+/// commit's envelope, where peers accept it in place of a passkey
+/// attestation.
+#[uniffi::export]
+pub fn sign_device_group_self_removal(
+    old_identity: &Identity,
+    group_id: Vec<u8>,
+    epoch: u64,
+    replacement_key_package: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    Ok(lakko_mls::sign_self_removal(
+        &old_identity.inner,
+        &group_id,
+        epoch,
+        &replacement_key_package,
+    )?)
+}
+
+/// ADR-0081 amendment — would `proof` cover replacing the leaf
+/// `removed_signature_pubkey` by `key_package` in the DeviceGroup `group_id`,
+/// in a commit leaving `epoch` (the sibling's current DeviceGroup epoch)?
+/// The admitting sibling's check BEFORE it builds the replacement commit (a
+/// commit peers refuse would leave it ahead of them). `identity` supplies the
+/// crypto provider. Never fails: malformed input answers `false`.
+#[uniffi::export]
+pub fn device_group_self_removal_covers(
+    identity: &Identity,
+    proof: Vec<u8>,
+    group_id: Vec<u8>,
+    epoch: u64,
+    removed_signature_pubkey: Vec<u8>,
+    key_package: Vec<u8>,
+) -> bool {
+    lakko_mls::self_removal::covers_key_package(
+        &identity.inner,
+        &proof,
+        &group_id,
+        epoch,
+        &removed_signature_pubkey,
+        &key_package,
+    )
+}
+
+/// The wire length of a DeviceGroup self-removal proof (137).
+#[uniffi::export]
+pub fn device_group_self_removal_proof_len() -> u32 {
+    u32::try_from(lakko_mls::SELF_REMOVAL_PROOF_LEN).unwrap_or(u32::MAX)
 }
 
 #[uniffi::export]
@@ -3454,6 +3551,42 @@ impl DeviceGroup {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let bytes = g.remove_device_at(&identity.inner, leaf_index)?;
         Ok(bytes)
+    }
+
+    /// ADR-0081 amendment — replace the device at `leaf_index` by the device
+    /// whose KeyPackage is `key_package`, in ONE commit (a remove and an add).
+    /// The commit a sibling builds to readmit a device that lost its
+    /// DeviceGroup state; under the attested-removal policy peers accept the
+    /// removal when the rejoining device's self-removal proof for this
+    /// KeyPackage ([`sign_device_group_self_removal`]) travels in the
+    /// envelope's removal-authorisation slot. Merges eagerly, like the other
+    /// DeviceGroup commits; the client's DeviceGroup outbox keeps the durable
+    /// state at N until the DS took it.
+    /// ADR-0081 amendment — `true` when a device leaf carries the leaf node
+    /// of `key_package`: a rejoin knock with it was already admitted (the
+    /// roster's keys cannot tell, the replaced leaf has the same key).
+    pub fn contains_leaf_of_key_package(
+        &self,
+        identity: &Identity,
+        key_package: Vec<u8>,
+    ) -> Result<bool, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.contains_leaf_of_key_package(&identity.inner, &key_package))
+    }
+
+    pub fn replace_device_at(
+        &self,
+        identity: &Identity,
+        leaf_index: u32,
+        key_package: Vec<u8>,
+    ) -> Result<AddMember, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let MemberAddition { commit, welcome } =
+            g.replace_device_at(&identity.inner, leaf_index, &key_package)?;
+        Ok(AddMember {
+            commit: group::encode_message(&commit)?,
+            welcome: group::encode_message(&welcome)?,
+        })
     }
 
     /// Derive the per-pairing history-bundle exporter secret

@@ -840,7 +840,10 @@ Recorded rather than fixed, because the analysis is the deliverable:
   cannot be reordered independently — iOS
   `PushGroupRouting.publishRemoveThenRotate(publishRemove:rotate:onRotationStarted:)`,
   whose sole production call site is `ChatRepository.removeMemberFromGroup`; web
-  and Android the equivalent. Each client then asserts on the **emitted
+  and Android the equivalent. (History: ADR-0045 moved the rotation to the
+  sweep, and the ADR-0081 second amendment of 2026-10-19 deleted the direct
+  removal and this seam with its tests on all three clients; a rotation now
+  starts only after the roster shrank.) Each client then asserts on the **emitted
   envelope's stamp**, not merely on call order, and each carries a **permanent
   inverted-order companion** that runs the swap and asserts the consequence:
   web `the INVERTED order would stamp the pre-removal epoch and lose the

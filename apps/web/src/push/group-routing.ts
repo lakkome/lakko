@@ -1891,9 +1891,9 @@ export function membershipRotationDecision(args: {
  * the order wrong and the stamp is the pre-removal epoch, which TIES with a
  * stale secret minted at the same epoch — the tie falls to the byte
  * comparison and the rotation may simply lose. The guarantee degrades from
- * "always wins" to "coin flip", silently. Use
- * {@link publishRemoveThenRotate} at the call site, which is where that
- * ordering is pinned by a test.
+ * "always wins" to "coin flip", silently. Since the ADR-0081 amendment
+ * (2026-10-19) every removal is a sweep, and the rotation is started from the
+ * sweep's tail, after the merged commit.
  *
  * The steps, in the one order that works:
  *
@@ -2019,59 +2019,6 @@ export function rotatePushRoutingSecret(
       return "rotated";
     },
   );
-}
-
-/**
- * **C-61 — publish the Remove commit, THEN rotate.** The single call site for
- * this device's own removal path, and the reason that ordering is testable at
- * all rather than being two adjacent statements anyone can reorder.
- *
- * Both halves of what C-61 buys depend on `publishRemove` having RESOLVED
- * before `rotate` is even started:
- *
- *   - **Forward secrecy (ADR-0043).** The rotation envelope is an MLS
- *     application message. Sealed before the Remove commit it is sealed at
- *     the pre-removal epoch, where the evicted member is still a member and
- *     can open it — learning the very secret the rotation exists to deny it.
- *   - **Recency (ADR-0044).** {@link rotatePushRoutingSecret} stamps the new
- *     secret with `group.epoch` read at mint time. After the commit that is
- *     the post-removal epoch, so the rotation strictly out-ranks the secret
- *     it replaces and a stale re-broadcast of that older secret is refused
- *     `reject-stale` by every member. Before the commit it is the PRE-removal
- *     epoch — the same epoch the stale secret carries — so the two TIE, the
- *     tie falls to the 32 secret bytes, and the rotation wins or loses by a
- *     coin flip with no signal either way.
- *
- * ADR-0043 required this ordering but enforced it only structurally, by call-
- * site sequencing, with no test on any client. ADR-0044 promotes it from a
- * property that protects one guarantee to a precondition of two, so it is
- * pinned here — where a test can drive both callbacks and observe which epoch
- * the emitted envelope was stamped at.
- *
- * The rotation is deliberately fire-and-forget: push is best-effort and a
- * rotation failure must never unwind the membership change that triggered it.
- * "Ordered" means the rotation is not STARTED until the removal has landed,
- * not that the caller waits for it.
- *
- * @returns whatever `publishRemove` resolved to, so the caller keeps its
- *          commit id (echo suppression, notices).
- */
-export async function publishRemoveThenRotate<T>(args: {
-  /** Applies + publishes the Remove commit, advancing the local MLS epoch.
-   *  Its rejection propagates — a removal that failed must not rotate. */
-  publishRemove: () => Promise<T>;
-  /** Started ONLY after `publishRemove` resolved. `undefined` skips the
-   *  rotation entirely (no session — nothing to rotate for). */
-  rotate?: (() => Promise<PushRotationOutcome>) | undefined;
-  /** Receives a rotation failure. The removal itself is already durable. */
-  onRotationError?: ((err: unknown) => void) | undefined;
-}): Promise<T> {
-  const result = await args.publishRemove();
-  const rotate = args.rotate;
-  if (rotate !== undefined) {
-    void rotate().catch((err: unknown) => args.onRotationError?.(err));
-  }
-  return result;
 }
 
 /**

@@ -42,10 +42,13 @@ class DeviceGroupRejoinTest {
         listed: Boolean = true,
         policy: Boolean = false,
         nowMs: Long = 1_000_100,
+        proofCovers: Boolean = false,
+        alreadyIn: Boolean = false,
     ) = AdmissionInput(
         knockId = 10, knockAtMs = 1_000_000, keyHex = lost, ownKeyHex = ownKeyHex, roster = roster,
         handled = handled, watchingSinceMs = watchingSinceMs, lastAddedAtMs = lastAddedAtMs, listed = listed,
         policyRequiresAttestation = policy, nowMs = nowMs,
+        selfRemovalProofCovers = proofCovers, keyPackageAlreadyIn = alreadyIn,
     )
 
     @Test
@@ -84,7 +87,18 @@ class DeviceGroupRejoinTest {
     }
 
     @Test
-    fun `under the attested-removal policy a present previous leaf waits for the person`() {
+    fun `under the policy a self-removal proof that covers the replacement admits (ADR-0081 amendment)`() {
+        assertEquals(AdmissionVerdict.ADMIT, admissionVerdict(input(policy = true, proofCovers = true)))
+    }
+
+    @Test
+    fun `a knock whose KeyPackage is already a leaf was answered, whatever the roster's keys say`() {
+        assertEquals(AdmissionVerdict.ALREADY_ADMITTED, admissionVerdict(input(alreadyIn = true)))
+        assertEquals(AdmissionVerdict.ALREADY_ADMITTED, admissionVerdict(input(alreadyIn = true, proofCovers = true)))
+    }
+
+    @Test
+    fun `under the attested-removal policy a present previous leaf without a covering proof waits for the person`() {
         assertEquals(AdmissionVerdict.NEEDS_ATTESTATION, admissionVerdict(input(policy = true)))
         assertEquals(
             AdmissionVerdict.ADMIT,

@@ -51,7 +51,11 @@ export interface PairingCore {
   decodePairingQr(
     bytes: Uint8Array,
     expectedLoginHandle: Uint8Array,
-  ): { readonly keyPackage: Uint8Array; readonly rendezvousPseudonym: Uint8Array };
+  ): {
+    readonly keyPackage: Uint8Array;
+    readonly rendezvousPseudonym: Uint8Array;
+    readonly selfRemovalProof?: Uint8Array | undefined;
+  };
 }
 
 /**
@@ -133,6 +137,10 @@ export interface DecodedPairingQr {
   /** 32-byte rendezvous pseudonym. The DS-mailbox slot the
    *  scanner PUTs the resulting Welcome to. */
   readonly rendezvousPseudonym: Uint8Array;
+  /** ADR-0081 amendment — on a DeviceGroup rejoin knock, the rejoining
+   *  device's self-removal proof (137 bytes, not verified here), else
+   *  `null`. */
+  readonly selfRemovalProof: Uint8Array | null;
 }
 
 /** The screen copy for a codec refusal: the core's messages are stable
@@ -165,7 +173,23 @@ export function parsePairingQrPayloadWith(
   return {
     keyPackage: decoded.keyPackage,
     rendezvousPseudonym: decoded.rendezvousPseudonym,
+    selfRemovalProof: decoded.selfRemovalProof ?? null,
   };
+}
+
+/**
+ * ADR-0081 amendment — a DeviceGroup rejoin knock: the pairing payload plus
+ * this device's self-removal proof (signed with its old leaf key, which is
+ * its device identity's key) for `keyPackage`.
+ */
+export async function buildRejoinKnockPayload(
+  loginHandle: Uint8Array,
+  keyPackage: Uint8Array,
+  rendezvousPseudonym: Uint8Array,
+  selfRemovalProof: Uint8Array,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  return wasm.encodeRejoinKnock(loginHandle, keyPackage, rendezvousPseudonym, selfRemovalProof);
 }
 
 /**

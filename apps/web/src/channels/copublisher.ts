@@ -757,17 +757,16 @@ export async function pollForCoPublishWelcome(
   // Newest first, and a Welcome sealed to a KeyPackage this device no longer
   // holds (or a Welcome for another group) is skipped rather than ending the
   // wait.
-  let group: InstanceType<typeof wasm.Group> | null = null;
+  // ADR-0081 amendment — a PublisherGroup carries no role table, so it joins
+  // through its own entry point: `Group.joinFromWelcome` refuses its Welcome,
+  // and this one refuses a Welcome for any other group (another channel this
+  // identity was invited to, or a chat) before anything is written.
+  const channelId = hexToBytes(channelIdHex);
+  if (channelId === null) throw new Error(`channel id hex is not valid: ${channelIdHex}`);
+  let group: PublisherGroup | null = null;
   for (const welcome of candidates.reverse()) {
     try {
-      const joined = wasm.Group.joinFromWelcome(welcome, identity);
-      // The mailbox is the account's and may hold a Welcome for another
-      // channel this identity was invited to; only this group ends the wait.
-      if (base64Encode(joined.groupId) !== base64Encode(groupId)) {
-        joined.free();
-        continue;
-      }
-      group = joined;
+      group = wasm.PublisherGroup.joinFromWelcome(identity, welcome, groupId, channelId);
       break;
     } catch (err) {
       // eslint-disable-next-line no-console

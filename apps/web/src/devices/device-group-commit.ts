@@ -54,7 +54,15 @@
 
 /** Which DeviceGroup change an entry carries (diagnostics, and what the
  *  caller does after it landed). */
-export type DeviceGroupCommitKind = "add" | "remove" | "policy" | "rejoin-remove" | "rejoin-add";
+export type DeviceGroupCommitKind =
+  | "add"
+  | "remove"
+  | "policy"
+  | "rejoin-remove"
+  | "rejoin-add"
+  /** ADR-0081 amendment — the previous leaf removed and the new one added in
+   *  one commit (the rejoin under the attested-removal policy). */
+  | "rejoin-replace";
 
 /** One DeviceGroup commit in flight. Stored as JSON, encrypted under the
  *  device key (it carries MLS private state). */
@@ -229,7 +237,14 @@ export async function withDeviceGroupCommitLock<T>(
 // Codec
 // ----------------------------------------------------------------------------
 
-const KINDS: readonly DeviceGroupCommitKind[] = ["add", "remove", "policy", "rejoin-remove", "rejoin-add"];
+const KINDS: readonly DeviceGroupCommitKind[] = [
+  "add",
+  "remove",
+  "policy",
+  "rejoin-remove",
+  "rejoin-add",
+  "rejoin-replace",
+];
 
 /** Encode an entry for the store. */
 export function encodeDeviceGroupCommitEntry(entry: DeviceGroupCommitEntry): Uint8Array {

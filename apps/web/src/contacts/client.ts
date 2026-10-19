@@ -158,7 +158,6 @@ import {
   knockToJoin,
   commitWithNextEpoch,
   takeSigner,
-  type ProofSigner,
 } from "../ds/access";
 import { resolveLeafSignatureKey, resolveMemberIdentity } from "../chat/author-identity";
 import type { IncomingChatEvent } from "../chat/client";
@@ -227,18 +226,6 @@ export interface ContactsClientOptions {
    *  reload restores no group and cannot desync: they are outside this bug's
    *  blast radius, mirroring `ChatClient.persistDurableOrThrow`. */
   onPersistWithCommit?: (entry: NewCommitEntry) => Promise<void>;
-  /** ADR-0040 F1 (lakko-security) — reset the in-memory group back to the last
-   *  durable snapshot after a FAIL-CLOSED commit persist-abort. The core
-   *  create-commit eager-merged epoch N -> N+1 in the shared provider BEFORE the
-   *  persist; when the persist throws the op aborts (no publish) but the
-   *  in-memory group is left at the un-published N+1. Wired to
-   *  `ChatApi.resetGroupToDurableSnapshot` (the route layer owns the group cache,
-   *  so the reload/replace is delegated). A throw here is a fail-safe HARD error
-   *  (the reset itself failed — the group may still be poisoned; do not proceed
-   *  as if the abort were clean). When unset (tests / standalone callers with no
-   *  group cache) it is a no-op — such callers persist nothing and hold no cached
-   *  group, so they cannot desync, mirroring `onPersistWithCommit`. */
-  onCommitPersistAbort?: (groupIdB64: string) => Promise<void>;
   /** ADR-0048 §2 — this account's composed profile envelope, carried inside
    *  every outgoing contact request's sealed plaintext so the recipient can
    *  see who is asking before accepting. `null` (or unset) sends none. A throw
@@ -739,9 +726,10 @@ export function randomFromPseudonym(): Uint8Array {
  * UX spec forbids.
  */
 export type MembershipOutcome =
-  /** A direct commit landed. Only reachable in a group with NO role table,
-   *  where ADR-0045's proposal path does not apply — see
-   *  {@link ContactsClient.usesProposalPath}. */
+  /** A direct commit landed. No membership call returns this arm since the
+   *  ADR-0081 amendment of 2026-10-19 removed the direct-commit paths (a group
+   *  with no role table is refused); it is kept so the outcome consumers that
+   *  share it with the sweep's result keep one shape. */
   | {
       readonly kind: "committed";
       readonly commitMessageId: number;
@@ -751,21 +739,18 @@ export type MembershipOutcome =
   | { readonly kind: "proposed"; readonly proposalMessageId: number };
 
 /**
- * ADR-0045 — does this group route membership through proposals?
+ * ADR-0045 — does this group carry an ADR-0022 role table, and therefore a
+ * committer?
  *
- * A group with **no role table** keeps direct commits, unchanged: it has no
- * owner, therefore no rank 0, therefore no committer, and every peer's receipt
- * gate drops proposals in such a group — so the propose path would silently
- * discard everything. ADR-0045 says this explicitly, and `Group::create` has
- * seeded a role table since ADR-0022, so no freshly created group reaches it.
+ * Every membership change is a proposal. A group with **no role table** has
+ * no owner, no rank 0 and no committer, and every peer's receipt gate drops a
+ * proposal in it, so a membership operation on one is refused
+ * ({@link noRoleTableRefusal}). Since the ADR-0081 amendment of 2026-10-19 no
+ * client reaches such a group: `Group::create` has seeded a role table since
+ * ADR-0022, and `Group.joinFromWelcome` refuses a Welcome without one. The
+ * direct-commit path that used to serve it is deleted.
  *
- * This is NOT a dual path in ADR-0045's forbidden sense. The ADR rules out a
- * "legacy direct-commit fallback" — a second, ungated route into a group that
- * *has* moved to proposals. This is the disjoint case: a group with no role
- * table has no gate to bypass, because there is no table to read a role from.
- *
- * A torn read is treated as "no role table", which keeps the direct path
- * working rather than routing into a proposal path whose gate cannot resolve.
+ * A torn read is "no role table", which refuses: fail closed.
  */
 function usesProposalPath(group: WasmGroup): boolean {
   try {
@@ -773,6 +758,27 @@ function usesProposalPath(group: WasmGroup): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * ADR-0081 amendment (2026-10-19) — the refusal a membership operation meets
+ * on a group with no role table: the core's typed `noRoleTable`. The
+ * direct-commit path that used to serve such a group is gone; no client
+ * creates one, and `Group.joinFromWelcome` refuses its Welcome.
+ */
+export function noRoleTableRefusal(op: string): ContactsError {
+  return ContactsError.wrap(
+    Object.assign(new Error(`${op} refused: this group carries no role table, so it has no committer`), {
+      refusalReason: "noRoleTable",
+      refusalDisposition: "doNotRetry",
+    }),
+  );
+}
+
+/** Refuse ({@link noRoleTableRefusal}) unless `group` carries a role table. A
+ *  torn read refuses too: fail closed. */
+function requireRoleTable(group: WasmGroup, op: string): void {
+  if (!usesProposalPath(group)) throw noRoleTableRefusal(op);
 }
 
 /**
@@ -1177,9 +1183,6 @@ export class ContactsClient {
   private readonly onPersistWithCommit:
     | ((entry: NewCommitEntry) => Promise<void>)
     | undefined;
-  private readonly onCommitPersistAbort:
-    | ((groupIdB64: string) => Promise<void>)
-    | undefined;
   private readonly ownProfileEnvelope: (() => Promise<Uint8Array | null>) | undefined;
   private readonly onUsernameResolved:
     | ((signatureKeyB64: string, username: string) => void)
@@ -1194,7 +1197,6 @@ export class ContactsClient {
     this.accountIdentityProvider = options.accountIdentityProvider;
     this.onPersist = options.onPersist;
     this.onPersistWithCommit = options.onPersistWithCommit;
-    this.onCommitPersistAbort = options.onCommitPersistAbort;
     this.ownProfileEnvelope = options.ownProfileEnvelope;
     this.onUsernameResolved = options.onUsernameResolved;
   }
@@ -1357,152 +1359,6 @@ export class ContactsClient {
     }
   }
 
-  /**
-   * ADR-0040 (G-35) — the FAIL-CLOSED persist a commit path runs BEFORE any
-   * publish. Durably records the pending-commit outbox entry (commit + Welcome /
-   * rendezvous bytes) AND the N+1 MLS snapshot in one atomic write; a throw
-   * propagates so the caller ABORTS the publish (no half-applied membership
-   * change leaves the device).
-   *
-   * A no-op resolve when `onPersistWithCommit` is unset — the degenerate
-   * test / standalone path (no reload-from-IDB), outside the desync blast radius,
-   * mirroring `ChatClient.persistDurableOrThrow`.
-   */
-  private async persistCommitOrThrow(entry: NewCommitEntry): Promise<void> {
-    if (this.onPersistWithCommit === undefined) return;
-    await this.onPersistWithCommit(entry);
-  }
-
-  /**
-   * ADR-0040 F1 (lakko-security) — RESET the in-memory group back to the last
-   * durable snapshot (epoch N) after a FAIL-CLOSED commit persist-abort, BEFORE
-   * the abort re-throws.
-   *
-   * The core create-commit eager-merged N -> N+1 in the shared in-memory provider
-   * BEFORE `persistCommitOrThrow`. When that atomic persist THROWS the op aborts
-   * (no publish) and — because the write is atomic — the durable snapshot stays at
-   * N with NO outbox entry. But the in-memory group (and the shared provider) is
-   * left at the un-published N+1. Left alone, a SECOND same-session commit would
-   * build on N+1 and publish commit(N+1 -> N+2) while peers are still at N (they
-   * never saw an N -> N+1 commit) — they drop it as wrong-epoch and the WHOLE
-   * group is permanently stranded ("device-ahead", worse than a single-device
-   * brick). The outbox sweep cannot catch this: a clean atomic abort wrote no
-   * entry, so there is nothing to re-publish. So the abort must be "as if the op
-   * never happened" IN MEMORY too — reload the group from the durable N snapshot
-   * and replace the cached reference, dropping the un-published eager merge.
-   *
-   * The route layer owns the group cache, so the reload/replace is delegated
-   * through `onCommitPersistAbort` (-> `ChatApi.resetGroupToDurableSnapshot`).
-   *
-   * FAIL-SAFE: if the reset itself fails (no durable snapshot for an existing
-   * group — should be impossible on these four created-and-persisted paths), the
-   * in-memory group is STILL poisoned at N+1, which is worse than a clean abort;
-   * surface a HARD, distinct error rather than swallow it. No-op when
-   * `onCommitPersistAbort` is unset (tests / standalone callers hold no cache).
-   */
-  private async resetGroupAfterPersistAbort(group: WasmGroup): Promise<void> {
-    if (this.onCommitPersistAbort === undefined) return;
-    // Read group_id BEFORE the reset — it is epoch-invariant and the old (N+1)
-    // group object is not freed by the reload, so this stays valid.
-    const groupIdB64 = base64Encode(group.groupId);
-    try {
-      await this.onCommitPersistAbort(groupIdB64);
-    } catch (resetErr) {
-      throw ContactsError.wrap(
-        new Error(
-          "ADR-0040 F1: in-memory group reset FAILED after a commit persist-abort; " +
-            "the group may be desynced ahead at an un-published N+1 — reload the app " +
-            `to recover. Cause: ${String(resetErr)}`,
-        ),
-      );
-    }
-  }
-
-  /**
-   * ADR-0081 + ADR-0040 for a DIRECT commit (a group with no role table: a
-   * one-to-one, a legacy group). The commit was STAGED by the caller
-   * (`stageAddMember` / `stageRemoveMember` / `stageSetGroupRoles`), so the
-   * group is still at epoch N holding it as pending. The order is ADR-0040's:
-   *
-   *   1. the entry (commit, Welcome) and the snapshot that carries the staged
-   *      commit are written in ONE atomic write, FAIL-CLOSED: a failure
-   *      abandons the staged commit (per group, nothing else touched) and
-   *      throws, so nothing was sent and the group is at N;
-   *   2. the commit and the N+1 registration go to the DS together
-   *      (`POST .../commit`, the N+1 key from `dsStagedAccessSigner`, proven
-   *      under `signerN`, the key of N);
-   *   3. on 201 / 200 (a re-send the DS recognises) the staged commit is
-   *      merged and the merge persisted, fail-closed: a failed write leaves
-   *      the durable N + staged + entry, which the owed-verdict path re-sends
-   *      (200) and merges;
-   *      on 409 (another commit took the epoch) or a definitive refusal it is
-   *      abandoned, the abandon persisted and the entry dropped;
-   *      on anything else (the network) the entry and the staged commit stay
-   *      for the next pass: `sweepIfCommitter` at the next poll and
-   *      `sweepPendingCommits` at the next open re-send it through
-   *      `resolveOwedVerdict`, which owns an entry with `sweepVerdictPending`.
-   *
-   * There is no point at which this device is ahead of the DS or below its
-   * own commit: the epoch advances only after the DS took the commit, and
-   * the commit is recorded before it is sent.
-   */
-  private async commitStagedDirect(
-    group: WasmGroup,
-    myIdentity: WasmIdentity,
-    signerN: ProofSigner | null,
-    commitBytes: Uint8Array,
-    entry: Omit<NewCommitEntry, "id" | "sweepVerdictPending">,
-  ): Promise<{ readonly entryId: string; readonly commitId: number }> {
-    const entryId = newOutboxEntryId();
-    try {
-      await this.persistCommitOrThrow({ id: entryId, ...entry, sweepVerdictPending: true });
-    } catch (err) {
-      await this.abandonStagedOrReset(group, myIdentity);
-      throw err;
-    }
-    let commitId: number;
-    const staged = takeSigner(() => {
-      const next = group.dsStagedAccessSigner(myIdentity);
-      if (next === undefined) throw new Error("ds: no staged commit to register");
-      return next;
-    });
-    try {
-      commitId = (await commitWithNextEpoch(this.ds, group.groupId, staged, signerN, commitBytes)).id;
-    } catch (err) {
-      if (isCommitConflict(err) || isBackoffRefusal(err)) {
-        // Nothing of this commit is on the DS: abandon it at N.
-        await this.abandonStagedOrReset(group, myIdentity);
-        await this.persistBestEffort();
-        try {
-          await deleteEntry(entryId);
-        } catch (discardErr) {
-          // The owed-verdict path finds nothing staged and drops it.
-          // eslint-disable-next-line no-console
-          console.warn("ContactsClient: lost direct commit entry not discarded", discardErr);
-        }
-      }
-      throw err;
-    } finally {
-      staged?.free();
-    }
-    group.mergeStagedSweep(myIdentity);
-    await this.persistDurableOrThrow();
-    return { entryId, commitId };
-  }
-
-  /** Abandon a staged commit; when the abandon itself fails, reload the
-   *  group from its durable snapshot (ADR-0040 F1) so no un-recorded staged
-   *  commit stays in memory. */
-  private async abandonStagedOrReset(group: WasmGroup, myIdentity: WasmIdentity): Promise<void> {
-    try {
-      group.abandonStagedSweep(myIdentity);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("ContactsClient: abandoning a staged commit failed; resetting the group", err);
-      await this.resetGroupAfterPersistAbort(group);
-    }
-  }
-
   /** ADR-0040 (G-35) — mark an outbox entry acked after BOTH artifacts have
    *  published. Best-effort: a failure here just leaves an acked-worthy entry
    *  un-acked, so the next restart sweep re-publishes it idempotently (peers
@@ -1587,32 +1443,7 @@ export class ContactsClient {
     // A group with no role table has no committer to be, and the core refuses
     // a sweep on it outright. Short-circuit before resolving an identity or
     // loading wasm, so the poll tail costs nothing at all on a legacy group.
-    if (!usesProposalPath(group)) {
-      // ADR-0081 — a table-less group commits directly, and a direct commit
-      // is staged until the DS took it. One whose send did not get an answer
-      // owes a verdict, which is finished here at the tail of every poll (it
-      // freezes the group's membership operations until then).
-      if (!group.hasStagedSweep()) return { kind: "not-committer", rank: undefined };
-      const owedIdentity = await this.resolveIdentity(identity);
-      const owedWasm = await loadWasm();
-      return withGroupMlsLock(base64Encode(group.groupId), async () =>
-        resolveOwedVerdict(
-          sweepPortsFor(
-            owedWasm,
-            owedIdentity,
-            group,
-            cursor,
-            markOwnPublished,
-            this.ds,
-            this.onPersistWithCommit,
-            () => this.persistBestEffort(),
-            () => this.persistDurableOrThrow(),
-            actingCommitter,
-            onSweptEvent,
-          ),
-        ),
-      );
-    }
+    if (!usesProposalPath(group)) return { kind: "not-committer", rank: undefined };
     const myIdentity = await this.resolveIdentity(identity);
     const wasm = await loadWasm();
     return withGroupMlsLock(base64Encode(group.groupId), async () =>
@@ -3584,30 +3415,21 @@ export class ContactsClient {
     //    queues the Welcome state for the recipient.
     const myIdentity = await this.resolveIdentity(identity);
 
-    // SERIALIZED per group (`withGroupMlsLock`) from here to the ack. The
-    // create-commit at step 3 eager-merges N -> N+1, so it MUST be inside: a
-    // concurrent commit region that created its own commit against the same N
-    // would publish on an epoch peers never reach. The KeyPackage fetch above
-    // stays outside — it touches no MLS state and would only lengthen the hold.
+    // SERIALIZED per group (`withGroupMlsLock`): the proposal is built and
+    // published under the same lock the poll's apply half and the sweep take,
+    // so it is never sealed at an epoch a concurrent apply is moving. The
+    // KeyPackage fetch above stays outside — it touches no MLS state and would
+    // only lengthen the hold.
     return withGroupMlsLock(base64Encode(group.groupId), async () => {
-      // ADR-0045 — a group carrying an ADR-0022 role table routes membership
-      // through proposals. The direct path stays for a group with no role
-      // table, which has no committer and whose peers' receipt gates would drop
-      // a proposal outright.
-      //
-      // The core enforces this from the other side too: `add_member` REFUSES
-      // while anything is pending, because every OpenMLS entry point the direct
-      // paths are built on sweeps the whole pending set alongside the one change
-      // it was asked for — an admin asking to add one member would add two, and
-      // route the single Welcome to only one of them.
-      // ADR-0050: one proposal / one commit per device of the person. The
-      // outcome reported is the last device's; every earlier one either
-      // landed or threw.
+      // ADR-0045 — membership goes through proposals; a group with no role
+      // table has no committer and is refused (ADR-0081 amendment of
+      // 2026-10-19), before anything is published.
+      requireRoleTable(group, "add");
+      // ADR-0050: one proposal per device of the person. The outcome reported
+      // is the last device's; every earlier one was published or threw.
       let outcome: MembershipOutcome | null = null;
       for (const dev of devices) {
-        outcome = usesProposalPath(group)
-          ? await this.proposeAddMemberLocked(myIdentity, group, dev.keyPackage)
-          : await this.addMemberToGroupLocked(myIdentity, group, dev.keyPackage);
+        outcome = await this.proposeAddMemberLocked(myIdentity, group, dev.keyPackage);
       }
       // `devices` is non-empty (checked above), so `outcome` is set.
       return outcome as MembershipOutcome;
@@ -3641,8 +3463,7 @@ export class ContactsClient {
    *
    * Every public membership method calls this on its `proposed` outcome, so the
    * user path, the queue-full retry, the device re-admission arm and the
-   * superseded re-request itself all record through one place. A direct commit
-   * records nothing: it either landed or threw. Never throws — a lost record
+   * superseded re-request itself all record through one place. Never throws — a lost record
    * costs the automatic re-request, never the request.
    */
   private noteOwnRequest(
@@ -3807,147 +3628,10 @@ export class ContactsClient {
     return { kind: "proposed", proposalMessageId: publish.id };
   }
 
-  /** The serialized body of {@link addMemberToGroup} — see that method for the
-   *  step numbering. Runs under `withGroupMlsLock`; never call it directly. */
-  private async addMemberToGroupLocked(
-    myIdentity: WasmIdentity,
-    group: WasmGroup,
-    keyPackageBytes: Uint8Array,
-  ): Promise<MembershipOutcome> {
-    // 3. Drive the MLS add. Returns `{ commit, welcome }` — the
-    //    commit is the wire bytes existing members process to
-    //    advance their tree; the welcome is what the new member
-    //    decodes via `joinFromWelcome`.
-    // ADR-0053 — the key of epoch N, the one the commit leaves. ADR-0081 —
-    // the commit is STAGED: the group stays at N until the DS took it.
-    const signerN = takeSigner(() => group.dsAccessSigner(myIdentity));
-    let added;
-    try {
-      added = group.stageAddMember(myIdentity, keyPackageBytes);
-    } catch (err) {
-      signerN?.free();
-      throw ContactsError.wrap(err);
-    }
-    const commitBytes = added.commit;
-    const welcomeBytes = added.welcome;
-
-    // 4+5. ADR-0040 (G-35) + F1 — from just after the eager-merge above through
-    //    the successful atomic persist is ONE fail-closed region. The core
-    //    `addMember` eager-merged epoch N -> N+1 in the in-memory provider, so ANY
-    //    throw before the publish — the Welcome-artifact computation
-    //    (`accountKeyOfKeyPackage`, which CAN throw) OR
-    //    the persist itself — must reset the in-memory group back to the durable N
-    //    snapshot before aborting; otherwise a later same-session commit builds on
-    //    the un-published N+1 and strands the WHOLE group ("device-ahead"). Compute
-    //    the second artifact's EXACT publishable bytes + its mailbox destination
-    //    UP-FRONT (so the outbox entry holds the very bytes the restart sweep
-    //    re-publishes — no drift), then persist the entry (commit + Welcome bytes,
-    //    both artifacts) AND the N+1 snapshot in ONE atomic write, FAIL-CLOSED. A
-    //    throw ABORTS: no publish, group reset to N — on the next launch the device
-    //    is at N with no entry, clean, as if the op never happened. Publish stays
-    //    OUTSIDE this region: a publish failure must NOT reset (the durable entry
-    //    is re-published idempotently by `sweepPendingCommits`).
-    const groupIdBytes = group.groupId;
-    let welcomeAccountKey: Uint8Array;
-    let welcomeLeafKey: Uint8Array;
-    try {
-      // ADR-0060 section 6 (amending ADR-0050 section 2.7): the Welcome is
-      // sealed to THIS leaf's KeyPackage but addressed to the ACCOUNT mailbox
-      // the leaf's binding names — one inbound mailbox per person.
-      welcomeAccountKey = await accountKeyOfKeyPackage(keyPackageBytes);
-      welcomeLeafKey = (await loadWasm()).keyPackageSignatureKey(keyPackageBytes);
-    } catch (err) {
-      signerN?.free();
-      await this.abandonStagedOrReset(group, myIdentity);
-      throw ContactsError.wrap(err);
-    }
-    // 6. ADR-0081 + ADR-0040 — the entry (commit + RAW Welcome, addressed
-    //    by the added leaf's key; ADR-0078: the row is sealed at publish to
-    //    the mailbox key a grant held for that account binds) and the
-    //    snapshot carrying the staged commit are written first; then the
-    //    commit and the N+1 registration reach the DS; then the merge
-    //    (`commitStagedDirect`).
-    let recorded: { readonly entryId: string; readonly commitId: number };
-    try {
-      recorded = await this.commitStagedDirect(group, myIdentity, signerN, commitBytes, {
-        groupId: base64Encode(groupIdBytes),
-        // The epoch the commit was built against (N): it is staged.
-        targetEpoch: group.epoch.toString(),
-        commitB64: base64Encode(commitBytes),
-        secondArtifactB64: base64Encode(welcomeBytes),
-        secondArtifactKind: "welcome",
-        secondArtifactAccountKeyB64: base64Encode(welcomeAccountKey),
-        welcomeMailboxesB64: [base64Encode(welcomeLeafKey)],
-      });
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    } finally {
-      signerN?.free();
-    }
-    const entryId = recorded.entryId;
-    const commitPublish = { id: recorded.commitId };
-    // The verdict is in and merged; only the Welcome is owed. Said durably
-    // before the write so a failure below is retried by
-    // `resolveOwedWelcomes` (best effort: the write runs either way).
-    try {
-      await markWelcomesOwed(entryId, commitPublish.id);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("ContactsClient: owed Welcome not recorded", err);
-    }
-
-    // 7. Publish artifact 2 — the Welcome to the new member's stranger inbox
-    //    (the SAME bytes stored in the outbox entry).
-    //    Rule 6 of ADR-0074 section 3.5a: a refusal re-checks the address
-    //    once; the outbox entry above re-derives the mailbox on a replay.
-    let welcomePublish;
-    try {
-      const wasm = await loadWasm();
-      welcomePublish = await writeToPerson(
-        welcomeAccountKey,
-        { scope: groupIdBytes, allowMember: true },
-        (target, auth) =>
-          this.ds.publishMailbox(target.address, sealRowFor(wasm, target, "welcome", welcomeBytes), auth),
-      );
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-
-    // 8. Both artifacts durable on the wire -> ack (best-effort; a crash here
-    //    just triggers a harmless idempotent re-publish on the next sweep).
-    await this.ackCommitBestEffort(entryId, commitPublish.id, welcomePublish.id);
-
-    return {
-      kind: "committed",
-      commitMessageId: commitPublish.id,
-      welcomeMessageId: welcomePublish.id,
-    };
-  }
-
   /**
-   * Remove a member from an MLS group by leaf index (Phase 1.18h).
-   *
-   * Symmetric to [`addMemberToGroup`] minus the Welcome step —
-   * the kicked member receives nothing direct from us; their
-   * own next `pollMessages` lands the commit they cannot decrypt
-   * (their leaf was removed) which surfaces as a generic
-   * "you're no longer in this group" signal at the application
-   * layer. The Welcome path simply doesn't exist for removes.
-   *
-   * Steps:
-   *   1. Resolve the canonical Identity.
-   *   2. `group.removeMember(identity, leafIndex)` returns the
-   *      wire-encoded commit bytes. The local group state is
-   *      already at the post-remove epoch.
-   *   3. Broadcast the commit via `ds.publishGroup` — every
-   *      remaining member processes it on their next poll and
-   *      advances locally.
-   *   4. `persistBestEffort` snapshots the new state.
-   *
-   * Caller (typically `Chat.tsx`'s "Remove" button per leaf row)
-   * must register the returned `commitMessageId` with
-   * `ChatClient.markOwnPublishedCommit` to suppress the echo —
-   * same rationale as `addMemberToGroup`.
+   * Remove a member (every leaf of the person) from an existing group: one
+   * Remove proposal per leaf (ADR-0045). A group with no role table is refused
+   * (ADR-0081 amendment of 2026-10-19).
    */
   async removeMemberFromGroup(
     identity: IdentitySecrets | null,
@@ -3956,9 +3640,11 @@ export class ContactsClient {
   ): Promise<MembershipOutcome> {
     const myIdentity = await this.resolveIdentity(identity);
 
-    // SERIALIZED per group — the create-commit below eager-merges N -> N+1, so
-    // it must run against the epoch the predecessor region actually published.
+    // SERIALIZED per group, like every membership proposal.
     return withGroupMlsLock(base64Encode(group.groupId), async () => {
+      // ADR-0081 amendment (2026-10-19) — no role table, no committer: refused
+      // before anything is read or published.
+      requireRoleTable(group, "remove");
       // ADR-0050 — removing a member removes the PERSON: every leaf of the
       // account the named leaf belongs to. Leaving (naming one's own leaf)
       // therefore leaves from every device at once.
@@ -3967,13 +3653,10 @@ export class ContactsClient {
       // the roster: the person's account key (or the legacy leaf key), never
       // the leaf index, which OpenMLS reuses for the next member added.
       const subjectKeyB64 = personKeyAtLeaf(group, leafIndex);
-      // ADR-0045 — proposal path for a role-table group; the direct commit
-      // survives only where there is no role table and therefore no committer.
+      // ADR-0045 — one Remove proposal per leaf.
       let outcome: MembershipOutcome | null = null;
       for (const leaf of leaves) {
-        outcome = usesProposalPath(group)
-          ? await this.proposeRemoveMemberLocked(myIdentity, group, leaf)
-          : await this.removeMemberFromGroupLocked(myIdentity, group, leaf);
+        outcome = await this.proposeRemoveMemberLocked(myIdentity, group, leaf);
       }
       if (outcome?.kind === "proposed" && subjectKeyB64 !== null) {
         let own: string | null = null;
@@ -3999,10 +3682,9 @@ export class ContactsClient {
    * account or of an account already in the group, no role needed.
    *
    * Resolves `null` when a leaf with that signature key is already in the
-   * roster — nothing to do, not an error. Otherwise the ADR-0045 split:
-   * a role-table group gets a proposal (swept by the caller; see
-   * `BackgroundReceiveApi.admitDevice`), a table-less group a direct commit
-   * with its Welcome sent to the device's own mailbox.
+   * roster — nothing to do, not an error. Otherwise a proposal (ADR-0045),
+   * swept by the caller (see `BackgroundReceiveApi.admitDevice`); a group with
+   * no role table is refused (ADR-0081 amendment of 2026-10-19).
    */
   async admitDeviceToGroup(
     identity: IdentitySecrets | null,
@@ -4064,9 +3746,8 @@ export class ContactsClient {
       // Re-checked under the lock: a poll may have applied the very commit
       // that admitted this device while we waited.
       if (leafIndexOfSignatureKey(group, deviceKey) !== null) return null;
-      const outcome = usesProposalPath(group)
-        ? await this.proposeAddMemberLocked(myIdentity, group, keyPackage)
-        : await this.addMemberToGroupLocked(myIdentity, group, keyPackage);
+      requireRoleTable(group, "add");
+      const outcome = await this.proposeAddMemberLocked(myIdentity, group, keyPackage);
       if (outcome.kind === "proposed" && accountId !== undefined) {
         this.noteOwnRequest(identity, group, {
           kind: "admit-device",
@@ -4138,9 +3819,8 @@ export class ContactsClient {
     return withGroupMlsLock(base64Encode(group.groupId), async () => {
       const leaf = leafIndexOfSignatureKey(group, deviceKey);
       if (leaf === null) return null;
-      const outcome = usesProposalPath(group)
-        ? await this.proposeRemoveMemberLocked(myIdentity, group, leaf)
-        : await this.removeMemberFromGroupLocked(myIdentity, group, leaf);
+      requireRoleTable(group, "remove");
+      const outcome = await this.proposeRemoveMemberLocked(myIdentity, group, leaf);
       if (outcome.kind === "proposed") {
         this.noteOwnRequest(identity, group, {
           kind: "retire-device",
@@ -4188,56 +3868,11 @@ export class ContactsClient {
     return { kind: "proposed", proposalMessageId: publish.id };
   }
 
-  /** The serialized body of {@link removeMemberFromGroup}. Runs under
-   *  `withGroupMlsLock`; never call it directly. */
-  private async removeMemberFromGroupLocked(
-    myIdentity: WasmIdentity,
-    group: WasmGroup,
-    leafIndex: number,
-  ): Promise<MembershipOutcome> {
-    // ADR-0053 — the key of epoch N, the one the commit leaves. ADR-0081 —
-    // the commit is STAGED: the group stays at N until the DS took it.
-    const signerN = takeSigner(() => group.dsAccessSigner(myIdentity));
-    let commitBytes: Uint8Array;
-    try {
-      commitBytes = group.stageRemoveMember(myIdentity, leafIndex);
-    } catch (err) {
-      signerN?.free();
-      throw ContactsError.wrap(err);
-    }
-    // ADR-0081 + ADR-0040 — record (entry + snapshot with the staged commit),
-    // then send, then merge (`commitStagedDirect`). A remove has no Welcome.
-    const groupIdBytes = group.groupId;
-    let recorded: { readonly entryId: string; readonly commitId: number };
-    try {
-      recorded = await this.commitStagedDirect(group, myIdentity, signerN, commitBytes, {
-        groupId: base64Encode(groupIdBytes),
-        targetEpoch: group.epoch.toString(),
-        commitB64: base64Encode(commitBytes),
-      });
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    } finally {
-      signerN?.free();
-    }
-    const commitPublish = { id: recorded.commitId };
-
-    await this.ackCommitBestEffort(recorded.entryId, commitPublish.id);
-
-    return {
-      kind: "committed",
-      commitMessageId: commitPublish.id,
-      welcomeMessageId: undefined,
-    };
-  }
-
   /** ADR-0022 — promote / demote a member as an admin (owner only). Reads the
    *  group's current role table, adds or removes `memberSigPubkey` from the
-   *  admin set, and produces + publishes the `setGroupRoles`
-   *  GroupContextExtensions commit. Peers accept it only because the committer
-   *  is the owner (the gate enforces that), so the caller must already be the
-   *  owner — the UI shows the toggle only then. The caller registers the
-   *  returned `commitMessageId` with `ChatClient.markOwnPublishedCommit`. */
+   *  admin set, and publishes it as a role-change PROPOSAL (ADR-0045); the
+   *  owner's sweep commits it. A group with no role table is refused (ADR-0081
+   *  amendment of 2026-10-19). */
   async setMemberAdmin(
     identity: IdentitySecrets | null,
     group: WasmGroup,
@@ -4281,8 +3916,7 @@ export class ContactsClient {
   }
 
   /** Read the group's current role table and return the admin set with
-   *  `memberSigPubkey` added or removed. Shared by the direct and the proposal
-   *  path so the two can never compute a different table. */
+   *  `memberSigPubkey` added or removed. */
   private nextAdminSet(
     group: WasmGroup,
     memberSigPubkey: Uint8Array,
@@ -4290,7 +3924,7 @@ export class ContactsClient {
   ): { owner: Uint8Array; adminsFlat: Uint8Array } {
     const owner = group.roleTableOwner();
     if (owner === undefined) {
-      throw ContactsError.wrap(new Error("group has no role table"));
+      throw noRoleTableRefusal("role change");
     }
     const flat = group.roleTableAdmins();
     const eq = (a: Uint8Array, b: Uint8Array): boolean =>
@@ -4320,92 +3954,54 @@ export class ContactsClient {
       makeAdmin,
     );
 
-    // ADR-0045 — a role change in a role-table group is a PROPOSAL. Note the
-    // asymmetry with add / remove is only apparent: reaching this method at all
-    // means the group HAS a role table (`nextAdminSet` refuses without one), so
-    // the direct arm below is unreachable in practice and is kept only because
-    // the local role read is what proves it.
-    if (usesProposalPath(group)) {
-      // A SECOND role change while one is pending is refused, and this is a
-      // real consequence of the proposal path rather than caution.
-      //
-      // A role change is a read-modify-write over the role table, and on the
-      // direct path the per-group lock was enough: the first toggle's commit
-      // updated the table, so the second read it and composed. A PROPOSAL
-      // changes nothing until it is swept, so two toggles taken a moment apart
-      // both read the SAME committed table and each proposes a table carrying
-      // only its own change. RFC 9420 permits at most one
-      // `GroupContextExtensions` proposal per commit, so the sweep keeps one
-      // and silently discards the other — the first promotion would vanish with
-      // no error anywhere. Serializing cannot fix that, because there is
-      // nothing for the second read to observe.
-      //
-      // Recomputing from "the committed table as amended by our own pending
-      // proposal" is not available either: `ProposalKind::RoleChange` carries
-      // no payload (the core's `classify` discards the extensions), so a client
-      // cannot read back what it proposed.
-      //
-      // So the honest answer is to refuse, and say so. The window is one sweep
-      // — the owner is rank 0 and sweeps immediately — so this is momentary in
-      // the ordinary case and a real, visible wait only when the committer is
-      // absent, which is precisely when a silent loss would be worst.
-      if (hasPendingRoleChange(group)) {
-        throw ContactsError.wrap(new KeyedError(ROLE_CHANGE_ALREADY_PENDING_KEY));
-      }
-      let proposalBytes: Uint8Array;
-      try {
-        proposalBytes = group.proposeGroupRoles(myIdentity, owner, adminsFlat);
-      } catch (err) {
-        throw ContactsError.wrap(err);
-      }
-      // A refused persist publishes nothing: the proposal lives in this
-      // device's pending store, and one on the wire that the device did not
-      // record (its account wiped, the session gone, a disk failure) is a
-      // request this device can no longer account for.
-      await this.persistProposalOrThrow();
-      let publish;
-      try {
-        publish = await this.ds.publishGroup(group.groupId, proposalBytes);
-      } catch (err) {
-        throw ContactsError.wrap(err);
-      }
-      return { kind: "proposed", proposalMessageId: publish.id };
+    // ADR-0045 — a role change is a PROPOSAL. Reaching this point means the
+    // group HAS a role table (`nextAdminSet` refuses without one); ADR-0081
+    // amendment: there is no direct arm any more.
+    requireRoleTable(group, "role change");
+    // A SECOND role change while one is pending is refused, and this is a
+    // real consequence of the proposal path rather than caution.
+    //
+    // A role change is a read-modify-write over the role table, and on the
+    // former direct path the per-group lock was enough: the first toggle's
+    // commit updated the table, so the second read it and composed. A PROPOSAL
+    // changes nothing until it is swept, so two toggles taken a moment apart
+    // both read the SAME committed table and each proposes a table carrying
+    // only its own change. RFC 9420 permits at most one
+    // `GroupContextExtensions` proposal per commit, so the sweep keeps one
+    // and silently discards the other — the first promotion would vanish with
+    // no error anywhere. Serializing cannot fix that, because there is
+    // nothing for the second read to observe.
+    //
+    // Recomputing from "the committed table as amended by our own pending
+    // proposal" is not available either: `ProposalKind::RoleChange` carries
+    // no payload (the core's `classify` discards the extensions), so a client
+    // cannot read back what it proposed.
+    //
+    // So the honest answer is to refuse, and say so. The window is one sweep
+    // — the owner is rank 0 and sweeps immediately — so this is momentary in
+    // the ordinary case and a real, visible wait only when the committer is
+    // absent, which is precisely when a silent loss would be worst.
+    if (hasPendingRoleChange(group)) {
+      throw ContactsError.wrap(new KeyedError(ROLE_CHANGE_ALREADY_PENDING_KEY));
     }
-
-    // ADR-0053 — the key of epoch N, the one the commit leaves. ADR-0081 —
-    // the commit is STAGED: the group stays at N until the DS took it.
-    const signerN = takeSigner(() => group.dsAccessSigner(myIdentity));
-    let commitBytes: Uint8Array;
+    let proposalBytes: Uint8Array;
     try {
-      commitBytes = group.stageSetGroupRoles(myIdentity, owner, adminsFlat);
-    } catch (err) {
-      signerN?.free();
-      throw ContactsError.wrap(err);
-    }
-    // ADR-0081 + ADR-0040 — record (entry + snapshot with the staged commit),
-    // then send, then merge (`commitStagedDirect`). No Welcome.
-    const groupIdBytes = group.groupId;
-    let recorded: { readonly entryId: string; readonly commitId: number };
-    try {
-      recorded = await this.commitStagedDirect(group, myIdentity, signerN, commitBytes, {
-        groupId: base64Encode(groupIdBytes),
-        targetEpoch: group.epoch.toString(),
-        commitB64: base64Encode(commitBytes),
-      });
+      proposalBytes = group.proposeGroupRoles(myIdentity, owner, adminsFlat);
     } catch (err) {
       throw ContactsError.wrap(err);
-    } finally {
-      signerN?.free();
     }
-    const commitPublish = { id: recorded.commitId };
-
-    await this.ackCommitBestEffort(recorded.entryId, commitPublish.id);
-
-    return {
-      kind: "committed",
-      commitMessageId: commitPublish.id,
-      welcomeMessageId: undefined,
-    };
+    // A refused persist publishes nothing: the proposal lives in this
+    // device's pending store, and one on the wire that the device did not
+    // record (its account wiped, the session gone, a disk failure) is a
+    // request this device can no longer account for.
+    await this.persistProposalOrThrow();
+    let publish;
+    try {
+      publish = await this.ds.publishGroup(group.groupId, proposalBytes);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    return { kind: "proposed", proposalMessageId: publish.id };
   }
 
   /**

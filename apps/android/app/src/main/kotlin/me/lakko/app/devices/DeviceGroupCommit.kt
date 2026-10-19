@@ -94,6 +94,9 @@ public data class DeviceGroupCommitEntry(
         @SerialName("policy") POLICY,
         @SerialName("rejoin-remove") REJOIN_REMOVE,
         @SerialName("rejoin-add") REJOIN_ADD,
+        /** ADR-0081 amendment — the previous leaf removed and the new one
+         *  added in one commit (the rejoin under the attested-removal policy). */
+        @SerialName("rejoin-replace") REJOIN_REPLACE,
     }
 
     /** The epoch as a number, `null` when the stored text is not one. */

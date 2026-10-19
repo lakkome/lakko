@@ -3,15 +3,20 @@
 
 /**
  * G-38 residual 1, the LOCAL sub-case — `ChatClient.pollMessages` applies a
- * batch under the same per-group MLS lock the four `ContactsClient`
- * create-commit regions take.
+ * batch under the same per-group MLS lock the `ContactsClient` membership
+ * calls take.
  *
  * The hazard is the ADR-0040 one seen from the receive side.
  * `processIncomingVerifyingRoles` mutates the SAME in-memory OpenMLS provider
- * the create-commit paths eager-merge into, so a poll applying a batch while a
- * local commit is parked in its publish interleaves two writers on one group's
- * state. `contacts/commit-lock.test.ts` pins the commit-vs-commit half; this
- * file pins the poll-vs-commit half and the cursor race that comes with it.
+ * a membership call writes its proposal into, so a poll applying a batch while
+ * a local membership request is parked in its publish interleaves two writers
+ * on one group's state. This file pins the poll-vs-membership half and the
+ * cursor race that comes with it.
+ *
+ * ADR-0081 amendment (2026-10-19): the membership call these tests park used
+ * to be a direct commit (an eager merge N -> N+1 before its publish). Those
+ * paths are gone; a membership change is now always a proposal, which advances
+ * no epoch, so the doubles below propose and the epochs only move on apply.
  *
  * ## Scope — what these do NOT claim
  *
@@ -32,7 +37,8 @@
  * the way.
  *
  * ## Which of these actually discriminate (measured by running the break, and
- * quoted verbatim — not predicted)
+ * quoted verbatim — not predicted; measured against the former direct-commit
+ * path, before the ADR-0081 amendment, and not re-measured since)
  *
  * Neutering `withGroupMlsLock` to a bare `return task()`:
  *   - "does not apply while a commit on the SAME group is parked in its publish"
@@ -112,12 +118,12 @@ async function within<T>(ms: number, p: Promise<T>, what: string): Promise<T> {
 }
 
 /**
- * A stand-in for an MLS group that mutates on BOTH sides of the hazard: its
- * remove-commit eager-merges N -> N+1 exactly as the real core does inside
- * `removeMember`, and its `processIncomingVerifyingRoles` advances the epoch
- * exactly as applying a real commit does. The live epoch is observable, so a
- * test can count how many writers have run at a given moment — which is
- * precisely what the lock controls.
+ * A stand-in for a role-table MLS group that is written on BOTH sides of the
+ * hazard: a removal writes a Remove proposal into the provider (it advances no
+ * epoch, as in the real core), and `processIncomingVerifyingRoles` advances
+ * the epoch exactly as applying a real commit does. The order log and the live
+ * epoch are observable, so a test can see which writers have run at a given
+ * moment — which is precisely what the lock controls.
  */
 function statefulGroup(
   groupId: Uint8Array,
@@ -134,9 +140,11 @@ function statefulGroup(
       return epoch;
     },
     dsAccessSigner: fakeAccessSigner(() => epoch),
-    removeMember: vi.fn((_id: unknown, leaf: number) => {
-      epoch += 1n; // the eager merge
-      order.push(`create:${label}${leaf}`);
+    roleTableOwner: vi.fn(() => new Uint8Array(32).fill(1)),
+    roleTableAdmins: vi.fn(() => new Uint8Array(0)),
+    pendingProposals: vi.fn(() => []),
+    proposeRemoveMember: vi.fn((_id: unknown, leaf: number) => {
+      order.push(`propose:${label}${leaf}`);
       return new Uint8Array([1, 2, 3]);
     }),
     processIncomingVerifyingRoles: vi.fn((_id: unknown, payload: Uint8Array) => {
@@ -183,7 +191,7 @@ function freshGid(): Uint8Array {
 
 describe("G-38 — the poll's apply half is serialized against commits", () => {
 
-  it("does not apply while a commit on the SAME group is parked in its publish", async () => {
+  it("does not apply while a membership request on the SAME group is parked in its publish", async () => {
     const order: string[] = [];
     const g = statefulGroup(freshGid(), 5n, order, "g");
     const publishGate = deferred<void>();
@@ -218,38 +226,29 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
 
     await settle();
 
-    // THE load-bearing assertion. The commit's eager merge has run and it is
-    // parked in `publish`; the poll has FETCHED (the network half is outside
-    // the lock, deliberately) but has applied NOTHING.
-    // `fetch` lands before `publish`: the commit awaits its ADR-0053 epoch
-    // registration and its persist first, and the poll's network half is
-    // outside the lock so it proceeds meanwhile — which is the split working
-    // as designed. (Since ADR-0053 the registration's await lets the fetch in
-    // ahead of the persist too; where exactly it lands is not what this test
-    // is about.)
-    // ADR-0081: the staged commit is recorded, then sent (registration +
-    // row); where the poll's fetch lands among them is not what this test is
-    // about.
-    expect(order.filter((o) => o !== "fetch")).toEqual(["create:g1", "persist", "publish"]);
+    // THE load-bearing assertion. The proposal is written and parked in
+    // `publish`; the poll has FETCHED (the network half is outside the lock,
+    // deliberately) but has applied NOTHING. Where the poll's fetch lands
+    // relative to the proposal is not what this test is about.
+    expect(order.filter((o) => o !== "fetch")).toEqual(["propose:g1", "publish"]);
     expect(order).toContain("fetch");
-    expect(g.epoch()).toBe(6n);
+    expect(g.epoch()).toBe(5n);
     expect(g.group.processIncomingVerifyingRoles).not.toHaveBeenCalled();
 
     publishGate.resolve();
     await commit;
     const result = await within(1000, poll, "poll queued behind a commit");
 
-    // The apply ran only after the commit's publish returned.
+    // The apply ran only after the proposal's publish returned.
     expect(order.filter((o) => o !== "fetch")).toEqual([
-      "create:g1",
-      "persist",
+      "propose:g1",
       "publish",
       "apply:g#1",
       "apply:g#2",
       "apply:g#3",
     ]);
     expect(order.indexOf("fetch")).toBeLessThan(order.indexOf("apply:g#1"));
-    expect(g.epoch()).toBe(9n);
+    expect(g.epoch()).toBe(8n);
     expect(result.outcome).toBe("applied");
     expect(result.events).toHaveLength(3);
   });
@@ -443,7 +442,7 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     expect(order).toEqual(["apply:g#1", "apply:g#2"]);
   });
 
-  it("the `void refresh()` tail of a commit handler QUEUES, it does not deadlock", async () => {
+  it("the `void refresh()` tail of a membership handler QUEUES, it does not deadlock", async () => {
     const order: string[] = [];
     const g = statefulGroup(freshGid(), 5n, order, "g");
 
@@ -475,6 +474,6 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     poll = chat.pollMessages(null, g.group, 0);
 
     await within(1000, poll, "void refresh() after a commit");
-    expect(order).toEqual(["create:g1", "publish", "apply:g#1"]);
+    expect(order).toEqual(["propose:g1", "publish", "apply:g#1"]);
   });
 });

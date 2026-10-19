@@ -244,10 +244,10 @@ public final class ChatRepository: ObservableObject {
     /// ``withCommitLock(groupIdHex:_:)`` because their hazard spans an
     /// `await`, which `@MainActor` does not cover.
     ///
-    /// A record is REPLACED (not mutated) by
-    /// ``resetGroupToDurableSnapshot(groupIdHex:)``, so any code that waits
-    /// on an `await` must re-read this map afterwards rather than hold the
-    /// `GroupRecord` it captured before the wait.
+    /// A record can be REPLACED (not mutated) or evicted by another task while
+    /// a caller waits, so any code that waits on an `await` must re-read this
+    /// map afterwards rather than hold the `GroupRecord` it captured before the
+    /// wait.
     var groups: [String: GroupRecord] = [:]
 
     /// ADR-0073 R.5 — the conversation lineage: which group continues which
@@ -2513,10 +2513,9 @@ public final class ChatRepository: ObservableObject {
 
     /// ADR-0045 UX §6.2.3 — record that this device asked to leave.
     ///
-    /// Called from the leave action at PUBLISH time, on both outcomes: a legacy
-    /// group with no role table takes the direct-commit path and evicts us in
-    /// the same call, so writing only on the `proposed` arm would lose exactly
-    /// the case that reaches the terminal state fastest. First-wins.
+    /// Called from the leave action at PUBLISH time, whatever the outcome
+    /// (since the ADR-0081 amendment of 2026-10-19 a leave is always a
+    /// proposal; a group with no role table is refused). First-wins.
     public func noteLeaveRequested(groupIdHex: String) {
         guard let accountIdB64 = currentAccountIdB64,
               let record = groups[groupIdHex] else { return }
@@ -2626,13 +2625,10 @@ public final class ChatRepository: ObservableObject {
         memberSignaturePubkey: Data,
         makeAdmin: Bool
     ) async throws -> MembershipOutcome {
-        // ADR-0040 (G-35) — serialize the whole eager-merge-through-publish
-        // region against every other membership commit on this group.
+        // Serialized against every other membership operation on this group.
         try await withCommitLock(groupIdHex: groupIdHex) { [self] in
-            // ADR-0045 — a role change in a role-table group is a PROPOSAL.
-            // The direct commit below is unreachable for a role change (the
-            // locked body already refuses a group with no table), so this is
-            // not a fallback — it is the only route.
+            // ADR-0045 — a role change is a PROPOSAL; a group with no role
+            // table is refused (ADR-0081 amendment of 2026-10-19).
             // UX §6, seventh row — the ONE string, defined once in
             // `OwnershipTransfer.swift` and used by both C-65 pre-checks. This
             // used to throw its own near-variant prose, which is precisely the
@@ -2978,8 +2974,8 @@ public final class ChatRepository: ObservableObject {
         devicesOfExpectedPerson(devices, expectedKey: expectedKey, keyPackageOf: { $0.keyPackage })
     }
 
-    /// One device's Add: a proposal on a role-table group, a direct commit
-    /// otherwise. Serialized on the group's commit chain.
+    /// One device's Add: a proposal (a group with no role table is refused).
+    /// Serialized on the group's commit chain.
     private func addOneDeviceToGroup(
         groupIdHex: String,
         keyPackageBytes: Data
@@ -2987,199 +2983,15 @@ public final class ChatRepository: ObservableObject {
         // ADR-0040 (G-35) — serialize the whole eager-merge-through-publish
         // region against every other membership commit on this group.
         return try await withCommitLock(groupIdHex: groupIdHex) { [self] in
-            // ADR-0045 — a group carrying an ADR-0022 role table routes
-            // membership through proposals. The direct path stays for a group
-            // with no role table, which has no committer and whose peers'
-            // receipt gates would drop a proposal outright.
-            //
-            // The core enforces this from the other side too: `add_member`
-            // REFUSES while anything is pending, because every OpenMLS entry
-            // point the direct paths are built on sweeps the whole pending set
-            // alongside the one change it was asked for — an admin asking to
-            // add one member would add two, and route the single Welcome to
-            // only one of them.
-            if usesProposalPath(groupIdHex: groupIdHex) {
-                return try await proposeAddMemberLocked(
-                    groupIdHex: groupIdHex,
-                    keyPackageBytes: keyPackageBytes
-                )
-            }
-            return .committed(
-                commitMessageId: try await addMemberToGroupLocked(
-                    groupIdHex: groupIdHex,
-                    keyPackageBytes: keyPackageBytes
-                ),
-                welcomeMessageId: nil
+            // ADR-0045 — membership goes through proposals. ADR-0081
+            // amendment (2026-10-19): the direct-commit path for a group with
+            // no role table is gone; such a group is refused, fail closed.
+            try requireRoleTable(groupIdHex: groupIdHex, op: "add")
+            return try await proposeAddMemberLocked(
+                groupIdHex: groupIdHex,
+                keyPackageBytes: keyPackageBytes
             )
         }
-    }
-
-    /// The ``addMemberToGroup(groupIdHex:recipientAccountId:recipientSignaturePubkey:)``
-    /// critical section. Runs only under ``withCommitLock(groupIdHex:_:)`` and
-    /// re-reads `canonicalIdentity` + `groups` itself — a predecessor may have
-    /// replaced or evicted the record while this section was queued.
-    private func addMemberToGroupLocked(
-        groupIdHex: String,
-        keyPackageBytes: Data
-    ) async throws -> Int64 {
-        guard let identity = canonicalIdentity else {
-            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
-        }
-        guard let record = groups[groupIdHex] else {
-            throw ChatError.argument("no live Group handle for \(groupIdHex)")
-        }
-
-        struct Prepared {
-            let entryId: String
-            let commit: Data
-            let welcomeEnvelope: Data
-            let recipientPseudonym: Data
-        }
-
-        // ADR-0081 over ADR-0040: the commit is STAGED (the group stays at
-        // N), the Welcome's address computed, the ADR-0040 entry and the
-        // snapshot carrying the staged commit written FAIL-CLOSED, and only
-        // then do the commit row and the N+1 key reach the DS in ONE request
-        // (proven under N). The merge follows the DS's answer; a lost commit
-        // is abandoned; an unanswered one stays recorded and staged for the
-        // owed-verdict path (see `DirectCommitSteps`).
-        // ADR-0057, live walk 2026-09-29 — the owner's claim on open precedes
-        // the registration, taken here while the group is still at N.
-        // Checked after every wait in this region (``requireCommitRegion(_:)``).
-        let bound = binding.capture()
-        await ensureOwnerClaimOnOpen(groupIdHex: groupIdHex)
-        try requireCommitRegion(bound)
-        let commitPublish: DsCommitAnswer = try await DirectCommitSteps(
-            currentSigner: { try record.group.dsAccessSigner(identity: identity) },
-            create: { () throws -> AddMember in
-                do {
-                    return try record.group.stageAddMemberFromWire(
-                        identity: identity,
-                        keyPackage: keyPackageBytes
-                    )
-                } catch {
-                    throw ChatError.wrapped("stageAddMemberFromWire failed", underlying: error)
-                }
-            },
-            prepare: { [self] addResult in
-                try requireCommitRegion(bound)
-                // Compute the second artifact (the Welcome) + its mailbox
-                // destination BEFORE the commit is sent, so a member with no
-                // reachable mailbox is refused while nothing is on the DS, and
-                // the outbox entry holds the EXACT bytes the restart sweep
-                // would deliver.
-                let welcomeEnvelope = addResult.welcome
-                let recipientPseudonym: Data
-                do {
-                    // ADR-0060 section 6 (amending ADR-0050 2.7) — the Welcome
-                    // is addressed to the ACCOUNT mailbox of the leaf's owner,
-                    // resolved through the leaf's device binding.
-                    // ADR-0074 section 3.5a rule 1 — the binding names the key
-                    // the leaf was bound under, which a proven rotation left
-                    // behind: the mailbox is the CURRENT key's.
-                    // ADR-0078 — the mailbox is the verified one a grant held
-                    // for that person names; with none, nothing is committed.
-                    let accountKey = try keyPackageAccountKey(keyPackage: keyPackageBytes)
-                        ?? keyPackageSignatureKey(keyPackage: keyPackageBytes)
-                    guard let target = ReachCenter.shared.writePlan(toAccountKey: accountKey)?.target else {
-                        throw MailboxUnknown()
-                    }
-                    recipientPseudonym = target.address
-                } catch {
-                    throw ChatError.wrapped("no verified mailbox for the added member", underlying: error)
-                }
-                return Prepared(
-                    entryId: newOutboxEntryId(),
-                    commit: addResult.commit,
-                    welcomeEnvelope: welcomeEnvelope,
-                    recipientPseudonym: recipientPseudonym)
-            },
-            // The ADR-0040 entry (commit + Welcome + its address) and the
-            // snapshot carrying the staged commit, FAIL-CLOSED, before
-            // anything is sent. `sweepVerdictPending` hands an unanswered
-            // commit to `resolveOwedVerdict`.
-            record: { [self] prepared in
-                try requireCommitRegion(bound)
-                try persistCommitEntryThenSnapshotOrThrow(
-                    NewCommitEntry(
-                        id: prepared.entryId,
-                        groupId: base64Encode(record.groupId),
-                        // The epoch the staged commit was built against (N).
-                        targetEpoch: String(try record.group.epoch()),
-                        commitB64: base64Encode(prepared.commit),
-                        secondArtifactB64: base64Encode(prepared.welcomeEnvelope),
-                        secondArtifactKind: .welcome,
-                        secondArtifactMailboxB64: base64Encode(prepared.recipientPseudonym),
-                        sweepVerdictPending: true,
-                        welcomeMailboxesB64: [base64Encode(prepared.recipientPseudonym)]
-                    )
-                )
-            },
-            stagedSigner: { [self] in try stagedDsSigner(record: record, identity: identity) },
-            // ADR-0081 decision 1 — the commit row and the N+1 registration in
-            // one request, proven under N.
-            commit: { [self] prepared, next, proof in
-                try requireCommitRegion(bound)
-                do {
-                    return try await commitNextEpoch(
-                        record: record, groupIdHex: groupIdHex, next: next, proof: proof,
-                        row: prepared.commit)
-                } catch {
-                    throw ChatError.wrapped("DS commit (add-member) failed", underlying: error)
-                }
-            },
-            merge: { [self] prepared, answer in
-                try mergeStagedDirectCommit(
-                    record: record, groupIdHex: groupIdHex, identity: identity,
-                    entryId: prepared.entryId, answer: answer, welcomeOwed: true, bound: bound)
-            },
-            abandon: { [self] in
-                guard bound.isCurrent else { return }
-                try abandonStagedDirectCommit(record: record, identity: identity)
-            },
-            discard: { [self] prepared in
-                discardCommitEntry(entryId: prepared.entryId, bound: bound)
-            },
-            publish: { [self] prepared, answer in
-                // Artifact 2 — the Welcome to the new member's mailbox (the
-                // SAME bytes stored in the outbox entry), signed with the grant
-                // that reaches them (ADR-0060). A failure leaves the entry
-                // un-acked; the restart sweep delivers it.
-                let welcomePublish: PublishResult
-                do {
-                    welcomePublish = try await publishWelcomeRecheckingOnce(
-                        recorded: prepared.recipientPseudonym,
-                        payload: prepared.welcomeEnvelope, groupIdHex: groupIdHex)
-                } catch {
-                    throw ChatError.wrapped("DS publishMailbox (Welcome) failed", underlying: error)
-                }
-                try requireCommitRegion(bound)
-                ackCommitBestEffort(
-                    entryId: prepared.entryId,
-                    commitMessageId: answer.id,
-                    secondMessageId: welcomePublish.id
-                )
-                return answer
-            }
-        ).run()
-        try requireCommitRegion(bound)
-
-        state = state.with(threads: buildThreadList())
-        // ADR-0042 — re-broadcast the CURRENT push-routing secret so the
-        // newly-added member learns it on their next poll (no-op if this
-        // device holds no secret; idempotent for existing members). Runs
-        // AFTER the add commit so the new member is already in the group.
-        // Fire-and-forget; failures retry on the next add / launch sweep.
-        redistributePushRoutingSecret(groupIdHex: groupIdHex)
-        // ADR-0048 §2 — the newcomer cannot read the epochs in which anyone's
-        // profile was published. Only SCHEDULES (the send takes this chain
-        // later), so the lock held here is never awaited against itself.
-        profilePublisher.noteGrowth(groupIdHex: groupIdHex)
-        // ADR-0051 §3 — same for the group name. Only schedules.
-        groupNamePublisher.noteGrowth(groupIdHex: groupIdHex)
-        // ADR-0052 decision 3 — and for the shared pins. Only schedules.
-        pinPublisher.noteGrowth(groupIdHex: groupIdHex)
-        return commitPublish.id
     }
 
     /// Remove a member from an EXISTING group by leaf index. Publishes the
@@ -3238,8 +3050,12 @@ public final class ChatRepository: ObservableObject {
         return outcome
     }
 
-    /// Remove ONE leaf: a proposal on a role-table group, a direct commit
-    /// (followed by the ADR-0043 rotation) otherwise.
+    /// Remove ONE leaf: a proposal (a group with no role table is refused).
+    ///
+    /// The ADR-0043 / C-61 rotation runs when the sweep's commit lands —
+    /// directly in ``sweepIfCommitter(groupIdHex:)`` on the committer, and via
+    /// the poll's membership-shrink diff on every other device — so nothing is
+    /// rotated here: there is no Remove commit yet.
     func removeOneLeafFromGroup(
         groupIdHex: String,
         leafIndex: UInt32
@@ -3252,155 +3068,15 @@ public final class ChatRepository: ObservableObject {
         guard groups[groupIdHex] != nil else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
-        // ADR-0043 C-61 / ADR-0044 — the Remove commit is published FIRST and
-        // the rotation is not STARTED until it has landed. The ordering is
-        // pinned behind this one seam rather than left as two adjacent
-        // statements, because it now underwrites TWO guarantees: forward
-        // secrecy (the rotation envelope is sealed at the post-removal epoch,
-        // unreadable to the evicted leaf) AND recency (the new secret is
-        // STAMPED at that epoch, so it strictly out-ranks the secret the
-        // evicted member still holds instead of merely tying with it).
-        // ADR-0045 — proposal path for a role-table group; the direct commit
-        // survives only where there is no role table and therefore no committer.
-        //
-        // The ADR-0043 / C-61 rotation is NOT started here on that path, and
-        // that is not an omission: there is no Remove commit yet, so there is no
-        // post-removal epoch to seal the new secret at and the evicted member is
-        // still a member. The rotation runs when the sweep's commit lands —
-        // directly in ``sweepIfCommitter(groupIdHex:)`` on the committer, and
-        // via the poll's membership-shrink diff on every other device.
-        if usesProposalPath(groupIdHex: groupIdHex) {
-            return try await withCommitLock(groupIdHex: groupIdHex) { [self] in
-                try await proposeRemoveMemberLocked(
-                    groupIdHex: groupIdHex,
-                    leafIndex: leafIndex
-                )
-            }
+        // ADR-0081 amendment (2026-10-19) — the direct-commit path for a
+        // group with no role table is gone; such a group is refused.
+        try requireRoleTable(groupIdHex: groupIdHex, op: "remove")
+        return try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+            try await proposeRemoveMemberLocked(
+                groupIdHex: groupIdHex,
+                leafIndex: leafIndex
+            )
         }
-        return .committed(
-            commitMessageId: try await PushGroupRouting.publishRemoveThenRotate(
-            // ADR-0040 (G-35) — ONLY the commit half takes the commit chain.
-            // The rotation below publishes an application message, not a
-            // commit, and already runs under the ADR-0044 routing chain; keeping
-            // it outside means the two chains are never nested, so they cannot
-            // deadlock against one another. C-61 ordering is unaffected — it is
-            // enforced by `publishRemoveThenRotate` sequencing the two halves,
-            // and the commit half still completes in full before the rotation
-            // is started.
-            publishRemove: {
-                try await self.withCommitLock(groupIdHex: groupIdHex) {
-                    try await self.publishRemoveCommit(
-                        groupIdHex: groupIdHex,
-                        leafIndex: leafIndex
-                    )
-                }
-            },
-            // Resolved INSIDE the closure, so this device's ADR-0022 role is
-            // read after the removal landed — the same moment the previous
-            // fire-and-forget call site read it.
-            rotate: { [weak self] in
-                guard let self,
-                      let body = self.rotationAfterRemoval(groupIdHex: groupIdHex)
-                else { return .skipNoSecret }
-                return await body()
-            }
-            ),
-            welcomeMessageId: nil
-        )
-    }
-
-    /// Apply + persist + publish a Remove commit. The `publishRemove` half of
-    /// C-61: everything that must have COMPLETED before a rotation may start.
-    /// Returns the commit's DS message id.
-    ///
-    /// Runs only under ``withCommitLock(groupIdHex:_:)`` and re-reads
-    /// `canonicalIdentity` + `groups` itself — a predecessor may have replaced
-    /// or evicted the record while this section was queued, so neither may be
-    /// captured by the caller before the wait.
-    private func publishRemoveCommit(
-        groupIdHex: String,
-        leafIndex: UInt32
-    ) async throws -> Int64 {
-        guard let identity = canonicalIdentity else {
-            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
-        }
-        guard let record = groups[groupIdHex] else {
-            throw ChatError.argument("no live Group handle for \(groupIdHex)")
-        }
-        // ADR-0081 over ADR-0040 — staged, recorded (entry + snapshot with the
-        // staged commit), sent with the N+1 registration proven under N, then
-        // merged (see `DirectCommitSteps`). A remove has no Welcome.
-        // ADR-0057 — the account this removal evicts, read from the roster
-        // before the commit, so the root can revoke its registrar key in the
-        // same registration.
-        let evicted = evictedAccountKeys(group: record.group, removedLeaves: [leafIndex])
-        // ADR-0057, live walk 2026-09-29 — the owner's claim on open first,
-        // while the group is still at N.
-        // Checked after every wait in this region (``requireCommitRegion(_:)``).
-        let bound = binding.capture()
-        await ensureOwnerClaimOnOpen(groupIdHex: groupIdHex)
-        try requireCommitRegion(bound)
-        let commitPublish: DsCommitAnswer = try await DirectCommitSteps(
-            currentSigner: { try record.group.dsAccessSigner(identity: identity) },
-            create: { () throws -> Data in
-                do {
-                    return try record.group.stageRemoveMember(
-                        identity: identity,
-                        leafIndex: leafIndex
-                    )
-                } catch {
-                    throw ChatError.wrapped("stageRemoveMember failed", underlying: error)
-                }
-            },
-            prepare: { [self] commitBytes in
-                // As in the add path: nothing is sent once the account has left.
-                try requireCommitRegion(bound)
-                return (entryId: newOutboxEntryId(), commit: commitBytes)
-            },
-            // The entry (commit only) and the snapshot carrying the staged
-            // commit, FAIL-CLOSED, before anything is sent.
-            record: { [self] prepared in
-                try requireCommitRegion(bound)
-                try persistCommitEntryThenSnapshotOrThrow(
-                    NewCommitEntry(
-                        id: prepared.entryId,
-                        groupId: base64Encode(record.groupId),
-                        targetEpoch: String(try record.group.epoch()),
-                        commitB64: base64Encode(prepared.commit),
-                        sweepVerdictPending: true
-                    )
-                )
-            },
-            stagedSigner: { [self] in try stagedDsSigner(record: record, identity: identity) },
-            commit: { [self] prepared, next, proof in
-                try requireCommitRegion(bound)
-                do {
-                    return try await commitNextEpoch(
-                        record: record, groupIdHex: groupIdHex, next: next, proof: proof,
-                        row: prepared.commit, evictedAccountKeys: evicted)
-                } catch {
-                    throw ChatError.wrapped("DS commit (remove-member) failed", underlying: error)
-                }
-            },
-            merge: { [self] prepared, answer in
-                try mergeStagedDirectCommit(
-                    record: record, groupIdHex: groupIdHex, identity: identity,
-                    entryId: prepared.entryId, answer: answer, welcomeOwed: false, bound: bound)
-            },
-            abandon: { [self] in
-                guard bound.isCurrent else { return }
-                try abandonStagedDirectCommit(record: record, identity: identity)
-            },
-            discard: { [self] prepared in
-                discardCommitEntry(entryId: prepared.entryId, bound: bound)
-            },
-            publish: { [self] prepared, answer in
-                ackCommitBestEffort(entryId: prepared.entryId, commitMessageId: answer.id)
-                return answer
-            }
-        ).run()
-        state = state.with(threads: buildThreadList())
-        return commitPublish.id
     }
 
     /// ADR-0027 (G-3) — the joiner signature keys of the external-join
@@ -4172,9 +3848,8 @@ public final class ChatRepository: ObservableObject {
     ///
     /// **Inside the region.** ``withCommitLock(groupIdHex:_:)``'s contract is
     /// that a `GroupRecord` read BEFORE the wait can be stale: a predecessor
-    /// that aborted its persist calls ``resetGroupToDurableSnapshot(groupIdHex:)``,
-    /// which REPLACES the record with a fresh one seeded from a *copy* of the
-    /// timeline. An apply against the orphan would mutate nothing the UI reads
+    /// may have REPLACED the record with a fresh one seeded from a *copy* of
+    /// the timeline. An apply against the orphan would mutate nothing the UI reads
     /// and the edit would silently vanish. So the record is re-read here, the
     /// way every other `…Locked` body re-reads it — and the caller no longer
     /// looks one up at all.
@@ -4245,8 +3920,7 @@ public final class ChatRepository: ObservableObject {
     ///
     /// Runs ONLY under ``withCommitLock(groupIdHex:_:)``; never call it
     /// directly. Re-reads `canonicalIdentity` + `groups` for the usual reason —
-    /// a predecessor's persist-abort calls
-    /// ``resetGroupToDurableSnapshot(groupIdHex:)``, which REPLACES the record.
+    /// a predecessor may have REPLACED the record.
     ///
     /// ## Why the send takes the commit lock at all
     ///
@@ -4539,73 +4213,6 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// ADR-0043 — this device just published a Remove commit, so the evicted
-    /// member still holds the group's `push_routing_secret` and push-gw is
-    /// still waking it. Re-key so nobody ever notifies the id it can derive
-    /// again, and retire this device's own subscription under the old id.
-    ///
-    /// The DIRECT entry point (the removing device knows immediately — no
-    /// membership diff needed). The wire-observed twin, for a removal
-    /// committed by SOMEONE ELSE, is
-    /// ``rotatePushRoutingSecretIfMembershipShrank(groupIdHex:previousMemberKeys:)``
-    /// on the poll path. Fire-and-forget.
-    /// ADR-0044 — the rotation body, as a closure
-    /// ``PushGroupRouting/publishRemoveThenRotate(publishRemove:rotate:onRotationStarted:)``
-    /// starts only AFTER the Remove commit has landed (C-61). The `mintEpoch`
-    /// provider reads the LIVE group's epoch at mint time, so the stamp is the
-    /// post-removal one and the rotation strictly out-ranks the secret the
-    /// evicted member still holds.
-    private func rotatePushRoutingSecretBody(
-        accountIdB64: String,
-        groupIdHex: String,
-        role: Role?
-    ) -> @MainActor () async -> PushGroupRouting.PushRotationOutcome {
-        { [weak self] in
-            guard let self else { return .skipNoSecret }
-            return await self.pushRouting.rotateSecret(
-                accountIdB64: accountIdB64,
-                groupIdHex: groupIdHex,
-                ownRole: role,
-                // ADR-0044 — read LAZILY, at mint time (inside the serializing
-                // rotation chain), never captured up front: a rotation queued
-                // behind a predecessor must stamp the epoch it actually mints
-                // at. An unreadable epoch fails closed to `skipUnknownEpoch`.
-                mintEpoch: { [weak self] in
-                    guard let group = self?.groups[groupIdHex]?.group else { return nil }
-                    return PushGroupRouting.readGroupEpoch(group)
-                },
-                // Throws rather than optional-chaining into a silent success —
-                // see the note in `performEnsurePushRouting`.
-                broadcast: { [weak self] bytes in
-                    guard let self else {
-                        throw ChatError.argument("ChatRepository deallocated mid-broadcast")
-                    }
-                    try await self.broadcastPushRoutingControl(
-                        accountIdB64: accountIdB64, groupIdHex: groupIdHex, bytes: bytes)
-                }
-            )
-        }
-    }
-
-    /// The rotation half of C-61, handed to
-    /// ``PushGroupRouting/publishRemoveThenRotate(publishRemove:rotate:onRotationStarted:)``.
-    /// `nil` when there is no session, which skips the rotation entirely.
-    private func rotationAfterRemoval(
-        groupIdHex: String
-    ) -> (@MainActor () async -> PushGroupRouting.PushRotationOutcome)? {
-        guard let accountIdB64 = currentAccountIdB64 else { return nil }
-        // ADR-0060 section 3 — the removed member held this account's `group`
-        // and `member` keys for this group; this runs after the Remove was
-        // published, so the rotated grants go out at the post-removal epoch.
-        if let groupId = groups[groupIdHex]?.groupId {
-            ReachCenter.shared.rotateGroup(groupId)
-        }
-        // The role is read here, on the removing device, at removal time.
-        let role = ownRole(groupIdHex: groupIdHex)
-        return rotatePushRoutingSecretBody(
-            accountIdB64: accountIdB64, groupIdHex: groupIdHex, role: role)
-    }
-
     /// ADR-0043 — someone ELSE's Remove commit just landed on the journal.
     /// A Commit surfaces from the poll loop with no membership delta
     /// attached, so the removal is INFERRED by diffing the member signature
@@ -4615,11 +4222,9 @@ public final class ChatRepository: ObservableObject {
     /// for the next Add, so a remove+add in one batch leaves both the count
     /// and the index set unchanged while a member really was evicted.
     ///
-    /// This device's OWN removals never come through here (they were applied
-    /// locally before this poll, so the baseline is already post-removal and
-    /// shows no shrink); those rotate directly via
-    /// ``rotatePushRoutingSecretAfterRemoval(groupIdHex:)``. Owner-or-admin
-    /// only, no-op on growth. Fire-and-forget: a rotation failure must never
+    /// A removal this device committed itself (a sweep) comes through here
+    /// too, from the sweep's tail (ADR-0081 amendment: no direct-commit path
+    /// remains). Owner-or-admin only, no-op on growth. Fire-and-forget: a rotation failure must never
     /// break the poll loop.
     private func rotatePushRoutingSecretIfMembershipShrank(
         groupIdHex: String,
@@ -4785,9 +4390,8 @@ public final class ChatRepository: ObservableObject {
     ///      group behind an idle connection, which is G-37's own defect at a
     ///      per-group blast radius.
     ///   3. Take the lock, then RE-READ the record and the cursor. A predecessor
-    ///      may have replaced the record
-    ///      (``resetGroupToDurableSnapshot(groupIdHex:)``) or advanced the
-    ///      cursor while this poll was parked on the network. A moved cursor
+    ///      may have replaced the record or advanced the cursor while this
+    ///      poll was parked on the network. A moved cursor
     ///      means the batch in hand starts at a row already consumed, so it is
     ///      DROPPED without applying and without touching the cursor — applying
     ///      it would re-feed consumed rows to OpenMLS and let the stale batch's
@@ -4990,9 +4594,8 @@ public final class ChatRepository: ObservableObject {
     /// reintroduced into it without a compile error.
     ///
     /// Re-reads `canonicalIdentity` and `groups` rather than trusting anything
-    /// captured before the wait — a predecessor's persist-abort calls
-    /// ``resetGroupToDurableSnapshot(groupIdHex:)``, which REPLACES the
-    /// `GroupRecord` and can evict it entirely.
+    /// captured before the wait — a predecessor may have REPLACED the
+    /// `GroupRecord` or evicted it entirely.
     private func applyFetchedBatch(
         groupIdHex: String,
         after: Int64,
@@ -5685,10 +5288,10 @@ public final class ChatRepository: ObservableObject {
                 }
                 return outcome
             }
-            return .committed(
-                commitMessageId: try await addMemberToGroupLocked(
-                    groupIdHex: groupIdHex, keyPackageBytes: keyPackage),
-                welcomeMessageId: nil)
+            // ADR-0081 amendment (2026-10-19) — no direct-commit path: a group
+            // with no role table is refused.
+            try requireRoleTable(groupIdHex: groupIdHex, op: "add")
+            return nil
         }
     }
 
@@ -5730,8 +5333,8 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0050 section 2.8 — admit a device this device just added to the
     /// DeviceGroup (QR pairing) to EVERY chat this device is in: wait, bounded,
     /// for its conversation KeyPackage, then per chat a self-service Add
-    /// proposal (swept here when this device is the acting committer) or a
-    /// direct commit on a table-less group. A device whose KeyPackage never
+    /// proposal (swept here when this device is the acting committer; a
+    /// table-less group is refused). A device whose KeyPackage never
     /// appears within the wait is admitted later by the re-admission arm.
     @discardableResult
     public func admitDevice(deviceKey: Data) async throws -> DeviceFanOut {
@@ -6239,27 +5842,37 @@ public final class ChatRepository: ObservableObject {
 
     // MARK: - ADR-0045 proposal-based membership + the committer sweep
 
-    /// ADR-0045 — does this group route membership through proposals?
+    /// ADR-0045 — does this group carry a role table, and so a committer?
     ///
-    /// A group with **no role table** keeps direct commits, unchanged: it has no
-    /// owner, therefore no rank 0, therefore no committer, and every peer's
-    /// receipt gate drops proposals in such a group — so the propose path would
-    /// silently discard everything. ADR-0045 says this explicitly, and
-    /// `Group::create` has seeded a role table since ADR-0022, so no freshly
-    /// created group reaches it.
-    ///
-    /// This is NOT a dual path in ADR-0045's forbidden sense. The ADR rules out
-    /// a "legacy direct-commit fallback" — a second, ungated route into a group
-    /// that *has* moved to proposals. This is the disjoint case: a group with no
-    /// role table has no gate to bypass, because there is no table to read a
-    /// role from.
-    ///
-    /// A torn read is treated as "no role table", which keeps the direct path
-    /// working rather than routing into a proposal path whose gate cannot
-    /// resolve.
+    /// A group with **no role table** has no owner, no rank 0 and no committer,
+    /// and every peer's receipt gate drops proposals in it, so a membership
+    /// operation on one is refused (``requireRoleTable(groupIdHex:op:)``).
+    /// `Group::create` has seeded a role table since ADR-0022, and since the
+    /// ADR-0081 amendment of 2026-10-19 `Group.joinFromWelcome` refuses a
+    /// Welcome without one, so no client reaches such a group. A torn read is
+    /// "no role table", which refuses.
     func usesProposalPath(groupIdHex: String) -> Bool {
         guard let record = groups[groupIdHex] else { return false }
         return Self.usesProposalPath { try record.group.groupRoles() }
+    }
+
+    /// ADR-0081 amendment (2026-10-19) — a membership operation on a group
+    /// with no role table is refused, fail closed, with the core's typed
+    /// `NoRoleTable` refusal. No client creates such a group and
+    /// `Group.joinFromWelcome` refuses its Welcome, so this is unreachable
+    /// today; it replaces the direct-commit path that used to serve it.
+    func requireRoleTable(groupIdHex: String, op: String) throws {
+        guard let record = groups[groupIdHex] else { return }
+        try Self.requireRoleTable(op: op) { try record.group.groupRoles() }
+    }
+
+    /// The rule of ``requireRoleTable(groupIdHex:op:)`` over an injected read,
+    /// so the refusal is testable without a group no client can make.
+    nonisolated static func requireRoleTable(op: String, _ roleTable: () throws -> RoleTable?) throws {
+        guard usesProposalPath(roleTable) else {
+            throw FfiError.MembershipNoRoleTable(
+                message: "\(op) refused: this group carries no role table, so it has no committer")
+        }
     }
 
     /// The rule of ``usesProposalPath(groupIdHex:)``, over an injected read so
@@ -6451,23 +6064,11 @@ public final class ChatRepository: ObservableObject {
     @discardableResult
     public func sweepIfCommitter(groupIdHex: String) async -> SweepOutcome {
         // A group with no role table has no committer to be. Short-circuit
-        // before taking the lock, so the poll tail costs nothing at all there,
-        // unless (ADR-0081) a staged direct commit owes a verdict: one whose
-        // send got no answer is finished here, at the tail of every poll.
+        // before taking the lock, so the poll tail costs nothing at all there.
+        // (Its staged direct commits went with the ADR-0081 amendment of
+        // 2026-10-19, so nothing can be owed on it.)
         guard usesProposalPath(groupIdHex: groupIdHex) else {
-            guard let record = groups[groupIdHex],
-                  (try? record.group.hasStagedSweep()) == true else {
-                return .notCommitter(rank: nil)
-            }
-            do {
-                return try await withCommitLock(groupIdHex: groupIdHex) { [self] in
-                    guard let record = groups[groupIdHex] else { return .notCommitter(rank: nil) }
-                    return try await resolveOwedVerdict(sweepPorts(record: record, groupIdHex: groupIdHex))
-                }
-            } catch {
-                NSLog("ADR-0081: a staged direct commit is still owed: \(error)")
-                return .unresolved
-            }
+            return .notCommitter(rank: nil)
         }
         guard let record = groups[groupIdHex] else { return .notCommitter(rank: nil) }
         let before = PushGroupRouting.memberSignatureKeys(group: record.group)
@@ -7504,9 +7105,8 @@ public final class ChatRepository: ObservableObject {
     ///
     /// `body` runs AFTER an unbounded wait, so it must RE-READ
     /// ``canonicalIdentity`` and ``groups`` rather than close over values
-    /// captured before the wait: a predecessor that aborted its persist calls
-    /// ``resetGroupToDurableSnapshot(groupIdHex:)``, which REPLACES the
-    /// `GroupRecord` (and can evict it entirely). Every `…Locked` method below
+    /// captured before the wait: a predecessor may have REPLACED the
+    /// `GroupRecord` (or evicted it entirely). Every `…Locked` method below
     /// re-derives both from `self` for exactly this reason.
     ///
     /// ## Deadlock audit
@@ -7514,7 +7114,7 @@ public final class ChatRepository: ObservableObject {
     /// The chain is not reentrant, so `body` must not call another
     /// commit-locked entry point. It does not: the locked sections reach only
     /// `Group` (synchronous UniFFI), ``persistCommitEntryThenSnapshotOrThrow(_:)``,
-    /// ``resetGroupToDurableSnapshot(groupIdHex:)``, ``ackCommitBestEffort(entryId:commitMessageId:secondMessageId:)``,
+    /// ``ackCommitBestEffort(entryId:commitMessageId:secondMessageId:)``,
     /// `DsClient.publishGroup` / `publishMailbox`, and
     /// `ChatClient.markOwnPublishedCommit` — none of which call back in.
     /// ``redistributePushRoutingSecret(groupIdHex:)`` is reached from the add
@@ -8813,56 +8413,6 @@ public final class ChatRepository: ObservableObject {
 
     // MARK: - ADR-0040 (G-35) durable pending-commit outbox
 
-    /// ADR-0081 — the signer of the epoch a staged direct commit moves to.
-    private func stagedDsSigner(record: GroupRecord, identity: Identity) throws -> DsGroupSigner {
-        guard let next = try record.group.dsStagedAccessSigner(identity: identity) else {
-            throw ChatError.argument("no staged commit to register")
-        }
-        return next
-    }
-
-    /// ADR-0081 — the DS took a staged direct commit: re-arm the echo filter,
-    /// merge, and persist the merge FAIL-CLOSED. A failed write throws with
-    /// the merge standing in memory; the durable N + staged commit + entry
-    /// are what a restart finishes (the re-send answers the original row). A
-    /// Welcome still owed is marked so ``resolveOwedWelcomes(_:)`` retries it.
-    private func mergeStagedDirectCommit(
-        record: GroupRecord,
-        groupIdHex: String,
-        identity: Identity,
-        entryId: String,
-        answer: DsCommitAnswer,
-        welcomeOwed: Bool,
-        bound: BindingEpoch.Captured
-    ) throws {
-        chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: answer.id)
-        try requireCommitRegion(bound)
-        _ = try record.group.mergeStagedSweep(identity: identity)
-        try persistSnapshotDurableOrThrow()
-        if welcomeOwed, let accountIdB64 = currentAccountIdB64 {
-            do {
-                try commitOutbox.markWelcomesOwed(
-                    accountIdB64: accountIdB64, id: entryId, commitMessageId: answer.id)
-            } catch {
-                NSLog("ADR-0081: the owed Welcome was not recorded")
-            }
-        }
-    }
-
-    /// ADR-0081 — abandon a staged direct commit (per group,
-    /// `clear_pending_commit`) and persist that best effort.
-    private func abandonStagedDirectCommit(record: GroupRecord, identity: Identity) throws {
-        _ = try record.group.abandonStagedSweep(identity: identity)
-        persistSnapshotBestEffort()
-    }
-
-    /// Drop the outbox entry of a commit that is not and will not be on the
-    /// DS (best effort; an orphan is dropped by the owed-verdict path).
-    private func discardCommitEntry(entryId: String, bound: BindingEpoch.Captured) {
-        guard bound.isCurrent, let accountIdB64 = currentAccountIdB64 else { return }
-        commitOutbox.deleteEntryBestEffort(accountIdB64: accountIdB64, id: entryId)
-    }
-
     /// Persist the pending-commit outbox entry AND the N+1 MLS snapshot durably,
     /// FAIL-CLOSED, BEFORE any publish — the load-bearing step of every
     /// group-membership commit path.
@@ -8900,100 +8450,6 @@ public final class ChatRepository: ObservableObject {
         //    sweep discards (the commit is never published because we abort).
         let blob = try identity.snapshotStorage()
         try snapshotStore.putSnapshotDurable(accountIdB64: accountIdB64, blob: blob)
-    }
-
-    /// ADR-0040 (G-35) F1 — reset the in-memory MLS group for `groupIdHex` back
-    /// to the last DURABLE snapshot (epoch N), dropping the un-published eager
-    /// merge a commit path performed just before its FAIL-CLOSED persist aborted.
-    ///
-    /// Every group-membership create-commit (`setGroupRoles` / `addMemberFromWire`
-    /// / `removeMember` / `approveExternalJoin`) EAGER-MERGES epoch N -> N+1 into
-    /// the shared in-memory OpenMLS provider BEFORE
-    /// ``persistCommitEntryThenSnapshotOrThrow(_:)`` durably records it. When that
-    /// persist THROWS, the op correctly aborts before any publish — but the
-    /// in-memory `Group` is left at N+1. A SECOND commit in the SAME session would
-    /// then build on the un-published N+1 and publish commit(N+1 -> N+2); peers
-    /// still at N drop it as wrong-epoch, stranding the WHOLE group (the
-    /// "device-ahead" outcome ADR-0040 flags as worse than the single-device
-    /// brick). This makes the abort "as if the op never happened" IN MEMORY too.
-    ///
-    /// Mechanism: because the durable persist FAILED, the on-disk snapshot is
-    /// still at N — ``IdentitySnapshotStore/putSnapshotDurable(accountIdB64:blob:)``
-    /// writes `.atomic`, so a failure leaves the prior N-envelope intact (and the
-    /// entry-first ordering means a snapshot write is only reached after the entry
-    /// landed; an entry-write failure never touches the snapshot at all). We
-    /// restore that snapshot into the canonical identity's provider —
-    /// `Identity.restoreStorage` REPLACES the whole provider map, discarding the
-    /// eager-merged N+1 — and REBUILD the `Group` handle via `loadGroup`. The
-    /// UniFFI `Group` holds an in-memory `MlsGroup` copy loaded once, so the stale
-    /// N+1 handle must be DISCARDED + reloaded, not mutated in place. This mirrors
-    /// exactly what ``bootstrap(secrets:)`` does on a cold start. The plaintext
-    /// timeline (messages + cursor) is preserved — a membership commit appends no
-    /// timeline row, and the log is independent of MLS state.
-    ///
-    /// Scope note: `restoreStorage` rolls the ENTIRE provider back to the durable
-    /// snapshot (the only rollback primitive available without a `lakko-mls`
-    /// change), but only the affected group's handle is rebuilt. In the normal
-    /// case every other group already equals the durable snapshot (sends persist
-    /// fail-closed; poll advances persist best-effort), so their handles stay
-    /// consistent; the sole divergence is a group whose earlier best-effort persist
-    /// silently failed — a pre-existing risk this reset neither creates nor
-    /// worsens, and which self-heals on its next poll.
-    ///
-    /// FAIL-SAFE: if the durable snapshot is missing / unrestorable / unreloadable
-    /// (should not happen for an existing, rehydrated group), the poisoned N+1
-    /// handle is EVICTED from the map and a hard error is thrown — a later commit
-    /// then fails "no live Group handle" rather than silently building on the
-    /// un-published N+1.
-    private func resetGroupToDurableSnapshot(groupIdHex: String) throws {
-        guard let identity = canonicalIdentity,
-              let accountIdB64 = currentAccountIdB64,
-              let record = groups[groupIdHex] else {
-            throw ChatError.argument(
-                "cannot reset \(groupIdHex) to durable snapshot — repository not bootstrapped"
-            )
-        }
-        guard let blob = snapshotStore.getSnapshot(accountIdB64: accountIdB64) else {
-            // No durable snapshot for an existing group is a hard, unexpected
-            // state. Evict the poisoned N+1 handle so a later commit fails "no
-            // handle" rather than building on the un-published epoch.
-            groups.removeValue(forKey: groupIdHex)
-            state = state.with(threads: buildThreadList())
-            throw ChatError.argument(
-                "no durable MLS snapshot to reset \(groupIdHex) after a commit persist-abort"
-            )
-        }
-        do {
-            // Roll the shared provider back to N (REPLACES the eager-merged N+1).
-            try identity.restoreStorage(snapshot: blob)
-            // Rebuild the handle from the rolled-back provider — the old handle
-            // still holds the stale N+1 in-memory `MlsGroup` copy.
-            guard let reloaded = try loadGroup(
-                identity: identity,
-                groupId: record.groupId
-            ) else {
-                throw ChatError.argument("loadGroup returned nil for an existing group")
-            }
-            let fresh = GroupRecord(group: reloaded, groupId: record.groupId)
-            // Preserve the plaintext timeline (MLS state is independent of the
-            // message log; a membership commit appends no row).
-            fresh.seed(
-                messages: record.messages,
-                cursor: record.cursor,
-                lastViewedMessageId: record.lastViewedMessageId,
-                feedSeen: record.feedSeen)
-            groups[groupIdHex] = fresh
-            state = state.with(threads: buildThreadList())
-        } catch {
-            // The restore / reload itself failed — do NOT leave the poisoned N+1
-            // handle in the map. Evict it + surface a hard error.
-            groups.removeValue(forKey: groupIdHex)
-            state = state.with(threads: buildThreadList())
-            throw ChatError.wrapped(
-                "failed to reset \(groupIdHex) to durable snapshot after a commit persist-abort",
-                underlying: error
-            )
-        }
     }
 
     /// Mark an outbox entry acked after BOTH artifacts have published.
@@ -9335,8 +8791,10 @@ public final class ChatRepository: ObservableObject {
 /// assert an effect that has not happened, which is exactly the optimistic-update
 /// lie `docs/ux/proposal-based-membership.md` forbids.
 public enum MembershipOutcome: Equatable {
-    /// A direct commit landed. Only reachable in a group with NO role table,
-    /// where ADR-0045's proposal path does not apply.
+    /// A direct commit landed. No membership call returns this case since the
+    /// ADR-0081 amendment of 2026-10-19 deleted the direct-commit paths (a
+    /// group with no role table is refused); kept so the outcome consumers
+    /// keep one shape.
     case committed(commitMessageId: Int64, welcomeMessageId: Int64?)
     /// A proposal was published. It takes effect when a committer sweeps it.
     case proposed(proposalMessageId: Int64)

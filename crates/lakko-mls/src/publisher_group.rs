@@ -296,6 +296,43 @@ impl PublisherGroup {
         }))
     }
 
+    /// Join a PublisherGroup as a co-publisher from the owner's Welcome
+    /// (ADR-0028 OQ3; [ADR-0081] amendment of 2026-10-19). A PublisherGroup
+    /// carries no role table, so [`Group::join_from_welcome`] refuses its
+    /// Welcome; this is its entry point. `group_id` is the id the `/g/`
+    /// capability conveyed and `channel_id` the one its sealed preview
+    /// carried: a Welcome for any other group is refused before anything is
+    /// written, and so is a conversation's Welcome. The joined state is
+    /// persisted in `identity`'s provider; [`PublisherGroup::load_joined`]
+    /// reopens it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Codec`] when `group_id` is not [`GROUP_ID_LEN`] bytes or the
+    /// Welcome does not decode; [`Error::Group`] for a Welcome of another
+    /// group, a conversation's Welcome, or an OpenMLS failure (no KeyPackage
+    /// of this identity matches, for one).
+    ///
+    /// [ADR-0081]: ../../../docs/adr/0081-devicegroup-commits-cannot-strand.md
+    pub fn join_from_welcome(
+        identity: &Identity,
+        welcome_bytes: &[u8],
+        group_id: &[u8],
+        channel_id: &ChannelId,
+    ) -> Result<Self> {
+        if group_id.len() != GROUP_ID_LEN {
+            return Err(Error::Codec(format!(
+                "publisher group id length {} != {GROUP_ID_LEN}",
+                group_id.len()
+            )));
+        }
+        let inner = Group::join_table_less_from_welcome(welcome_bytes, identity, Some(group_id))?;
+        Ok(Self {
+            inner,
+            channel_id: *channel_id,
+        })
+    }
+
     /// Create a fresh PublisherGroup for `channel_id` with
     /// `identity` as the sole founding member. The MLS state
     /// is persisted to `identity.provider.storage()` as a
@@ -491,6 +528,61 @@ impl PublisherGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0081 amendment — a co-publisher's Welcome joins through
+    /// `PublisherGroup::join_from_welcome` only: the conversation rule of
+    /// `Group::join_from_welcome` refuses it (no role table), and the
+    /// refusal leaves nothing, so the dedicated entry point still opens it.
+    #[test]
+    fn a_publisher_group_welcome_joins_only_through_its_own_entry_point() {
+        let alice = Identity::generate("alice-pg-entry").unwrap();
+        let bob = Identity::generate("bob-pg-entry").unwrap();
+        let cid = ChannelId([0x5a; CHANNEL_ID_LEN]);
+        let mut alice_pg = PublisherGroup::create(&alice, &cid).expect("create");
+        let gid = alice_pg.group_id();
+        let addition = alice_pg
+            .inner_mut()
+            .add_member(&alice, bob.create_key_package().unwrap())
+            .expect("add");
+        let welcome = crate::group::encode_message(&addition.welcome).expect("encode");
+
+        let err = Group::join_from_welcome(&welcome, &bob)
+            .err()
+            .expect("refused as a chat");
+        assert!(
+            matches!(
+                err,
+                Error::MembershipRefused {
+                    reason: crate::RefusalReason::NoRoleTable,
+                    ..
+                }
+            ),
+            "typed refusal, got {err}"
+        );
+        assert!(
+            PublisherGroup::load_joined(&bob, &gid, &cid)
+                .unwrap()
+                .is_none(),
+            "nothing written"
+        );
+
+        // Another id than the link conveyed: refused, nothing written.
+        let wrong = vec![0x01; GROUP_ID_LEN];
+        assert!(PublisherGroup::join_from_welcome(&bob, &welcome, &wrong, &cid).is_err());
+        assert!(PublisherGroup::load_joined(&bob, &gid, &cid)
+            .unwrap()
+            .is_none());
+
+        let bob_pg = PublisherGroup::join_from_welcome(&bob, &welcome, &gid, &cid).expect("joins");
+        assert_eq!(bob_pg.group_id(), gid);
+        assert_eq!(
+            bob_pg.channel_seed(&bob).expect("seed"),
+            alice_pg.channel_seed(&alice).expect("seed"),
+        );
+        assert!(PublisherGroup::load_joined(&bob, &gid, &cid)
+            .unwrap()
+            .is_some());
+    }
 
     fn test_identity() -> Identity {
         Identity::generate("publisher-group-test").expect("Identity::generate")
@@ -749,17 +841,15 @@ mod tests {
             .add_member(&alice, bob_kp)
             .expect("alice adds bob");
 
-        // Encode the welcome to bytes, give Bob a fresh
-        // Group::join_from_welcome handle. Bob's PublisherGroup
-        // is constructed by hand from that handle since we
-        // don't expose a "join PublisherGroup from welcome"
-        // shortcut yet (would be the natural next API; for
-        // step 6 the test goes through Group::from_mls_group
-        // analogue isn't accessible publicly, so we use the
-        // standard Group::join_from_welcome + a custom assemble).
+        // Bob joins through the PublisherGroup entry point (ADR-0081
+        // amendment): the conversation rule of `Group::join_from_welcome`
+        // refuses a Welcome with no role table.
         let welcome_bytes =
             crate::group::encode_message(&addition.welcome).expect("welcome encode");
-        let bob_group = crate::Group::join_from_welcome(&welcome_bytes, &bob).expect("bob join");
+        let alice_gid = alice_pg.group_id();
+        let bob_group = PublisherGroup::join_from_welcome(&bob, &welcome_bytes, &alice_gid, &cid)
+            .expect("bob join")
+            .inner;
 
         // Alice rotates AFTER adding Bob. Both sides advance.
         // (Note: Alice's `add_member` already merged a commit
@@ -827,7 +917,7 @@ mod tests {
         // Bob joins from the Welcome and reconstructs the PublisherGroup under
         // the deterministic id — and BOTH derive the same channel content-key
         // seed at the shared post-add epoch, so Bob can now publish.
-        use crate::group::{encode_message, Group, Incoming};
+        use crate::group::{encode_message, Incoming};
 
         let alice = Identity::from_seed(&[0xA7u8; 64]).expect("alice");
         let bob = Identity::from_seed(&[0xB7u8; 64]).expect("bob");
@@ -864,7 +954,8 @@ mod tests {
         // Bob joins from the Welcome. He cannot derive the owner's id (it
         // needs Alice's seed); he opens the group under the id the ticket
         // conveyed, with the channel id the link's sealed preview carried.
-        let _bob_group = Group::join_from_welcome(&welcome_bytes, &bob).expect("bob joins");
+        let _bob_group = PublisherGroup::join_from_welcome(&bob, &welcome_bytes, &group_id, &cid)
+            .expect("bob joins");
         assert!(
             PublisherGroup::load(&bob, &cid)
                 .expect("own load")

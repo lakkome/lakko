@@ -32,7 +32,7 @@
 //!
 //! [ADR-0045]: ../../../docs/adr/0045-remote-commit-epoch-fork.md
 
-use lakko_mls::{key_package, Group, GroupKind, Identity, LeafNodeIndex, RoleTable};
+use lakko_mls::{key_package, DeviceGroup, Group, GroupKind, Identity, LeafNodeIndex, RoleTable};
 
 fn wire(msg: openmls::framing::MlsMessageOut) -> Vec<u8> {
     lakko_mls::group::encode_message(&msg).expect("encode message")
@@ -222,8 +222,10 @@ fn the_accessor_and_the_inference_agree_across_a_proposal_path_eviction() {
 // ============================================================================
 
 /// A group created without a role table has no proposal path at all
-/// (`propose_*` refuses), so `remove_member` is the only route and it is still
-/// live. The accessor must track it identically.
+/// (`propose_*` refuses), so `remove_member` is the only route (the core keeps
+/// it for the table-less groups, PublisherGroup and DeviceGroup; no client uses
+/// it on an ordinary group since the ADR-0081 second amendment). The accessor
+/// must track it identically.
 #[test]
 fn the_accessor_and_the_inference_agree_across_a_direct_commit_eviction() {
     let alice = Identity::from_seed(&[0x91u8; 64]).expect("alice");
@@ -239,7 +241,11 @@ fn the_accessor_and_the_inference_agree_across_a_direct_commit_eviction() {
     let add_bob = alice_g
         .add_member_from_wire(&alice, &kp_wire(&bob))
         .expect("alice adds bob");
-    let mut bob_g = Group::join_from_welcome(&wire(add_bob.welcome), &bob).expect("bob joins");
+    // ADR-0081 second amendment: a table-less Welcome is refused by the
+    // conversation entry point, so the joiner uses a table-less one (the
+    // by-name DeviceGroup join returns a plain `Group`).
+    let mut bob_g =
+        DeviceGroup::join_welcome_before_account(&wire(add_bob.welcome), &bob).expect("bob joins");
 
     assert!(agree(&alice_g, &alice, "alice before"));
     assert!(agree(&bob_g, &bob, "bob before"));

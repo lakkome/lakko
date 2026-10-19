@@ -1633,8 +1633,8 @@ public final class ChatViewModel: ObservableObject {
     /// there is nothing to commit and nothing to refuse.
     ///
     /// Deliberately NOT routed through ``onRemoveMember(leafIndex:)``, whose
-    /// own-leaf guard is still correct for the direct-commit path a table-less
-    /// group takes.
+    /// own-leaf guard dates from the direct-commit path a table-less group
+    /// took (deleted by the ADR-0081 amendment of 2026-10-19).
     ///
     /// The caller is expected to have confirmed first: a published request
     /// cannot be withdrawn — there is no wire withdraw, and evicting it locally

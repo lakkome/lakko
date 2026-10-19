@@ -62,6 +62,9 @@ public struct DeviceGroupCommitEntry: Codable, Equatable {
         case policy
         case rejoinRemove = "rejoin-remove"
         case rejoinAdd = "rejoin-add"
+        /// ADR-0081 amendment — the previous leaf removed and the new one
+        /// added in one commit (the rejoin under the attested-removal policy).
+        case rejoinReplace = "rejoin-replace"
     }
 
     public var v: Int
