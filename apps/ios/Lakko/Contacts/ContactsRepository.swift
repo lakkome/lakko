@@ -1350,7 +1350,15 @@ public final class ContactsRepository: ObservableObject {
         } catch {
             throw ContactsError.wrap(error)
         }
-        try bound.require()
+        // From here on a step that fails mints no link, so the link key
+        // registered above is removed with it (web and Android do the same).
+        let dropLinkKey = { ReachCenter.shared.removeLink(linkId: linkId) }
+        do {
+            try bound.require()
+        } catch {
+            dropLinkKey()
+            throw error
+        }
         let mint: InviteLinkMint
         do {
             mint = try composeInviteCapability(
@@ -1370,6 +1378,7 @@ public final class ContactsRepository: ObservableObject {
                 inviterUsername: ProfileDirectory.shared.ownUsername
             )
         } catch {
+            dropLinkKey()
             throw ContactsError.wrap(error)
         }
 
@@ -1384,6 +1393,7 @@ public final class ContactsRepository: ObservableObject {
         do {
             revocation = try LinkRevocationKey.fresh()
         } catch {
+            dropLinkKey()
             throw ContactsError.wrap(error)
         }
         let blobId: Data
@@ -1395,6 +1405,7 @@ public final class ContactsRepository: ObservableObject {
                 maxUses: maxUses
             )
         } catch {
+            dropLinkKey()
             throw ContactsError.wrap(error)
         }
         // The reach record and the invite list below are the bound
