@@ -27,7 +27,13 @@ final class LinkClaimsTests: XCTestCase {
     func testFollowsTheRegisterOnceLoaded() {
         XCTAssertEqual(LinkClaims.step(own: nil, answeredElsewhere: false, verdict: .accept), .postClaim)
         XCTAssertEqual(LinkClaims.step(own: nil, answeredElsewhere: false, verdict: .answered), .drop)
-        XCTAssertEqual(LinkClaims.step(own: nil, answeredElsewhere: false, verdict: .dead), .cardDead)
+        XCTAssertEqual(LinkClaims.step(own: nil, answeredElsewhere: false, verdict: .dead), .refuse)
+    }
+
+    /// ADR-0079 amendment of 2026-10-19 — a link this device holds no record
+    /// of waits, and is never refused.
+    func testWaitsOnALinkThisDeviceHoldsNoRecordOf() {
+        XCTAssertEqual(LinkClaims.step(own: nil, answeredElsewhere: false, verdict: .unknown), .wait)
     }
 
     func testWaitsUnshownOnARosterDevicesClaimUntilTheRegisterSaysAnswered() {
@@ -51,17 +57,50 @@ final class LinkClaimsTests: XCTestCase {
         XCTAssertEqual(LinkClaims.step(own: posting, answeredElsewhere: true, verdict: nil), .decide)
     }
 
-    func testBuildsAWonClaimEvenAfterTheLinkWasUsedUp() {
-        XCTAssertEqual(
-            LinkClaims.step(own: LinkClaims.Own(ids: [9], won: 9), answeredElsewhere: true, verdict: .dead), .build)
-        XCTAssertEqual(
-            LinkClaims.step(own: LinkClaims.Own(ids: [9], won: 9), answeredElsewhere: true, verdict: .answered), .build)
+    /// ADR-0079 amendment of 2026-10-19 — a revocation wins until this
+    /// account has answered: a won claim not yet founded refuses; once
+    /// founded (here, or by another device whose note is held) it builds.
+    func testARevocationBeforeTheAnswerRefusesAWonClaim() {
+        let won = LinkClaims.Own(ids: [9], won: 9)
+        XCTAssertEqual(LinkClaims.step(own: won, answeredElsewhere: true, verdict: .dead), .refuse)
+        XCTAssertEqual(LinkClaims.step(own: won, answeredElsewhere: true, verdict: .dead, noteHeld: true), .build)
+        var founded = won
+        founded.founded = BuildFake.founding
+        XCTAssertEqual(LinkClaims.step(own: founded, answeredElsewhere: true, verdict: .dead), .build)
+        XCTAssertEqual(LinkClaims.step(own: won, answeredElsewhere: true, verdict: .answered), .build)
     }
 
-    func testTakesDownADeadLinkCardOnlyForAnotherDevicesClaim() {
-        XCTAssertTrue(LinkClaims.shownCardAnswered(own: nil, answeredElsewhere: true))
-        XCTAssertFalse(LinkClaims.shownCardAnswered(own: nil, answeredElsewhere: false))
-        XCTAssertFalse(LinkClaims.shownCardAnswered(own: posted, answeredElsewhere: true))
+    /// Through the core: expiry is judged at the request's DS stamp, a
+    /// revocation now (Add then expiry then A online -> accepted; revoke
+    /// before the answer -> refused).
+    func testTheVerdictUsesTheRequestStampForExpiryAndNowForRevocation() throws {
+        let s = SyncedState()
+        let id = Data(repeating: 3, count: 16)
+        let secret = Data(repeating: 4, count: 12)
+        let bob = Data(repeating: 0xB0, count: 32)
+        let record = LinkRecord(
+            hlc: 5, linkId: id, linkSecret: secret, kind: .contact, ledgerId: Data(), revocationSeed: Data(),
+            expiryMs: 1_000, maxUses: 5, uses: 0, revoked: false, mintedAtMs: 1, label: "", answered: [])
+        XCTAssertTrue(try s.setLinkRecord(hlc: 5, record: record))
+        XCTAssertEqual(try s.linkAnswerVerdict(linkId: id, linkSecret: secret, requesterKey: bob, pressedAtMs: 999), .accept)
+        XCTAssertEqual(try s.linkAnswerVerdict(linkId: id, linkSecret: secret, requesterKey: bob, pressedAtMs: 1_000), .dead)
+        XCTAssertTrue(try s.revokeLinkRecord(hlc: 6, linkId: id))
+        XCTAssertEqual(try s.linkAnswerVerdict(linkId: id, linkSecret: secret, requesterKey: bob, pressedAtMs: 1), .dead)
+        XCTAssertEqual(
+            try s.linkAnswerVerdict(linkId: Data(repeating: 9, count: 16), linkSecret: secret, requesterKey: bob, pressedAtMs: 1),
+            .unknown)
+    }
+
+    func testTheRequestKeepsTheDsStampAsMilliseconds() {
+        let request = IncomingContactRequest(
+            messageId: 1, fromPubkey: Data(repeating: 3, count: 32), fromAccountId: nil,
+            fromPseudonym: Data(repeating: 0, count: 32), validAfterMs: 0, intro: nil,
+            createdAt: "2026-10-19T12:00:00.500Z")
+        XCTAssertEqual(request.createdAtMs, 1_792_411_200_500)
+        let bad = IncomingContactRequest(
+            messageId: 1, fromPubkey: Data(repeating: 3, count: 32), fromAccountId: nil,
+            fromPseudonym: Data(repeating: 0, count: 32), validAfterMs: 0, intro: nil, createdAt: "t")
+        XCTAssertNil(bad.createdAtMs)
     }
 
     /// Through the core: the earliest roster claim wins and its author
@@ -271,16 +310,17 @@ final class LinkClaimsTests: XCTestCase {
         XCTAssertTrue(inbox.rows().isEmpty)
     }
 
-    func testTheDeadLinkNoteSurvivesTheStoredRequestList() throws {
+    func testAnUndecidedRequestKeepsItsDsStampAcrossARestart() throws {
         let request = IncomingContactRequest(
             messageId: 6, fromPubkey: Data(repeating: 3, count: 32), fromAccountId: nil,
-            fromPseudonym: Data(repeating: 0, count: 32), validAfterMs: 0, intro: nil, createdAt: "t")
-            .sentThroughDeadLink(linkId: Data(repeating: 1, count: 16))
+            fromPseudonym: Data(repeating: 0, count: 32), validAfterMs: 0, intro: nil,
+            createdAt: "2026-10-19T12:00:00Z")
         let back = try JSONDecoder().decode(
-            PersistedContactsInbox.self,
-            from: try JSONEncoder().encode(PersistedContactsInbox(cursor: 3, pending: [request])))
-        XCTAssertEqual(back.pending.first?.viaDeadLink, true)
-        XCTAssertEqual(back.pending.first?.deadLinkId, Data(repeating: 1, count: 16))
+            LinkRequestInbox.Row.self,
+            from: try JSONEncoder().encode(LinkRequestInbox.Row(
+                request: request, linkId: Data(repeating: 1, count: 16), linkSecret: Data(repeating: 2, count: 12))))
+        XCTAssertEqual(back.request.createdAt, "2026-10-19T12:00:00Z")
+        XCTAssertEqual(back.request.createdAtMs, request.createdAtMs)
     }
 }
 

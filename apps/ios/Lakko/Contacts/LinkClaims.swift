@@ -270,12 +270,15 @@ public enum LinkClaims {
 
     /// What the device does with a request carrying a link answer, now.
     public enum Step: Equatable {
-        /// The synced state is not loaded yet: keep it undecided, unshown.
+        /// The synced state is not loaded yet, or this device holds no record
+        /// of the link: keep it undecided, unshown.
         case wait
         /// Answered (by another device, or the register says so): remove.
         case drop
-        /// The link no longer works: show the card with the note.
-        case cardDead
+        /// The link does not count for the request (ADR-0079 amendment of
+        /// 2026-10-19): drop it silently and answer the requester with a link
+        /// refusal. No card.
+        case refuse
         /// Live link: post this device's claim.
         case postClaim
         /// Claim posted: read the journal past it and decide.
@@ -288,25 +291,36 @@ public enum LinkClaims {
 
     /// The next step for one request.
     ///
-    /// | own claims        | answered elsewhere | verdict  | step        |
-    /// |-------------------|--------------------|----------|-------------|
-    /// | won               | any                | any      | `build`     |
-    /// | any other         | any                | answered | `drop`      |
-    /// | lost (settled)    | any                | dead     | `drop`      |
-    /// | lost (settled)    | any                | other    | `recheck`   |
-    /// | posted or posting | any                | any      | `decide`    |
-    /// | none              | yes                | dead     | `drop`      |
-    /// | none              | yes                | other    | `wait`      |
-    /// | none              | no                 | not held | `wait`      |
-    /// | none              | no                 | dead     | `cardDead`  |
-    /// | none              | no                 | accept   | `postClaim` |
+    /// | own claims        | answered elsewhere | verdict          | step        |
+    /// |-------------------|--------------------|------------------|-------------|
+    /// | won, not founded, no note held | any   | dead             | `refuse`    |
+    /// | won               | any                | any other        | `build`     |
+    /// | any other         | any                | answered         | `drop`      |
+    /// | lost (settled)    | any                | dead             | `drop`      |
+    /// | lost (settled)    | any                | other            | `recheck`   |
+    /// | posted or posting | any                | any              | `decide`    |
+    /// | none              | yes                | dead             | `drop`      |
+    /// | none              | yes                | other            | `wait`      |
+    /// | none              | no                 | not held/unknown | `wait`      |
+    /// | none              | no                 | dead             | `refuse`    |
+    /// | none              | no                 | accept           | `postClaim` |
     ///
     /// "Answered elsewhere" is the core's `linkClaimAnsweredElsewhere`: a
-    /// claim from a device in the current roster. A request goes only when
-    /// the register says it was answered, or the link is dead while another
-    /// device holds the claim that answers it.
-    public static func step(own: Own?, answeredElsewhere: Bool, verdict: LinkAnswerVerdictValue?) -> Step {
-        if let own, own.holdsClaim, own.won != nil { return .build }
+    /// claim from a device in the current roster. The verdict judges the
+    /// link's expiry at the moment the server stamped the request and its
+    /// revocation now, so a revocation wins until this account has answered
+    /// (ADR-0079 amendment of 2026-10-19): a winner that has not founded yet,
+    /// and holds no other device's founding note, refuses instead of
+    /// building. A device that lost, or sees another device's claim, drops a
+    /// dead request without a refusal: the claimer answers it. A link this
+    /// device holds no record of waits. Mirror of web `linkRequestStep`.
+    public static func step(
+        own: Own?, answeredElsewhere: Bool, verdict: LinkAnswerVerdictValue?, noteHeld: Bool = false
+    ) -> Step {
+        if let own, own.holdsClaim, own.won != nil {
+            let answered = own.founded != nil || noteHeld
+            return verdict == .dead && !answered ? .refuse : .build
+        }
         if verdict == .answered { return .drop }
         if let own, own.holdsClaim {
             if !own.settled { return .decide }
@@ -316,15 +330,10 @@ public enum LinkClaims {
         guard let verdict else { return .wait }
         switch verdict {
         case .answered: return .drop
-        case .dead: return .cardDead
+        case .unknown: return .wait
+        case .dead: return .refuse
         case .accept: return .postClaim
         }
-    }
-
-    /// A card already shown for a request (the link no longer worked here)
-    /// that a roster device claimed: the request is answered.
-    public static func shownCardAnswered(own: Own?, answeredElsewhere: Bool) -> Bool {
-        !(own?.holdsClaim ?? false) && answeredElsewhere
     }
 
     /// The claims the core decides over: this device's own (authored by its
@@ -336,7 +345,7 @@ public enum LinkClaims {
     /// The register's verdict as the rule reads it (the core's
     /// `LinkAnswerVerdict`, kept separate so the rule is testable without
     /// the binding).
-    public enum LinkAnswerVerdictValue: Equatable { case accept, answered, dead }
+    public enum LinkAnswerVerdictValue: Equatable { case accept, answered, dead, unknown }
 
     /// Lower-case hex of `link_id ‖ requester_account_key`.
     public static func requestKeyHex(linkId: Data, requesterKey: Data) -> String {

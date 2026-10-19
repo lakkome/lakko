@@ -50,7 +50,7 @@ export interface LinkRecordModel {
 }
 
 /** What a device does with a contact request carrying a link answer. */
-export type LinkAnswerVerdict = "accept" | "answered" | "dead";
+export type LinkAnswerVerdict = "accept" | "answered" | "dead" | "unknown";
 
 /** A link just minted, as the register first records it. */
 export interface NewLinkRecord {

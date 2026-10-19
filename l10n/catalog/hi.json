@@ -8410,14 +8410,6 @@
       "text": "अभी नहीं",
       "status": "machine"
     },
-    "invite.contact.page.sign_in": {
-      "text": "{name} को जोड़ने के लिए साइन इन करें",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "खाता बनाएँ",
-      "status": "machine"
-    },
     "invite.contact.page.already_title": {
       "text": "{name} पहले से आपके संपर्कों में हैं",
       "status": "machine"
@@ -8438,14 +8430,6 @@
       "text": "हो गया",
       "status": "machine"
     },
-    "invite.contact.page.dead_title": {
-      "text": "यह आमंत्रण लिंक अब काम नहीं करता",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "भेजने वाले से नया लिंक माँगें।",
-      "status": "machine"
-    },
     "invite.contact.page.add_failed": {
       "text": "{name} को नहीं जोड़ा जा सका। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
       "status": "machine"
@@ -8464,10 +8448,6 @@
     },
     "chat.pending.call_disabled": {
       "text": "{name} के जुड़ने पर उपलब्ध होगा।",
-      "status": "machine"
-    },
-    "contacts.request.dead_link_note": {
-      "text": "ऐसे आमंत्रण लिंक से भेजा गया जो अब काम नहीं करता।",
       "status": "machine"
     }
   }

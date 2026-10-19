@@ -900,20 +900,24 @@ public class DeviceGroupSyncRepository(
         writeLinkRecord(linkId) { it.recordLinkUse(Hlc.mint(), linkId, requesterKey) }
 
     /**
-     * The one rule for a request's link answer (ADR-0079 section 3), asked
-     * of the fold. `null` while the fold is not loaded: the request stays
-     * undecided (no timer) and is decided once [ready] turns `true`.
+     * The one rule for a request's link answer (ADR-0079 section 3 as
+     * amended 2026-10-19), asked of the fold: the link's expiry is judged at
+     * [pressedAtMs] (the time the DS stamped on the request row), its
+     * revocation and uses now. `null` while the fold is not loaded: the
+     * request stays undecided (no timer) and is decided once [ready] turns
+     * `true`.
      */
-    public fun linkAnswerVerdictNow(
+    public fun linkAnswerVerdictAt(
         linkId: ByteArray,
         linkSecret: ByteArray,
         requesterKey: ByteArray,
+        pressedAtMs: ULong,
     ): LinkAnswerVerdict? {
         if (!ready.value) return null
         return synchronized(stateLock) {
             val state = syncedState ?: return null
             runCatching {
-                state.linkAnswerVerdict(linkId, linkSecret, requesterKey, System.currentTimeMillis().toULong())
+                state.linkAnswerVerdict(linkId, linkSecret, requesterKey, pressedAtMs)
             }.getOrDefault(LinkAnswerVerdict.DEAD)
         }
     }

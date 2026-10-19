@@ -4134,10 +4134,6 @@
       "comment": "Button that accepts an incoming contact request (the person becomes a trusted contact).",
       "security_critical": true
     },
-    "contacts.request.dead_link_note": {
-      "text": "Sent with an invite link that no longer works.",
-      "comment": "One line under the name on a contact request card whose invite link was revoked, expired or used up."
-    },
     "contacts.request.decline": {
       "text": "Decline",
       "comment": "Button that declines an incoming contact request."
@@ -6156,18 +6152,6 @@
       "text": "{name} is already in your contacts",
       "comment": "Contact invite page when the inviter is already a contact. Nothing is sent."
     },
-    "invite.contact.page.create_account": {
-      "text": "Create an account",
-      "comment": "Secondary button on the contact invite page for a visitor who is not signed in."
-    },
-    "invite.contact.page.dead_body": {
-      "text": "Ask the person who sent it for a new one.",
-      "comment": "Line under 'This invite link no longer works'."
-    },
-    "invite.contact.page.dead_title": {
-      "text": "This invite link no longer works",
-      "comment": "Contact invite page when the link was revoked, expired, used up, is unknown, or is damaged. The inviter's name is not shown."
-    },
     "invite.contact.page.done": {
       "text": "Done",
       "comment": "Button that closes the contact invite page."
@@ -6187,10 +6171,6 @@
     "invite.contact.page.own_title": {
       "text": "This is your own invite link",
       "comment": "Contact invite page opened by the person who made the link."
-    },
-    "invite.contact.page.sign_in": {
-      "text": "Sign in to add {name}",
-      "comment": "Primary button on the contact invite page for a visitor who is not signed in. {name} as in the heading."
     },
     "invite.contact.page.title": {
       "text": "Add {name} to your contacts?",

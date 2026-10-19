@@ -6,7 +6,12 @@
 - **Status:** Accepted (2026-10-16, maintainer). The maintainer decided the behaviour the
   same day (`docs/ux/contact-invite-link.md`): the invited person writes at
   once, a request through a dead link reaches the inviter as an ordinary
-  request card, the page shows no key material.
+  request card, the page shows no key material. **Amended 2026-10-19
+  (maintainer):** the moment B pressed Add decides whether a link counts; a
+  request through a link that does not count is dropped silently and B is
+  sent a signed refusal (this overturns the 2026-10-16 card decision); a
+  signed-out visitor sees no inviter card; a dead link opens Contacts. See
+  "Amendment (2026-10-19)" at the end.
 - **Date:** 2026-10-16
 - **Context:** contacts, invite links (ADR-0005 section 13, ADR-0028 sealed
   links, ADR-0060 section 6 link grants, ADR-0078 section 10 ownerless
@@ -78,7 +83,9 @@ used up.
 A request whose link answer names no live record (revoked, expired, used up,
 unknown, wrong secret) is shown as an ordinary request card with the note
 "Sent with an invite link that no longer works." A request without a link
-answer is unchanged.
+answer is unchanged. *(Overturned 2026-10-19: such a request is dropped
+silently and B is refused; "live" is judged at the moment B pressed Add.
+See the amendment at the end.)*
 
 ### 4. Link records travel between A's devices
 
@@ -478,8 +485,9 @@ change.
   roster (or the link's answered list, at most 16 requester keys, dropped
   this requester after later uses), the request stays stored, unshown; the
   iOS and Android undecided stores hold at most 64 rows.
-- No client offers B a control to delete a pending contact; the store-level
-  removal (record and queue) exists on all three for when the UX defines it.
+- No client offers B a control to delete a pending contact (maintainer,
+  2026-10-19: none is to be built); the store-level removal (record and
+  queue) runs when a verified refusal arrives (amendment below).
 - `max_uses` is counted twice: the ledger's soft count at Add (which B can
   inflate with fresh accounts, as before) and the register's count at
   accept, which is the one that decides. Two devices that accept two
@@ -487,3 +495,128 @@ change.
   limit by one (section 4, accepted).
 - iOS and Android unit tests were compiled but not run (`xcodebuild test` is
   not run here; the Android host JVM suite does not load the native core).
+
+## Amendment (2026-10-19): when a link counts, signed-out and dead links, a refusal back to B
+
+The maintainer decided seven rules on 2026-10-19 (UX spec
+`docs/ux/contact-invite-link.md` sections 3-5 and 7 amended the same day).
+Built the same day in `lakko-contacts`, `lakko-sync`, both FFI surfaces and on
+web, iOS and Android. Host-tested only; nothing was walked on a device, in a
+browser against a server, or between two accounts.
+
+**1. The moment B pressed Add decides.** A link counts for a request when, at
+the moment the request was written, it was not expired, and, now, it is not
+revoked and has uses left. A's app accepts whenever it next comes online,
+before or after the expiry. "The moment" is the server stamp the DS gives the
+mailbox row (`created_at`, `TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3)`, set by
+MariaDB, served RFC 3339 on every fetch, `services/ds/src/journal.rs`), never
+B's clock. It survives a restart of A's app because each client keeps it with
+the undecided request: web in the stored mailbox row, iOS and Android in the
+`IncomingContactRequest` inside the sealed `LinkRequestInbox` row. A stamp
+that does not parse counts as written after any expiry (fail-closed: the link
+is judged dead). The rule is one function in the core,
+`LinkRecordEntry::counts_for_request(pressed_at_ms)` behind
+`SyncedState::link_answer_verdict(link_id, secret, requester, pressed_at_ms)`
+on both FFI surfaces; no client re-derives it.
+
+*The use limit.* A pointer link's ledger counts uses at Add (the existing
+consume; at most `max_uses` Adds are admitted). The decision at A still uses
+the register's count of answered requests, now: an honest request the ledger
+admitted is within the limit, so it is never refused by that count, and the
+count stops a client that skipped the consume. An **inline link** (no ledger
+row; only web and Android can mint one when the upload failed) has no server
+count: A's register decides, the first requests answered win, and a request
+beyond the limit is refused. No server change was made. *Proposal, not
+built:* drop the inline fallback so that every contact link has a ledger row
+(a failed upload then fails the mint), which would make the count at Add the
+only one B can see.
+
+A new verdict `Unknown` (wire code `unknown`) says this device holds no record
+of the link at all. A device in that state waits and never refuses: the
+record may still be on its way from another of A's devices.
+
+**2. A revocation wins until A's app has answered.** "Answered" means the
+one-to-one was founded for the request: a won claim with a recorded founding,
+or a held link-founded note from another device. Until then a revocation makes
+the request refused, even for the device that won the claim. After it, the
+founding is resumed and the Welcome is delivered (a revocation does not undo a
+contact already made).
+
+**3. Signed out: no inviter card.** The first screen is the ordinary sign-in
+(web `/login` with the link as the return, its "Create account" link carrying
+the same return; iOS and Android the anon root with the link parked). After a
+session lands the link is opened again: live, the invite page; dead, rule 4.
+The signed-out preview (`previewInviteLink` on the natives, the signed-out
+page on all three) is removed.
+
+**4. A dead link opens Contacts.** Revoked, expired, used up, unknown,
+damaged: the client goes to the Contacts screen and shows nothing else. The
+"This link no longer works" page and its two catalog strings are removed.
+
+**5. Add on a dead link keeps nothing.** The ledger consume runs first; when
+it answers exhausted or not-found, no pending contact is written, nothing is
+held, and the page goes to Contacts. The pending contact is written only after
+the consume answered live (and still before the request is sent, so an
+answer that comes back at once finds it). The order is one injected-steps
+function per client with its own tests: web `contacts/invite-add.ts`, iOS and
+Android `InviteAddOrder`.
+
+**6. A request that reaches A as dead is dropped silently, and B is
+refused.** No card. The dead-link card, its note and its catalog string are
+removed (this overturns section 3's 2026-10-16 decision). A's device sends B a
+**link refusal**, `lakko-contacts::link_refusal`:
+
+```
+"lakko/link-refusal/v1\0" (22) ‖ version 0x01 ‖ link_id (16) ‖ requester_account_key (32) ‖ sig (64)
+```
+
+135 bytes, fixed; the signature is Ed25519 by A's account key over everything
+before it. Decode checks the domain, then the version, then the length;
+`verify_link_refusal(wire, inviter_key, expected_link_id, own_account_key)`
+also checks the link id and the requester key, so a refusal of another link or
+of another person removes nothing (errors `WrongDomain`, `BadLength`,
+`UnknownVersion`, `OtherLink`, `OtherRequester`, `BadKey`, `BadSignature`).
+Fuzz target `lakko-contacts/link_refusal_decode`; proptests that any one
+changed byte is refused and that decode round-trips. It travels as a sealed
+mailbox row of a new kind, `MailboxKind::LinkRefusal` (wire byte 5), to B's
+account mailbox through the reply grant the request carried (the path a
+contact ack takes). On UniFFI `composeLinkRefusal` / `verifyLinkRefusal` /
+`linkRefusalLen` and the `LinkRefusal` mailbox kind; on wasm the same names.
+No background reader opens mailbox rows (the iOS NSE, the web service worker
+and the Android background decrypt act on group wakes only), so the refusal
+is suppressed by construction and the NSE surface needs nothing.
+
+B's client checks each refusal against its pending contacts: the stated
+account key of the inviter, the link id the pending contact now stores (web
+`linkIdHex`, store version 3; iOS `linkId`, key prefix v2; Android
+`linkIdHex`), and B's own account key. On a match the pending contact and its
+held messages are removed silently and its reply key is closed. There is no
+delete button. A refusal that does not verify, or that arrives after the
+one-to-one exists (there is no pending contact any more), changes nothing.
+
+*Who refuses.* The step rule (`linkRequestStep` on web, `LinkClaims.step` on
+iOS and Android) has a `refuse` step in place of the card: with no own claim
+and a dead verdict the device refuses; with a won claim not yet answered and a
+dead verdict it refuses (rule 2); a device that lost the claim, or that sees
+another device's claim answered, drops the request without a refusal (the
+claimer answers). Two of A's devices that both judge a request dead may each
+send a refusal; B removes the pending contact on the first and finds nothing
+on the second. A refusal write that fails keeps the request for the next pass.
+
+**7. Kept.** The 7-day "has not answered yet" line, the already-contacts and
+own-link states, and one device answering a request (the claims, sections
+"As built" above).
+
+**Residuals of the amendment.**
+
+- A device whose register has not yet received a revocation may build while
+  another device, which has, refuses the same request. B can then receive the
+  refusal and the Welcome in either order: a refusal first removes the pending
+  contact and the Welcome then lands as an ordinary one-to-one; a Welcome
+  first makes the refusal find nothing. Not closed; it needs the claim to
+  carry the verdict, which was not decided.
+- The expiry is judged at the DS stamp, so a request that sat in A's mailbox
+  for longer than the DS retention (30 days) is gone before A sees it, as any
+  mailbox row.
+- An unparseable stamp (none observed; the DS always serves one) refuses a
+  request that might have counted.

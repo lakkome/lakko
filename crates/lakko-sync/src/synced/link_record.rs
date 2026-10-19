@@ -183,10 +183,16 @@ pub enum LinkAnswerVerdict {
     /// The requester was already accepted through this link (by this device
     /// or another): the request is answered, show nothing.
     Answered,
-    /// The answer names no live link (unknown, wrong secret, revoked,
-    /// expired, used up, or a call link): show an ordinary request card
-    /// with the "no longer works" note.
+    /// The answer names a link of this account that does not count for
+    /// this request (wrong secret, revoked now, expired before the request
+    /// was written, used up, or a call link): drop the request silently and
+    /// answer the requester with a refusal (ADR-0079 amendment of
+    /// 2026-10-19).
     Dead,
+    /// This device holds no record of the link the answer names (its record
+    /// may not have reached this device yet): keep the request undecided and
+    /// unshown, and ask again when the synced state changes. Never a refusal.
+    Unknown,
 }
 
 impl LinkAnswerVerdict {
@@ -197,6 +203,7 @@ impl LinkAnswerVerdict {
             Self::Accept => "accept",
             Self::Answered => "answered",
             Self::Dead => "dead",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -308,15 +315,36 @@ impl LinkRecordEntry {
         }
     }
 
-    /// The one rule (ADR-0079 section 3, UX section 6) for a request whose
-    /// link answer names this record. The secret is compared in constant
-    /// time; nothing but a matching secret on a live contact link accepts.
+    /// `true` when the link counts for a request written at `pressed_at_ms`
+    /// (ADR-0079 amendment of 2026-10-19): not revoked NOW (a revocation
+    /// wins until this account has answered), not expired at the moment the
+    /// request was written (the server's stamp on the request row, so the
+    /// requester cannot back-date it), and uses left now.
+    #[must_use]
+    pub const fn counts_for_request(&self, pressed_at_ms: u64) -> bool {
+        if self.revoked {
+            return false;
+        }
+        if self.expiry_ms != 0 && pressed_at_ms >= self.expiry_ms {
+            return false;
+        }
+        match self.effective_limit() {
+            Some(limit) => self.uses < limit,
+            None => true,
+        }
+    }
+
+    /// The one rule (ADR-0079 section 3 as amended 2026-10-19, UX section 5)
+    /// for a request whose link answer names this record. The secret is
+    /// compared in constant time; nothing but a matching secret on a contact
+    /// link that counts for the request accepts. `pressed_at_ms` is the time
+    /// the server stamped on the request row.
     #[must_use]
     pub fn verdict(
         &self,
         link_secret: &[u8; LINK_RECORD_SECRET_LEN],
         requester_key: &[u8; LINK_RECORD_REQUESTER_KEY_LEN],
-        now_ms: u64,
+        pressed_at_ms: u64,
     ) -> LinkAnswerVerdict {
         if !link_secrets_match(&self.link_secret, link_secret) {
             return LinkAnswerVerdict::Dead;
@@ -327,7 +355,7 @@ impl LinkRecordEntry {
         if self.answered.contains(requester_key) {
             return LinkAnswerVerdict::Answered;
         }
-        if self.is_live(now_ms) {
+        if self.counts_for_request(pressed_at_ms) {
             LinkAnswerVerdict::Accept
         } else {
             LinkAnswerVerdict::Dead

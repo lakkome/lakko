@@ -635,9 +635,14 @@ pub enum LinkAnswerVerdict {
     Accept,
     /// The requester was already accepted through this link: show nothing.
     Answered,
-    /// No live link (unknown, wrong secret, revoked, expired, used up):
-    /// show an ordinary request card with the "no longer works" note.
+    /// The link does not count for the request (wrong secret, revoked now,
+    /// expired before the request was written, used up): drop the request
+    /// silently and answer the requester with a link refusal (ADR-0079,
+    /// 2026-10-19).
     Dead,
+    /// This device holds no record of the link: keep the request undecided
+    /// and unshown, ask again when the synced state changes. Never a refusal.
+    Unknown,
 }
 
 impl From<core::LinkAnswerVerdict> for LinkAnswerVerdict {
@@ -646,6 +651,7 @@ impl From<core::LinkAnswerVerdict> for LinkAnswerVerdict {
             core::LinkAnswerVerdict::Accept => Self::Accept,
             core::LinkAnswerVerdict::Answered => Self::Answered,
             core::LinkAnswerVerdict::Dead => Self::Dead,
+            core::LinkAnswerVerdict::Unknown => Self::Unknown,
         }
     }
 }
@@ -1296,8 +1302,11 @@ impl SyncedState {
     }
 
     /// The one rule for a contact request carrying a link answer (ADR-0079
-    /// section 3): compare the answer with the held record (the secret in
-    /// constant time). An answer of the wrong width is `Dead`.
+    /// section 3 as amended 2026-10-19): compare the answer with the held
+    /// record (the secret in constant time). `pressed_at_ms` is the time the
+    /// Delivery Service stamped on the request row: the link's expiry is
+    /// judged at that moment, its revocation and use count now. An answer of
+    /// the wrong width is `Dead`.
     ///
     /// # Errors
     ///
@@ -1307,7 +1316,7 @@ impl SyncedState {
         link_id: Vec<u8>,
         link_secret: Vec<u8>,
         requester_key: Vec<u8>,
-        now_ms: u64,
+        pressed_at_ms: u64,
     ) -> Result<LinkAnswerVerdict, FfiError> {
         let (Ok(id), Ok(secret), Ok(key)) = (
             <[u8; 16]>::try_from(link_id.as_slice()),
@@ -1316,7 +1325,10 @@ impl SyncedState {
         ) else {
             return Ok(LinkAnswerVerdict::Dead);
         };
-        self.with(|s| s.link_answer_verdict(&id, &secret, &key, now_ms).into())
+        self.with(|s| {
+            s.link_answer_verdict(&id, &secret, &key, pressed_at_ms)
+                .into()
+        })
     }
 
     /// The service envelope carrying one held link record with its original

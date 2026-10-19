@@ -42,7 +42,65 @@ class PendingContactsTest {
             displayName = name,
             username = username,
             addedAtMs = at,
+            linkIdHex = "07".repeat(16),
         )
+
+    /** ADR-0079 amendment of 2026-10-19 — the refusal is handed to the
+     *  verifier with the pending contact's stated key, the link its request
+     *  answered and this account's key; only a verifying refusal cancels
+     *  (the signature itself is the core's, tested in `lakko-contacts`). */
+    @Test
+    fun `only a refusal verifying against the contact's key and link cancels it`() {
+        val anna = contact("aa", 1)
+        val bob = ByteArray(32) { 0xB0.toByte() }
+        val refusal = byteArrayOf(9)
+        var seen: List<ByteArray>? = null
+        val annaSigned: (ByteArray, ByteArray, ByteArray, ByteArray) -> Boolean = { w, k, l, o ->
+            seen = listOf(w, k, l, o)
+            k.contentEquals(ByteArray(32) { 1 }) && l.contentEquals(ByteArray(16) { 7 }) && o.contentEquals(bob)
+        }
+        assertEquals("aa", PendingContacts.refusedBy(listOf(contact("bb", 3), anna), refusal, bob, annaSigned)?.accountIdHex)
+        assertTrue(seen!![0].contentEquals(refusal))
+        assertNull(PendingContacts.refusedBy(listOf(anna), refusal, ByteArray(32) { 0xB1.toByte() }, annaSigned))
+        assertNull(PendingContacts.refusedBy(listOf(anna.copy(linkIdHex = "08".repeat(16))), refusal, bob, annaSigned))
+        assertNull(PendingContacts.refusedBy(listOf(anna.copy(linkIdHex = "zz")), refusal, bob) { _, _, _, _ -> true })
+    }
+
+    /** Add racing a link that went dead: the consume answers dead and
+     *  nothing is kept, no pending contact and no request. */
+    @Test
+    fun `Add on a link the consume finds dead keeps nothing`() = kotlinx.coroutines.runBlocking {
+        val log = mutableListOf<String>()
+        val outcome = InviteAddOrder.run(
+            consumeLive = { log += "consume"; false },
+            recordPending = { log += "record" },
+            sendRequest = { log += "send" },
+            forgetPending = { log += "forget" },
+        )
+        assertEquals(InviteAddOrder.Outcome.DEAD, outcome)
+        assertEquals(listOf("consume"), log)
+    }
+
+    @Test
+    fun `Add on a live link records before it sends and forgets when the send fails`() = kotlinx.coroutines.runBlocking {
+        val log = mutableListOf<String>()
+        assertEquals(
+            InviteAddOrder.Outcome.ADDED,
+            InviteAddOrder.run({ log += "consume"; true }, { log += "record" }, { log += "send" }, { log += "forget" }),
+        )
+        assertEquals(listOf("consume", "record", "send"), log)
+        log.clear()
+        val thrown = runCatching {
+            InviteAddOrder.run(
+                { log += "consume"; true },
+                { log += "record" },
+                { log += "send"; error("offline") },
+                { log += "forget" },
+            )
+        }.exceptionOrNull()
+        assertEquals("offline", thrown?.message)
+        assertEquals(listOf("consume", "record", "send", "forget"), log)
+    }
 
     @Test
     fun `a second Add keeps the first Add time`() {

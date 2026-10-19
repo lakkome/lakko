@@ -5399,7 +5399,9 @@ as live (not revoked, not expired, not used up), whose stored secret equals
 the answer's in constant time, and the sender's key is not one the link was
 already answered for. A request whose answer names a revoked, expired, used
 up or unknown link is shown as an ordinary request card with a note; one
-already answered is dropped. A revocation in the register is final: no later
+already answered is dropped. *(Amended 2026-10-19: expiry is judged at the
+request's DS stamp, and a request on a link that does not count is dropped
+with a signed refusal instead of a card; see below.)* A revocation in the register is final: no later
 write, from any device and at any stamp, makes the link live again.
 
 **Only one device answers (reworked 2026-10-17).** A device that decides to
@@ -5520,9 +5522,35 @@ reads that commit's row. Property tests
 `a_straddled_claim_never_wins_and_one_device_builds` (exactly one builder
 across interleavings of claims and commits) and `a_straddled_note_never_counts`.
 
+**When a link counts, and the refusal (amended 2026-10-19).** The verdict
+judges expiry at the moment the request was written, the DS server stamp of
+its mailbox row (`created_at`, set by MariaDB, kept by each client with the
+undecided request across a restart; a stamp that does not parse counts as
+written after any expiry), and revocation and uses now
+(`LinkRecordEntry::counts_for_request(pressed_at_ms)`). A device holding no
+record of the link answers `Unknown` and waits, never refuses. A revocation
+wins until the account has answered (a recorded founding or a held
+link-founded note): before that, a won claim on a dead link refuses instead of
+building. A request on a link that does not count is no longer shown as a
+card: it is dropped silently and the requester is sent a **link refusal**
+(`lakko-contacts::link_refusal`, 135 bytes: domain `lakko/link-refusal/v1\0`,
+version, `link_id(16)`, `requester_account_key(32)`, an Ed25519 signature by
+the inviter's account key over everything before it; fuzz
+`link_refusal_decode`), as a sealed mailbox row of kind `LinkRefusal` (5)
+through the request's reply grant. The requester removes its pending contact
+and the messages held for it only when `verify_link_refusal` succeeds against
+that pending contact's stated inviter key, the link id it stored, and its own
+account key, so a refusal signed by anyone else, for another link, or for
+another person removes nothing. On the inviting side the client writes no
+pending contact before the ledger consume answered live.
+
 **What this does NOT do.** It does not authenticate the inviter's name on the
 invite page beyond the capability's signature: the name is the inviter's own
-claim, signed by their account key. The readability rule does not cover a
+claim, signed by their account key. A device of the account whose register
+has not yet received a revocation may build while another device refuses the
+same request (amended 2026-10-19; the requester then sees whichever lands
+first). A refusal says the inviter's app judged the link dead; it does not
+prove when. The readability rule does not cover a
 forked DeviceGroup (two of the account's devices committing at one epoch with
 both commits taking effect on different devices), nor an own claim or note
 published before an own commit the device had already merged when it read

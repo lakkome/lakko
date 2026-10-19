@@ -26,6 +26,7 @@ const anna = {
   displayName: "Anna",
   username: "anna",
   addedAtMs: 1_000,
+  linkIdHex: "1".repeat(32),
 };
 
 function withAnna(): PendingContact[] {

@@ -1952,14 +1952,18 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         return written
     }
 
-    /// The one rule for a request's link answer (ADR-0079 section 3), asked
-    /// of the fold. `nil` while the fold is not loaded: the request stays
-    /// undecided (no timer) and is decided once ``ready`` turns `true`.
-    public func linkAnswerVerdictNow(linkId: Data, linkSecret: Data, requesterKey: Data) -> LinkAnswerVerdict? {
+    /// The one rule for a request's link answer (ADR-0079 section 3 as
+    /// amended 2026-10-19), asked of the fold: the link's expiry is judged at
+    /// `pressedAtMs` (the time the DS stamped on the request row), its
+    /// revocation and uses now. `nil` while the fold is not loaded: the
+    /// request stays undecided (no timer) and is decided once ``ready`` turns
+    /// `true`.
+    public func linkAnswerVerdictAt(
+        linkId: Data, linkSecret: Data, requesterKey: Data, pressedAtMs: UInt64
+    ) -> LinkAnswerVerdict? {
         guard ready else { return nil }
-        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         return (try? syncedState.linkAnswerVerdict(
-            linkId: linkId, linkSecret: linkSecret, requesterKey: requesterKey, nowMs: nowMs)) ?? .dead
+            linkId: linkId, linkSecret: linkSecret, requesterKey: requesterKey, pressedAtMs: pressedAtMs)) ?? .dead
     }
 
     // MARK: - ADR-0076: the own-username register

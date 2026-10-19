@@ -1169,6 +1169,40 @@ public final class ContactsClient {
         return PublishedAck(messageId: publish.id, createdAt: publish.createdAt)
     }
 
+    // MARK: - Link refusal
+
+    /// ADR-0079 amendment of 2026-10-19 — answer a request whose invite link
+    /// no longer counts with a link refusal: signed by this account's key
+    /// over the link id and the requester's account key, sealed as a
+    /// `linkRefusal` row to the mailbox the requester's `reply` grant names
+    /// (the path an ack takes). Throws when there is nowhere to write or the
+    /// write fails; the caller keeps the request for the next pass.
+    public func sendLinkRefusal(
+        inviterSigningSeed: Data,
+        linkId: Data,
+        originalRequest: IncomingContactRequest,
+        plan: MailboxWritePlan?
+    ) async throws {
+        guard let plan else {
+            NSLog("ADR-0079: no verified mailbox for the requester; the refusal was not sent")
+            throw ContactsError.wrap(MailboxUnknown())
+        }
+        let wire: Data
+        do {
+            wire = try composeLinkRefusal(
+                inviterSigningSeed: inviterSigningSeed, linkId: linkId,
+                requesterAccountKey: originalRequest.fromPubkey)
+        } catch {
+            throw ContactsError.wrap(error)
+        }
+        do {
+            let row = try plan.target.seal(kind: .linkRefusal, body: wire)
+            _ = try await ds.publishMailbox(pseudonym: plan.target.address, payload: row, writeAuth: plan.auth)
+        } catch {
+            throw ContactsError.wrap(error)
+        }
+    }
+
     // MARK: - Poll
 
     /// Poll the user's stranger-inbox mailbox for new
@@ -1241,6 +1275,8 @@ public final class ContactsClient {
                 // The co-publisher join reads its own rows
                 // (``CoPublisher/pollForCoPublishWelcome``).
                 continue
+            case .linkRefusal:
+                events.append(.linkRefusal(body))
             case .welcome:
                 events.append(
                     .welcome(
@@ -1411,17 +1447,10 @@ public struct IncomingContactRequest: Equatable, Codable {
     /// request carried none (or one that failed its bounds). A claim bound to
     /// ``fromPubkey``; its username is shown only once verified.
     public let profile: ProfileClaim?
+    /// The time the DS stamped on the row (ISO-8601, server-set). For a
+    /// request through an invite link it decides the link's expiry (ADR-0079
+    /// amendment of 2026-10-19); persisted with the request.
     public let createdAt: String
-    /// ADR-0079 section 3 — the request was sent through an invite link of
-    /// this account that no longer works (revoked, expired, used up,
-    /// unknown): the card shows "Sent with an invite link that no longer
-    /// works." `nil` for every other request. Persisted with the request, so
-    /// the note survives a relaunch.
-    public let viaDeadLink: Bool?
-    /// The 16-byte id of the dead link (not its secret): what the card is
-    /// matched by when another device of the account claims the same request
-    /// (ADR-0079, reworked 2026-10-17). `nil` for every other request.
-    public let deadLinkId: Data?
 
     public init(
         messageId: Int64,
@@ -1431,9 +1460,7 @@ public struct IncomingContactRequest: Equatable, Codable {
         validAfterMs: UInt64,
         intro: String?,
         profile: ProfileClaim? = nil,
-        createdAt: String,
-        viaDeadLink: Bool? = nil,
-        deadLinkId: Data? = nil
+        createdAt: String
     ) {
         self.messageId = messageId
         self.fromPubkey = fromPubkey
@@ -1443,17 +1470,16 @@ public struct IncomingContactRequest: Equatable, Codable {
         self.intro = intro
         self.profile = profile
         self.createdAt = createdAt
-        self.viaDeadLink = viaDeadLink
-        self.deadLinkId = deadLinkId
     }
 
-    /// The same request, marked as sent through the link `linkId`, which no
-    /// longer works.
-    public func sentThroughDeadLink(linkId: Data) -> IncomingContactRequest {
-        IncomingContactRequest(
-            messageId: messageId, fromPubkey: fromPubkey, fromAccountId: fromAccountId,
-            fromPseudonym: fromPseudonym, validAfterMs: validAfterMs, intro: intro,
-            profile: profile, createdAt: createdAt, viaDeadLink: true, deadLinkId: linkId)
+    /// The DS stamp as Unix ms, or `nil` when it does not parse.
+    public var createdAtMs: UInt64? {
+        let withFrac = ISO8601DateFormatter()
+        withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        guard let date = withFrac.date(from: createdAt) ?? plain.date(from: createdAt),
+              date.timeIntervalSince1970 >= 0 else { return nil }
+        return UInt64(date.timeIntervalSince1970 * 1000)
     }
 }
 
@@ -1530,6 +1556,10 @@ public enum IncomingMailboxEvent: Equatable {
     case welcome(messageId: Int64, welcomeBytes: Data, createdAt: String)
     /// 1.9b1 — original recipient's accept-reply.
     case contactAck(IncomingContactAck)
+    /// ADR-0079 amendment of 2026-10-19 — a link refusal, NOT yet verified:
+    /// the receiver checks it against each pending contact
+    /// (`verifyLinkRefusal`) before it removes anything.
+    case linkRefusal(Data)
 }
 
 /// Result of ``ContactsClient/pollStrangerInbox(...)``.

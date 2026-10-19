@@ -1403,17 +1403,21 @@ impl SyncedState {
     }
 
     /// The one rule for a contact request carrying a link answer (ADR-0079
-    /// section 3): `"accept"` (run the accept path with no card, then
-    /// `recordLinkUse`), `"answered"` (show nothing) or `"dead"` (show the
-    /// card with the "no longer works" note). The secret is compared in
-    /// constant time; an answer of the wrong width is `"dead"`.
+    /// section 3 as amended 2026-10-19): `"accept"` (run the accept path
+    /// with no card, then `recordLinkUse`), `"answered"` (show nothing),
+    /// `"dead"` (drop the request silently and answer with a link refusal)
+    /// or `"unknown"` (no record of the link here: keep the request
+    /// undecided). `pressedAtMs` is the time the Delivery Service stamped on
+    /// the request row: expiry is judged then, revocation and uses now. The
+    /// secret is compared in constant time; an answer of the wrong width is
+    /// `"dead"`.
     #[wasm_bindgen(js_name = linkAnswerVerdict)]
     pub fn link_answer_verdict(
         &self,
         link_id: &[u8],
         link_secret: &[u8],
         requester_key: &[u8],
-        now_ms: u64,
+        pressed_at_ms: u64,
     ) -> Result<String, JsError> {
         let (Ok(id), Ok(secret), Ok(key)) = (
             <[u8; 16]>::try_from(link_id),
@@ -1423,7 +1427,7 @@ impl SyncedState {
             return Ok(core::LinkAnswerVerdict::Dead.code().to_string());
         };
         self.with(|s| {
-            s.link_answer_verdict(&id, &secret, &key, now_ms)
+            s.link_answer_verdict(&id, &secret, &key, pressed_at_ms)
                 .code()
                 .to_string()
         })

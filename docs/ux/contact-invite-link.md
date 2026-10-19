@@ -47,13 +47,17 @@ Shown at `/i/<id>#<secret>` on web, and by the deep link on iOS and Android.
 No fingerprint, no safety number, no expiry, no use count. The safety number
 stays where it is today, on the contact's info screen, for anyone who wants it.
 
-**Signed out.** The same page with one primary button, **Sign in to add Anna**,
-and a secondary **Create an account**. After either, B returns to this page
-with the default state, not to the chat list.
+**Signed out** (amended 2026-10-19). No inviter card at all: the first screen
+is the ordinary **Sign in** / **Create an account** choice. After either, the
+link is checked again: if it still works B sees the default page above; if it
+no longer works B lands on the Contacts screen (below).
 
 **Adding.** **Add** shows a spinner in place of its label and disables both
 buttons until the request is written. Then the page closes into the chat with A
-(section 4).
+(section 4). A becomes a contact on B's side only after the server has
+confirmed the link still works (the use is counted at that moment); if it
+answers that the link no longer works, nothing is kept, no message is held and
+B lands on the Contacts screen with nothing else shown (amended 2026-10-19).
 
 **Already contacts.** Title **Anna is already in your contacts**, one button
 **Open chat**. Nothing is sent.
@@ -61,14 +65,10 @@ buttons until the request is written. Then the page closes into the chat with A
 **Own link.** Title **This is your own invite link**, body "Share it with the
 person you want to add.", one button **Done**.
 
-**Link no longer works** (revoked, expired, used up, or the id is unknown):
-title **This invite link no longer works**, body "Ask the person who sent it
-for a new one.", one button **Done**. The name is not shown: a revoked link's
-contents are gone.
-
-**Damaged link** (the secret after `#` is missing or wrong): the same copy as
-"no longer works". A person cannot tell the two apart and should do the same
-thing.
+**Link no longer works** (revoked, expired, used up, the id is unknown, or the
+link is damaged: the secret after `#` is missing or wrong): there is no page.
+B is taken to the Contacts screen and nothing else is shown (amended
+2026-10-19; the earlier "This invite link no longer works" page is gone).
 
 **Network failure while adding:** the page stays, the button returns, one line
 under it: "Could not add Anna. Check your connection and try again."
@@ -87,9 +87,13 @@ under it: "Could not add Anna. Check your connection and try again."
 - When A's app answers, the line goes away and the queued messages send. No
   notification for this on B's side.
 
-If A's app refuses (section 5, last bullet), B's chat keeps the line. B is told
-nothing more; the next time B opens the chat after 7 days without an answer the
-line reads **Anna has not answered yet. You can ask them for a new link.**
+If A's app never answers, B's chat keeps the line; the next time B opens the
+chat after 7 days without an answer the line reads **Anna has not answered
+yet. You can ask them for a new link.**
+
+If A's app refuses (section 5, last bullet), A disappears from B's contacts and
+chats and the messages B wrote are dropped, silently: no message, no notice
+(amended 2026-10-19). There is no button for B to delete a pending contact.
 
 ## 5. A: the invited person becomes a contact on their own
 
@@ -100,11 +104,19 @@ line reads **Anna has not answered yet. You can ask them for a new link.**
 - The link's own record is updated: a single-use link is used up and
   disappears from A's link list; a multi-use link counts down.
 - **No request card** is shown for such a request.
-- A request that names a link A no longer holds as live (revoked, expired,
-  used up on another of A's devices, or unknown) is **not** taken on its own.
-  It is shown as an ordinary request card, with one line under the name:
-  "Sent with an invite link that no longer works." A decides. (Decided by the
-  maintainer 2026-10-16 over dropping such a request silently.)
+- **When a link counts** (amended 2026-10-19). The moment B pressed **Add**
+  decides, as the server recorded it on the request: a request written while
+  the link worked is taken whenever A's app comes online, even after the
+  link's expiry. A revocation wins until A's app has answered: a link A
+  revoked before A's app took the request refuses it, even if B pressed Add
+  earlier.
+- A request that reaches A with a link that no longer counts (revoked before
+  A's app answered, expired before B pressed Add, used up, or unknown) is
+  dropped silently: no card, nothing shown to A. A's app answers B with a
+  refusal, and B's app removes A from B's contacts silently (section 4). (This
+  overturns the 2026-10-16 decision to show such a request as a card with the
+  line "Sent with an invite link that no longer works"; that card and its line
+  are gone.)
 
 ## 6. A's other devices
 
@@ -131,6 +143,13 @@ the link already used treats the request as answered, not as an expired link.
    when sent or when B deletes the contact.
 5. **The "not answered for 7 days" marker**: the time B pressed Add, kept with
    the pending contact.
+6. **When B pressed Add, as the server saw it** (2026-10-19): the time the
+   server stamped on the request row in A's mailbox. B cannot back-date it. A's
+   app keeps it with a request it has not decided yet, across a restart.
+7. **A refusal back to B** (2026-10-19): a small message signed by A's account
+   key naming the link and B, sent the way the request said to answer, and
+   checked by B against A's key before B removes the pending contact, so
+   nobody else can remove it.
 
 ## 8. Same on all three clients
 

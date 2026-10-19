@@ -8410,14 +8410,6 @@
       "text": "לא עכשיו",
       "status": "machine"
     },
-    "invite.contact.page.sign_in": {
-      "text": "יש להתחבר כדי להוסיף את {name}",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "יצירת חשבון",
-      "status": "machine"
-    },
     "invite.contact.page.already_title": {
       "text": "{name} כבר באנשי הקשר שלך",
       "status": "machine"
@@ -8438,14 +8430,6 @@
       "text": "סיום",
       "status": "machine"
     },
-    "invite.contact.page.dead_title": {
-      "text": "קישור ההזמנה הזה כבר לא עובד",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "בקשו קישור חדש ממי ששלח אותו.",
-      "status": "machine"
-    },
     "invite.contact.page.add_failed": {
       "text": "לא ניתן היה להוסיף את {name}. בדקו את החיבור ונסו שוב.",
       "status": "machine"
@@ -8464,10 +8448,6 @@
     },
     "chat.pending.call_disabled": {
       "text": "יהיה זמין כש־{name} יתחבר.",
-      "status": "machine"
-    },
-    "contacts.request.dead_link_note": {
-      "text": "נשלח דרך קישור הזמנה שכבר לא עובד.",
       "status": "machine"
     }
   }

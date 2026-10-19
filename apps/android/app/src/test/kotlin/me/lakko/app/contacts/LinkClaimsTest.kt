@@ -45,7 +45,14 @@ class LinkClaimsTest {
     fun `follows the register once it is loaded`() {
         assertEquals(LinkClaims.Step.POST_CLAIM, LinkClaims.step(null, false, LinkClaims.Verdict.ACCEPT))
         assertEquals(LinkClaims.Step.DROP, LinkClaims.step(null, false, LinkClaims.Verdict.ANSWERED))
-        assertEquals(LinkClaims.Step.CARD_DEAD, LinkClaims.step(null, false, LinkClaims.Verdict.DEAD))
+        assertEquals(LinkClaims.Step.REFUSE, LinkClaims.step(null, false, LinkClaims.Verdict.DEAD))
+    }
+
+    /** ADR-0079 amendment of 2026-10-19 — a link this device holds no record
+     *  of waits, and is never refused. */
+    @Test
+    fun `waits on a link this device holds no record of`() {
+        assertEquals(LinkClaims.Step.WAIT, LinkClaims.step(null, false, LinkClaims.Verdict.UNKNOWN))
     }
 
     @Test
@@ -70,15 +77,27 @@ class LinkClaimsTest {
     fun `decides by the journal once posted or posting and builds a won claim whatever the verdict says`() {
         assertEquals(LinkClaims.Step.DECIDE, LinkClaims.step(posted, true, LinkClaims.Verdict.ACCEPT))
         assertEquals(LinkClaims.Step.DECIDE, LinkClaims.step(posting, true, null))
-        assertEquals(LinkClaims.Step.BUILD, LinkClaims.step(won, true, LinkClaims.Verdict.DEAD))
         assertEquals(LinkClaims.Step.BUILD, LinkClaims.step(won, true, LinkClaims.Verdict.ANSWERED))
     }
 
+    /** ADR-0079 amendment of 2026-10-19 — a revocation wins until this
+     *  account has answered: a won claim not yet founded refuses; once
+     *  founded (here, or by another device whose note is held) it builds. */
     @Test
-    fun `a dead-link card goes only for another device's claim`() {
-        assertTrue(LinkClaims.shownCardAnswered(null, true))
-        assertFalse(LinkClaims.shownCardAnswered(null, false))
-        assertFalse(LinkClaims.shownCardAnswered(won, true))
+    fun `a revocation before the answer refuses a won claim`() {
+        assertEquals(LinkClaims.Step.REFUSE, LinkClaims.step(won, true, LinkClaims.Verdict.DEAD))
+        assertEquals(LinkClaims.Step.BUILD, LinkClaims.step(won, true, LinkClaims.Verdict.DEAD, noteHeld = true))
+        assertEquals(
+            LinkClaims.Step.BUILD,
+            LinkClaims.step(won.copy(founded = BuildFake.FOUNDING), true, LinkClaims.Verdict.DEAD),
+        )
+    }
+
+    @Test
+    fun `the request keeps the DS stamp as milliseconds`() {
+        assertEquals(1_792_411_200_500L, request(1).copy(createdAt = "2026-10-19T12:00:00.500Z").createdAtMs)
+        assertEquals(1_792_411_200_000L, request(1).copy(createdAt = "2026-10-19T12:00:00+00:00").createdAtMs)
+        assertNull(request(1).createdAtMs)
     }
 
     @Test
@@ -358,11 +377,13 @@ class LinkClaimsTest {
     }
 
     @Test
-    fun `the dead-link note is kept with the stored request`() {
-        val card = request(6).copy(viaDeadLink = true, deadLinkId = ByteArray(16) { 1 })
-        val back = decodePendingRequests(encodePendingRequests(listOf(card)))!!.single()
-        assertTrue(back.viaDeadLink)
-        assertTrue(back.deadLinkId!!.contentEquals(ByteArray(16) { 1 }))
-        assertFalse(decodePendingRequests(encodePendingRequests(listOf(request(7))))!!.single().viaDeadLink)
+    fun `an undecided request keeps its DS stamp across a restart`() {
+        val blobs = MapBlobs()
+        val account = base64Encode(ByteArray(16) { 1 })
+        val stamped = request(6).copy(createdAt = "2026-10-19T12:00:00Z")
+        assertTrue(LinkRequestInbox(account, blobs).add(UndecidedLinkRequest(stamped, ByteArray(16) { 1 }, ByteArray(12) { 2 })))
+        val back = LinkRequestInbox(account, blobs).rows().single().request
+        assertEquals("2026-10-19T12:00:00Z", back.createdAt)
+        assertEquals(stamped.createdAtMs, back.createdAtMs)
     }
 }

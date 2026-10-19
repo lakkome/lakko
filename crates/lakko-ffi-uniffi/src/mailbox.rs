@@ -58,6 +58,8 @@ pub enum FfiMailboxKind {
     ContactAck,
     /// A Welcome rendezvous (the channel co-publisher join).
     WelcomeRendezvous,
+    /// A signed link refusal (ADR-0079, 2026-10-19).
+    LinkRefusal,
 }
 
 impl From<FfiMailboxKind> for MailboxKind {
@@ -67,6 +69,7 @@ impl From<FfiMailboxKind> for MailboxKind {
             FfiMailboxKind::Welcome => Self::Welcome,
             FfiMailboxKind::ContactAck => Self::ContactAck,
             FfiMailboxKind::WelcomeRendezvous => Self::WelcomeRendezvous,
+            FfiMailboxKind::LinkRefusal => Self::LinkRefusal,
         }
     }
 }
@@ -78,6 +81,7 @@ impl From<MailboxKind> for FfiMailboxKind {
             MailboxKind::Welcome => Self::Welcome,
             MailboxKind::ContactAck => Self::ContactAck,
             MailboxKind::WelcomeRendezvous => Self::WelcomeRendezvous,
+            MailboxKind::LinkRefusal => Self::LinkRefusal,
         }
     }
 }
@@ -263,6 +267,7 @@ mod tests {
             FfiMailboxKind::Welcome,
             FfiMailboxKind::ContactAck,
             FfiMailboxKind::WelcomeRendezvous,
+            FfiMailboxKind::LinkRefusal,
         ] {
             let row = seal_mailbox_row_to_binding(
                 binding.clone(),

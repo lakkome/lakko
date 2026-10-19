@@ -747,22 +747,25 @@ impl SyncedState {
     }
 
     /// The one rule for a contact request that carries a link answer
-    /// (ADR-0079 section 3, UX section 6): [`LinkAnswerVerdict::Accept`]
-    /// only for a live contact link of this account whose secret matches
-    /// (compared in constant time); [`LinkAnswerVerdict::Answered`] when the
-    /// requester was already accepted through it; otherwise
-    /// [`LinkAnswerVerdict::Dead`] (an unknown link included).
+    /// (ADR-0079 section 3 as amended 2026-10-19, UX section 5):
+    /// [`LinkAnswerVerdict::Accept`] only for a contact link of this account
+    /// whose secret matches (compared in constant time) and that counts for
+    /// a request written at `pressed_at_ms` (the server's stamp on the
+    /// request row: not revoked now, not expired then, uses left);
+    /// [`LinkAnswerVerdict::Answered`] when the requester was already
+    /// accepted through it; [`LinkAnswerVerdict::Unknown`] when this device
+    /// holds no record of the link; otherwise [`LinkAnswerVerdict::Dead`].
     #[must_use]
     pub fn link_answer_verdict(
         &self,
         link_id: &[u8; LINK_RECORD_ID_LEN],
         link_secret: &[u8; LINK_RECORD_SECRET_LEN],
         requester_key: &[u8; LINK_RECORD_REQUESTER_KEY_LEN],
-        now_ms: u64,
+        pressed_at_ms: u64,
     ) -> LinkAnswerVerdict {
         self.link_record(link_id)
-            .map_or(LinkAnswerVerdict::Dead, |r| {
-                r.value.verdict(link_secret, requester_key, now_ms)
+            .map_or(LinkAnswerVerdict::Unknown, |r| {
+                r.value.verdict(link_secret, requester_key, pressed_at_ms)
             })
     }
 
@@ -1212,6 +1215,51 @@ mod tests {
         })
     }
 
+    /// ADR-0079 amendment of 2026-10-19: the moment the request was written
+    /// decides expiry; a revocation decides until the account has answered.
+    #[test]
+    fn a_link_counts_by_the_request_stamp_and_a_revocation_wins_until_answered() {
+        use crate::synced::LinkAnswerVerdict;
+        let mut a = SyncedState::new();
+        let SyncEntry::LinkRecord(mut record) = link(1, 0, false, 1) else {
+            unreachable!()
+        };
+        record.expiry_ms = 1_000;
+        assert_eq!(a.set_link_record(5, record), Ok(true));
+        let id = [1u8; 16];
+        let secret = [0x5C; 12];
+        let bob = [0xB0; 32];
+        // Written before the expiry, processed long after it: accepted.
+        assert_eq!(
+            a.link_answer_verdict(&id, &secret, &bob, 999),
+            LinkAnswerVerdict::Accept
+        );
+        // Written at or after the expiry: dead.
+        assert_eq!(
+            a.link_answer_verdict(&id, &secret, &bob, 1_000),
+            LinkAnswerVerdict::Dead
+        );
+        // Revoked before this account answered: dead even for a request
+        // written while the link was live.
+        assert_eq!(a.revoke_link_record(6, &id), Ok(true));
+        assert_eq!(
+            a.link_answer_verdict(&id, &secret, &bob, 1),
+            LinkAnswerVerdict::Dead
+        );
+        // Answered before the revocation: stays answered.
+        let mut c = SyncedState::new();
+        let SyncEntry::LinkRecord(record) = link(1, 0, false, 1) else {
+            unreachable!()
+        };
+        assert_eq!(c.set_link_record(5, record), Ok(true));
+        assert_eq!(c.record_link_use(6, &id, &bob), Ok(true));
+        assert_eq!(c.revoke_link_record(7, &id), Ok(true));
+        assert_eq!(
+            c.link_answer_verdict(&id, &secret, &bob, 1),
+            LinkAnswerVerdict::Answered
+        );
+    }
+
     #[test]
     fn link_records_are_written_used_revoked_and_carried() {
         use crate::synced::{LinkAnswerVerdict, LinkRecordKind};
@@ -1230,7 +1278,7 @@ mod tests {
         );
         assert_eq!(
             a.link_answer_verdict(&[2; 16], &secret, &bob, 0),
-            LinkAnswerVerdict::Dead
+            LinkAnswerVerdict::Unknown
         );
         // A use, written on a stamp lower than the held one, still lands.
         assert_eq!(a.record_link_use(1, &id, &bob), Ok(true));

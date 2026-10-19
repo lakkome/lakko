@@ -90,6 +90,7 @@ pub mod key_rotation;
 pub mod l10n;
 pub mod link_claim;
 pub mod link_founded;
+pub mod link_refusal;
 pub mod mailbox;
 pub mod mls;
 pub mod mnemonic;

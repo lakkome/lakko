@@ -298,10 +298,6 @@ export interface IncomingContactRequest {
    *  answers (the link id and its secret, as the sender opened them), or
    *  `null`. SECRET: compared with the link register, never logged. */
   linkAnswer: LinkAnswer | null;
-  /** ADR-0079 section 3 — set by the mailbox when the link answer named no
-   *  live link of this account: the card shows "Sent with an invite link
-   *  that no longer works." Absent for every other request. */
-  deadLink?: boolean;
   /** ISO-8601 timestamp the DS recorded on receive. */
   createdAt: string;
 }
@@ -401,7 +397,11 @@ export type IncomingMailboxEvent =
       row: MailboxRow;
     }
   | { kind: "welcome"; welcome: IncomingWelcome }
-  | { kind: "contact-ack"; ack: IncomingContactAck };
+  | { kind: "contact-ack"; ack: IncomingContactAck }
+  /** ADR-0079 amendment of 2026-10-19: a link refusal, NOT yet verified.
+   *  The receiver checks it against each pending contact
+   *  (`verifyLinkRefusal`) before it removes anything. */
+  | { kind: "link-refusal"; refusal: Uint8Array };
 
 /** One account-mailbox row as the DS served it. `payload` is the envelope
  *  (kind byte + wire bytes): a signed ContactRequest whose intro and profile
@@ -2796,6 +2796,39 @@ export class ContactsClient {
   }
 
   /**
+   * ADR-0079 amendment of 2026-10-19 - answer a request whose invite link no
+   * longer counts with a link refusal: signed by this account's key over the
+   * link id and the requester's account key, sealed as a `link-refusal` row
+   * to the requester's mailbox through the `reply` grant the request
+   * carried (the path an ack takes). The requester's app then removes this
+   * account from its pending contacts, silently. Throws when the request
+   * carries no link answer or the write fails (the caller keeps the request
+   * and tries again at the next pass).
+   */
+  async sendLinkRefusal(identity: IdentitySecrets | null, originalRequest: IncomingContactRequest): Promise<void> {
+    const answer = originalRequest.linkAnswer;
+    if (answer === null) throw ContactsError.wrap(new Error("link refusal: no link answer"));
+    const wasm = await loadWasm();
+    const myIdentity = await this.resolveAccountIdentity(identity);
+    let wire: Uint8Array;
+    try {
+      wire = wasm.composeLinkRefusal(myIdentity.ed25519Seed, answer.linkId, originalRequest.fromPubkey);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    try {
+      await writeToPerson(
+        originalRequest.fromPubkey,
+        { explicit: originalRequest.replyGrantB64 },
+        (target, auth) =>
+          this.ds.publishMailbox(target.address, sealRowFor(wasm, target, "link-refusal", wire), auth),
+      );
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+  }
+
+  /**
    * Send a Welcome (MLS group-join blob) to the recipient via
    * their stranger-inbox mailbox. Used by `startGroupWith`
    * once the sender has called `Group.addMember(recipientKp)`
@@ -4740,6 +4773,10 @@ export function dispatchMailboxRows(
     }
     if (row.kind === "welcome-rendezvous") continue;
     if (options.welcomesOnly === true) continue;
+    if (row.kind === "link-refusal") {
+      events.push({ kind: "link-refusal", refusal: row.body });
+      continue;
+    }
     if (row.kind === "contact-ack") {
       // Phase 1.9b1: signature is verified inside the WASM
       // surface; bad-signature / malformed-wire entries drop

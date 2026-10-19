@@ -325,13 +325,17 @@ export interface DeviceGroupSyncApi {
   /** Count one request accepted through a link, remembering the requester's
    *  account key, fold and send. */
   recordLinkUse(linkId: Uint8Array, requesterKey: Uint8Array): Promise<boolean>;
-  /** The one rule for a request's link answer (ADR-0079 section 3), asked
-   *  of the fold. `null` while the fold is not loaded: the request stays
-   *  undecided (no timer) and is decided once {@link ready} turns `true`. */
-  linkAnswerVerdictNow(
+  /** The one rule for a request's link answer (ADR-0079 section 3 as
+   *  amended 2026-10-19), asked of the fold: the link's expiry is judged at
+   *  `pressedAtMs` (the time the DS stamped on the request row), its
+   *  revocation and uses now. `null` while the fold is not loaded: the
+   *  request stays undecided (no timer) and is decided once {@link ready}
+   *  turns `true`. */
+  linkAnswerVerdictAt(
     linkId: Uint8Array,
     linkSecret: Uint8Array,
     requesterKey: Uint8Array,
+    pressedAtMs: number,
   ): LinkAnswerVerdict | null;
   /** ADR-0079 (reworked 2026-10-17) - seal and post this device's claim of
    *  a link request into the account's DeviceGroup. `beforePublish` gets
@@ -1308,19 +1312,25 @@ export function DeviceGroupSyncProvider(props: {
     return written;
   }
 
-  function linkAnswerVerdictNowImpl(
+  function linkAnswerVerdictAtImpl(
     linkId: Uint8Array,
     linkSecret: Uint8Array,
     requesterKey: Uint8Array,
+    pressedAtMs: number,
   ): LinkAnswerVerdict | null {
     if (synced === null || !ready()) return null;
+    // A stamp that cannot be read counts as written after any expiry
+    // (fail-closed: the link does not count).
+    const pressedAt =
+      Number.isFinite(pressedAtMs) && pressedAtMs >= 0 ? BigInt(Math.floor(pressedAtMs)) : 18446744073709551615n;
     try {
-      const v = synced.linkAnswerVerdict(linkId, linkSecret, requesterKey, BigInt(Date.now()));
-      return v === "accept" || v === "answered" ? v : "dead";
+      const v = synced.linkAnswerVerdict(linkId, linkSecret, requesterKey, pressedAt);
+      return v === "accept" || v === "answered" || v === "unknown" ? v : "dead";
     } catch {
       return "dead";
     }
   }
+
 
   /** Send every register again when an earlier send was not confirmed. */
   async function flushUnsentLineage(): Promise<void> {
@@ -2615,7 +2625,7 @@ export function DeviceGroupSyncProvider(props: {
     setLinkRecord: setLinkRecordImpl,
     revokeLinkRecord: revokeLinkRecordImpl,
     recordLinkUse: recordLinkUseImpl,
-    linkAnswerVerdictNow: linkAnswerVerdictNowImpl,
+    linkAnswerVerdictAt: linkAnswerVerdictAtImpl,
     postLinkClaim: postLinkClaimImpl,
     linkClaimRoster: linkClaimRosterImpl,
     postLinkFounded: postLinkFoundedImpl,

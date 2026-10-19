@@ -183,11 +183,6 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                   <div class="lk-row-body">
                     <span class="lk-row-title">{memberNameOf(r())}</span>
                     <Show when={r().username}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
-                    {/* ADR-0079 section 3: sent through a link that no
-                        longer works. A decides. */}
-                    <Show when={req.deadLink === true}>
-                      <span class="lk-row-sub">{t("contacts.request.dead_link_note")}</span>
-                    </Show>
                     <span class="lk-request-intro">
                       {req.intro !== null && req.intro !== "" ? req.intro : t("contacts.request.no_intro")}
                     </span>

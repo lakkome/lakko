@@ -257,3 +257,10 @@ path = "fuzz_targets/link_founded_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "link_refusal_decode"
+path = "fuzz_targets/link_refusal_decode.rs"
+test = false
+doc = false
+bench = false

@@ -117,6 +117,7 @@ pub mod journal_epoch;
 pub mod key_rotation;
 pub mod link_claim;
 pub mod link_founded;
+pub mod link_refusal;
 pub mod link_seal;
 pub mod mailbox;
 pub mod media_state;
@@ -233,6 +234,10 @@ pub use link_founded::{
     LinkFoundedError, LINK_FOUNDED_ENVELOPE_DOMAIN_V1, LINK_FOUNDED_ENVELOPE_MAX_LEN,
     LINK_FOUNDED_ENVELOPE_MIN_LEN, LINK_FOUNDED_GROUP_ID_LEN, LINK_FOUNDED_MAX_WELCOME_LEN,
     LINK_FOUNDED_VERSION_V1,
+};
+pub use link_refusal::{
+    compose_link_refusal, decode_link_refusal, verify_link_refusal, LinkRefusal, LinkRefusalError,
+    LINK_REFUSAL_DOMAIN_V1, LINK_REFUSAL_LEN, LINK_REFUSAL_VERSION_V1,
 };
 pub use mailbox::{
     bucket_for as mailbox_bucket_for, is_well_formed_row as is_well_formed_mailbox_row,

@@ -220,12 +220,15 @@ export async function runLinkBuild(d: LinkBuildDeps): Promise<boolean> {
 
 /** What the device does with a request carrying a link answer, now. */
 export type LinkRequestStep =
-  /** The synced state is not loaded yet: keep it undecided, unshown. */
+  /** The synced state is not loaded yet, or this device holds no record of
+   *  the link: keep it undecided, unshown. */
   | "wait"
   /** Answered (by another device, or the link register says so): remove. */
   | "drop"
-  /** The link no longer works: show the card with the note. */
-  | "card-dead"
+  /** The link does not count for the request (ADR-0079 amendment of
+   *  2026-10-19): drop it silently and answer the requester with a link
+   *  refusal. No card. */
+  | "refuse"
   /** Live link: post this device's claim. */
   | "post-claim"
   /** Claim posted: read the journal past it and decide. */
@@ -235,6 +238,10 @@ export type LinkRequestStep =
   /** Claim won: found the one-to-one (again, after a failure). */
   | "build";
 
+/** The verdict the fold gives a request's link answer (`null` while the fold
+ *  is not loaded). */
+export type LinkVerdict = "accept" | "answered" | "dead" | "unknown" | null;
+
 function holdsClaim(own: OwnLinkClaims | null): own is OwnLinkClaims {
   return own !== null && (own.won !== null || own.ids.length > 0 || own.wires.length > 0);
 }
@@ -242,51 +249,52 @@ function holdsClaim(own: OwnLinkClaims | null): own is OwnLinkClaims {
 /**
  * The next step for one request. Pure.
  *
- * | own claims        | answered elsewhere | verdict  | step         |
- * |-------------------|--------------------|----------|--------------|
- * | won               | any                | any      | `build`      |
- * | any other         | any                | answered | `drop`       |
- * | lost (settled)    | any                | dead     | `drop`       |
- * | lost (settled)    | any                | other    | `recheck`    |
- * | posted or posting | any                | any      | `decide`     |
- * | none              | yes                | dead     | `drop`       |
- * | none              | yes                | other    | `wait`       |
- * | none              | no                 | not held | `wait`       |
- * | none              | no                 | dead     | `card-dead`  |
- * | none              | no                 | accept   | `post-claim` |
+ * | own claims        | answered elsewhere | verdict          | step         |
+ * |-------------------|--------------------|------------------|--------------|
+ * | won, not founded, no note held | any   | dead             | `refuse`     |
+ * | won               | any                | any other        | `build`      |
+ * | any other         | any                | answered         | `drop`       |
+ * | lost (settled)    | any                | dead             | `drop`       |
+ * | lost (settled)    | any                | other            | `recheck`    |
+ * | posted or posting | any                | any              | `decide`     |
+ * | none              | yes                | dead             | `drop`       |
+ * | none              | yes                | other            | `wait`       |
+ * | none              | no                 | not held/unknown | `wait`       |
+ * | none              | no                 | dead             | `refuse`     |
+ * | none              | no                 | accept           | `post-claim` |
  *
  * "Answered elsewhere" is the core's `linkClaimAnsweredElsewhere`: a claim
- * from a device in the current roster. A won claim builds whatever the
- * verdict says by now: the decision was made. Otherwise a request goes only
- * when the register says it was answered (the winner counted the use), or
- * the link is dead while another device holds the claim that answers it:
- * until then a loser re-checks, and a device without a claim waits, so a
- * claimer that is removed before it builds hands the request on.
+ * from a device in the current roster. The verdict judges the link's expiry
+ * at the moment the server stamped the request and its revocation now, so a
+ * revocation wins until this account has answered (ADR-0079 amendment of
+ * 2026-10-19): a winner that has not founded yet, and holds no other
+ * device's founding note, refuses instead of building. Once it founded, the
+ * answer is given and the build carries on. A device that lost, or sees
+ * another device's claim, drops a dead request without a refusal: the
+ * claimer answers it. A link this device holds no record of waits: its
+ * record may not have reached this device yet, and a refusal cannot be
+ * taken back.
  */
 export function linkRequestStep(input: {
   readonly own: OwnLinkClaims | null;
   readonly answeredElsewhere: boolean;
-  readonly verdict: "accept" | "answered" | "dead" | null;
+  readonly verdict: LinkVerdict;
+  /** A link-founded note from another device is held for the request. */
+  readonly noteHeld?: boolean;
 }): LinkRequestStep {
-  if (holdsClaim(input.own) && input.own.won !== null) return "build";
+  if (holdsClaim(input.own) && input.own.won !== null) {
+    const answered = input.own.founded !== null || input.noteHeld === true;
+    return input.verdict === "dead" && !answered ? "refuse" : "build";
+  }
   if (input.verdict === "answered") return "drop";
   if (holdsClaim(input.own)) {
     if (!input.own.settled) return "decide";
     return input.verdict === "dead" ? "drop" : "recheck";
   }
   if (input.answeredElsewhere) return input.verdict === "dead" ? "drop" : "wait";
-  if (input.verdict === null) return "wait";
-  if (input.verdict === "dead") return "card-dead";
+  if (input.verdict === null || input.verdict === "unknown") return "wait";
+  if (input.verdict === "dead") return "refuse";
   return "post-claim";
-}
-
-/**
- * A card already shown for a request (the link no longer worked here) that
- * a device in the roster claimed: the request is answered, the card goes.
- * Pure.
- */
-export function shownCardAnswered(own: OwnLinkClaims | null, answeredElsewhere: boolean): boolean {
-  return !holdsClaim(own) && answeredElsewhere;
 }
 
 /**

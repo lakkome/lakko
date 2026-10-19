@@ -730,7 +730,6 @@ struct AppRoot: View, Equatable {
     /// section 3, "Signed out"): the sign-in or sign-up screen it opened.
     /// `nil` while that page is shown. The link stays parked either way, so
     /// the session that lands opens the invite page in its default state.
-    @State private var signedOutInviteChoice: AnonRoute?
 
     /// Mirror of ``DeviceGroupSyncRepository/deviceRemoved`` (UX spec
     /// second-device section 3.1). Received rather than observed: observing
@@ -884,32 +883,16 @@ struct AppRoot: View, Equatable {
                         ),
                         onDone: {}
                     )
-                } else if let inviteSlug = inviteIntake.pendingSlug, signedOutInviteChoice == nil {
-                    // ADR-0079 (reworked 2026-10-17) — a tapped `/i/` link
-                    // from a person who is not signed in: the invite page
-                    // with Sign in / Create an account. The slug stays
-                    // parked; the session that lands opens the default page.
-                    SignedOutInviteScreen(
-                        slug: inviteSlug,
-                        preview: { [contacts = services.contactsRepository] in
-                            await contacts.previewInviteLink(slug: $0)
-                        },
-                        onSignIn: { signedOutInviteChoice = .login },
-                        onCreateAccount: { signedOutInviteChoice = .signup },
-                        onDone: { inviteIntake.clear() }
-                    )
-                    .id(inviteSlug)
                 } else {
                     AnonRoot(
                         repository: authRepository,
                         cachedUsername: cachedUsername,
                         accountProtection: services.accountProtection,
                         onSignedUp: { pendingSignupProtect = true },
-                        initialRoute: signedOutInviteChoice
+                        initialRoute: nil
                     )
                 }
             }
-            .onChange(of: inviteIntake.pendingSlug) { _, _ in signedOutInviteChoice = nil }
             // Pending contact / group invites land in
             // `InviteIntake` but cannot consume in the anon state —
             // those flows need `identitySecrets`. We leave the slug
@@ -2074,6 +2057,12 @@ private struct SessionRoot: View, Equatable {
                     case .contact(let messageId):
                         replaceTop(route, with: .contactDetail(messageId: messageId), in: tab)
                     }
+                },
+                // Amended 2026-10-19 — a link that does not work: Contacts,
+                // nothing else shown.
+                onOpenContacts: {
+                    pop(route, from: tab)
+                    selectedTab = .contacts
                 }
             )
         case .pendingChat(let accountIdHex):

@@ -613,7 +613,7 @@ public enum CoPublisher {
                 guard let opened = MailboxRows.open(row.payload, key: mailboxKey) else { continue }
                 switch opened.kind {
                 case .welcomeRendezvous, .welcome: candidates.append(opened.body)
-                case .contactRequest, .contactAck: continue
+                case .contactRequest, .contactAck, .linkRefusal: continue
                 }
             }
             guard let last = page.messages.last, page.hasMore, last.id > after else { break }

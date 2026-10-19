@@ -23,7 +23,7 @@
  *   db   "lakko-pending-contacts"  v2
  *   └── store "rows"  keyPath: "accountId"
  *         row { accountId, ciphertext: Uint8Array  // [12-byte IV | ct+tag] }
- *         plaintext: JSON { v: 2, contacts: PendingContact[] }
+ *         plaintext: JSON { v: 3, contacts: PendingContact[] }
  * ```
  *
  * The rules (what is shown, which line the chat shows, which record a
@@ -55,6 +55,9 @@ export interface PendingContact {
   readonly username: string;
   /** When **Add** was pressed: the 7-day line counts from here. */
   readonly addedAtMs: number;
+  /** The id of the invite link the request answered (16 bytes, lower-case
+   *  hex): a link refusal must name it (ADR-0079 amendment of 2026-10-19). */
+  readonly linkIdHex: string;
 }
 
 /** The held-send queue key of what is written to a pending contact before
@@ -106,7 +109,9 @@ function isContact(v: unknown): v is PendingContact {
     typeof c["x25519PubkeyB64"] === "string" &&
     typeof c["displayName"] === "string" &&
     typeof c["username"] === "string" &&
-    typeof c["addedAtMs"] === "number"
+    typeof c["addedAtMs"] === "number" &&
+    typeof c["linkIdHex"] === "string" &&
+    /^[0-9a-f]{32}$/.test(c["linkIdHex"] as string)
   );
 }
 
@@ -119,9 +124,9 @@ export function decodePendingContacts(json: string): PendingContact[] {
     return [];
   }
   const p = parsed as { v?: unknown; contacts?: unknown } | null;
-  // Version 1 kept the messages inside the record; it is not read (nothing
-  // is deployed, no migration).
-  if (p?.v !== 2) return [];
+  // Version 1 kept the messages inside the record and version 2 had no link
+  // id; neither is read (nothing is deployed, no migration).
+  if (p?.v !== 3) return [];
   const list = p.contacts;
   if (!Array.isArray(list)) return [];
   const out: PendingContact[] = [];
@@ -134,13 +139,14 @@ export function decodePendingContacts(json: string): PendingContact[] {
       displayName: c.displayName,
       username: c.username,
       addedAtMs: c.addedAtMs,
+      linkIdHex: c.linkIdHex,
     });
   }
   return out;
 }
 
 export function encodePendingContacts(list: readonly PendingContact[]): string {
-  return JSON.stringify({ v: 2, contacts: list });
+  return JSON.stringify({ v: 3, contacts: list });
 }
 
 /** `list` with `contact` added, or the existing record for the same person
@@ -165,6 +171,45 @@ export function withoutPendingContact(
   return list.filter((c) => c.accountIdHex !== accountIdHex);
 }
 
+
+/**
+ * ADR-0079 amendment of 2026-10-19 - the pending contact a link refusal
+ * cancels: the one whose stated account key signed it over the link that
+ * contact's request answered and this account's key (`verify` is the core's
+ * `verifyLinkRefusal`). `null` when none does: a refusal nobody but the
+ * inviter could sign, for another link or another person, changes nothing.
+ * Pure over `verify`.
+ */
+export function pendingContactRefusedBy(
+  list: readonly PendingContact[],
+  refusal: Uint8Array,
+  ownAccountKey: Uint8Array,
+  verify: (wire: Uint8Array, inviterKey: Uint8Array, linkId: Uint8Array, ownKey: Uint8Array) => boolean,
+): PendingContact | null {
+  for (const c of list) {
+    let inviterKey: Uint8Array;
+    try {
+      inviterKey = base64ToBytes(c.signaturePubkeyB64);
+    } catch {
+      continue;
+    }
+    if (verify(refusal, inviterKey, hexToBytes(c.linkIdHex), ownAccountKey)) return c;
+  }
+  return null;
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
 
 /** The line the pending chat shows (UX section 4). Pure. */
 export function pendingLine(contact: PendingContact, nowMs: number): "waiting" | "stale" {
@@ -383,9 +428,11 @@ export async function deletePendingContactsForAccount(accountIdB64: string): Pro
 }
 
 /**
- * B deletes a pending contact: the record goes and so do the messages kept
- * for it in the held-send queue (UX section 7 item 4). Resolves to whether
- * the record was removed. Never throws.
+ * A pending contact goes: the record and the messages kept for it in the
+ * held-send queue (UX section 7 item 4). Called when the inviter's app
+ * refused the request (ADR-0079 amendment of 2026-10-19); no control lets B
+ * delete a pending contact. Resolves to whether the record was removed.
+ * Never throws.
  */
 export async function removePendingContact(accountIdB64: string, accountIdHex: string): Promise<boolean> {
   const next = await updatePendingContacts(accountIdB64, (list) =>

@@ -18,7 +18,6 @@ import {
   linkClaimRecord,
   linkRequestKeyHex,
   linkRequestStep,
-  shownCardAnswered,
 } from "./link-claims";
 
 function memoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
@@ -47,7 +46,11 @@ describe("linkRequestStep (ADR-0079, reworked 2026-10-17)", () => {
   it("follows the register once it is loaded", () => {
     expect(linkRequestStep({ own: null, answeredElsewhere: false, verdict: "accept" })).toBe("post-claim");
     expect(linkRequestStep({ own: null, answeredElsewhere: false, verdict: "answered" })).toBe("drop");
-    expect(linkRequestStep({ own: null, answeredElsewhere: false, verdict: "dead" })).toBe("card-dead");
+    expect(linkRequestStep({ own: null, answeredElsewhere: false, verdict: "dead" })).toBe("refuse");
+  });
+
+  it("waits on a link this device holds no record of, and never refuses it (2026-10-19)", () => {
+    expect(linkRequestStep({ own: null, answeredElsewhere: false, verdict: "unknown" })).toBe("wait");
   });
 
   it("waits, unshown, on a roster device's claim until the register says answered", () => {
@@ -71,16 +74,16 @@ describe("linkRequestStep (ADR-0079, reworked 2026-10-17)", () => {
     expect(linkRequestStep({ own: lost, answeredElsewhere: true, verdict: "dead" })).toBe("drop");
   });
 
-  it("builds a won claim even after the link was used up or answered meanwhile", () => {
+  it("builds a won claim once answered, but a revocation before the answer refuses (2026-10-19)", () => {
     const won = { wires: [], ids: [9], won: 9, settled: false, founded: null, noteWire: null, noteConfirmed: false };
-    expect(linkRequestStep({ own: won, answeredElsewhere: true, verdict: "dead" })).toBe("build");
+    // Revoked (or otherwise dead) before this device founded: refused.
+    expect(linkRequestStep({ own: won, answeredElsewhere: true, verdict: "dead" })).toBe("refuse");
+    // Another device already founded (its note is held): the answer stands.
+    expect(linkRequestStep({ own: won, answeredElsewhere: true, verdict: "dead", noteHeld: true })).toBe("build");
+    // This device founded already: the answer was given, the build carries on.
+    const founded = { ...won, founded: { groupIdB64: "g", welcomeB64: "w", targets: [], notePosted: true, delivered: false } };
+    expect(linkRequestStep({ own: founded, answeredElsewhere: true, verdict: "dead" })).toBe("build");
     expect(linkRequestStep({ own: won, answeredElsewhere: true, verdict: "answered" })).toBe("build");
-  });
-
-  it("takes down a dead-link card a roster device claimed, never one this device claimed", () => {
-    expect(shownCardAnswered(null, true)).toBe(true);
-    expect(shownCardAnswered(null, false)).toBe(false);
-    expect(shownCardAnswered(posted, true)).toBe(false);
   });
 
   it("hands the core this device's claims under its own key, then the others", () => {

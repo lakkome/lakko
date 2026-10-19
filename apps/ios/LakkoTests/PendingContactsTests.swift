@@ -15,7 +15,71 @@ final class PendingContactsTests: XCTestCase {
         PendingContact(
             accountIdHex: hex, signaturePubkey: Data(repeating: key, count: 32),
             x25519Pubkey: Data(repeating: key &+ 1, count: 32), displayName: name,
-            username: username, addedAtMs: at)
+            username: username, addedAtMs: at, linkId: Data(repeating: 7, count: 16))
+    }
+
+    /// Add racing a link that went dead: the consume answers dead and nothing
+    /// is kept, no pending contact and no request.
+    @MainActor
+    func testAddOnALinkTheConsumeFindsDeadKeepsNothing() async throws {
+        var log: [String] = []
+        let outcome = try await InviteAddOrder.run(
+            consumeLive: { log.append("consume"); return false },
+            recordPending: { log.append("record") },
+            sendRequest: { log.append("send") },
+            forgetPending: { log.append("forget") })
+        XCTAssertEqual(outcome, .dead)
+        XCTAssertEqual(log, ["consume"])
+    }
+
+    @MainActor
+    func testAddOnALiveLinkRecordsBeforeItSendsAndForgetsWhenTheSendFails() async throws {
+        struct Offline: Error {}
+        var log: [String] = []
+        let added = try await InviteAddOrder.run(
+            consumeLive: { log.append("consume"); return true },
+            recordPending: { log.append("record") },
+            sendRequest: { log.append("send") },
+            forgetPending: { log.append("forget") })
+        XCTAssertEqual(added, .added)
+        XCTAssertEqual(log, ["consume", "record", "send"])
+        log = []
+        do {
+            _ = try await InviteAddOrder.run(
+                consumeLive: { log.append("consume"); return true },
+                recordPending: { log.append("record") },
+                sendRequest: { log.append("send"); throw Offline() },
+                forgetPending: { log.append("forget") })
+            XCTFail("the send failure propagates")
+        } catch is Offline {}
+        XCTAssertEqual(log, ["consume", "record", "send", "forget"])
+    }
+
+    /// ADR-0079 amendment of 2026-10-19 — only a refusal signed by the key
+    /// the link named, over that link and this account, cancels a pending
+    /// contact (through the core).
+    func testOnlyTheInvitersRefusalCancelsThePendingContact() throws {
+        let anna = try Identity.fromSeed(seed: Data(repeating: 1, count: 32))
+        let mallory = try Identity.fromSeed(seed: Data(repeating: 2, count: 32))
+        let bob = Data(repeating: 0xB0, count: 32)
+        let linkId = Data(repeating: 7, count: 16)
+        let pending = PendingContact(
+            accountIdHex: "aa", signaturePubkey: anna.signaturePublicKey(), x25519Pubkey: anna.x25519PublicKey(),
+            displayName: "Anna", username: "anna", addedAtMs: 1, linkId: linkId)
+        let verify: (Data, Data, Data, Data) -> Bool = {
+            verifyLinkRefusal(wire: $0, inviterKey: $1, expectedLinkId: $2, ownAccountKey: $3)
+        }
+        let fromAnna = try composeLinkRefusal(inviterSigningSeed: anna.ed25519Seed(), linkId: linkId, requesterAccountKey: bob)
+        XCTAssertEqual(
+            PendingContacts.refusedBy([pending], refusal: fromAnna, ownAccountKey: bob, verify: verify)?.accountIdHex, "aa")
+        let fromMallory = try composeLinkRefusal(
+            inviterSigningSeed: mallory.ed25519Seed(), linkId: linkId, requesterAccountKey: bob)
+        XCTAssertNil(PendingContacts.refusedBy([pending], refusal: fromMallory, ownAccountKey: bob, verify: verify))
+        let otherLink = try composeLinkRefusal(
+            inviterSigningSeed: anna.ed25519Seed(), linkId: Data(repeating: 8, count: 16), requesterAccountKey: bob)
+        XCTAssertNil(PendingContacts.refusedBy([pending], refusal: otherLink, ownAccountKey: bob, verify: verify))
+        XCTAssertNil(PendingContacts.refusedBy(
+            [pending], refusal: fromAnna, ownAccountKey: Data(repeating: 0xB1, count: 32), verify: verify))
     }
 
     func testASecondAddKeepsTheFirstAddTime() {

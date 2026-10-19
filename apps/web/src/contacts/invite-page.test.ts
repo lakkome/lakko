@@ -45,13 +45,13 @@ describe("invitePageView (docs/ux/contact-invite-link.md section 3)", () => {
     expect(invitePageView({ ...base, link: "dead" })).toEqual({ kind: "dead" });
   });
 
-  it("asks a signed-out visitor to sign in, naming the inviter", () => {
-    expect(invitePageView({ ...base, signedIn: false })).toEqual({
-      kind: "signed-out",
-      name: "Anna",
-      username: "anna",
-      label: null,
-    });
+  it("shows a signed-out visitor no inviter card: straight to sign-in, whatever the link (2026-10-19)", () => {
+    expect(invitePageView({ ...base, signedIn: false })).toEqual({ kind: "sign-in" });
+    expect(invitePageView({ ...base, signedIn: false, link: "dead" })).toEqual({ kind: "sign-in" });
+    expect(invitePageView({ ...base, signedIn: false, link: "loading" })).toEqual({ kind: "sign-in" });
+    // Once signed in the link is checked again: live -> the card, dead -> Contacts.
+    expect(invitePageView({ ...base, signedIn: true }).kind).toBe("default");
+    expect(invitePageView({ ...base, signedIn: true, link: "dead" })).toEqual({ kind: "dead" });
   });
 
   it("recognises the visitor's own link before an existing contact", () => {

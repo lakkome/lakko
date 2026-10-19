@@ -10,17 +10,22 @@
  * the link states (sealed inside the capability, ADR-0079 section 1) and
  * shows no key material: no fingerprint, no safety number, no expiry and no
  * use count. The states are one pure decision (`contacts/invite-page.ts`):
- * loading, rate-limited, no longer works (revoked, expired, used up,
- * unknown, damaged), signed out, own link, already a contact, and the
- * default Add / Not now.
+ * signed out (straight to the sign-in screen, no inviter card), loading,
+ * rate-limited, own link, already a contact, and the default Add / Not now.
+ * A link that does not work (revoked, expired, used up, unknown, damaged)
+ * has no page: the visitor lands on the Contacts screen (amended
+ * 2026-10-19).
  *
  * **Add** sends the inviter a contact request carrying the link answer (the
  * link's id and secret, sealed to the inviter: ADR-0079 section 2), so the
  * inviter's device takes it by itself; this account records the inviter as
  * a pending contact at once (`contacts/pending-contacts.ts`) and the page
- * closes into the chat with them (section 4). The record is written BEFORE
- * the request is sent, so an answer that comes back at once always finds it;
- * a send that fails removes it again and the page says so.
+ * closes into the chat with them (section 4). The record is written only
+ * after the ledger's consume answered that the link still works (amended
+ * 2026-10-19: a consume that answers used up or gone keeps nothing and takes
+ * the visitor to Contacts), and BEFORE the request is sent, so an answer
+ * that comes back at once always finds it; a send that fails removes it
+ * again and the page says so.
  *
  * `bootstrap_referral` links (ADR-0005 section 13.4) press Add by themselves
  * once the visitor is signed in: the click on the link is the consent.
@@ -37,7 +42,7 @@ import {
   Switch,
   type JSX,
 } from "solid-js";
-import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
+import { useLocation, useNavigate, useParams } from "@solidjs/router";
 import type { InviteCapability as WasmInviteCapability } from "../../wasm/lakko_ffi_wasm";
 import { useAuth } from "../auth/AuthContext";
 import { buildAuthUrlWithReturn } from "../auth/return-url";
@@ -51,6 +56,7 @@ import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
 import { INVITE_INLINE_MIN_LEN } from "../contacts/invite";
 import { invitePageView, type InvitePageView } from "../contacts/invite-page";
+import { addThroughInviteLink } from "../contacts/invite-add";
 import { DiscoveryClient, isDiscoveryRateLimited } from "../discovery/client";
 import {
   INVITE_LINK_RATE_LIMITED,
@@ -92,7 +98,10 @@ export default function Invite(): JSX.Element {
   const profiles = useProfiles();
   const navigate = useNavigate();
 
-  const slugSignal = createMemo(() => ({ slug: params.slug, hash: location.hash }));
+  const signedIn = (): boolean => auth.state().kind === "session" && auth.identitySecrets() !== null;
+  // A signed-out visitor sees no inviter card: the link is opened only once
+  // signed in (amended 2026-10-19).
+  const slugSignal = createMemo(() => (signedIn() ? { slug: params.slug, hash: location.hash } : null));
   const discovery = new DiscoveryClient();
   discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
   const [decoded, { refetch }] = createResource(
@@ -134,8 +143,6 @@ export default function Invite(): JSX.Element {
     return d === undefined || d === RATE_LIMITED || d === DEAD ? null : d;
   };
 
-  const signedIn = (): boolean => auth.state().kind === "session" && auth.identitySecrets() !== null;
-
   /** The visitor's contact row for the inviter, when they already are one:
    *  the pin or a verified binding naming the row's key, never a row whose
    *  account id came only from a peer's own profile. */
@@ -149,6 +156,7 @@ export default function Invite(): JSX.Element {
   };
 
   const view = createMemo((): InvitePageView => {
+    if (!signedIn()) return { kind: "sign-in" };
     const d = decoded();
     if (decoded.loading || d === undefined) return { kind: "loading" };
     if (d === RATE_LIMITED) return { kind: "rate-limited" };
@@ -206,33 +214,17 @@ export default function Invite(): JSX.Element {
             </div>
           </section>
         </Match>
+        <Match when={view().kind === "sign-in"}>
+          <Redirect to={buildAuthUrlWithReturn(paths.login, returnPath(params.slug, location.hash))} />
+        </Match>
         <Match when={view().kind === "dead"}>
-          <DonePanel
-            title={t("invite.contact.page.dead_title")}
-            body={t("invite.contact.page.dead_body")}
-          />
+          <Redirect to={paths.contacts} />
         </Match>
         <Match when={view().kind === "own"}>
           <DonePanel
             title={t("invite.contact.page.own_title")}
             body={t("invite.contact.page.own_body")}
           />
-        </Match>
-        <Match when={(() => { const v = view(); return v.kind === "signed-out" ? v : undefined; })()}>
-          {(v) => (
-            <InviterCard name={nameOr(v().name)} username={v().username} label={v().label}>
-              <div class="lk-actions">
-                <A href={buildAuthUrlWithReturn(paths.login, returnPath(params.slug, location.hash))}>
-                  <button class="primary" type="button">
-                    {t("invite.contact.page.sign_in", { name: nameOr(v().name) })}
-                  </button>
-                </A>
-                <A href={buildAuthUrlWithReturn(paths.signup, returnPath(params.slug, location.hash))}>
-                  <button type="button">{t("invite.contact.page.create_account")}</button>
-                </A>
-              </div>
-            </InviterCard>
-          )}
         </Match>
         <Match when={(() => { const v = view(); return v.kind === "already" ? v : undefined; })()}>
           {(v) => (
@@ -265,6 +257,13 @@ export default function Invite(): JSX.Element {
       </Switch>
     </PublicLayout>
   );
+}
+
+/** Navigate to `to` (replacing this entry) as soon as the state shows. */
+function Redirect(props: { to: string }): JSX.Element {
+  const navigate = useNavigate();
+  onMount(() => navigate(props.to, { replace: true }));
+  return null;
 }
 
 /** The return path through sign-in: the fragment is the link secret, without
@@ -321,7 +320,6 @@ function AddPanel(props: {
   const cap = props.invite.cap;
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createLiveText();
-  const [dead, setDead] = createSignal(false);
 
   // ADR-0005 section 13.4 — a referral link presses Add by itself.
   onMount(() => {
@@ -336,62 +334,68 @@ function AddPanel(props: {
     setError(null);
     setBusy(true);
     const ownerHex = groupIdHex(cap.ownerAccountId);
-    let recorded = false;
     try {
       // ADR-0073 R.2: the link's owner may already be a contact under other
       // keys; the published identity passes the fail-closed gate first.
       await props.client.refuseContactRequestToUnverifiedKeys(cap.ownerAccountId, cap.ownerSignaturePubkey);
-      // The ledger's soft use count (a pointer link only). A link used up or
-      // gone since the page opened no longer works; a link this account used
-      // before is sent again: the inviter's device answers it either way.
-      if (props.invite.blobId !== null) {
-        const result = await props.discovery.consumeInvite(
-          props.invite.blobId,
-          props.invite.capabilityBytes,
-          secrets.accountId,
-        );
-        if (result.kind === "exhausted" || result.kind === "not-found") {
-          setDead(true);
-          return;
-        }
-      }
-      // ADR-0079 section 5 — the inviter is this account's contact from now
-      // on. Written before the request so an answer that comes back at once
-      // finds it.
-      const kept = await updatePendingContacts(account, (list) =>
-        withPendingContact(list, {
-          accountIdHex: ownerHex,
-          signaturePubkeyB64: base64Encode(cap.ownerSignaturePubkey),
-          x25519PubkeyB64: base64Encode(cap.ownerX25519Pubkey),
-          displayName: cap.inviterDisplayName ?? "",
-          username: cap.inviterUsername ?? "",
-          addedAtMs: Date.now(),
-        }),
-      );
-      recorded = kept !== null;
-      // ADR-0060 section 6 — written to the owner's closed mailbox under the
-      // link's `link` grant, used for this one write and freed.
-      const linkGrant = cap.linkGrant;
-      try {
-        await props.client.sendContactRequestToBundle(
-          secrets,
-          cap.ownerAccountId,
-          cap.ownerSignaturePubkey,
-          cap.ownerX25519Pubkey,
-          new Uint8Array(0),
-          {
-            writeGrant: linkGrant,
-            // ADR-0079 section 2 — the link answer: the inviter's device
-            // takes the request by itself.
-            linkAnswer: { linkId: cap.linkId, linkSecret: props.invite.linkSecret },
-          },
-        );
-      } finally {
-        linkGrant.free();
+      const blobId = props.invite.blobId;
+      const outcome = await addThroughInviteLink({
+        // The ledger's soft use count (a pointer link only). A link this
+        // account used before is sent again: the inviter's device answers it
+        // either way.
+        consume:
+          blobId === null
+            ? null
+            : async () =>
+                (await props.discovery.consumeInvite(blobId, props.invite.capabilityBytes, secrets.accountId)).kind,
+        // ADR-0079 section 5 — the inviter is this account's contact from now
+        // on, written only once the link was found live.
+        recordPending: async () =>
+          (await updatePendingContacts(account, (list) =>
+            withPendingContact(list, {
+              accountIdHex: ownerHex,
+              signaturePubkeyB64: base64Encode(cap.ownerSignaturePubkey),
+              x25519PubkeyB64: base64Encode(cap.ownerX25519Pubkey),
+              displayName: cap.inviterDisplayName ?? "",
+              username: cap.inviterUsername ?? "",
+              addedAtMs: Date.now(),
+              linkIdHex: groupIdHex(cap.linkId),
+            }),
+          )) !== null,
+        // ADR-0060 section 6 — written to the owner's closed mailbox under
+        // the link's `link` grant, used for this one write and freed.
+        sendRequest: async () => {
+          const linkGrant = cap.linkGrant;
+          try {
+            await props.client.sendContactRequestToBundle(
+              secrets,
+              cap.ownerAccountId,
+              cap.ownerSignaturePubkey,
+              cap.ownerX25519Pubkey,
+              new Uint8Array(0),
+              {
+                writeGrant: linkGrant,
+                // ADR-0079 section 2 — the link answer: the inviter's device
+                // takes the request by itself.
+                linkAnswer: { linkId: cap.linkId, linkSecret: props.invite.linkSecret },
+              },
+            );
+          } finally {
+            linkGrant.free();
+          }
+        },
+        forgetPending: async () => {
+          await updatePendingContacts(account, (list) => withoutPendingContact(list, ownerHex));
+        },
+      });
+      if (outcome === "dead") {
+        // The link died while the page was open: nothing is kept, nothing is
+        // held, the visitor lands on Contacts (amended 2026-10-19).
+        navigate(paths.contacts, { replace: true });
+        return;
       }
       navigate(paths.pendingChat(ownerHex));
     } catch (err) {
-      if (recorded) void updatePendingContacts(account, (list) => withoutPendingContact(list, ownerHex));
       setError(() =>
         isDiscoveryRateLimited(err)
           ? INVITE_LINK_RATE_LIMITED()
@@ -403,15 +407,7 @@ function AddPanel(props: {
   }
 
   return (
-    <Show
-      when={!dead()}
-      fallback={
-        <DonePanel
-          title={t("invite.contact.page.dead_title")}
-          body={t("invite.contact.page.dead_body")}
-        />
-      }
-    >
+    <>
       <InviterCard name={props.name} username={props.username} label={props.label}>
         <div class="lk-actions">
           <button class="primary" type="button" disabled={busy()} onClick={() => void onAdd()}>
@@ -425,7 +421,7 @@ function AddPanel(props: {
         </div>
         <Show when={error()}>{(message) => <p class="form-error">{message()}</p>}</Show>
       </InviterCard>
-    </Show>
+    </>
   );
 }
 

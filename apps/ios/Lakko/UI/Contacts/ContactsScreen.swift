@@ -387,13 +387,6 @@ private struct IncomingRequestRow: View {
                             .font(.subheadline)
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
-                    // ADR-0079 section 3 — sent through a link that no longer
-                    // works: an ordinary card, with this note.
-                    if request.viaDeadLink == true {
-                        Text(l10n.t("contacts.request.dead_link_note"))
-                            .font(.footnote)
-                            .foregroundStyle(Color.lakkoTextMuted)
-                    }
                     if let intro = request.intro?.trimmingCharacters(in: .whitespacesAndNewlines),
                        !intro.isEmpty {
                         Text(intro)

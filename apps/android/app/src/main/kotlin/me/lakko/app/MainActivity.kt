@@ -781,30 +781,15 @@ private fun AppRoot(
     when (val current = state) {
         AuthState.Loading -> InsetRoot { LoadingScreen() }
         is AuthState.Anon -> InsetRoot {
-            // ADR-0079 (reworked 2026-10-17) - a tapped `/i/` link from a
-            // person who is not signed in: the invite page with Sign in /
-            // Create an account. The slug stays parked; the session that
-            // lands opens the default page.
-            val anonInviteSlug by inviteIntake.pendingInviteSlug.collectAsStateWithLifecycle()
-            var anonInviteChoice by androidx.compose.runtime.saveable.rememberSaveable(anonInviteSlug) {
-                androidx.compose.runtime.mutableStateOf<String?>(null)
-            }
-            val parkedInvite = anonInviteSlug
-            if (parkedInvite != null && anonInviteChoice == null) {
-                me.lakko.app.ui.contacts.SignedOutInviteScreen(
-                    slug = parkedInvite,
-                    preview = { contactsRepository.previewInviteLink(it) },
-                    onSignIn = { anonInviteChoice = AnonRoutes.LOGIN },
-                    onCreateAccount = { anonInviteChoice = AnonRoutes.SIGNUP },
-                    onDone = { inviteIntake.consume() },
-                )
-            } else {
-                AnonRoot(
-                    repository = authRepository,
-                    cachedUsername = current.cachedUsername,
-                    startRoute = anonInviteChoice,
-                )
-            }
+            // ADR-0079 (amended 2026-10-19) - a tapped `/i/` link from a
+            // person who is not signed in shows no inviter card: the ordinary
+            // sign-in screen. The slug stays parked; once a session lands the
+            // link is checked again (live -> the invite page, dead -> Contacts).
+            AnonRoot(
+                repository = authRepository,
+                cachedUsername = current.cachedUsername,
+                startRoute = null,
+            )
         }
         // Signed in, but this device does not hold the account's keys:
         // the restore prompt (another device, a passkey that carries the
@@ -2731,6 +2716,12 @@ private fun SessionRoot(
                             navController.navigate(route) {
                                 popUpTo(Routes.INVITE) { inclusive = true }
                             }
+                        },
+                        // Amended 2026-10-19 — a link that does not work:
+                        // Contacts, nothing else shown.
+                        onOpenContacts = {
+                            navController.popBackStack(Routes.INVITE, inclusive = true)
+                            navController.navigateToTab(Routes.CONTACTS)
                         },
                     )
                 }

@@ -8410,14 +8410,6 @@
       "text": "Не зараз",
       "status": "machine"
     },
-    "invite.contact.page.sign_in": {
-      "text": "Увійдіть, щоб додати {name}",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "Створити акаунт",
-      "status": "machine"
-    },
     "invite.contact.page.already_title": {
       "text": "{name} вже є у ваших контактах",
       "status": "machine"
@@ -8438,14 +8430,6 @@
       "text": "Готово",
       "status": "machine"
     },
-    "invite.contact.page.dead_title": {
-      "text": "Це посилання-запрошення більше не працює",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "Попросіть у відправника нове.",
-      "status": "machine"
-    },
     "invite.contact.page.add_failed": {
       "text": "Не вдалося додати {name}. Перевірте з'єднання і спробуйте ще раз.",
       "status": "machine"
@@ -8464,10 +8448,6 @@
     },
     "chat.pending.call_disabled": {
       "text": "Буде доступно, коли {name} під'єднається.",
-      "status": "machine"
-    },
-    "contacts.request.dead_link_note": {
-      "text": "Надіслано за посиланням-запрошенням, яке більше не працює.",
       "status": "machine"
     }
   }

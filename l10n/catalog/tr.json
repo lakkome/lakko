@@ -8410,14 +8410,6 @@
       "text": "Şimdi değil",
       "status": "machine"
     },
-    "invite.contact.page.sign_in": {
-      "text": "{name} kişisini eklemek için giriş yapın",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "Hesap oluştur",
-      "status": "machine"
-    },
     "invite.contact.page.already_title": {
       "text": "{name} zaten kişilerinizde",
       "status": "machine"
@@ -8438,14 +8430,6 @@
       "text": "Tamam",
       "status": "machine"
     },
-    "invite.contact.page.dead_title": {
-      "text": "Bu davet bağlantısı artık çalışmıyor",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "Gönderen kişiden yenisini isteyin.",
-      "status": "machine"
-    },
     "invite.contact.page.add_failed": {
       "text": "{name} eklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
@@ -8464,10 +8448,6 @@
     },
     "chat.pending.call_disabled": {
       "text": "{name} bağlandığında kullanılabilir.",
-      "status": "machine"
-    },
-    "contacts.request.dead_link_note": {
-      "text": "Artık çalışmayan bir davet bağlantısıyla gönderildi.",
       "status": "machine"
     }
   }

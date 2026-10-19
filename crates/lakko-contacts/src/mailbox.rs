@@ -62,7 +62,8 @@
 //! bucket and are told apart by nothing the server sees.
 //!
 //! **Kinds** ([`MailboxKind`]): `0x01` contact request, `0x02` Welcome,
-//! `0x03` contact ack, `0x04` Welcome rendezvous. An unknown kind is refused
+//! `0x03` contact ack, `0x04` Welcome rendezvous, `0x05` link refusal
+//! (ADR-0079, 2026-10-19). An unknown kind is refused
 //! by [`open_mailbox_row`] and the caller drops the row. The inner request
 //! and ack wires are unchanged, so their signature checks do not move.
 //!
@@ -206,15 +207,19 @@ pub enum MailboxKind {
     ContactAck,
     /// A Welcome rendezvous (the channel co-publisher join).
     WelcomeRendezvous,
+    /// A signed link refusal ([`crate::link_refusal`], ADR-0079 amendment of
+    /// 2026-10-19).
+    LinkRefusal,
 }
 
 impl MailboxKind {
     /// Every kind, in wire-byte order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::ContactRequest,
         Self::Welcome,
         Self::ContactAck,
         Self::WelcomeRendezvous,
+        Self::LinkRefusal,
     ];
 
     /// The frozen wire byte.
@@ -225,6 +230,7 @@ impl MailboxKind {
             Self::Welcome => 0x02,
             Self::ContactAck => 0x03,
             Self::WelcomeRendezvous => 0x04,
+            Self::LinkRefusal => 0x05,
         }
     }
 
@@ -239,6 +245,7 @@ impl MailboxKind {
             0x02 => Ok(Self::Welcome),
             0x03 => Ok(Self::ContactAck),
             0x04 => Ok(Self::WelcomeRendezvous),
+            0x05 => Ok(Self::LinkRefusal),
             other => Err(MailboxError::UnknownKind(other)),
         }
     }
@@ -699,12 +706,12 @@ mod tests {
 
     #[test]
     fn kind_bytes_are_frozen() {
-        let expected = [1u8, 2, 3, 4];
+        let expected = [1u8, 2, 3, 4, 5];
         for (kind, byte) in MailboxKind::ALL.iter().zip(expected) {
             assert_eq!(kind.to_byte(), byte);
             assert_eq!(MailboxKind::from_byte(byte), Ok(*kind));
         }
-        for byte in [0u8, 5, 0x7F, 0xFF] {
+        for byte in [0u8, 6, 0x7F, 0xFF] {
             assert_eq!(
                 MailboxKind::from_byte(byte),
                 Err(MailboxError::UnknownKind(byte))

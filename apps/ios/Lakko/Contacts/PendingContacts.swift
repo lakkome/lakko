@@ -30,12 +30,15 @@ public struct PendingContact: Codable, Equatable, Identifiable {
     public let username: String
     /// When **Add** was pressed (Unix ms): the 7-day line counts from here.
     public let addedAtMs: Int64
+    /// The 16-byte id of the invite link the request answered: a link
+    /// refusal must name it (ADR-0079 amendment of 2026-10-19).
+    public let linkId: Data
 
     public var id: String { accountIdHex }
 
     public init(
         accountIdHex: String, signaturePubkey: Data, x25519Pubkey: Data, displayName: String,
-        username: String, addedAtMs: Int64
+        username: String, addedAtMs: Int64, linkId: Data
     ) {
         self.accountIdHex = accountIdHex
         self.signaturePubkey = signaturePubkey
@@ -43,6 +46,7 @@ public struct PendingContact: Codable, Equatable, Identifiable {
         self.displayName = displayName
         self.username = username
         self.addedAtMs = addedAtMs
+        self.linkId = linkId
     }
 
     /// The held-send queue key of what is written before the chat exists:
@@ -67,8 +71,22 @@ public enum PendingContacts {
         next[at] = PendingContact(
             accountIdHex: contact.accountIdHex, signaturePubkey: contact.signaturePubkey,
             x25519Pubkey: contact.x25519Pubkey, displayName: contact.displayName,
-            username: contact.username, addedAtMs: min(list[at].addedAtMs, contact.addedAtMs))
+            username: contact.username, addedAtMs: min(list[at].addedAtMs, contact.addedAtMs),
+            linkId: contact.linkId)
         return next
+    }
+
+    /// ADR-0079 amendment of 2026-10-19 — the pending contact a link refusal
+    /// cancels: the one whose stated account key signed it over the link
+    /// that contact's request answered and this account's key (`verify` is
+    /// the core's `verifyLinkRefusal`). `nil` when none does: a refusal
+    /// nobody but the inviter could sign, for another link or another
+    /// person, changes nothing. Mirror of web `pendingContactRefusedBy`.
+    public static func refusedBy(
+        _ list: [PendingContact], refusal: Data, ownAccountKey: Data,
+        verify: (Data, Data, Data, Data) -> Bool
+    ) -> PendingContact? {
+        list.first { verify(refusal, $0.signaturePubkey, $0.linkId, ownAccountKey) }
     }
 
     /// Which line the pending chat shows.
@@ -105,7 +123,7 @@ public enum PendingContacts {
 /// The pending-contact records, per account, in `UserDefaults` (no message
 /// text: that lives in the sealed held-send queue).
 public enum PendingContactStore {
-    static let keyPrefix = "lakko.contacts.pending-invited.v1:"
+    static let keyPrefix = "lakko.contacts.pending-invited.v2:"
 
     static func key(_ accountIdB64: String) -> String { keyPrefix + accountIdB64 }
 
@@ -162,5 +180,44 @@ public enum LinkRecords {
         records
             .filter { $0.kind == .contact && !$0.ledgerId.isEmpty && isLive($0, nowMs: nowMs) }
             .sorted { $0.mintedAtMs > $1.mintedAtMs }
+    }
+}
+
+/// The order of **Add** on a contact invite page (ADR-0079 section 5, amended
+/// 2026-10-19; `docs/ux/contact-invite-link.md` section 3), with the page's
+/// steps passed in so the order is unit-tested. The web
+/// (`contacts/invite-add.ts`) and Android (`InviteAddOrder`) keep the same
+/// order:
+///
+///  1. the ledger's consume: a link used up or gone since the page opened is
+///     dead, and NOTHING is kept (no pending contact, no held message);
+///  2. only then the pending contact is written, before the request is sent
+///     so an answer that comes back at once finds it;
+///  3. the request; a send that fails removes the pending contact again and
+///     the failure propagates.
+@MainActor
+public enum InviteAddOrder {
+    /// How Add ended.
+    public enum Outcome: Equatable { case added, dead }
+
+    /// - Parameters:
+    ///   - consumeLive: `false` when the ledger answered used up or gone.
+    ///   - recordPending: writes the pending contact; a throw stops Add with
+    ///     nothing to forget.
+    public static func run(
+        consumeLive: () async throws -> Bool,
+        recordPending: () throws -> Void,
+        sendRequest: () async throws -> Void,
+        forgetPending: () -> Void
+    ) async throws -> Outcome {
+        guard try await consumeLive() else { return .dead }
+        try recordPending()
+        do {
+            try await sendRequest()
+        } catch {
+            forgetPending()
+            throw error
+        }
+        return .added
     }
 }

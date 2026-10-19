@@ -47,6 +47,9 @@ public data class PendingContact(
     val username: String,
     /** When Add was pressed (Unix ms): the 7-day line counts from here. */
     val addedAtMs: Long,
+    /** The id of the invite link the request answered (16 bytes, lower-case
+     *  hex): a link refusal must name it (ADR-0079 amendment of 2026-10-19). */
+    val linkIdHex: String,
 ) {
     /** The held-send queue key of what is written before the chat exists:
      *  the inviter's account id hex (32 characters, never a conversation id,
@@ -69,6 +72,26 @@ public object PendingContacts {
         return list.toMutableList().also {
             it[at] = contact.copy(addedAtMs = minOf(held.addedAtMs, contact.addedAtMs))
         }
+    }
+
+    /**
+     * ADR-0079 amendment of 2026-10-19 — the pending contact a link refusal
+     * cancels: the one whose stated account key signed it over the link that
+     * contact's request answered and this account's key ([verify] is the
+     * core's `verifyLinkRefusal`). `null` when none does: a refusal nobody
+     * but the inviter could sign, for another link or another person,
+     * changes nothing. Mirror of web `pendingContactRefusedBy`.
+     */
+    public fun refusedBy(
+        list: List<PendingContact>,
+        refusal: ByteArray,
+        ownAccountKey: ByteArray,
+        verify: (ByteArray, ByteArray, ByteArray, ByteArray) -> Boolean,
+    ): PendingContact? = list.firstOrNull { c ->
+        val inviterKey = runCatching { java.util.Base64.getDecoder().decode(c.signaturePubkeyB64) }.getOrNull()
+            ?: return@firstOrNull false
+        val linkId = LinkClaims.bytes(c.linkIdHex) ?: return@firstOrNull false
+        verify(refusal, inviterKey, linkId, ownAccountKey)
     }
 
     /** Which line the pending chat shows. */
@@ -207,5 +230,42 @@ public class InMemoryPendingContactsStore : PendingContactsStore {
     override fun save(accountIdB64: String, list: List<PendingContact>): Boolean = synchronized(this) {
         if (list.isEmpty()) rows.remove(accountIdB64) else rows[accountIdB64] = encodePendingContacts(list)
         true
+    }
+}
+
+/**
+ * The order of **Add** on a contact invite page (ADR-0079 section 5, amended
+ * 2026-10-19; `docs/ux/contact-invite-link.md` section 3), with the page's
+ * steps passed in so the order is unit-tested. The web
+ * (`contacts/invite-add.ts`) and iOS (`InviteAddOrder`) keep the same order:
+ *
+ *  1. the ledger's consume: a link used up or gone since the page opened is
+ *     dead, and NOTHING is kept (no pending contact, no held message);
+ *  2. only then the pending contact is written, before the request is sent
+ *     so an answer that comes back at once finds it;
+ *  3. the request; a send that fails removes the pending contact again and
+ *     the failure propagates.
+ *
+ * Inline, so a step may return from the caller (a refusal, a lost session).
+ */
+public object InviteAddOrder {
+    /** How Add ended. */
+    public enum class Outcome { ADDED, DEAD }
+
+    public suspend inline fun run(
+        consumeLive: suspend () -> Boolean,
+        recordPending: () -> Unit,
+        sendRequest: suspend () -> Unit,
+        forgetPending: () -> Unit,
+    ): Outcome {
+        if (!consumeLive()) return Outcome.DEAD
+        recordPending()
+        try {
+            sendRequest()
+        } catch (e: Throwable) {
+            forgetPending()
+            throw e
+        }
+        return Outcome.ADDED
     }
 }

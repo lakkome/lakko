@@ -4070,10 +4070,6 @@
       "text": "Принять",
       "status": "machine"
     },
-    "contacts.request.dead_link_note": {
-      "text": "Отправлено по ссылке-приглашению, которая больше не работает.",
-      "status": "machine"
-    },
     "contacts.request.decline": {
       "text": "Отклонить",
       "status": "machine"
@@ -5950,18 +5946,6 @@
       "text": "{name} уже есть в ваших контактах",
       "status": "machine"
     },
-    "invite.contact.page.create_account": {
-      "text": "Создать аккаунт",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "Попросите у отправителя новую.",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_title": {
-      "text": "Эта ссылка-приглашение больше не работает",
-      "status": "machine"
-    },
     "invite.contact.page.done": {
       "text": "Готово",
       "status": "machine"
@@ -5980,10 +5964,6 @@
     },
     "invite.contact.page.own_title": {
       "text": "Это ваша собственная ссылка-приглашение",
-      "status": "machine"
-    },
-    "invite.contact.page.sign_in": {
-      "text": "Войдите, чтобы добавить {name}",
       "status": "machine"
     },
     "invite.contact.page.title": {

@@ -8410,14 +8410,6 @@
       "text": "Ahora no",
       "status": "machine"
     },
-    "invite.contact.page.sign_in": {
-      "text": "Inicia sesión para añadir a {name}",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "Crear una cuenta",
-      "status": "machine"
-    },
     "invite.contact.page.already_title": {
       "text": "{name} ya está en tus contactos",
       "status": "machine"
@@ -8438,14 +8430,6 @@
       "text": "Listo",
       "status": "machine"
     },
-    "invite.contact.page.dead_title": {
-      "text": "Este enlace de invitación ya no funciona",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "Pide uno nuevo a quien te lo envió.",
-      "status": "machine"
-    },
     "invite.contact.page.add_failed": {
       "text": "No se pudo añadir a {name}. Revisa tu conexión e inténtalo de nuevo.",
       "status": "machine"
@@ -8464,10 +8448,6 @@
     },
     "chat.pending.call_disabled": {
       "text": "Disponible cuando {name} se conecte.",
-      "status": "machine"
-    },
-    "contacts.request.dead_link_note": {
-      "text": "Enviado con un enlace de invitación que ya no funciona.",
       "status": "machine"
     }
   }

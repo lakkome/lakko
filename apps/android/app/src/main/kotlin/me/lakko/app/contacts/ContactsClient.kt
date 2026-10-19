@@ -1451,6 +1451,42 @@ public class ContactsClient(
         return PublishedAck(messageId = publish.id, createdAt = publish.createdAt)
     }
 
+    /**
+     * ADR-0079 amendment of 2026-10-19 — answer a request whose invite link
+     * no longer counts with a link refusal: signed by this account's key
+     * over the link id and the requester's account key, sealed as a
+     * LINK_REFUSAL row to the requester's mailbox through [reach] (the reply
+     * grant the request held, the path an ack takes). With no [reach]
+     * nothing is written. Throws when it was not written.
+     */
+    public suspend fun sendLinkRefusal(
+        inviterSigningSeed: ByteArray,
+        linkId: ByteArray,
+        originalRequest: IncomingContactRequest,
+        reach: MailboxDest? = null,
+    ) {
+        val target = reach ?: throw ContactsError.wrap(MailboxUnknown())
+        val wire = try {
+            uniffi.lakko_ffi_uniffi.composeLinkRefusal(inviterSigningSeed, linkId, originalRequest.fromPubkey)
+        } catch (e: FfiException) {
+            throw ContactsError.wrap(e)
+        }
+        val sealed = try {
+            mailboxCrypto.sealFor(target, MailboxRowKind.LINK_REFUSAL, wire)
+        } catch (e: FfiException) {
+            throw ContactsError.wrap(e)
+        }
+        try {
+            ds.publishMailbox(sealed.address, sealed.row, reach = target.auth)
+        } catch (e: DsHttpError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DsNetworkError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DsClientArgError) {
+            throw ContactsError.wrap(e)
+        }
+    }
+
     // -----------------------------------------------------------------
     // Poll: fetch stranger inbox + decode envelopes
     // -----------------------------------------------------------------
@@ -1511,6 +1547,10 @@ public class ContactsClient(
                     // The channel co-publisher join reads its own rows
                     // ([me.lakko.app.channels.CoPublisher]); not a chat event.
                     continue
+                }
+
+                MailboxRowKind.LINK_REFUSAL -> {
+                    events.add(IncomingMailboxEvent.LinkRefusal(env.body))
                 }
 
                 MailboxRowKind.WELCOME -> {
@@ -1704,15 +1744,16 @@ public data class IncomingContactRequest(
      *  links the request was sent through. SECRET: decided on when the
      *  request arrives and never persisted with the pending row. */
     val linkAnswer: FfiLinkAnswer? = null,
-    /** ADR-0079 section 3 — the request named a link this account no longer
-     *  holds as live: shown as an ordinary card with a note. Persisted with
-     *  the pending row, so the note survives a restart. */
-    val viaDeadLink: Boolean = false,
-    /** The 16-byte id of that dead link (not its secret): what the card is
-     *  matched by when another device of the account claims the same request
-     *  (ADR-0079, reworked 2026-10-17). `null` for every other request. */
-    val deadLinkId: ByteArray? = null,
 ) {
+    /** The DS stamp ([createdAt], server-set) as Unix ms, or `null` when it
+     *  does not parse. For a request through an invite link it decides the
+     *  link's expiry (ADR-0079 amendment of 2026-10-19). */
+    val createdAtMs: Long?
+        get() = runCatching { java.time.Instant.parse(createdAt).toEpochMilli() }
+            .recoverCatching { java.time.OffsetDateTime.parse(createdAt).toInstant().toEpochMilli() }
+            .getOrNull()
+            ?.takeIf { it >= 0 }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is IncomingContactRequest) return false
@@ -1723,9 +1764,7 @@ public data class IncomingContactRequest(
             validAfterMs == other.validAfterMs &&
             intro == other.intro &&
             createdAt == other.createdAt &&
-            profile == other.profile &&
-            viaDeadLink == other.viaDeadLink &&
-            (deadLinkId?.contentEquals(other.deadLinkId) ?: (other.deadLinkId == null))
+            profile == other.profile
     }
 
     override fun hashCode(): Int {
@@ -1820,6 +1859,14 @@ public sealed interface IncomingMailboxEvent {
     }
     /** 1.9b1 — original recipient's accept-reply. */
     public data class ContactAck(val ack: IncomingContactAck) : IncomingMailboxEvent
+
+    /** ADR-0079 amendment of 2026-10-19 — a link refusal, NOT yet verified:
+     *  the receiver checks it against each pending contact
+     *  (`verifyLinkRefusal`) before it removes anything. */
+    public data class LinkRefusal(val refusal: ByteArray) : IncomingMailboxEvent {
+        override fun equals(other: Any?): Boolean = other is LinkRefusal && refusal.contentEquals(other.refusal)
+        override fun hashCode(): Int = refusal.contentHashCode()
+    }
 }
 
 /** Result of [ContactsClient.pollStrangerInbox]. */

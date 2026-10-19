@@ -229,16 +229,19 @@ public object LinkClaims {
     }
 
     /** The register's verdict as the rule reads it. */
-    public enum class Verdict { ACCEPT, ANSWERED, DEAD }
+    public enum class Verdict { ACCEPT, ANSWERED, DEAD, UNKNOWN }
 
     /** What the device does with a request carrying a link answer, now. */
     public enum class Step {
-        /** The synced state is not loaded yet: keep it undecided, unshown. */
+        /** The synced state is not loaded yet, or this device holds no
+         *  record of the link: keep it undecided, unshown. */
         WAIT,
         /** Answered (by another device, or the register says so): remove. */
         DROP,
-        /** The link no longer works: show the card with the note. */
-        CARD_DEAD,
+        /** The link does not count for the request (ADR-0079 amendment of
+         *  2026-10-19): drop it silently and answer the requester with a link
+         *  refusal. No card. */
+        REFUSE,
         /** Live link: post this device's claim. */
         POST_CLAIM,
         /** Claim posted: read the journal past it and decide. */
@@ -252,26 +255,35 @@ public object LinkClaims {
     /**
      * The next step for one request.
      *
-     * | own claims        | answered elsewhere | verdict  | step       |
-     * |-------------------|--------------------|----------|------------|
-     * | won               | any                | any      | BUILD      |
-     * | any other         | any                | answered | DROP       |
-     * | lost (settled)    | any                | dead     | DROP       |
-     * | lost (settled)    | any                | other    | RECHECK    |
-     * | posted or posting | any                | any      | DECIDE     |
-     * | none              | yes                | dead     | DROP       |
-     * | none              | yes                | other    | WAIT       |
-     * | none              | no                 | not held | WAIT       |
-     * | none              | no                 | dead     | CARD_DEAD  |
-     * | none              | no                 | accept   | POST_CLAIM |
+     * | own claims        | answered elsewhere | verdict          | step       |
+     * |-------------------|--------------------|------------------|------------|
+     * | won, not founded, no note held | any   | dead             | REFUSE     |
+     * | won               | any                | any other        | BUILD      |
+     * | any other         | any                | answered         | DROP       |
+     * | lost (settled)    | any                | dead             | DROP       |
+     * | lost (settled)    | any                | other            | RECHECK    |
+     * | posted or posting | any                | any              | DECIDE     |
+     * | none              | yes                | dead             | DROP       |
+     * | none              | yes                | other            | WAIT       |
+     * | none              | no                 | not held/unknown | WAIT       |
+     * | none              | no                 | dead             | REFUSE     |
+     * | none              | no                 | accept           | POST_CLAIM |
      *
      * "Answered elsewhere" is the core's `linkClaimAnsweredElsewhere`: a
-     * claim from a device in the current roster. A request goes only when
-     * the register says it was answered, or the link is dead while another
-     * device holds the claim that answers it.
+     * claim from a device in the current roster. The verdict judges the
+     * link's expiry at the moment the server stamped the request and its
+     * revocation now, so a revocation wins until this account has answered
+     * (ADR-0079 amendment of 2026-10-19): a winner that has not founded
+     * yet, and holds no other device's founding note, refuses instead of
+     * building. A device that lost, or sees another device's claim, drops a
+     * dead request without a refusal: the claimer answers it. A link this
+     * device holds no record of waits. Mirror of web `linkRequestStep`.
      */
-    public fun step(own: Own?, answeredElsewhere: Boolean, verdict: Verdict?): Step {
-        if (own != null && own.holdsClaim && own.won != null) return Step.BUILD
+    public fun step(own: Own?, answeredElsewhere: Boolean, verdict: Verdict?, noteHeld: Boolean = false): Step {
+        if (own != null && own.holdsClaim && own.won != null) {
+            val answered = own.founded != null || noteHeld
+            return if (verdict == Verdict.DEAD && !answered) Step.REFUSE else Step.BUILD
+        }
         if (verdict == Verdict.ANSWERED) return Step.DROP
         if (own != null && own.holdsClaim) {
             if (!own.settled) return Step.DECIDE
@@ -279,17 +291,12 @@ public object LinkClaims {
         }
         if (answeredElsewhere) return if (verdict == Verdict.DEAD) Step.DROP else Step.WAIT
         return when (verdict) {
-            null -> Step.WAIT
+            null, Verdict.UNKNOWN -> Step.WAIT
             Verdict.ANSWERED -> Step.DROP
-            Verdict.DEAD -> Step.CARD_DEAD
+            Verdict.DEAD -> Step.REFUSE
             Verdict.ACCEPT -> Step.POST_CLAIM
         }
     }
-
-    /** A card already shown for a request (the link no longer worked here)
-     *  that a roster device claimed: the request is answered. */
-    public fun shownCardAnswered(own: Own?, answeredElsewhere: Boolean): Boolean =
-        !(own?.holdsClaim ?: false) && answeredElsewhere
 
     /** The claims the core decides over: this device's own (authored by its
      *  own leaf key) and the others seen. */

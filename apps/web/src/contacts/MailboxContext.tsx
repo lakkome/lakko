@@ -132,7 +132,9 @@ import {
   handOverPendingContact,
   loadPendingContacts,
   moveHeldToConversation,
+  pendingContactRefusedBy,
   pendingContacts,
+  removePendingContact,
 } from "./pending-contacts";
 import {
   type LinkClaimRecord as LinkClaimRecordHandle,
@@ -143,7 +145,6 @@ import {
   linkClaimRecord,
   linkRequestKeyHex,
   linkRequestStep,
-  shownCardAnswered,
 } from "./link-claims";
 import { loadWasm } from "../wasm";
 
@@ -710,14 +711,6 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         const { ids, authors } = claimInputs(seen);
         return wasm.linkClaimAnsweredElsewhere(ids, authors, concatBytes(roster.roster));
       };
-      // A card already shown (dead link here) for a request a roster device
-      // claimed: answered, the card goes.
-      for (const req of target.deadLinkRequests()) {
-        const answer = req.linkAnswer;
-        if (answer === null) continue;
-        const key = linkRequestKeyHex(answer.linkId, req.fromPubkey);
-        if (shownCardAnswered(claims.own(key), answeredElsewhere(key))) target.remove(req.messageId);
-      }
       for (const req of target.undecidedLinkRequests()) {
         if (!current()) return;
         const answer = req.linkAnswer;
@@ -726,10 +719,14 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           continue;
         }
         const key = linkRequestKeyHex(answer.linkId, req.fromPubkey);
+        // ADR-0079 amendment of 2026-10-19 - the moment the request was
+        // written decides the link's expiry: the time the DS stamped on the
+        // row, kept with the request across a restart.
         let step = linkRequestStep({
           own: claims.own(key),
           answeredElsewhere: answeredElsewhere(key),
-          verdict: sync.linkAnswerVerdictNow(answer.linkId, answer.linkSecret, req.fromPubkey),
+          verdict: sync.linkAnswerVerdictAt(answer.linkId, answer.linkSecret, req.fromPubkey, Date.parse(req.createdAt)),
+          noteHeld: claims.note(key) !== null,
         });
         try {
           if (step === "wait") continue;
@@ -738,8 +735,14 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             target.remove(req.messageId);
             continue;
           }
-          if (step === "card-dead") {
-            target.markDeadLink(req.messageId);
+          if (step === "refuse") {
+            // The link does not count: no card. The requester is answered
+            // with a refusal and the request goes; a failed write keeps it
+            // for the next pass.
+            await client.sendLinkRefusal(auth.identitySecrets(), req);
+            if (!current()) return;
+            claims.forgetOwn(key);
+            target.remove(req.messageId);
             continue;
           }
           if (step === "post-claim") {
@@ -936,6 +939,21 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             // eslint-disable-next-line no-console
             console.warn("joinGroupFromWelcome failed", ev.welcome.messageId, err);
           }
+        } else if (ev.kind === "link-refusal") {
+          // ADR-0079 amendment of 2026-10-19 - the inviter's app refused the
+          // request this account sent through their link (the link no longer
+          // counted): the pending contact and the messages held for it go,
+          // silently. Only a refusal signed by the key the link named, over
+          // that link and this account, removes anything.
+          const own = chats.accountIdentity();
+          if (own === null) continue;
+          const wasm = await loadWasm();
+          const refused = pendingContactRefusedBy(pendingContacts(), ev.refusal, own.signaturePublicKey, (w, k, l, o) =>
+            wasm.verifyLinkRefusal(w, k, l, o),
+          );
+          if (refused === null) continue;
+          await removePendingContact(accountIdB64, refused.accountIdHex);
+          void reachSession()?.closeRepliesTo(journalHex(base64Decode(refused.signaturePubkeyB64)));
         } else {
           // 1.9b1: contact-ack — the recipient of our ContactRequest pressed
           // Accept. The signature is verified, so even a stale ack is a

@@ -8410,14 +8410,6 @@
       "text": "暂不",
       "status": "machine"
     },
-    "invite.contact.page.sign_in": {
-      "text": "登录以添加 {name}",
-      "status": "machine"
-    },
-    "invite.contact.page.create_account": {
-      "text": "创建账号",
-      "status": "machine"
-    },
     "invite.contact.page.already_title": {
       "text": "{name} 已在你的联系人中",
       "status": "machine"
@@ -8438,14 +8430,6 @@
       "text": "完成",
       "status": "machine"
     },
-    "invite.contact.page.dead_title": {
-      "text": "此邀请链接已失效",
-      "status": "machine"
-    },
-    "invite.contact.page.dead_body": {
-      "text": "请向发送者索要新的链接。",
-      "status": "machine"
-    },
     "invite.contact.page.add_failed": {
       "text": "无法添加 {name}。请检查网络连接后重试。",
       "status": "machine"
@@ -8464,10 +8448,6 @@
     },
     "chat.pending.call_disabled": {
       "text": "{name} 连接后即可使用。",
-      "status": "machine"
-    },
-    "contacts.request.dead_link_note": {
-      "text": "通过已失效的邀请链接发送。",
       "status": "machine"
     }
   }

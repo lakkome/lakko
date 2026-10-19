@@ -7,17 +7,21 @@
  * the same rule. The page shows who invites, by the name the link states; it
  * shows no fingerprint, no safety number, no expiry and no use count.
  *
- * | the link                       | the visitor            | state        |
- * |--------------------------------|------------------------|--------------|
- * | does not open / expired / gone | any                    | `dead`       |
- * | rate-limited                   | any                    | `rate-limited` |
- * | opens                          | signed out             | `signed-out` |
- * | opens, made by this account    | signed in              | `own`        |
- * | opens, inviter a contact       | signed in              | `already`    |
- * | opens                          | signed in              | `default`    |
+ * | the visitor | the link                       | state          |
+ * |-------------|--------------------------------|----------------|
+ * | signed out  | any                            | `sign-in`      |
+ * | signed in   | loading                        | `loading`      |
+ * | signed in   | rate-limited                   | `rate-limited` |
+ * | signed in   | does not open / expired / gone | `dead`         |
+ * | signed in   | opens, made by this account    | `own`          |
+ * | signed in   | opens, inviter a contact       | `already`      |
+ * | signed in   | opens                          | `default`      |
  *
- * A damaged link (a missing or wrong secret) reads exactly like one that no
- * longer works: a person cannot tell the two apart and should do the same.
+ * Amended 2026-10-19 (ADR-0079): a signed-out visitor sees no inviter card at
+ * all, only the sign-in screen, and the link is checked again once signed in;
+ * a link that does not work has no page: `dead` takes the visitor to the
+ * Contacts screen. A damaged link (a missing or wrong secret) reads exactly
+ * like one that no longer works.
  */
 
 /** What the page shows. `name` is what the link states (display name, else
@@ -26,12 +30,7 @@ export type InvitePageView =
   | { readonly kind: "loading" }
   | { readonly kind: "rate-limited" }
   | { readonly kind: "dead" }
-  | {
-      readonly kind: "signed-out";
-      readonly name: string | null;
-      readonly username: string | null;
-      readonly label: string | null;
-    }
+  | { readonly kind: "sign-in" }
   | { readonly kind: "own" }
   | { readonly kind: "already"; readonly name: string | null; readonly contactKeyB64: string }
   | {
@@ -71,6 +70,7 @@ export interface InvitePageInput {
 
 /** The page's state for `input`. Pure. */
 export function invitePageView(input: InvitePageInput): InvitePageView {
+  if (!input.signedIn) return { kind: "sign-in" };
   if (input.link === "loading") return { kind: "loading" };
   if (input.link === "rate-limited") return { kind: "rate-limited" };
   if (input.link === "dead" || input.expired) return { kind: "dead" };
@@ -78,7 +78,6 @@ export function invitePageView(input: InvitePageInput): InvitePageView {
   const username =
     input.inviterUsername !== null && input.inviterUsername.length > 0 ? input.inviterUsername : null;
   const label = input.label.trim().length > 0 ? input.label : null;
-  if (!input.signedIn) return { kind: "signed-out", name, username, label };
   if (input.isOwn) return { kind: "own" };
   if (input.existingContactKeyB64 !== null) {
     return { kind: "already", name, contactKeyB64: input.existingContactKeyB64 };

@@ -146,17 +146,17 @@ describe("a request answering an invite link (ADR-0079, reworked 2026-10-17)", (
     expect(reloaded.undecidedLinkRequests().map((r) => r.messageId)).toEqual([5]);
   });
 
-  it("keeps the dead-link note across a reload", async () => {
+  it("keeps the time the DS stamped on the row across a reload (ADR-0079, 2026-10-19)", async () => {
     const st = memory();
     const inbox = open(st);
     inbox.addFetched([fetched(5, true)]);
-    inbox.markDeadLink(5);
-    expect(inbox.pending()[0]?.deadLink).toBe(true);
     const reloaded = open(st);
-    await reloaded.restore(decodeAll);
-    expect(reloaded.undecidedLinkRequests()).toEqual([]);
-    expect(reloaded.deadLinkRequests().map((r) => r.messageId)).toEqual([5]);
-    expect(reloaded.pending()[0]?.deadLink).toBe(true);
+    await reloaded.restore((rows) =>
+      Promise.resolve(rows.map((r) => ({ ...request(r.messageId), createdAt: (r as { createdAt: string }).createdAt }))),
+    );
+    expect(reloaded.undecidedLinkRequests().map((r) => r.createdAt)).toEqual(["2026-10-17T00:00:00Z"]);
+    // A dead link is never a listed card.
+    expect(reloaded.pending()).toEqual([]);
   });
 
   it("is gone for good once answered", () => {

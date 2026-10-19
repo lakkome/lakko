@@ -23,7 +23,7 @@ import { t } from "../l10n";
 import { KeyedError } from "../l10n/keyed-error";
 import { tRich } from "../l10n/rich";
 import { PasswordExplainer } from "../auth/PasswordExplainer";
-import { readReturnUrl } from "../auth/return-url";
+import { buildAuthUrlWithReturn, readReturnUrl } from "../auth/return-url";
 import { WebauthnClient } from "../auth/webauthn-client";
 import { UsernameHint } from "../profile/UsernameHint";
 import { requireValidUsername } from "../profile/username-field";
@@ -48,6 +48,9 @@ export default function Login(): JSX.Element {
     const s = auth.state();
     return s.kind === "anon" && s.sessionExpired === true;
   };
+  // The invite page sends a signed-out visitor here first; Create an account
+  // keeps the way back to it (ADR-0079 amendment of 2026-10-19).
+  const signupHref = (): string => buildAuthUrlWithReturn(paths.signup, readReturnUrl(location));
   const [username, setUsername] = createSignal(cached());
   const [password, setPassword] = createSignal("");
   const [busy, setBusy] = createSignal(false);
@@ -159,7 +162,7 @@ export default function Login(): JSX.Element {
       </p>
       <p class="lk-auth-foot">
         {tRich("auth.login.no_account", {
-          link: <A href={paths.signup}>{t("auth.signup.submit")}</A>,
+          link: <A href={signupHref()}>{t("auth.signup.submit")}</A>,
         })}
       </p>
       <PasswordExplainer />

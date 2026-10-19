@@ -55,6 +55,26 @@ describe("link records (ADR-0079 section 4)", () => {
     expect(isLinkLive(model({ maxUses: 10, uses: 10 }), 0)).toBe(false);
   });
 
+  it("judges expiry at the request's DS stamp and a revocation now (ADR-0079, 2026-10-19)", () => {
+    const s = new SyncedState();
+    const id = new Uint8Array(16).fill(3);
+    const secret = new Uint8Array(12).fill(4);
+    const record = new LinkRecord(id, secret, LinkRecordKind.Contact, new Uint8Array(0), new Uint8Array(0), 1_000n, 5, 1n, "");
+    expect(s.setLinkRecord(5n, record)).toBe(true);
+    const bob = new Uint8Array(32).fill(0xb0);
+    // Add pressed before the expiry; this device online long after it: accepted.
+    expect(s.linkAnswerVerdict(id, secret, bob, 999n)).toBe("accept");
+    // Add pressed at or after the expiry: dead (refused).
+    expect(s.linkAnswerVerdict(id, secret, bob, 1_000n)).toBe("dead");
+    // Revoked before this account answered: dead even for an earlier Add.
+    expect(s.revokeLinkRecord(6n, id)).toBe(true);
+    expect(s.linkAnswerVerdict(id, secret, bob, 1n)).toBe("dead");
+    // A link this device holds no record of: unknown, never refused.
+    expect(s.linkAnswerVerdict(new Uint8Array(16).fill(9), secret, bob, 1n)).toBe("unknown");
+    record.free();
+    s.free();
+  });
+
   it("decides a request's link answer through the one Rust rule", () => {
     const s = new SyncedState();
     const record = new LinkRecord(

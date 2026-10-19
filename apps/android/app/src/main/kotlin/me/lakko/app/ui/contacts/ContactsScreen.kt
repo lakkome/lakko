@@ -495,17 +495,6 @@ private fun RequestRow(
                 )
             }
         }
-        // ADR-0079 section 3 — sent through a link that no longer works: an
-        // ordinary card, with this note.
-        if (req.viaDeadLink) {
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = t("contacts.request.dead_link_note"),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 52.dp),
-            )
-        }
         if (!req.intro.isNullOrBlank()) {
             Spacer(Modifier.height(6.dp))
             Text(
