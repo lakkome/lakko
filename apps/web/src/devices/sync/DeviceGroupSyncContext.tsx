@@ -80,6 +80,7 @@ import {
   type EnsuredDeviceGroup,
 } from "../lifecycle";
 import {
+  DeviceGroupSnapshotChangedError,
   deleteDeviceGroupPending,
   dropDeviceGroupStateForRejoin,
   getDeviceGroupJournalCursor,
@@ -1816,6 +1817,13 @@ export function DeviceGroupSyncProvider(props: {
             "DeviceGroup snapshot + cursor persist failed; holding the cursor",
             err,
           );
+          // Another handle on this device wrote a newer snapshot without
+          // announcing it: this handle is behind what is on disk and would
+          // hold the cursor forever. Reload from disk; the poll restarts
+          // from the stored cursor.
+          if (err instanceof DeviceGroupSnapshotChangedError && group === g) {
+            void reloadHandle();
+          }
         },
       });
       try {

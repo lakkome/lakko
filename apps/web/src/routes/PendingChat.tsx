@@ -65,6 +65,10 @@ export default function PendingChat(): JSX.Element {
     void restoreHeldSends(account).then(() => setQueueVersion((v) => v + 1));
   });
 
+  const contact = createMemo((): PendingContact | undefined =>
+    pendingContacts().find((c) => c.accountIdHex === params.hex),
+  );
+
   /** What was written to this person so far, in order. */
   const queued = createMemo(() => {
     queueVersion();
@@ -73,10 +77,6 @@ export default function PendingChat(): JSX.Element {
     const key = pendingQueueKey(c);
     return heldSends.all().find(([k]) => k === key)?.[1] ?? [];
   });
-
-  const contact = createMemo((): PendingContact | undefined =>
-    pendingContacts().find((c) => c.accountIdHex === params.hex),
-  );
   const name = (): string => {
     const c = contact();
     return (c === undefined ? null : pendingNameOf(c)) ?? t("invite.contact.page.unnamed");

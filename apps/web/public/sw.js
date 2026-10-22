@@ -608,7 +608,6 @@ function normalisedSubIdHex(s) {
   if (typeof s !== "string" || s.length !== 32) return null;
   const lower = s.toLowerCase();
   return /^[0-9a-f]{32}$/.test(lower) ? lower : null;
-}$/.test(lower) ? lower : null;
 }
 
 // ----- background decrypt (1.21) -------------------------------
