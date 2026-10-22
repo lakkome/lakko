@@ -9,7 +9,7 @@ import LakkoCore
 ///
 /// * Refilled on a randomised schedule that never looks at spending
 ///   (ADR-0078 section 8): when a session is bound, each context is topped
-///   up once at a random moment within ``initialRefillSpread`` seconds, then
+///   up at once (``initialRefillSpread`` is zero), then
 ///   at independent random intervals between ``refillIntervalMin`` and
 ///   ``refillIntervalMax``, each time to its ``AnonTokenContext/poolTarget``
 ///   (about a day of use plus a reserve) in one issuance, never holding more
@@ -56,8 +56,11 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
     /// Never hold more than this per context.
     public static let maxHeld = 32
     /// A context's first refill after a session is bound falls at a random
-    /// moment within this many seconds.
-    public static let initialRefillSpread: TimeInterval = 20
+    /// moment within this many seconds. Zero since 2026-10-22: a fresh
+    /// session holds no tokens, so a signup or a first sign-in whose first
+    /// lookup came before a later first refill failed after
+    /// ``defaultWaitSeconds``. The issuer sees the session start either way.
+    public static let initialRefillSpread: TimeInterval = 0
     /// After that, a context is topped up at independent random intervals
     /// between these (seconds). Chosen, not measured.
     public static let refillIntervalMin: TimeInterval = 30 * 60
@@ -168,7 +171,7 @@ public final class AnonTokenPool: AnonTokenSource, @unchecked Sendable {
     // MARK: - The refill schedule (ADR-0078 section 8)
 
     /// Arm every context's schedule for the bound session: a first refill at
-    /// a random moment within ``initialRefillSpread``, then one at a random
+    /// once (``initialRefillSpread`` is zero), then one at a random
     /// interval between ``refillIntervalMin`` and ``refillIntervalMax``,
     /// for as long as the binding lasts. Called with the lock held.
     private func startScheduleLocked() {

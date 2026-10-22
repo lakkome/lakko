@@ -28,8 +28,8 @@ import kotlin.coroutines.cancellation.CancellationException
  *
  * ADR-0078 section 8: the pool is refilled on a randomised schedule that does
  * not look at spending. When a session is bound each context is topped up to
- * its target (about a day of use plus a reserve, [anonPoolTargetFor]) once at a
- * random moment within [INITIAL_REFILL_SPREAD_MS], and after that at
+ * its target (about a day of use plus a reserve, [anonPoolTargetFor]) at once
+ * ([INITIAL_REFILL_SPREAD_MS] is zero), and after that at
  * independent random intervals between [REFILL_INTERVAL_MIN_MS] and
  * [REFILL_INTERVAL_MAX_MS]. A take never starts an issuance: before ADR-0078 a
  * take below a low-water mark started one, so the bearer issuance landed
@@ -95,8 +95,11 @@ public fun anonPoolTargetFor(context: AnonTokenContext): Int = when (context) {
 }
 
 /** The first scheduled refill of a newly bound session runs at a random
- *  moment within this many milliseconds (ADR-0078 section 8; chosen). */
-public const val INITIAL_REFILL_SPREAD_MS: Long = 20_000L
+ *  moment within this many milliseconds (ADR-0078 section 8). Zero since
+ *  2026-10-22: a fresh session holds no tokens, so a signup or a first sign-in
+ *  whose first lookup came before a later first refill failed after
+ *  [AnonTokenPool.DEFAULT_WAIT_MS]. The issuer sees the session start either way. */
+public const val INITIAL_REFILL_SPREAD_MS: Long = 0L
 
 /** After the first, each context refills at an independent random interval
  *  between these two (ADR-0078 section 8; chosen). */
@@ -467,7 +470,7 @@ public class AnonTokenPool(
     }
 
     /** Arm every context's schedule for the bound account: a first refill
-     *  within [INITIAL_REFILL_SPREAD_MS], then one every
+     *  at once ([INITIAL_REFILL_SPREAD_MS] is zero), then one every
      *  [REFILL_INTERVAL_MIN_MS]..[REFILL_INTERVAL_MAX_MS], independently. */
     private fun startScheduleLocked() {
         val gen = generation

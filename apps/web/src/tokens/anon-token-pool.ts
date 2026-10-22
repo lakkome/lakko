@@ -18,8 +18,8 @@
  * For the signed-in account, one bucket per context, kept at about a day of
  * use plus a reserve ({@link POOL_TARGET}, never above {@link MAX_POOL}).
  * Refills run on a randomised schedule that does not look at spending: when
- * a session is installed each context is topped up once at a random moment
- * within {@link INITIAL_REFILL_SPREAD_MS}, and after that at independent
+ * a session is installed each context is topped up at once (a fresh session
+ * holds no tokens and its first actions need them), and after that at independent
  * random intervals between {@link REFILL_INTERVAL_MIN_MS} and
  * {@link REFILL_INTERVAL_MAX_MS}. A take never starts an issuance. Before
  * ADR-0078 a take below a low-water mark started one, so the bearer issuance
@@ -148,8 +148,11 @@ export function poolTarget(context: AnonTokenContext): number {
 }
 
 /** A context's first refill after a session is installed falls at a random
- *  moment within this window. */
-export const INITIAL_REFILL_SPREAD_MS = 20_000;
+ *  moment within this window. Zero since 2026-10-22: a fresh session holds no
+ *  tokens, so a signup or a first sign-in whose first lookup came before a
+ *  later first refill failed after {@link TAKE_WAIT_MS}. The issuer sees the
+ *  session start either way. */
+export const INITIAL_REFILL_SPREAD_MS = 0;
 /** After that, a context is topped up at independent random intervals
  *  between these two. Chosen, not measured: short enough that a burst which
  *  empties a bucket recovers within the hour and a half, long enough that
@@ -557,7 +560,7 @@ export class AnonTokenPool {
 
   /**
    * Arm the refill schedule of every context for a newly installed account:
-   * a first refill at a random moment within {@link INITIAL_REFILL_SPREAD_MS}.
+   * a first refill at once ({@link INITIAL_REFILL_SPREAD_MS} is zero).
    */
   private startSchedule(): void {
     const generation = this.generation;
