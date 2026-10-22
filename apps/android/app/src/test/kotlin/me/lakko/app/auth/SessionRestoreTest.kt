@@ -76,7 +76,7 @@ class SessionRestoreTest {
         deviceKey = true,
         token = pair("v2.acct.1.tok.sig", now + 60_000, refreshExpiresAtMs = now + 60_000),
         seed = ByteArray(64) { 7 },
-        exportKey = ByteArray(32) { 3 },
+        exportKey = ByteArray(ExportKeyStore.EXPORT_KEY_LENGTH) { 3 },
     )
 
     private fun pair(access: String, accessExpiresAtMs: Long, refreshExpiresAtMs: Long, refresh: String = "r1.acct.1.r.sig") =
@@ -114,7 +114,7 @@ class SessionRestoreTest {
         assertEquals(SessionAccount(accountIdB64 = accountB64, username = "alice"), decision.account)
         assertArrayEquals(accountBytes, decision.secrets.accountId)
         assertArrayEquals(ByteArray(64) { 7 }, decision.secrets.accountIdentitySeed)
-        assertArrayEquals(ByteArray(32) { 3 }, decision.secrets.exportKey)
+        assertArrayEquals(ByteArray(ExportKeyStore.EXPORT_KEY_LENGTH) { 3 }, decision.secrets.exportKey)
         assertEquals("v2.acct.1.tok.sig", decision.secrets.sessionToken)
         assertEquals(now + 60_000, decision.secrets.sessionExpiresAtMs)
         assertEquals("r1.acct.1.r.sig", decision.secrets.session.refreshToken)

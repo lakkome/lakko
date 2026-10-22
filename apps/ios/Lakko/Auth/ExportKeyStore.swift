@@ -16,7 +16,7 @@ import Security
 ///
 /// ## What's stored
 ///
-/// The raw 32-byte OPAQUE export key — the seed every identity-
+/// The raw 64-byte OPAQUE export key — the seed every identity-
 /// bearing operation derives from:
 ///
 ///   - Ed25519 + X25519 keypairs via `Identity.fromSeed(seed:)`
@@ -62,7 +62,7 @@ import Security
 ///   * `kSecAttrService = "me.lakko.export-key.v1"` — versioned
 ///   * `kSecAttrAccount = accountIdB64` — per-account namespace
 ///   * `kSecAttrAccessible = AfterFirstUnlockThisDeviceOnly`
-///   * `kSecValueData = <32 raw bytes of the export key>`
+///   * `kSecValueData = <64 raw bytes of the export key>`
 public enum ExportKeyStore {
 
     /// Service tag — versioned so a future rotation (e.g. a
@@ -71,7 +71,10 @@ public enum ExportKeyStore {
     public static let serviceTag: String = "me.lakko.export-key.v1"
 
     /// Fixed export-key length pinned by the OPAQUE ciphersuite.
-    public static let exportKeyLength: Int = 32
+    /// `EXPORT_KEY_LEN` in `crates/lakko-auth-client/src/cipher_suite.rs`
+    /// (SHA-512). It read 32 until 2026-10-22, so no export key was ever
+    /// stored on iOS and every write threw.
+    public static let exportKeyLength: Int = 64
 
     /// Persist `exportKey` for `accountIdB64`. Existing record
     /// (if any) is overwritten — same delete-then-add pattern

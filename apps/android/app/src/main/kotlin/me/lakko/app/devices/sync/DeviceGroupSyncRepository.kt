@@ -11,6 +11,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -1522,12 +1526,7 @@ public class DeviceGroupSyncRepository(
         DsClient().use { ds ->
             while (currentCoroutineContextActive()) {
                 val result = try {
-                    ds.fetchGroup(
-                        groupId = groupId,
-                        after = cursor,
-                        limit = null,
-                        waitSecs = 25,
-                    )
+                    fetchOrKicked(ds, groupId, cursor) ?: continue
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (http: DsHttpError) {
@@ -2285,6 +2284,35 @@ public class DeviceGroupSyncRepository(
     /** Bumped each time a poll read the journal to its head. */
     private val headReads: MutableStateFlow<Long> = MutableStateFlow(0L)
 
+    /** Callers waiting in [awaitHead]. While any wait, the poll does not hold
+     *  its read open: two head reads of a 25 s long poll each made every
+     *  step of an invite-link answer take about 50 s. */
+    private val headWaiters = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Cuts short a long poll already out when a caller starts waiting. */
+    private val headKick = Channel<Unit>(Channel.CONFLATED)
+
+    /** One journal read: at once while a head waiter exists, else a long poll
+     *  that a new waiter cuts short (`null`: read again at once). */
+    private suspend fun fetchOrKicked(ds: DsClient, groupId: ByteArray, after: Long) =
+        if (headWaiters.get() > 0) {
+            ds.fetchGroup(groupId = groupId, after = after, limit = null, waitSecs = 0)
+        } else {
+            coroutineScope {
+                val fetch = async { ds.fetchGroup(groupId = groupId, after = after, limit = null, waitSecs = 25) }
+                val kicked = select {
+                    fetch.onAwait { false }
+                    headKick.onReceive { true }
+                }
+                if (kicked) {
+                    fetch.cancel()
+                    null
+                } else {
+                    fetch.await()
+                }
+            }
+        }
+
     private fun isKeyRotation(envelope: ByteArray): Boolean =
         try {
             uniffi.lakko_ffi_uniffi.dispatchIncomingEnvelope(envelope).kind ==
@@ -2297,12 +2325,18 @@ public class DeviceGroupSyncRepository(
      *  its head, or [timeoutMs] passed. */
     private suspend fun awaitHead(timeoutMs: Long): Boolean {
         val seen = headReads.value
-        return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
-            // Two head reads: the first may belong to a fetch that was
-            // already waiting when this was asked.
-            headReads.first { it >= seen + 2 }
-            true
-        } ?: (headReads.value > seen)
+        headWaiters.incrementAndGet()
+        headKick.trySend(Unit)
+        try {
+            return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+                // Two head reads: the first may belong to a fetch that was
+                // already out when this was asked.
+                headReads.first { it >= seen + 2 }
+                true
+            } ?: (headReads.value > seen)
+        } finally {
+            headWaiters.decrementAndGet()
+        }
     }
 
     /**

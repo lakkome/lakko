@@ -194,6 +194,15 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// head (unix ms); 0 before the first one. Read by
     /// ``waitForJournalHead(timeoutMs:)``.
     private var lastDrainedFetchAtMs: Int64 = 0
+    /// Callers waiting in ``waitForJournalHead(timeoutMs:)``. While any wait,
+    /// the poll does not hold its read open: a 25 s long poll per head read
+    /// made every step of an invite-link answer take about 25 s.
+    private var headWaiters = 0
+    /// The long poll out now, cut short when a caller starts waiting.
+    private var pollFetchTask: Task<FetchResult, Error>?
+    /// Set when ``pollFetchTask`` was cancelled for a waiter, so the poll
+    /// reads again at once instead of backing off.
+    private var pollKicked = false
 
     public init() {
         // ADR-0081 — a DeviceGroup commit of this device landed through a
@@ -752,12 +761,22 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     public func waitForJournalHead(timeoutMs: Int64 = DeviceGroupSyncRepository.journalHeadTimeoutMs) async -> Bool {
         guard ready, group != nil, !deviceRemoved else { return false }
         let start = Int64(Date().timeIntervalSince1970 * 1000)
+        headWaiters += 1
+        defer { headWaiters -= 1 }
+        // A long poll already out started before this call: cut it short so
+        // the next read starts now and does not wait.
+        if let out = pollFetchTask {
+            pollKicked = true
+            out.cancel()
+        }
+        // A read that STARTED after this call, so it carries every row
+        // published before it.
         while Int64(Date().timeIntervalSince1970 * 1000) - start < timeoutMs {
-            if lastDrainedFetchAtMs > start { return true }
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            if lastDrainedFetchStartedAtMs > start { return true }
+            try? await Task.sleep(nanoseconds: 100_000_000)
             if Task.isCancelled { return false }
         }
-        return lastDrainedFetchAtMs > start
+        return lastDrainedFetchStartedAtMs > start
     }
 
     private func sendBody(_ body: DeviceGroupBody, hlc: UInt64) async throws {
@@ -1037,14 +1056,25 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     DeviceGroupDsAccess.auth(group: g, identity: $0, accountIdB64: accountIdB64, ds: ds)
                 }
             }
-            do {
-                result = try await ds.fetchGroup(
+            let waitSecs = headWaiters > 0 ? 0 : 25
+            let fetchTask = Task {
+                try await ds.fetchGroup(
                     groupId: groupId,
                     after: cursor,
                     limit: nil,
-                    waitSecs: 25,
+                    waitSecs: waitSecs,
                     auth: auth
                 )
+            }
+            pollFetchTask = fetchTask
+            do {
+                result = try await fetchTask.value
+                pollFetchTask = nil
+                pollKicked = false
+            } catch where pollKicked {
+                pollKicked = false
+                pollFetchTask = nil
+                continue
             } catch DsClientError.http(let status, _, _) where status == 404 {
                 continue
             } catch let err as DsClientError {
