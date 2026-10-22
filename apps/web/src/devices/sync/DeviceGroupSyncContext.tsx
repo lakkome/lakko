@@ -1867,7 +1867,12 @@ export function DeviceGroupSyncProvider(props: {
 
       // ADR-0074 section 3.3: a pass that started after a catch-up was asked
       // for and found nothing more behind it has read the journal to its head.
-      if (batch.persisted && !raw.hasMore) settleCatchUps("read", passStartedAt);
+      // An empty answer at the head is a read to the head too: nothing is
+      // persisted for it, and waiting for a persist kept the read open-ended
+      // (every pass with wait 0, a tight loop) until the waiter timed out.
+      if (!raw.hasMore && (batch.persisted || raw.messages.length === 0)) {
+        settleCatchUps("read", passStartedAt);
+      }
       if (batch.persisted) {
         cursor = batch.nextCursor;
         // Past the cursor on disk now, so these ids can never come back.
