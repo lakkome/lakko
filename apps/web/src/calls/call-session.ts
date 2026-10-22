@@ -428,6 +428,46 @@ export class CallSession {
   /** Logged once per session; see {@link armFrameDescriptor}. */
   private frameDescriptorWarned = false;
 
+  /** Receivers that already carry this session's decrypt transform. */
+  private readonly sealedReceivers = new WeakSet<RTCRtpReceiver>();
+
+  /** Attach the decrypt transform to `receiver` unless it has one. Returns
+   *  whether it attached. */
+  private sealReceiver(receiver: RTCRtpReceiver, seed: Uint8Array): boolean {
+    if (this.sealedReceivers.has(receiver)) return false;
+    this.sframe.attachReceiver(receiver, { seed });
+    this.sealedReceivers.add(receiver);
+    return true;
+  }
+
+  /**
+   * Attach the decrypt transform to the receiver of every transceiver that
+   * has none yet, and let one task pass before the caller applies a
+   * description.
+   *
+   * Chromium bypasses a receive transform set from `ontrack` on a
+   * transceiver this side created with `addTrack` (a two-way audio
+   * transceiver, which is every 1x1 call): the frames go to the decoder
+   * still sealed and the transform never sees one. Measured 2026-10-22 in
+   * Chromium 1243 (Playwright 1.63) with a counting worker: two-way audio
+   * with the receive transforms set in `ontrack` delivered 0 frames to them
+   * while 300 were sent each way and the peer played the sealed bytes as
+   * noise (about 60% of samples concealed); the same transforms set before
+   * the description, with one task in between, delivered every frame. WebKit
+   * delivered every frame either way. A transceiver a remote offer creates
+   * is not affected, which is why the group call (receive-only transceivers
+   * from the SFU's offers) never showed it; `ontrack` still covers those.
+   */
+  private async sealReceiversBeforeDescription(pc: RTCPeerConnection): Promise<void> {
+    const key = this.callKey;
+    if (key === null) return;
+    let attached = false;
+    for (const t of pc.getTransceivers()) {
+      if (this.sealReceiver(t.receiver, key.seed)) attached = true;
+    }
+    if (attached) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+
   /** In-flight guard for {@link addLocalVideo} (no double-acquire). */
   private addingVideo = false;
   /** Mid-call camera-on lifecycle (piece B). */
@@ -565,6 +605,8 @@ export class CallSession {
     const pc = this.pc;
     if (pc === null) throw new Error("peer connection not initialised");
     this.armFrameDescriptor(pc);
+    await this.sealReceiversBeforeDescription(pc);
+    if (this.offerIsStale(pc)) return;
     let offer: RTCSessionDescriptionInit;
     try {
       offer = await pc.createOffer();
@@ -760,6 +802,8 @@ export class CallSession {
       if (this.state !== "ringing") return;
       const pc = this.pc;
       if (pc === null) return;
+      await this.sealReceiversBeforeDescription(pc);
+      if (this.state !== "ringing" || this.pc !== pc) return;
       await pc.setRemoteDescription({ type: "offer", sdp: offer.sdp });
       this.coverSFrame();
       this.pendingOffer = null;
@@ -1185,7 +1229,7 @@ export class CallSession {
       // sender leaf and stream, so audio and camera need no separate arming.
       // A frame that fails to open is dropped in the worker, never forwarded
       // as plaintext.
-      this.sframe.attachReceiver(ev.receiver, { seed: key.seed });
+      this.sealReceiver(ev.receiver, key.seed);
       const remote = ev.streams[0];
       if (remote !== undefined) {
         this.callbacks.onRemoteStream(remote);
@@ -1293,6 +1337,10 @@ export class CallSession {
       // transceiver, and it starts with the descriptor stopped like every
       // other: arm it before the offer that first describes it.
       this.armFrameDescriptor(pc);
+      // The camera's transceiver is new; its receiver gets the decrypt
+      // transform now, before the offer that describes it.
+      await this.sealReceiversBeforeDescription(pc);
+      if (this.pc !== pc || pc.signalingState !== "stable") return;
       await pc.setLocalDescription(); // implicit createOffer
       const sdp = pc.localDescription?.sdp;
       if (sdp === undefined) return;
@@ -1323,6 +1371,9 @@ export class CallSession {
   private async applyRenegotiationOffer(sdp: string): Promise<void> {
     const pc = this.pc;
     if (pc === null) return;
+    // A transceiver this side added that the peer now starts sending on.
+    await this.sealReceiversBeforeDescription(pc);
+    if (this.pc !== pc) return;
     const polite = !this.isOfferer;
     const readyForOffer =
       !this.makingOffer &&

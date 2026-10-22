@@ -525,6 +525,34 @@ export function DeviceGroupSyncProvider(props: {
    *  through another handle replaces the row, and this handle - an epoch
    *  behind - must not write over it (ADR-0081 decision 3). */
   let handleGeneration: number | null = null;
+  /** The handle's snapshot writes, one at a time. The receive loop and a
+   *  publish both write through this handle; run side by side, both named
+   *  the same generation and the second was refused as if another handle
+   *  had written (seen at signup: the username and profile sends failed). */
+  let handleWrites: Promise<unknown> = Promise.resolve();
+  function writeHandleSnapshot(
+    id: WasmIdentity,
+    accountIdB64: string,
+    deviceKey: CryptoKey,
+    cursor: number | undefined,
+    stillThisHandle: () => boolean,
+  ): Promise<number> {
+    // The generation is read and recorded inside the queue, so the next write
+    // always names the one this write produced.
+    const run = handleWrites.then(async () => {
+      const written = await persistDeviceGroupSnapshotWithCursor(
+        id,
+        accountIdB64,
+        deviceKey,
+        cursor,
+        handleGeneration ?? undefined,
+      );
+      if (stillThisHandle()) handleGeneration = written;
+      return written;
+    });
+    handleWrites = run.catch(() => undefined);
+    return run;
+  }
   /** ADR-0081 decision 4 - the rejoin in progress, if any. */
   let rejoinAbort: AbortController | null = null;
   /** The sibling's admission record (`device-group-rejoin.ts`), loaded with
@@ -1797,14 +1825,7 @@ export function DeviceGroupSyncProvider(props: {
             throw new Error("DeviceGroup handle replaced; not persisting");
           }
           // Conditional on the row this handle read (ADR-0081 decision 3).
-          const written = await persistDeviceGroupSnapshotWithCursor(
-            id,
-            accountIdB64,
-            deviceKey,
-            to,
-            handleGeneration ?? undefined,
-          );
-          if (group === g) handleGeneration = written;
+          await writeHandleSnapshot(id, accountIdB64, deviceKey, to, () => group === g);
           await saveAdmissions(accountIdB64, deviceKey);
         },
         onApplyError: (message, err) => {
@@ -2395,14 +2416,7 @@ export function DeviceGroupSyncProvider(props: {
     if (deviceKey !== null && identity === id) {
       // Fail-closed and conditional on the row this handle read (ADR-0081
       // decision 3).
-      const written = await persistDeviceGroupSnapshotWithCursor(
-        id,
-        account,
-        deviceKey,
-        undefined,
-        handleGeneration ?? undefined,
-      );
-      if (identity === id) handleGeneration = written;
+      await writeHandleSnapshot(id, account, deviceKey, undefined, () => identity === id);
       if (!current()) throw new StaleBindingError();
     }
     return published.id;

@@ -87,6 +87,7 @@ class FakeStream {
 
 interface FakeSender {
   track: FakeTrack | null;
+  receiver: { track: FakeTrack };
   replaceTrack(t: FakeTrack): Promise<void>;
 }
 
@@ -104,6 +105,7 @@ class FakePeerConnection {
   addTrack(track: FakeTrack, _stream: FakeStream): FakeSender {
     const sender: FakeSender = {
       track,
+      receiver: { track: new FakeTrack(track.kind) },
       replaceTrack: async (t: FakeTrack): Promise<void> => {
         sender.track = t;
       },
@@ -119,7 +121,8 @@ class FakePeerConnection {
    *  honest answer for a fake that models senders and not transceivers: the
    *  arming is a no-op here and the answer path is what these tests are for. */
   getTransceivers(): unknown[] {
-    return [];
+    if (!modelTransceivers) return [];
+    return this.senders.map((sender) => ({ sender, receiver: sender.receiver }));
   }
   closed = false;
   async createOffer(): Promise<{ type: string; sdp: string }> {
@@ -135,12 +138,14 @@ class FakePeerConnection {
     return { type: "answer", sdp: "v=0 fake-answer" };
   }
   async setLocalDescription(desc?: { type: string; sdp: string }): Promise<void> {
+    descriptionLog.push("local");
     const type =
       desc?.type ?? (this.signalingState === "have-remote-offer" ? "answer" : "offer");
     this.localDescription = desc ?? { type, sdp: "v=0 fake-local" };
     this.signalingState = type === "offer" ? "have-local-offer" : "stable";
   }
   async setRemoteDescription(desc: { type: string; sdp: string }): Promise<void> {
+    descriptionLog.push(`remote:${desc.type}`);
     this.remoteDescription = desc;
     this.signalingState = desc.type === "offer" ? "have-remote-offer" : "stable";
   }
@@ -163,6 +168,13 @@ class FakePeerConnection {
 
 let pcs: FakePeerConnection[] = [];
 
+/** When set, the fake reports one transceiver per sender, each with its
+ *  receiver, the way a browser does after `addTrack`. Off by default: the
+ *  other tests model senders only. */
+let modelTransceivers = false;
+/** Descriptions applied and receive transforms attached, in order. */
+let descriptionLog: string[] = [];
+
 let gumCalls: MediaStreamConstraints[] = [];
 let gumStreams: FakeStream[] = [];
 
@@ -179,6 +191,8 @@ async function fakeGetUserMedia(
 }
 
 beforeEach(() => {
+  modelTransceivers = false;
+  descriptionLog = [];
   gumCalls = [];
   gumStreams = [];
   pcs = [];
@@ -721,5 +735,55 @@ describe("offerer: ICE that connects while the answer is still being applied", (
     expect(session.getState()).toBe("connected");
     // The failure this pins published an End carrying `error`.
     expect(published.filter((p) => p.startsWith("end:"))).toEqual([]);
+  });
+});
+
+describe("1x1 receive transform is attached before the description", () => {
+  // Chromium bypasses a receive transform set from `ontrack` on a transceiver
+  // this side created with `addTrack`; it has to be on the receiver before
+  // the description that creates the receive stream is applied.
+  function sessionLoggingReceivers(): CallSession {
+    const session = new CallSession(
+      new Uint8Array(16),
+      {
+        onRemoteStream: () => {},
+        onLocalStream: () => {},
+        onOutboundSignaling: () => {},
+        onStateChange: () => {},
+      },
+      { ringTimeoutMs: TEST_RING_WINDOW_MS },
+      {
+        supported: () => true,
+        attachSender: () => {},
+        attachReceiver: (receiver) => descriptionLog.push(`receiver:${receiver.track.kind}`),
+      },
+    );
+    session.setCallKey(new Uint8Array(32), 3);
+    return session;
+  }
+
+  it("answerer: the receiver is sealed before the remote offer is applied", async () => {
+    modelTransceivers = true;
+    const session = sessionLoggingReceivers();
+    await session.applyIncomingSignaling(fakeOffer(false));
+    await session.accept();
+    expect(descriptionLog.slice(0, 2)).toEqual(["receiver:audio", "remote:offer"]);
+  });
+
+  it("offerer: the receiver is sealed before the local offer", async () => {
+    modelTransceivers = true;
+    const session = sessionLoggingReceivers();
+    await session.dial({ audio: true, video: false });
+    expect(descriptionLog.slice(0, 2)).toEqual(["receiver:audio", "local"]);
+  });
+
+  it("a receiver sealed before the description is not sealed again from ontrack", async () => {
+    modelTransceivers = true;
+    const session = sessionLoggingReceivers();
+    await session.dial({ audio: true, video: false });
+    const pc = at(pcs, 0);
+    const receiver = (pc.getTransceivers()[0] as { receiver: unknown }).receiver;
+    pc.ontrack?.({ receiver, streams: [] });
+    expect(descriptionLog.filter((e) => e.startsWith("receiver:"))).toEqual(["receiver:audio"]);
   });
 });

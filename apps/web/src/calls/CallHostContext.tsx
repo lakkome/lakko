@@ -762,8 +762,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (groupIdB64 === null) return t("chat.peer.fallback_name");
     const entry = groupEntry(groupIdB64);
     if (entry === undefined) return t("chat.peer.fallback_name");
-    const own = chats.identity();
-    const ownKeyB64 = own === null ? null : base64Encode(own.signaturePublicKey);
+    // The person key, as the chat header uses: member keys name people, and
+    // the device key never matched one, so the call title named this person
+    // beside the other one ("A, B").
+    const ownKeyB64 = ownPersonKeyB64(chats.identity());
     const memberKeysB64 = memberKeysOf(entry.group);
     // The same title the chat header and the list show (ADR-0051 §5): the
     // kind the conversation carries (ADR-0062) decides group-vs-1x1, the
