@@ -2906,6 +2906,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     silentRing,
     connStats,
     nameFor,
+    groupNameFor: (groupIdB64: string | null): string | null =>
+      groupIdB64 === null ? null : groupNames.nameOf(groupIdB64),
     hangUp,
     groupHandle,
     dismissedGroupCalls,
@@ -2938,6 +2940,8 @@ interface CallHostInternals {
   readonly silentRing: Accessor<boolean>;
   readonly connStats: Accessor<WebConnectionStats | null>;
   nameFor(groupIdB64: string | null): string;
+  /** The group's shared name (ADR-0051), or `null` when it has none. */
+  groupNameFor(groupIdB64: string | null): string | null;
   /**
    * End the live 1x1 call.
    *
@@ -3189,6 +3193,7 @@ export function CallHostView(): JSX.Element {
           <Call
             embedded={true}
             group={true}
+            groupName={internals.groupNameFor(host.groupCall()?.groupIdB64 ?? null)}
             onExit={() => void host.leaveGroupCall()}
             onEndForEveryone={
               host.startedGroupCall() ? () => void host.endGroupCallForEveryone() : undefined
@@ -3297,6 +3302,11 @@ export function CallHostView(): JSX.Element {
             : null
         }
         groupCall={host.callOccupant() !== null && host.callOccupant() !== "one-to-one"}
+        groupName={
+          host.callOccupant() === "group"
+            ? internals.groupNameFor(host.groupCall()?.groupIdB64 ?? null)
+            : null
+        }
         ringing={host.state() === "ringing"}
         callScreenUp={callScreenUp()}
         onExpand={() => host.expandCall()}

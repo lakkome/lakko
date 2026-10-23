@@ -78,6 +78,9 @@ export interface CallBarProps {
   readonly peerName: string | null;
   /** A group or link call: the group label rather than a person's name. */
   readonly groupCall: boolean;
+  /** The group's shared name on a group call placed in a conversation, the
+   *  name the call screen shows; `null` otherwise. */
+  readonly groupName?: string | null;
   /** A 1x1 call is ringing and unanswered — the one phase the store does not
    *  carry, because such a call takes the whole screen instead (§2.2). */
   readonly ringing: boolean;
@@ -132,6 +135,7 @@ export function CallBar(props: CallBarProps): JSX.Element {
       peerName: props.peerName,
       participantCount: callState.participants().length,
       soleRemoteName: remotes()[0]?.displayName,
+      groupName: props.groupName,
     }),
   );
 

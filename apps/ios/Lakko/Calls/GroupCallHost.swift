@@ -96,10 +96,12 @@ final class GroupCallHost: ObservableObject {
             _ turn: TurnCredential?
         ) -> GroupCallHandle
         /// The group's own name for the call screen's title — the ADR-0051
-        /// shared fact every member has, falling back through the 1x1 peer name
-        /// and the members' names, never a hex id. `nil` when it cannot be
-        /// resolved at all.
-        var conversationTitle: @MainActor (_ groupIdHex: String) -> String?
+        /// shared fact every member has — or `nil` when the group has none,
+        /// and the screen says `Group call`. Not the chat title built from the
+        /// members' names: Android and the web title a nameless group's call
+        /// `Group call`, and the three clients in one call agree (aligned
+        /// 2026-10-23).
+        var groupName: @MainActor (_ groupIdHex: String) -> String?
         var safetyNumber: (_ seed: Data) -> String?
         var mintCallId: () -> Data
         /// `docs/ux/calls.md` §6 — file the finished call's row in the
@@ -396,7 +398,7 @@ final class GroupCallHost: ObservableObject {
         // tiles, and in a call that can grow from two people to five, naming
         // the screen after whoever happens to be the only other person would
         // rename the call when a third joined.
-        ui.setPeerName(ports.conversationTitle(groupIdHex))
+        ui.setPeerName(ports.groupName(groupIdHex))
         let config = SfuCallSession.Config(
             sfuBaseUrl: base,
             jwt: minted.jwt,
@@ -984,7 +986,7 @@ extension GroupCallHost {
                 handle.session.setTurnClient(TurnCredentialClient(preMinted: turn))
                 return handle
             },
-            conversationTitle: { [weak repository] in repository?.conversationTitle(groupIdHex: $0) },
+            groupName: { [weak repository] in repository?.groupName(groupIdHex: $0) },
             safetyNumber: { try? callSafetyNumber(seed: $0) },
             mintCallId: { CallSession.mintCallId() },
             recordCall: { [weak repository] call in

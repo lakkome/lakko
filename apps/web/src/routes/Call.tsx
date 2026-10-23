@@ -1941,6 +1941,9 @@ const Call: Component<{
    *  sheet's one sentence (§5). Omitted on a group call, where there is no
    *  "other person". */
   peerName?: string | null;
+  /** The group's shared name on a group call placed in a conversation: the
+   *  name at the top of the screen. Omitted on a link call. */
+  groupName?: string | null;
   /** What the portrait's colour is hashed from, so one person is one colour
    *  everywhere in the app. Falls back to the name. */
   peerId?: string | null;
@@ -2206,6 +2209,7 @@ const Call: Component<{
       peerName: props.peerName,
       participantCount: callState.participants().length,
       soleRemoteName: remotes()[0]?.displayName,
+      groupName: props.groupName,
     }),
   );
 

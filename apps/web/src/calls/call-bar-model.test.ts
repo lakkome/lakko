@@ -392,7 +392,7 @@ describe("the label the bar and the call screen share", () => {
    * `.tsx` is reachable from this suite, so the copy that lived in the view was
    * a rule nothing could assert.
    */
-  it("names the person, counts the group, and never invents either", async () => {
+  it("names the person, names the group, and never invents either", async () => {
     const { callPeerLabel } = await import("./call-screen-model");
     expect(
       callPeerLabel({
@@ -402,15 +402,27 @@ describe("the label the bar and the call screen share", () => {
         soleRemoteName: "leaf-1",
       }),
     ).toBe("Anna");
-    // A group call has no single other person, so the label names the call.
+    // A group call has no single other person: the label is the group's
+    // name, as on iOS and Android, and `Group call` when it has none or the
+    // call came from a link.
     expect(
       callPeerLabel({
         surface: "group",
         peerName: "Anna",
         participantCount: 4,
         soleRemoteName: null,
+        groupName: "  Weekend plans ",
       }),
-    ).toBe("Group call · 4");
+    ).toBe("Weekend plans");
+    expect(
+      callPeerLabel({
+        surface: "group",
+        peerName: "Anna",
+        participantCount: 4,
+        soleRemoteName: null,
+        groupName: null,
+      }),
+    ).toBe("Group call");
     // The host resolves a name for every 1x1 call, so this is practically
     // unreachable — but it must not invent a person if it is, and
     // `encryption-chip.ts` treats this exact word as "no name".
