@@ -250,6 +250,30 @@ final class CallHistoryTests: XCTestCase {
         XCTAssertEqual(store.entries.first?.outcome, .answered)
     }
 
+    /// The one-time fill from past calls keys a call on its row's time (when
+    /// it ended), the live record on when it started. Run after live records
+    /// (the first opening of the Calls screen), it used to file every call a
+    /// second time; the live record now runs it first.
+    @MainActor
+    func testTheFillFromPastCallsNeverFilesALiveCallAgain() throws {
+        let f = try makeGroupInviteRepo(
+            discoveryScope: GroupInviteDiscoveryURLProtocol.freshScope(.ok), token: "t")
+        addTeardownBlock { try? FileManager.default.removeItem(at: f.outboxDir) }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        for startedAtMs in [nowMs - 120_000, nowMs - 60_000] {
+            f.repo.recordFinishedCall(FinishedCall(
+                groupIdHex: f.groupIdHex,
+                row: CallTranscriptRow(direction: .incoming, outcome: .answered(durationMs: 29_000)),
+                video: false,
+                startedAtMs: startedAtMs))
+        }
+        // What the Calls screen does when it opens.
+        f.repo.backfillCallHistory()
+
+        let filed = CallHistoryStore.shared.entries.filter { $0.conversationId == f.groupIdHex }
+        XCTAssertEqual(filed.map(\.startedAtMs).sorted(), [nowMs - 120_000, nowMs - 60_000])
+    }
+
     /// Two accounts on one device do not see each other's calls.
     @MainActor
     func testOneAccountsCallsAreNotAnothers() {

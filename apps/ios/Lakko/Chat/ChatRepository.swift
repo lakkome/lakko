@@ -1594,6 +1594,14 @@ public final class ChatRepository: ObservableObject {
     /// sites is how an index stops being written for one of the two call kinds
     /// without anything failing.
     public func recordFinishedCall(_ call: FinishedCall) {
+        // The one-time fill from past calls runs BEFORE this call's row
+        // exists. It keys a call on the row's time, which is when the call
+        // ended, while this entry keys it on when it started; run after a
+        // live record (the first opening of the Calls screen used to be what
+        // ran it), it filed every call already recorded a second time. Seen
+        // in the simulator on 2026-10-23: each call listed twice, a minute
+        // apart. Run first, it only ever sees calls from before the index.
+        backfillCallHistory()
         appendCallRow(groupIdHex: call.groupIdHex, row: call.row)
         guard let accountIdB64 = currentAccountIdB64 else { return }
         let (outcome, durationMs) = CallHistoryEntry.outcome(of: call.row)
