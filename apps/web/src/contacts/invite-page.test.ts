@@ -71,3 +71,23 @@ describe("invitePageView (docs/ux/contact-invite-link.md section 3)", () => {
     expect(invitePageView({ ...base, link: "rate-limited" })).toEqual({ kind: "rate-limited" });
   });
 });
+
+describe("inviteOpenFailure", () => {
+  it("offers a rate-limited or failed fetch again, and reads only a damaged link as dead", async () => {
+    const { inviteOpenFailure } = await import("./invite-page");
+    const { DiscoveryRateLimitedError, DiscoveryHttpError, isDiscoveryRateLimited } = await import(
+      "../discovery/client"
+    );
+    const { InviteLinkDamagedError, isInviteLinkDamaged } = await import("./invite-link");
+    const is = { rateLimited: isDiscoveryRateLimited, damaged: isInviteLinkDamaged };
+    expect(inviteOpenFailure(new DiscoveryRateLimitedError("/discovery/invite (GET)", null), is)).toBe(
+      "rate-limited",
+    );
+    expect(inviteOpenFailure(new InviteLinkDamagedError(), is)).toBe("dead");
+    // A server error and the network say nothing about the link.
+    expect(inviteOpenFailure(new DiscoveryHttpError(500, "/discovery/invite (GET)", "boom"), is)).toBe(
+      "open-failed",
+    );
+    expect(inviteOpenFailure(new TypeError("Failed to fetch"), is)).toBe("open-failed");
+  });
+});

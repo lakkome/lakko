@@ -54,7 +54,7 @@ import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/accoun
 import { groupIdHex } from "../devices/sync/state";
 import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
-import { invitePageView, type InvitePageView } from "../contacts/invite-page";
+import { inviteOpenFailure, invitePageView, type InvitePageView } from "../contacts/invite-page";
 import { addThroughInviteLink } from "../contacts/invite-add";
 import { DiscoveryClient, isDiscoveryRateLimited } from "../discovery/client";
 import {
@@ -86,6 +86,9 @@ interface DecodedInvite {
 }
 
 const RATE_LIMITED = "rate-limited" as const;
+/** The link could not be fetched or opened for a reason that says nothing
+ *  about the link: the network, a server error. */
+const OPEN_FAILED = "open-failed" as const;
 const DEAD = "dead" as const;
 
 export default function Invite(): JSX.Element {
@@ -104,7 +107,7 @@ export default function Invite(): JSX.Element {
   discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
   const [decoded, { refetch }] = createResource(
     slugSignal,
-    async ({ slug, hash }): Promise<DecodedInvite | typeof RATE_LIMITED | typeof DEAD> => {
+    async ({ slug, hash }): Promise<DecodedInvite | typeof RATE_LIMITED | typeof OPEN_FAILED | typeof DEAD> => {
       try {
         const wasm = await loadWasm();
         const widths = inviteLinkWidths(wasm);
@@ -124,20 +127,25 @@ export default function Invite(): JSX.Element {
         const cap = opened.capability;
         return { cap, blobId: opened.blobId, capabilityBytes: cap.wire, linkSecret: fragment.secret };
       } catch (err) {
-        if (isDiscoveryRateLimited(err)) return RATE_LIMITED;
-        // A damaged link (missing or wrong secret) and a malformed slug are
-        // the same to the person: the link does not work.
-        if (!isInviteLinkDamaged(err)) {
-          // eslint-disable-next-line no-console
-          console.warn("invite: link did not open", err instanceof Error ? err.name : "");
-        }
-        return DEAD;
+        // A server error or the network says nothing about the link: it is
+        // offered again (seen on a local stack 2026-10-23: a server error on
+        // the fetch sent a person who had just opened a working link to
+        // Contacts with no word of why).
+        const failure = inviteOpenFailure(err, {
+          rateLimited: isDiscoveryRateLimited,
+          damaged: isInviteLinkDamaged,
+        });
+        if (failure === "rate-limited") return RATE_LIMITED;
+        if (failure === "dead") return DEAD;
+        // eslint-disable-next-line no-console
+        console.warn("invite: link did not open", err instanceof Error ? err.name : "");
+        return OPEN_FAILED;
       }
     },
   );
   const invite = (): DecodedInvite | null => {
     const d = decoded();
-    return d === undefined || d === RATE_LIMITED || d === DEAD ? null : d;
+    return d === undefined || d === RATE_LIMITED || d === OPEN_FAILED || d === DEAD ? null : d;
   };
 
   /** The visitor's contact row for the inviter, when they already are one:
@@ -157,6 +165,7 @@ export default function Invite(): JSX.Element {
     const d = decoded();
     if (decoded.loading || d === undefined) return { kind: "loading" };
     if (d === RATE_LIMITED) return { kind: "rate-limited" };
+    if (d === OPEN_FAILED) return { kind: "open-failed" };
     if (d === DEAD) return { kind: "dead" };
     const s = auth.state();
     const own = s.kind === "session" && base64Encode(d.cap.ownerAccountId) === s.account.accountId;
@@ -204,6 +213,16 @@ export default function Invite(): JSX.Element {
         <Match when={view().kind === "rate-limited"}>
           <section class="lk-stack" style={{ gap: "12px" }}>
             <p>{INVITE_LINK_RATE_LIMITED()}</p>
+            <div class="lk-actions">
+              <button class="primary" type="button" onClick={() => void refetch()}>
+                {INVITE_LINK_TRY_AGAIN()}
+              </button>
+            </div>
+          </section>
+        </Match>
+        <Match when={view().kind === "open-failed"}>
+          <section class="lk-stack" style={{ gap: "12px" }}>
+            <p>{t("invite.contact.result.failed_title")}</p>
             <div class="lk-actions">
               <button class="primary" type="button" onClick={() => void refetch()}>
                 {INVITE_LINK_TRY_AGAIN()}

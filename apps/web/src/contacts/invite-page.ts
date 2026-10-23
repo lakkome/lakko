@@ -29,6 +29,9 @@
 export type InvitePageView =
   | { readonly kind: "loading" }
   | { readonly kind: "rate-limited" }
+  /** The link could not be fetched for another reason (the network, a server
+   *  error): not a link that no longer works, and offered again. */
+  | { readonly kind: "open-failed" }
   | { readonly kind: "dead" }
   | { readonly kind: "sign-in" }
   | { readonly kind: "own" }
@@ -83,4 +86,26 @@ export function invitePageView(input: InvitePageInput): InvitePageView {
     return { kind: "already", name, contactKeyB64: input.existingContactKeyB64 };
   }
   return { kind: "default", name, username, label };
+}
+
+/** What a failure to open an invite link means to the page. */
+export type InviteOpenFailure = "rate-limited" | "dead" | "open-failed";
+
+/**
+ * Classify a failure to fetch or open an invite link. A rate limit says
+ * nothing about the link and is offered again; a damaged link (missing or
+ * wrong secret, malformed slug) is a link that does not work; anything else
+ * (the network, a server error) says nothing about the link either and is
+ * offered again, as on iOS and Android (`InviteOpenResult.Failed`). Until
+ * 2026-10-23 the web read that last case as a dead link and went to Contacts
+ * on its own. The predicates are passed in: `discovery/client.ts` imports the
+ * link module, so this one does not import it back.
+ */
+export function inviteOpenFailure(
+  err: unknown,
+  is: { readonly rateLimited: (err: unknown) => boolean; readonly damaged: (err: unknown) => boolean },
+): InviteOpenFailure {
+  if (is.rateLimited(err)) return "rate-limited";
+  if (is.damaged(err)) return "dead";
+  return "open-failed";
 }
