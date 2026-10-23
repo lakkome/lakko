@@ -144,9 +144,11 @@ public interface OneToOneCallPort<S : OneToOneCallSession> {
      * Local to this device — nothing is composed and nothing is published, so
      * this is a side effect on the transcript store and never on the wire.
      * Defaulted to a no-op for the same reason as [peerName]: a host driven by
-     * fake sessions has no conversation to write into.
+     * fake sessions has no conversation to write into. [startedAtMs] is when
+     * the call began ringing or was dialled (`docs/ux/navigation.md` section
+     * 6.2 lists calls by it); `null` when this host never saw it start.
      */
-    public fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+    public fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
         // No conversation store attached.
     }
 }
@@ -646,6 +648,11 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
          *  pre-join, cancelled) is not a call and writes no row. */
         var dialed: Boolean = false
 
+        /** When the call started: an incoming call when its offer arrived (the
+         *  ring), an outgoing one when it was dialled. `null` for an outgoing
+         *  call still at the pre-join. */
+        var startedAtMs: Long? = null
+
         /** Wall clock at the first `Connected`, or `null` if media never flowed.
          *  The only source of a duration; its absence is what keeps an
          *  unanswered call from being given one. */
@@ -987,7 +994,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                 ),
                 callIdHex = callIdHexOf(offer.callId),
                 keyArmed = key != null,
-            ),
+            ).also { it.startedAtMs = clock() },
         )
         // An answer already taken on the ring screen, for exactly this call.
         val pending = pendingAccept
@@ -1029,6 +1036,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         if (s.call.incoming || s.call.session.state.value != CallSession.WebCallState.Idle) return
         armKeyIfMissing(s)
         s.dialed = true
+        if (s.startedAtMs == null) s.startedAtMs = clock()
         s.call.session.dial(audio = event.audio, video = event.video)
     }
 
@@ -1221,13 +1229,14 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                 },
                 durationSecs = callDurationSecs(s.connectedAtMs, clock()),
             ),
+            startedAtMs = s.startedAtMs,
         )
     }
 
     /** Write one row, never letting a transcript failure break a call teardown. */
-    private fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+    private fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
         try {
-            port?.recordCall(groupIdHex, entry)
+            port?.recordCall(groupIdHex, entry, startedAtMs)
         } catch (error: Throwable) {
             warn("call host: recording the call row failed", error)
         }
@@ -1243,6 +1252,8 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         recordCall(
             groupIdHex = row.groupIdHex,
             entry = CallTranscriptEntry(outcome = outcome, video = offer.media.video),
+            // When the offer was held is not kept; the row's time stands in.
+            startedAtMs = null,
         )
     }
 

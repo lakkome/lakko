@@ -86,8 +86,12 @@ class HostedCallsTest {
         val rows = mutableListOf<Pair<String, CallTranscriptEntry>>()
         var synced = 0
 
-        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+        /** When each recorded call started, in the order of [rows]. */
+        val rowStarts = mutableListOf<Long?>()
+
+        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
             rows += groupIdHex to entry
+            rowStarts += startedAtMs
         }
 
         override fun sfuBaseUrl(): String = "wss://sfu.test"

@@ -116,11 +116,14 @@ class OneToOneCallHostTest {
 
         /** docs/ux/calls.md section 6 — the transcript rows the host wrote. */
         val recorded = mutableListOf<Pair<String, CallTranscriptEntry>>()
+        /** When each recorded call started, in the order of [recorded]. */
+        val recordedStarts = mutableListOf<Long?>()
         var keyDelayMs = 0L
         var keyAvailable = true
 
-        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?) {
             recorded += groupIdHex to entry
+            recordedStarts += startedAtMs
         }
 
         override fun createSession(
@@ -875,6 +878,36 @@ class OneToOneCallHostTest {
             listOf(groupA to CallTranscriptEntry(CallOutcome.INCOMING, video = false, durationSecs = 724)),
             h.port.recorded,
         )
+    }
+
+    @Test
+    fun `an incoming call is filed under when it began to ring, not when it ended`() = runTest {
+        val h = harness()
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        h.now = t0 + 5_000L
+        h.host.accept(withVideo = false)
+        runCurrent()
+        h.session()!!.mutableState.value = CallSession.WebCallState.Connected
+        runCurrent()
+        h.now = t0 + 60_000L
+        h.host.hangUp()
+        runCurrent()
+
+        assertEquals(listOf<Long?>(t0), h.port.recordedStarts)
+    }
+
+    @Test
+    fun `an outgoing call is filed under when it was dialled`() = runTest {
+        val h = harness()
+        h.now = t0 + 1_000L
+        assertTrue(h.host.startOutgoing(groupA, RequestedCallKind.VOICE))
+        runCurrent()
+        h.now = t0 + 30_000L
+        h.host.hangUp()
+        runCurrent()
+
+        assertEquals(listOf<Long?>(t0 + 1_000L), h.port.recordedStarts)
     }
 
     @Test

@@ -173,8 +173,9 @@ public interface GroupCallPort {
 
     public fun createSession(request: GroupCallSessionRequest, ui: CallUiState): GroupCallSessionHandle
 
-    /** `docs/ux/calls.md` section 6 - file the finished call's row in the conversation it happened in. */
-    public fun recordCall(groupIdHex: String, entry: CallTranscriptEntry)
+    /** `docs/ux/calls.md` section 6 - file the finished call's row in the conversation it happened in.
+     *  [startedAtMs] is when this device started or joined the call. */
+    public fun recordCall(groupIdHex: String, entry: CallTranscriptEntry, startedAtMs: Long?)
 }
 
 /** The group call in the host's slot. */
@@ -302,6 +303,9 @@ public class GroupCallHost(
         /** When this device's own media first flowed, or `null` if it never did
          *  ([groupCallTranscriptEntry]). */
         var connectedAtMs: Long? = null,
+        /** When this device started or joined the call: the time the Calls
+         *  list files it under (`docs/ux/navigation.md` section 6.2). */
+        val startedAtMs: Long,
         /** Re-publishes the Join every [GROUP_CALL_HEARTBEAT_MS]; cancelled by [release]. */
         var heartbeat: Job? = null,
         /** This call has had at least one other participant ([groupCallAloneAction]). */
@@ -639,6 +643,7 @@ public class GroupCallHost(
                 initiator = initiator,
                 video = video,
                 keyedEpoch = read.epoch,
+                startedAtMs = clock(),
             )
             active = a
             startedCall = a
@@ -870,7 +875,7 @@ public class GroupCallHost(
         release()
         val endedAtMs = callEndedAtMs(clock(), lastInbound)
         groupCallTranscriptEntry(a.initiator, a.video, a.connectedAtMs, endedAtMs)?.let { entry ->
-            p?.recordCall(a.groupIdHex, entry)
+            p?.recordCall(a.groupIdHex, entry, a.startedAtMs)
         }
         val plan = planGroupCallLeave(
             reason = reason,

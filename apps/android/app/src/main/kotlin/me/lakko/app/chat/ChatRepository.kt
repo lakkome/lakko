@@ -12421,9 +12421,26 @@ public class ChatRepository(
      * A group this device does not know is a no-op rather than an error: a call
      * can outlive leaving the chat it was placed from, and losing the row is a
      * better outcome than failing a call teardown.
+     *
+     * The row sits in the conversation at the moment the call ended; the Calls
+     * list files it under [startedAtMs], when it started (section 6.2), or
+     * the end when the host never saw it start.
      */
-    public fun recordCallRow(groupIdHex: String, entry: me.lakko.app.calls.CallTranscriptEntry) {
+    public fun recordCallRow(
+        groupIdHex: String,
+        entry: me.lakko.app.calls.CallTranscriptEntry,
+        startedAtMs: Long? = null,
+    ) {
         val record = groups[groupIdHex] ?: return
+        val accountIdB64 = currentAccountIdB64.get()
+        // The one-time fill from past calls must see the transcripts as they
+        // were BEFORE this call's row: it files each row it finds and the index
+        // keeps no ids, so a fill that runs after a live record (the first
+        // opening of the Calls screen used to be what ran it) files that call a
+        // second time. Seen on the emulator on 2026-10-23: each call listed
+        // twice. The snapshot is taken here, before the append; the disk work
+        // stays off this thread.
+        val pastBeforeThisCall = takeCallHistoryFillSnapshot(accountIdB64)
         val now = java.time.Instant.now()
         record.appendCallRow(entry, createdAt = now.toString())
         publishThreadList()
@@ -12431,12 +12448,18 @@ public class ChatRepository(
         // written when the row is, never a walk of every transcript. Written on
         // the same dispatcher as the transcript persist and after it, so a
         // failure here can never cost the conversation its row.
-        // The account the call was placed under, read now and not when the
+        // The account the call was placed under, read above and not when the
         // write runs.
-        val accountIdB64 = currentAccountIdB64.get()
+        val filedAtMs = startedAtMs ?: now.toEpochMilli()
         callRowScope.launchSession {
             persistMessageLogBestEffort()
-            recordCallHistoryEntry(accountIdB64, groupIdHex, entry, now.toEpochMilli())
+            if (pastBeforeThisCall != null) {
+                me.lakko.app.calls.CallHistoryStore.backfillOnce(
+                    context = applicationContext,
+                    accountIdB64 = accountIdB64,
+                ) { pastBeforeThisCall }
+            }
+            recordCallHistoryEntry(accountIdB64, groupIdHex, entry, filedAtMs)
         }
     }
 
@@ -12488,12 +12511,31 @@ public class ChatRepository(
      */
     public fun backfillCallHistory() {
         val accountIdB64 = currentAccountIdB64.get() ?: return
+        val past = takeCallHistoryFillSnapshot(accountIdB64) ?: return
         callRowScope.launchSession {
             me.lakko.app.calls.CallHistoryStore.backfillOnce(
                 context = applicationContext,
                 accountIdB64 = accountIdB64,
-            ) { pastCallEntries() }
+            ) { past }
         }
+    }
+
+    /** Accounts whose fill snapshot this process has taken. */
+    private val callHistoryFillSnapshotTaken: MutableSet<String> =
+        java.util.Collections.synchronizedSet(HashSet())
+
+    /**
+     * The past calls the one-time fill files, read now - on the main thread,
+     * in order with the call rows it appends - and at most once per account
+     * per process: the first call to finish or the first opening of the Calls
+     * screen, whichever comes first, takes it, and nothing later can file a
+     * row whose call was already recorded live. `null` when it was already
+     * taken. [me.lakko.app.calls.CallHistoryStore.backfillOnce] still runs the
+     * fill once per account ever.
+     */
+    private fun takeCallHistoryFillSnapshot(accountIdB64: String?): List<me.lakko.app.calls.CallHistoryEntry>? {
+        if (accountIdB64 == null || !callHistoryFillSnapshotTaken.add(accountIdB64)) return null
+        return pastCallEntries()
     }
 
     /**
