@@ -243,6 +243,42 @@ final class InviteLinkShapeTests: XCTestCase {
         XCTAssertEqual(vm.preview?.groupName, "Hiking club")
     }
 
+    /// A server error or a dropped connection on the fetch says nothing
+    /// about the link: it is offered again, never shown as invalid; Try again
+    /// fetches it once more.
+    func testAFetchThatFailsIsOfferedAgainNotInvalid() async throws {
+        let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
+        for mode in [GroupInviteDiscoveryURLProtocol.Mode.status(500), .network] {
+            let scope = GroupInviteDiscoveryURLProtocol.freshScope(mode)
+            let vm = try landing(
+                slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug,
+                fragment: base64UrlEncodeNoPad(mint.linkSecret),
+                scope: scope)
+            await vm.run()
+            XCTAssertEqual(vm.state, .openFailed, "\(mode)")
+            let fetches = GroupInviteDiscoveryURLProtocol.requests(scope)
+                .filter { $0.path.hasPrefix("/discovery/") }.count
+            await vm.retry()
+            XCTAssertEqual(vm.state, .openFailed, "\(mode)")
+            XCTAssertGreaterThan(
+                GroupInviteDiscoveryURLProtocol.requests(scope)
+                    .filter { $0.path.hasPrefix("/discovery/") }.count,
+                fetches, "Try again asks the ledger again (\(mode))")
+        }
+    }
+
+    /// The ledger answering that there is no such link is the link's own
+    /// state: invalid.
+    func testALinkTheLedgerDoesNotHaveIsInvalid() async throws {
+        let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
+        let vm = try landing(
+            slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug,
+            fragment: base64UrlEncodeNoPad(mint.linkSecret),
+            scope: GroupInviteDiscoveryURLProtocol.freshScope(.status(404)))
+        await vm.run()
+        XCTAssertEqual(vm.state, .invalid)
+    }
+
     func testTheLandingRefusesALinkWithNoFragmentWithoutARequest() async throws {
         let scope = GroupInviteDiscoveryURLProtocol.freshScope(.ok)
         let vm = try landing(

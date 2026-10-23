@@ -3809,7 +3809,8 @@ public class ChatRepository(
                 val fetched = try {
                     discovery.fetchGroupInvite(parsed.blobId)
                 } catch (e: Throwable) {
-                    throw ChatError("group invite fetch failed", e)
+                    me.lakko.app.rethrowIfCancelled(e)
+                    throw ChatError("group invite fetch failed", InviteLinkUnreachable(e))
                 } ?: throw ChatError(
                     "group invite not found or expired",
                     IllegalStateException("404"),

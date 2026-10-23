@@ -248,6 +248,18 @@ public fun memberCountLine(count: Int): UiText =
 /** Copy for a link that does not decode, verify, or has expired. */
 public val GROUP_INVITE_INVALID_TEXT: UiText = UiText("invite.link.invalid")
 
+/** The ledger could not be asked for a `/g/` or `/c/` link (the network, a
+ *  server error): the link may be fine, so the page offers it again. The same
+ *  sentence on web and iOS. */
+public val INVITE_LINK_OPEN_FAILED_TEXT: UiText = UiText("common.error.offline")
+
+/** The ledger could not be asked for a link: the network failed, or the
+ *  server answered with an error other than "no such link". Says nothing
+ *  about the link (seen on a local stack 2026-10-23, where the pages read it
+ *  as an invalid link). A `429` travels inside as the cause; callers test for
+ *  it first. */
+public class InviteLinkUnreachable(cause: Throwable) : RuntimeException("the invite link could not be fetched", cause)
+
 /** Copy for a link whose fragment does not open its preview (fail closed). */
 public val GROUP_INVITE_DAMAGED_TEXT: UiText = UiText("invite.link.damaged")
 
@@ -281,9 +293,15 @@ public enum class GroupInviteOpenFailure {
     /** The discovery service answered `429`: try again later, the link may
      *  well be fine. */
     RateLimited,
+
+    /** The ledger could not be asked (the network, a server error): the link
+     *  may be fine, it is offered again. */
+    OpenFailed,
 }
 
-/** Classify a failure to open a `/g/` link (the page's three refusal states). */
+/** Classify a failure to open a `/g/` link (the page's four refusal states).
+ *  Only a failure to ask the ledger is offered again; everything after the
+ *  ledger answered is a link that does not work. */
 public fun groupInviteOpenFailure(error: Throwable): GroupInviteOpenFailure {
     var cause: Throwable? = error
     val seen = HashSet<Throwable>()
@@ -294,5 +312,11 @@ public fun groupInviteOpenFailure(error: Throwable): GroupInviteOpenFailure {
         cause = cause.cause
     }
     if (me.lakko.app.discovery.isDiscoveryRateLimited(error)) return GroupInviteOpenFailure.RateLimited
+    cause = error
+    seen.clear()
+    while (cause != null && seen.add(cause)) {
+        if (cause is InviteLinkUnreachable) return GroupInviteOpenFailure.OpenFailed
+        cause = cause.cause
+    }
     return GroupInviteOpenFailure.Invalid
 }

@@ -67,13 +67,15 @@ import { isAbortError } from "../auth/pow";
 import { signupErrorMessage } from "../auth/auth-error-copy";
 import { guestWorkingTitle, signupWorkingLine } from "../auth/signup-working";
 import { loadWasm } from "../wasm";
-import { DiscoveryClient, DiscoveryHttpError, isDiscoveryRateLimited } from "../discovery/client";
+import { DiscoveryClient, isDiscoveryRateLimited } from "../discovery/client";
 import {
   INVITE_LINK_DAMAGED,
+  INVITE_LINK_OPEN_FAILED,
   INVITE_LINK_RATE_LIMITED,
   INVITE_LINK_TRY_AGAIN,
   inviteLinkWidths,
   isInviteLinkDamaged,
+  isInviteLinkUnreachable,
   openInviteLinkFromUrl,
 } from "../contacts/invite-link";
 import { useCallHost, type CallHostApi } from "../calls/CallHostContext";
@@ -154,6 +156,9 @@ export default function JoinCall() {
   /** The link does not open under its fragment (missing, malformed, wrong
    *  secret, tampered or substituted): docs/ux/call-links.md section 5. */
   const [damaged, setDamaged] = createSignal(false);
+  /** The ledger could not be asked for the link (the network, a server
+   *  error): the link may be fine, so it is offered again. */
+  const [openFailed, setOpenFailed] = createSignal(false);
   const [decoded, { refetch }] = createResource(
     slugSignal,
     async ({ slug, hash }): Promise<DecodedCall | null> => {
@@ -161,6 +166,7 @@ export default function JoinCall() {
       try {
         setRateLimited(false);
         setDamaged(false);
+        setOpenFailed(false);
         const wasm = await loadWasm();
         // Sealed-link amendment of ADR-0028 / ADR-0009 (2026-09-28): a
         // missing or malformed fragment is refused before any request, and
@@ -193,13 +199,16 @@ export default function JoinCall() {
           isOwner,
         };
       } catch (err) {
-        if (err instanceof DiscoveryHttpError && err.status === 404) return null;
         if (isDiscoveryRateLimited(err)) {
           setRateLimited(true);
           return null;
         }
         if (isInviteLinkDamaged(err)) {
           setDamaged(true);
+          return null;
+        }
+        if (isInviteLinkUnreachable(err)) {
+          setOpenFailed(true);
           return null;
         }
         // eslint-disable-next-line no-console
@@ -443,9 +452,6 @@ export default function JoinCall() {
           <Show when={decoded.loading}>
             <p>{t("call.link.loading")}</p>
           </Show>
-          <Show when={!decoded.loading && decoded() === null && damaged()}>
-            <p>{INVITE_LINK_DAMAGED()}</p>
-          </Show>
           <Show when={!decoded.loading && decoded() === null && rateLimited()}>
             <p>{INVITE_LINK_RATE_LIMITED()}</p>
             <button type="button" class="primary" onClick={() => void refetch()}>
@@ -457,10 +463,17 @@ export default function JoinCall() {
             <p>{INVITE_LINK_DAMAGED()}</p>
             <A href={paths.home}>{t("common.open_lakko")}</A>
           </Show>
+          <Show when={!decoded.loading && decoded() === null && openFailed()}>
+            <p>{INVITE_LINK_OPEN_FAILED()}</p>
+            <button type="button" class="primary" onClick={() => void refetch()}>
+              {INVITE_LINK_TRY_AGAIN()}
+            </button>
+            <A href={paths.home}>{t("common.open_lakko")}</A>
+          </Show>
           <Show
             when={
               !decoded.loading &&
-              ((decoded() === null && !rateLimited() && !damaged()) ||
+              ((decoded() === null && !rateLimited() && !damaged() && !openFailed()) ||
                 decoded()?.valid === false)
             }
           >

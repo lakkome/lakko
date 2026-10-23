@@ -162,11 +162,12 @@ export type AcceptCallInviteResult =
  * over [`AcceptCallInviteResult`] variants — every observable
  * outcome is a non-thrown value the UI dispatches on.
  *
- * The only thrown exception path is a `DiscoveryNetworkError`
- * (no network / TLS failure / etc.) — the acceptor folds
- * `DiscoveryHttpError` into discriminated variants but lets
- * lower-level transport failures bubble up so the UI can
- * surface "you're offline" copy.
+ * The only thrown exception path is a failure to reach the
+ * ledger (`InviteLinkUnreachableError`, the `DiscoveryNetworkError`
+ * or non-404 `DiscoveryHttpError` inside it as the cause) — the
+ * acceptor folds a 404 and a 429 into discriminated variants but
+ * lets transport failures bubble up so the UI can surface
+ * "you're offline" copy.
 
  */
 export async function acceptCallInviteFromSlug(

@@ -56,6 +56,7 @@ import {
   splitGroupInviteLink,
 } from "./group-invite";
 import {
+  fetchLedgerLink,
   InviteLinkDamagedError,
   inviteLinkWidths,
   openSealedInvite,
@@ -4460,8 +4461,9 @@ export class ContactsClient {
   /** ADR-0028 (G-3) — resolve a `/g/<slug>` slug (an 8-character ledger id)
    *  to the SEALED link blob, fetched from the discovery ledger. Returns the
    *  `blobId` so the caller can drive `consumeGroupInvite` before requesting
-   *  to join. Any other slug, an inline sealed blob included, throws. A 429 from the ledger
-   *  surfaces as a wrapped `DiscoveryRateLimitedError` (see
+   *  to join. Any other slug, an inline sealed blob included, throws. A
+   *  failure to ask the ledger surfaces as a wrapped
+   *  `InviteLinkUnreachableError` (a 429 inside it, see
    *  `isDiscoveryRateLimited`), never as "not found". */
   async resolveGroupInviteSlug(
     slug: string,
@@ -4474,7 +4476,7 @@ export class ContactsClient {
     }
     let fetched: Uint8Array | null;
     try {
-      fetched = await this.discovery.fetchGroupInvite(parsed.blobId);
+      fetched = await fetchLedgerLink(() => this.discovery.fetchGroupInvite(parsed.blobId));
     } catch (err) {
       throw ContactsError.wrap(err);
     }

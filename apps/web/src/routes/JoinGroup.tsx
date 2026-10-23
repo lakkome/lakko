@@ -82,9 +82,11 @@ import {
 // same `vitest` reason as the wait copy above.
 import {
   INVITE_LINK_DAMAGED,
+  INVITE_LINK_OPEN_FAILED,
   INVITE_LINK_RATE_LIMITED,
   INVITE_LINK_TRY_AGAIN,
   isInviteLinkDamaged,
+  isInviteLinkUnreachable,
 } from "../contacts/invite-link";
 import { reachSession } from "../reach/reach-service";
 import { journalHex } from "../ds/access";
@@ -114,7 +116,7 @@ interface DecodedTicket {
 }
 
 /** Why the page refuses to offer a join without the link being invalid. */
-type LinkRefusal = "rate-limited" | "damaged";
+type LinkRefusal = "rate-limited" | "damaged" | "open-failed";
 
 export default function JoinGroup() {
   const params = useParams<{ slug: string }>();
@@ -170,6 +172,9 @@ export default function JoinGroup() {
         // "invalid" (ADR-0028 short-link amendment).
         if (isDiscoveryRateLimited(err)) return "rate-limited";
         if (isInviteLinkDamaged(err)) return "damaged";
+        // The ledger could not be asked (the network, a server error): the
+        // link may be fine, so it is offered again, never called invalid.
+        if (isInviteLinkUnreachable(err)) return "open-failed";
         // eslint-disable-next-line no-console
         console.warn("group-join: decode/verify failed", err);
         return null;
@@ -285,6 +290,14 @@ export default function JoinGroup() {
       <Show when={!decoded.loading && decoded() === "rate-limited"}>
         <h1>{t("group.join.title")}</h1>
         <p>{INVITE_LINK_RATE_LIMITED()}</p>
+        <button type="button" class="primary" onClick={() => void refetch()}>
+          {INVITE_LINK_TRY_AGAIN()}
+        </button>
+        <A href={paths.home}>{t("common.open_lakko")}</A>
+      </Show>
+      <Show when={!decoded.loading && decoded() === "open-failed"}>
+        <h1>{t("group.join.title")}</h1>
+        <p>{INVITE_LINK_OPEN_FAILED()}</p>
         <button type="button" class="primary" onClick={() => void refetch()}>
           {INVITE_LINK_TRY_AGAIN()}
         </button>

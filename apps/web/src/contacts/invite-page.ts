@@ -92,20 +92,21 @@ export function invitePageView(input: InvitePageInput): InvitePageView {
 export type InviteOpenFailure = "rate-limited" | "dead" | "open-failed";
 
 /**
- * Classify a failure to fetch or open an invite link. A rate limit says
- * nothing about the link and is offered again; a damaged link (missing or
- * wrong secret, malformed slug) is a link that does not work; anything else
- * (the network, a server error) says nothing about the link either and is
- * offered again, as on iOS and Android (`InviteOpenResult.Failed`). Until
- * 2026-10-23 the web read that last case as a dead link and went to Contacts
- * on its own. The predicates are passed in: `discovery/client.ts` imports the
- * link module, so this one does not import it back.
+ * Classify a failure to fetch or open an invite link. Only a failure to ask
+ * the ledger says nothing about the link: a rate limit, and the network or a
+ * server error (`isInviteLinkUnreachable`), are offered again, as on iOS and
+ * Android (`InviteOpenResult.Failed`). Everything after the ledger answered
+ * (a damaged or malformed link, a capability that does not verify) is a link
+ * that does not work. Until 2026-10-23 the web read a fetch failure as a dead
+ * link and went to Contacts on its own. The predicates are passed in:
+ * `discovery/client.ts` imports the link module, so this one does not import
+ * it back.
  */
 export function inviteOpenFailure(
   err: unknown,
-  is: { readonly rateLimited: (err: unknown) => boolean; readonly damaged: (err: unknown) => boolean },
+  is: { readonly rateLimited: (err: unknown) => boolean; readonly unreachable: (err: unknown) => boolean },
 ): InviteOpenFailure {
   if (is.rateLimited(err)) return "rate-limited";
-  if (is.damaged(err)) return "dead";
-  return "open-failed";
+  if (is.unreachable(err)) return "open-failed";
+  return "dead";
 }

@@ -154,6 +154,10 @@ public struct GroupInviteHeadline: Equatable {
 /// The copy of the invalid / expired state (`invite.link.invalid`), in the
 /// interface language of the moment it is read.
 public var groupInviteInvalidMessage: String { Localization.text("invite.link.invalid") }
+/// The ledger could not be asked for a `/g/` or `/c/` link (the network, a
+/// server error): the link may be fine, so the page offers it again. The same
+/// sentence on web and Android.
+public var inviteLinkOpenFailedMessage: String { Localization.text("common.error.offline") }
 
 /// The copy of a `/g/` link whose fragment is present but whose preview does
 /// not open under it (or whose fragment is not a link secret at all). Since the

@@ -73,21 +73,33 @@ describe("invitePageView (docs/ux/contact-invite-link.md section 3)", () => {
 });
 
 describe("inviteOpenFailure", () => {
-  it("offers a rate-limited or failed fetch again, and reads only a damaged link as dead", async () => {
+  it("offers a rate-limited or failed fetch again, and reads everything after the fetch as dead", async () => {
     const { inviteOpenFailure } = await import("./invite-page");
     const { DiscoveryRateLimitedError, DiscoveryHttpError, isDiscoveryRateLimited } = await import(
       "../discovery/client"
     );
-    const { InviteLinkDamagedError, isInviteLinkDamaged } = await import("./invite-link");
-    const is = { rateLimited: isDiscoveryRateLimited, damaged: isInviteLinkDamaged };
-    expect(inviteOpenFailure(new DiscoveryRateLimitedError("/discovery/invite (GET)", null), is)).toBe(
-      "rate-limited",
-    );
-    expect(inviteOpenFailure(new InviteLinkDamagedError(), is)).toBe("dead");
+    const { InviteLinkDamagedError, InviteLinkUnreachableError, isInviteLinkUnreachable, classifyInviteSlug } =
+      await import("./invite-link");
+    const is = { rateLimited: isDiscoveryRateLimited, unreachable: isInviteLinkUnreachable };
+    const limited = new DiscoveryRateLimitedError("/discovery/invite (GET)", null);
+    expect(inviteOpenFailure(limited, is)).toBe("rate-limited");
+    // A 429 arrives wrapped as a failure to ask the ledger: still a rate limit.
+    expect(inviteOpenFailure(new InviteLinkUnreachableError(limited), is)).toBe("rate-limited");
     // A server error and the network say nothing about the link.
-    expect(inviteOpenFailure(new DiscoveryHttpError(500, "/discovery/invite (GET)", "boom"), is)).toBe(
+    const serverError = new DiscoveryHttpError(500, "/discovery/invite (GET)", "boom");
+    expect(inviteOpenFailure(new InviteLinkUnreachableError(serverError), is)).toBe("open-failed");
+    expect(inviteOpenFailure(new InviteLinkUnreachableError(new TypeError("Failed to fetch")), is)).toBe(
       "open-failed",
     );
-    expect(inviteOpenFailure(new TypeError("Failed to fetch"), is)).toBe("open-failed");
+    // A damaged or malformed link does not work.
+    expect(inviteOpenFailure(new InviteLinkDamagedError(), is)).toBe("dead");
+    let malformed: unknown = null;
+    try {
+      classifyInviteSlug("not-a-ledger-id!", { blobIdLen: 6, blobIdUrlLen: 8 } as never, "invite");
+    } catch (err) {
+      malformed = err;
+    }
+    expect(malformed).not.toBeNull();
+    expect(inviteOpenFailure(malformed, is)).toBe("dead");
   });
 });

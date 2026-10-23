@@ -61,7 +61,7 @@ import {
   INVITE_LINK_RATE_LIMITED,
   INVITE_LINK_TRY_AGAIN,
   inviteLinkWidths,
-  isInviteLinkDamaged,
+  isInviteLinkUnreachable,
   openInviteLinkFromUrl,
   parseInviteLinkFragment,
 } from "../contacts/invite-link";
@@ -133,7 +133,7 @@ export default function Invite(): JSX.Element {
         // Contacts with no word of why).
         const failure = inviteOpenFailure(err, {
           rateLimited: isDiscoveryRateLimited,
-          damaged: isInviteLinkDamaged,
+          unreachable: isInviteLinkUnreachable,
         });
         if (failure === "rate-limited") return RATE_LIMITED;
         if (failure === "dead") return DEAD;

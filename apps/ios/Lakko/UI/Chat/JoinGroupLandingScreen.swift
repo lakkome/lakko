@@ -67,6 +67,9 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         /// The fragment is not a link secret, or the preview does not open
         /// under it. Fail-closed: no preview-less fallback.
         case damaged
+        /// The ledger could not be asked for the link (the network, a server
+        /// error): the link may be fine, the page offers it again.
+        case openFailed
         /// ADR-0053 — one of the shared failure states; the raw error is
         /// logged, never shown.
         case failed(JoinRequestFailure)
@@ -149,7 +152,10 @@ public final class JoinGroupLandingViewModel: ObservableObject {
                 return
             }
             NSLog("group join: resolving the invite link failed: %@", String(describing: error))
-            state = .failed(JoinRequestFailure.classify(error))
+            // A link that is not there was answered above; this is a failure
+            // to ask the ledger, which says nothing about the link.
+            let failure = JoinRequestFailure.classify(error)
+            state = failure == .generic ? .openFailed : .failed(failure)
             return
         }
         let cap: GroupInviteCapability
@@ -236,6 +242,11 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     /// "Try again" on the generic failure: re-run whatever failed — the link
     /// resolve when it never resolved, the request otherwise.
     public func retry() async {
+        if state == .openFailed {
+            state = .loading
+            await load()
+            return
+        }
         guard case .failed = state else { return }
         if resolved == nil {
             state = .loading
@@ -324,6 +335,20 @@ public struct JoinGroupLandingScreen: View {
                 Text(groupInviteInvalidMessage)
                     .foregroundStyle(Color.lakkoText)
                     .fixedSize(horizontal: false, vertical: true)
+                Button(l10n.t("common.close")) {
+                    viewModel.dismiss()
+                    onDone()
+                }
+                .tint(.lakkoAccent)
+            case .openFailed:
+                Text(inviteLinkOpenFailedMessage)
+                    .foregroundStyle(Color.lakkoText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(joinTryAgain) {
+                    Task { await viewModel.retry() }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.lakkoAccent)
                 Button(l10n.t("common.close")) {
                     viewModel.dismiss()
                     onDone()

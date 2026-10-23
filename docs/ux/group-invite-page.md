@@ -82,6 +82,14 @@ new link.`) and `/c/` (see [`call-links.md`](call-links.md) section 5).
 kind): `Too many requests from this network right now. Try again in a minute.`
 and `Try again`. Never shown as an invalid link.
 
+**Could not load the link** (added 2026-10-23; the ledger could not be asked:
+the network failed, or the server answered with an error other than "no such
+link", on `/g/` and `/c/`): `Could not reach Lakko. Check your connection and
+try again.` and `Try again`, which fetches the link again. Never shown as an
+invalid link. Only the fetch can end here; anything after the ledger answered
+is damaged or invalid. `/i/` has the same rule with its own copy
+([`contact-invite-link.md`](contact-invite-link.md)).
+
 **Invalid or expired link** - unchanged: `This invite link is invalid or has
 expired.` and a link to open Lakko.
 

@@ -21,6 +21,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -109,6 +110,10 @@ public class JoinGroupLandingViewModel(
         public data object Damaged : State
         /** The ledger answered `429`; the link may be fine. */
         public data object RateLimited : State
+
+        /** The ledger could not be asked (the network, a server error): the
+         *  link may be fine, the page offers it again. */
+        public data object OpenFailed : State
         /** The card is on screen; nothing has been sent yet. */
         public data object Ready : State
         public data object Requesting : State
@@ -190,14 +195,16 @@ public class JoinGroupLandingViewModel(
                     me.lakko.app.chat.GroupInviteOpenFailure.Invalid -> State.Invalid
                     me.lakko.app.chat.GroupInviteOpenFailure.Damaged -> State.Damaged
                     me.lakko.app.chat.GroupInviteOpenFailure.RateLimited -> State.RateLimited
+                    me.lakko.app.chat.GroupInviteOpenFailure.OpenFailed -> State.OpenFailed
                 }
             }
         }
     }
 
-    /** `Try again` after a rate-limited open: resolve the link once more. */
+    /** `Try again` after a rate-limited or failed open: resolve the link
+     *  once more. */
     public fun retryOpen() {
-        if (mutableState.value != State.RateLimited) return
+        if (mutableState.value != State.RateLimited && mutableState.value != State.OpenFailed) return
         mutableState.value = State.Loading
         started = false
         start()
@@ -333,6 +340,13 @@ public fun JoinGroupLandingScreen(
                 Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT.text(), textAlign = TextAlign.Center)
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = { viewModel.retryOpen() }) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN_TEXT.text()) }
+            }
+            is JoinGroupLandingViewModel.State.OpenFailed -> {
+                Text(me.lakko.app.chat.INVITE_LINK_OPEN_FAILED_TEXT.text(), textAlign = TextAlign.Center)
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = { viewModel.retryOpen() }) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN_TEXT.text()) }
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = onDone) { Text(t("common.open_lakko")) }
             }
             is JoinGroupLandingViewModel.State.Ready -> {
                 InviteHeadline(card)

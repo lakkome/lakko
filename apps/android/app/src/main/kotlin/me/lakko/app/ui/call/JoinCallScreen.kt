@@ -147,6 +147,9 @@ data class JoinCallUiState(
     /** Sealed links (2026-09-28): the fragment is missing or malformed, or
      *  the link does not open under it. Refused with one sentence. */
     val damaged: Boolean = false,
+    /** The ledger could not be asked for the link (the network, a server
+     *  error): the screen offers it again. */
+    val openFailed: Boolean = false,
     val phase: JoinCallPhase = JoinCallPhase.Idle,
     /** Why the last attempt failed (ADR-0061: a catalog message). */
     val error: UiText? = null,
@@ -199,6 +202,10 @@ internal sealed interface CallLinkDecode {
 
     /** The ledger answered `429`: not an invalid link. */
     data object RateLimited : CallLinkDecode
+
+    /** The ledger could not be asked (the network, a server error): the link
+     *  may be fine, it is offered again. */
+    data object OpenFailed : CallLinkDecode
 
     /** Sealed links: the fragment is missing or malformed, or the link does
      *  not open under it. */
@@ -327,15 +334,16 @@ class JoinCallViewModel internal constructor(
                     decoded = (outcome as? CallLinkDecode.Opened)?.call,
                     rateLimited = outcome == CallLinkDecode.RateLimited,
                     damaged = outcome == CallLinkDecode.Damaged,
+                    openFailed = outcome == CallLinkDecode.OpenFailed,
                 )
             }
         }
     }
 
-    /** `Try again` after a rate-limited resolve. */
+    /** `Try again` after a rate-limited or failed resolve. */
     fun retryDecode() {
-        if (!local.value.rateLimited) return
-        local.update { it.copy(loading = true, rateLimited = false) }
+        if (!local.value.rateLimited && !local.value.openFailed) return
+        local.update { it.copy(loading = true, rateLimited = false, openFailed = false) }
         runDecode()
     }
 
@@ -569,6 +577,17 @@ internal suspend fun decodeCallLink(
                 val discovery = DiscoveryClient()
                 try {
                     discovery.fetchCallInvite(parsed.blobId) ?: return CallLinkDecode.Invalid
+                } catch (e: Throwable) {
+                    // A failure to ask the ledger says nothing about the link.
+                    me.lakko.app.rethrowIfCancelled(e)
+                    return when {
+                        me.lakko.app.discovery.isDiscoveryRateLimited(e) -> CallLinkDecode.RateLimited
+                        e is DiscoveryHttpError && e.status == 404 -> CallLinkDecode.Invalid
+                        else -> {
+                            Log.w("JoinCall", "the call link could not be fetched", e)
+                            CallLinkDecode.OpenFailed
+                        }
+                    }
                 } finally {
                     discovery.close()
                 }
@@ -770,6 +789,11 @@ fun JoinCallScreen(
             }
             ui.damaged -> {
                 Text(me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY.text())
+                TextButton(onClick = onExit) { Text(t("common.back")) }
+            }
+            ui.openFailed -> {
+                Text(me.lakko.app.chat.INVITE_LINK_OPEN_FAILED_TEXT.text())
+                TextButton(onClick = { viewModel.retryDecode() }) { Text(t("common.try_again")) }
                 TextButton(onClick = onExit) { Text(t("common.back")) }
             }
             ui.decoded == null || ui.decoded?.valid == false -> {

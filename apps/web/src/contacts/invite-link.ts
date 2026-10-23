@@ -178,22 +178,57 @@ export class InviteLinkDamagedError extends Error {
   }
 }
 
-/** `true` when `err` is the damaged-link refusal: ours, or the wasm core's
- *  (`Error` carrying `inviteLinkError: "damaged"`), possibly wrapped. */
-export function isInviteLinkDamaged(err: unknown): boolean {
+/** Whether `err` or anything it wraps (`cause`, or a `ContactsError`'s
+ *  `variant.cause`) satisfies `test`. */
+function errorChainHas(err: unknown, test: (current: object) => boolean): boolean {
   let current: unknown = err;
   for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
-    if (current instanceof InviteLinkDamagedError) return true;
     if (typeof current !== "object") return false;
-    const record = current as {
-      inviteLinkError?: unknown;
-      cause?: unknown;
-      variant?: { cause?: unknown };
-    };
-    if (record.inviteLinkError === "damaged") return true;
+    if (test(current)) return true;
+    const record = current as { cause?: unknown; variant?: { cause?: unknown } };
     current = record.cause ?? record.variant?.cause;
   }
   return false;
+}
+
+/** `true` when `err` is the damaged-link refusal: ours, or the wasm core's
+ *  (`Error` carrying `inviteLinkError: "damaged"`), possibly wrapped. */
+export function isInviteLinkDamaged(err: unknown): boolean {
+  return errorChainHas(
+    err,
+    (current) =>
+      current instanceof InviteLinkDamagedError ||
+      (current as { inviteLinkError?: unknown }).inviteLinkError === "damaged",
+  );
+}
+
+/** The ledger could not be asked for the link: the network failed, or the
+ *  server answered with an error other than "no such link". Says nothing
+ *  about the link, so the page offers it again instead of calling it dead
+ *  (seen on a local stack 2026-10-23). A 429 travels inside as the `cause`;
+ *  callers test for it first. */
+export class InviteLinkUnreachableError extends Error {
+  override name = "InviteLinkUnreachableError";
+  constructor(cause: unknown) {
+    super("the invite link could not be fetched", { cause });
+  }
+}
+
+/** `true` when `err` is, or wraps, {@link InviteLinkUnreachableError}. */
+export function isInviteLinkUnreachable(err: unknown): boolean {
+  return errorChainHas(err, (current) => current instanceof InviteLinkUnreachableError);
+}
+
+/** Ask the ledger for a sealed link; any failure of the asking itself is
+ *  {@link InviteLinkUnreachableError}. `null` (no such link) passes through. */
+export async function fetchLedgerLink(
+  fetchPointer: () => Promise<Uint8Array | null>,
+): Promise<Uint8Array | null> {
+  try {
+    return await fetchPointer();
+  } catch (err) {
+    throw new InviteLinkUnreachableError(err);
+  }
 }
 
 /** Open a sealed blob with the fragment's secret through the kind's
@@ -223,8 +258,9 @@ export type OpenedInviteLink<T> =
  * malformed one, before any request), refuse a missing or malformed fragment
  * as damaged BEFORE any request, fetch the sealed blob from the ledger, and
  * open it with the fragment's secret.
- * Throws {@link InviteLinkDamagedError} for every damaged case; a ledger
- * error (429, network) propagates unchanged.
+ * Throws {@link InviteLinkDamagedError} for every damaged case and
+ * {@link InviteLinkUnreachableError} when the ledger could not be asked
+ * (a 429 inside it as the cause).
  */
 export async function openInviteLinkFromUrl<T>(args: {
   readonly slug: string;
@@ -237,7 +273,7 @@ export async function openInviteLinkFromUrl<T>(args: {
   const parsed = classifyInviteSlug(args.slug, args.widths, args.what);
   const fragment = parseInviteLinkFragment(args.hash, args.widths);
   if (fragment.kind !== "secret") throw new InviteLinkDamagedError();
-  const sealed = await args.fetchPointer(parsed.blobId);
+  const sealed = await fetchLedgerLink(() => args.fetchPointer(parsed.blobId));
   if (sealed === null) return { kind: "not-found" };
   return { kind: "opened", capability: openSealedInvite(args.open, sealed, fragment), blobId: parsed.blobId };
 }
@@ -269,6 +305,11 @@ export const INVITE_LINK_DAMAGED = (): string => t("invite.link.damaged");
 /** The discovery service answered 429 on fetch or consume: the link may be
  *  fine, this network asked too often. Never reported as an invalid link. */
 export const INVITE_LINK_RATE_LIMITED = (): string => t("invite.link.rate_limited");
+
+/** The ledger could not be asked for the link (the network, a server
+ *  error): the link may be fine. Shown with {@link INVITE_LINK_TRY_AGAIN} on
+ *  the group and call link pages, the same sentence iOS and Android show. */
+export const INVITE_LINK_OPEN_FAILED = (): string => t("common.error.offline");
 
 /** The button under {@link INVITE_LINK_RATE_LIMITED}; it re-runs the fetch. */
 export const INVITE_LINK_TRY_AGAIN = (): string => t("common.try_again");

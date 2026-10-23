@@ -70,6 +70,12 @@ link is damaged: the secret after `#` is missing or wrong): there is no page.
 B is taken to the Contacts screen and nothing else is shown (amended
 2026-10-19; the earlier "This invite link no longer works" page is gone).
 
+**Network failure while opening the link** (added 2026-10-23: the ledger could
+not be asked, the network failed or the server answered with an error other
+than "no such link" or 429): "Invite not accepted" and **Try again**, which
+fetches the link again. Never taken for a link that no longer works; anything
+after the ledger answered is.
+
 **Network failure while adding:** the page stays, the button returns, one line
 under it: "Could not add Anna. Check your connection and try again."
 
