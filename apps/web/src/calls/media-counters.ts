@@ -280,6 +280,35 @@ export function describeDeltas(label: string, deltas: ReadonlyMap<string, Stream
   return lines;
 }
 
+/**
+ * The receivers' counters of a one-to-one call, as lines: one per remote
+ * stream per interval, and once more as a total when the call ends. The group
+ * call writes the same lines inline, beside its sender and tile lines; a
+ * one-to-one call has no layers, so its video receiver reads as `main` (`-`
+ * where the report does not name the receiver's track).
+ */
+export class InboundCounterLog {
+  private last: MediaReading | null = null;
+
+  /** The change since the previous reading (from zero on the first), read
+   *  from one statistics report's entries. */
+  interval(entries: Iterable<StatsEntry>): string[] {
+    const reading = readMedia(entries);
+    const lines = describeDeltas("call media interval", deltaOf(this.last, reading));
+    this.last = reading;
+    return lines;
+  }
+
+  /** The whole call, from the last reading; empty when nothing was read.
+   *  Forgets the readings, so a second call returns nothing. */
+  total(): string[] {
+    const last = this.last;
+    this.last = null;
+    // Counted from zero: the counters are cumulative from the stream's start.
+    return last === null ? [] : describeDeltas("call media total", deltaOf(null, last));
+  }
+}
+
 /** The picture of a peer this device asks the SFU for: the name it has in
  *  the `video-wants` frame (`video-wants.ts`). */
 export type ShownWant = "main" | "middle" | "light";

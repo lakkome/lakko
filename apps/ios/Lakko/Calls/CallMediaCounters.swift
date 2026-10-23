@@ -4,9 +4,10 @@
 import Foundation
 import LakkoCore
 
-/// What a group call's video is doing, read from the peer connection's own
-/// counters and from the tiles (ADR-0067 steps 1 and 5); the twin of
-/// `apps/web/src/calls/media-counters.ts` for the lines this client logs.
+/// What a call's media is doing, read from the peer connection's own
+/// counters and, in a group call, from the tiles (ADR-0067 steps 1 and 5);
+/// the twin of `apps/web/src/calls/media-counters.ts` for the lines this
+/// client logs.
 ///
 /// Diagnostics only: counts and durations, nothing about who is in the call
 /// beyond the SFU's per-call peer id, which the stream ids already carry.
@@ -47,6 +48,17 @@ struct InboundVideoCounters: Equatable {
     var jitterBufferEmittedCount: Int64 = 0
 }
 
+/// One remote audio stream's cumulative receiver counters.
+struct InboundAudioCounters: Equatable {
+    var packetsReceived: Int64 = 0
+    var packetsLost: Int64 = 0
+    var nackCount: Int64 = 0
+    var jitterBufferDelay: Double = 0
+    var jitterBufferEmittedCount: Int64 = 0
+    var concealedSamples: Int64 = 0
+    var totalSamplesReceived: Int64 = 0
+}
+
 /// One of this device's own camera senders, as the statistics report it.
 struct OutboundVideoSender: Equatable {
     /// Which sender it is; `nil` when the report does not tie the stream to
@@ -69,8 +81,11 @@ struct OutboundActivity: Equatable {
     let active: Bool
 }
 
-/// One statistics reading, reduced to the video this client logs.
+/// One statistics reading, reduced to what this client logs.
 struct CallMediaReading: Equatable {
+    /// Remote audio streams, ordered by statistics id so a stream keeps its
+    /// number from one interval to the next.
+    var inboundAudio: [(id: String, counters: InboundAudioCounters)] = []
     /// Remote video streams, ordered by statistics id so a stream keeps its
     /// number from one interval to the next.
     var inbound: [(id: String, counters: InboundVideoCounters)] = []
@@ -80,6 +95,10 @@ struct CallMediaReading: Equatable {
 
     static func == (a: CallMediaReading, b: CallMediaReading) -> Bool {
         a.outbound == b.outbound
+            && a.inboundAudio.count == b.inboundAudio.count
+            && zip(a.inboundAudio, b.inboundAudio).allSatisfy {
+                $0.id == $1.id && $0.counters == $1.counters
+            }
             && a.inbound.count == b.inbound.count
             && zip(a.inbound, b.inbound).allSatisfy { $0.id == $1.id && $0.counters == $1.counters }
     }
@@ -123,12 +142,26 @@ enum CallMediaCounters {
         for entry in entries {
             // `kind` is the current spelling; `mediaType` the older one.
             let kind = (entry.values["kind"] as? String) ?? (entry.values["mediaType"] as? String)
-            guard kind == "video" else { continue }
             let int: (String) -> Int64 = { (entry.values[$0] as? NSNumber)?.int64Value ?? 0 }
             let double: (String) -> Double = {
                 let v = (entry.values[$0] as? NSNumber)?.doubleValue ?? 0
                 return v.isFinite ? v : 0
             }
+            if kind == "audio", entry.type == "inbound-rtp" {
+                reading.inboundAudio.append((
+                    id: entry.id,
+                    counters: InboundAudioCounters(
+                        packetsReceived: int("packetsReceived"),
+                        packetsLost: int("packetsLost"),
+                        nackCount: int("nackCount"),
+                        jitterBufferDelay: double("jitterBufferDelay"),
+                        jitterBufferEmittedCount: int("jitterBufferEmittedCount"),
+                        concealedSamples: int("concealedSamples"),
+                        totalSamplesReceived: int("totalSamplesReceived"))
+                ))
+                continue
+            }
+            guard kind == "video" else { continue }
             let string: (String) -> String? = {
                 guard let s = entry.values[$0] as? String, !s.isEmpty else { return nil }
                 return s
@@ -180,6 +213,7 @@ enum CallMediaCounters {
                 continue
             }
         }
+        reading.inboundAudio.sort { $0.id < $1.id }
         reading.inbound.sort { $0.id < $1.id }
         reading.outbound.sort { senderOrder($0.sender) < senderOrder($1.sender) }
         return reading
@@ -191,14 +225,44 @@ enum CallMediaCounters {
             ?? CameraSenderKind.allCases.count
     }
 
-    /// One line per remote video stream: how it changed since `before` (from
-    /// zero when `before` is `nil`, when the stream is new, or when its
-    /// counters went backwards). Each line ends with `layer=`: `main`,
-    /// `middle`, `light`, or `-` when unknown.
+    /// One line per remote stream, audio first: how it changed since
+    /// `before` (from zero when `before` is `nil`, when the stream is new, or
+    /// when its counters went backwards). An audio line ends with the share
+    /// of samples concealed (`concealed=N.N%`, `-` when none arrived); a
+    /// video line with `layer=`: `main`, `middle`, `light`, or `-` when
+    /// unknown.
     static func describeInbound(
         _ label: String, before: CallMediaReading?, now: CallMediaReading
     ) -> [String] {
         var lines: [String] = []
+        for (index, stream) in now.inboundAudio.enumerated() {
+            let cur = stream.counters
+            var base = InboundAudioCounters()
+            if let prev = before?.inboundAudio.first(where: { $0.id == stream.id })?.counters,
+                prev.packetsReceived <= cur.packetsReceived {
+                base = prev
+            }
+            let emitted = max(0, cur.jitterBufferEmittedCount - base.jitterBufferEmittedCount)
+            let jitterMs: String = emitted > 0
+                ? String(
+                    format: "%.0f",
+                    max(0, cur.jitterBufferDelay - base.jitterBufferDelay) / Double(emitted) * 1000)
+                : "-"
+            let samples = max(0, cur.totalSamplesReceived - base.totalSamplesReceived)
+            let concealed: String = samples > 0
+                ? String(
+                    format: "%.1f",
+                    Double(max(0, cur.concealedSamples - base.concealedSamples))
+                        / Double(samples) * 100)
+                : "-"
+            lines.append(
+                "\(label) audio#\(index + 1)"
+                    + " pkts=\(max(0, cur.packetsReceived - base.packetsReceived))"
+                    + " lost=\(max(0, cur.packetsLost - base.packetsLost))"
+                    + " nack=\(max(0, cur.nackCount - base.nackCount))"
+                    + " jb_ms=\(jitterMs)"
+                    + " concealed=\(concealed)%")
+        }
         for (index, stream) in now.inbound.enumerated() {
             let cur = stream.counters
             var base = InboundVideoCounters(layer: cur.layer)
@@ -428,5 +492,33 @@ final class LayerDisplayLedger {
         _ byPeer: [String: LayerDisplayCounters]
     ) -> [(peerId: String, counters: LayerDisplayCounters)] {
         byPeer.keys.sorted().map { (peerId: $0, counters: byPeer[$0] ?? .zero) }
+    }
+}
+
+/// The receivers' counters of a one-to-one call, as lines: one per remote
+/// stream per interval, and once more as a total when the call ends. The group
+/// call writes the same lines inline, beside its sender and tile lines; a
+/// one-to-one call has no layers, so its video receiver reads as `main` (`-`
+/// where the report does not name the receiver's track).
+struct InboundCounterLog {
+    private var last: CallMediaReading?
+
+    /// The change since the previous reading (from zero on the first).
+    mutating func interval(_ entries: [CallMediaStatEntry]) -> [String] {
+        let reading = CallMediaCounters.read(entries, lightTrackIds: [])
+        let lines = CallMediaCounters.describeInbound(
+            CallMediaCounters.intervalLabel, before: last, now: reading)
+        last = reading
+        return lines
+    }
+
+    /// The whole call, from the last reading; empty when nothing was read.
+    /// Forgets the readings, so a second call returns nothing.
+    mutating func total() -> [String] {
+        guard let reading = last else { return [] }
+        last = nil
+        // Counted from zero: the counters are cumulative from the stream's start.
+        return CallMediaCounters.describeInbound(
+            CallMediaCounters.totalLabel, before: nil, now: reading)
     }
 }

@@ -281,6 +281,34 @@ internal fun describeDeltas(label: String, deltas: Map<String, StreamDelta>): Li
 }
 
 /**
+ * The receivers' counters of a one-to-one call, as lines: one per remote
+ * stream per interval, and once more as a total when the call ends. The group
+ * call writes the same lines inline, beside its sender and tile lines; a
+ * one-to-one call has no layers, so its video receiver reads as `main` (`-`
+ * where the report does not name the receiver's track).
+ */
+internal class InboundCounterLog {
+    private var last: MediaReading? = null
+
+    /** The change since the previous reading (from zero on the first). */
+    fun interval(stats: Iterable<RtcStat>): List<String> {
+        val reading = readMedia(stats)
+        val lines = describeDeltas(MEDIA_COUNTERS_INTERVAL_LABEL, deltaOf(last, reading))
+        last = reading
+        return lines
+    }
+
+    /** The whole call, from the last reading; empty when nothing was read.
+     *  Forgets the readings, so a second call returns nothing. */
+    fun total(): List<String> {
+        val reading = last ?: return emptyList()
+        last = null
+        // Counted from zero: the counters are cumulative from the stream's start.
+        return describeDeltas(MEDIA_COUNTERS_TOTAL_LABEL, deltaOf(null, reading))
+    }
+}
+
+/**
  * What each camera sender sent over the interval since [before], kilobits a
  * second, from the growth of its `bytesSent` over [elapsedMs]. A sender that
  * did not report in both readings, or whose counter went back, has no entry.

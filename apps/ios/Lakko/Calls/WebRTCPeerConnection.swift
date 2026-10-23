@@ -568,11 +568,11 @@ public final class WebRTCPeerConnection: NSObject {
         }
     }
 
-    /// The video entries of the statistics report (`inbound-rtp`,
-    /// `outbound-rtp` and the `media-source` each sender reads from), with
-    /// their ids, for the group call's media log
+    /// The media entries of the statistics report (`inbound-rtp`,
+    /// `outbound-rtp` and the `media-source` each sender reads from, audio
+    /// and video), with their ids, for the calls' media log
     /// (``CallMediaCounters``). `nil` when there is no peer connection.
-    func sampleVideoStatEntries() async -> [CallMediaStatEntry]? {
+    func sampleMediaStatEntries() async -> [CallMediaStatEntry]? {
         guard let peer = peer else { return nil }
         let report: RTCStatisticsReport = await withCheckedContinuation { cont in
             peer.statistics { cont.resume(returning: $0) }

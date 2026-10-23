@@ -225,6 +225,10 @@ public final class CallSession: ObservableObject {
     /// / [`downBps`] / [`upBps`]. Started on the first `.connected`
     /// transition, cancelled in `teardownMediaPipeline`.
     private var statsTask: Task<Void, Never>?
+    /// What the receivers report, logged with every stats sample and as a
+    /// total in `teardownMediaPipeline` (ADR-0067 step 1, as the group call
+    /// does).
+    private var inboundCounters = InboundCounterLog()
     /// The media-flow line is said once per call, not every two seconds.
     private var loggedMediaFlow = false
 
@@ -1109,6 +1113,9 @@ public final class CallSession: ObservableObject {
         // dropping the peer connection.
         statsTask?.cancel()
         statsTask = nil
+        for line in inboundCounters.total() {
+            NSLog("%@", line)
+        }
         rtc?.close()
         rtc = nil
         if let capture = self.localCameraCapture {
@@ -1203,6 +1210,14 @@ public final class CallSession: ObservableObject {
                                 + "ssrcSending=%lld ssrcSignalled=%@",
                             snap.mediaPacketsReceived, snap.mediaPacketsSent,
                             snap.mediaSsrcSent, signalled)
+                    }
+                    // The receivers' counters, from a second read of the
+                    // report: the snapshot above carries numbers only.
+                    if let entries = await rtc.sampleMediaStatEntries(),
+                        !Task.isCancelled, self.rtc === rtc {
+                        for line in self.inboundCounters.interval(entries) {
+                            NSLog("%@", line)
+                        }
                     }
                     await MainActor.run { self.endIfMediaHasGoneSilent(atSec: nowSec) }
                     await MainActor.run {

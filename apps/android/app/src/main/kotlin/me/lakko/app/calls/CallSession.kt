@@ -282,6 +282,11 @@ public class CallSession(
      *  transition; cancelled in [teardownMediaPipeline]. */
     private var statsJob: kotlinx.coroutines.Job? = null
 
+    /** What the receivers report, logged with every stats sample and as a
+     *  total in [teardownMediaPipeline] (ADR-0067 step 1, as the group call
+     *  does). Touched only on the session's scope. */
+    private val inboundCounters = InboundCounterLog()
+
     /**
      * G3-sframe-native N-6 — per-call MLS exporter seed and
      * local participant leaf index. Both must be set BEFORE
@@ -1472,6 +1477,7 @@ public class CallSession(
         // dropping the peer connection.
         statsJob?.cancel()
         statsJob = null
+        for (line in inboundCounters.total()) android.util.Log.i("CallSession", line)
         rtc?.close()
         rtc = null
         localCameraCapture?.let { capture ->
@@ -1600,6 +1606,9 @@ public class CallSession(
                     val nowMs = nowNanos / 1_000_000L
                     inboundActivity =
                         MediaWatchdog.note(inboundActivity, snap.mediaPacketsReceived, nowMs)
+                    for (line in inboundCounters.interval(snap.stats)) {
+                        android.util.Log.i("CallSession", line)
+                    }
                     endIfMediaHasGoneSilent(nowMs)
                 }
                 delay(2_000)

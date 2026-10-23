@@ -53,6 +53,7 @@
  * the canonical home-broadband case. TURN relay arrives in
  * 3a2.
  */
+import { InboundCounterLog } from "./media-counters";
 import {
   inboundHasGoneSilent,
   noteInboundMedia,
@@ -476,6 +477,9 @@ export class CallSession {
   /** G3-3-conn-quality — `getStats()` poll loop handle, armed on
    *  the first `connected` transition, cleared in `dispose()`. */
   private statsTimer: ReturnType<typeof setInterval> | null = null;
+  /** What the receivers report, logged with every stats sample and as a
+   *  total in `dispose()` (ADR-0067 step 1, as the group call does). */
+  private readonly inboundCounters = new InboundCounterLog();
   /** Previous candidate-pair byte counters + monotonic timestamp
    *  (ms) used to derive the down/up bitrate. */
   private prevStatsBytes: {
@@ -1078,6 +1082,10 @@ export class CallSession {
     }
     this.prevStatsBytes = null;
     this.inboundActivity = null;
+    for (const line of this.inboundCounters.total()) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
     if (this.pc !== null) {
       try {
         this.pc.close();
@@ -1681,8 +1689,10 @@ export class CallSession {
     // call left: metering the pair would have watched the 45-minute call climb
     // and called it healthy.
     let mediaPackets = 0;
+    const entries: Record<string, unknown>[] = [];
     report.forEach((value: unknown, id: string) => {
       byId.set(id, value);
+      if (typeof value === "object" && value !== null) entries.push(value as Record<string, unknown>);
       const type = statString(value, "type");
       if (type === "candidate-pair") pairs.push(value);
       if (type === "inbound-rtp") mediaPackets += statNumber(value, "packetsReceived") ?? 0;
@@ -1692,6 +1702,10 @@ export class CallSession {
       mediaPackets,
       performance.now(),
     );
+    for (const line of this.inboundCounters.interval(entries)) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
     const succeeded = (s: unknown): boolean =>
       statString(s, "state") === "succeeded";
     const isNominated = (s: unknown): boolean => {

@@ -1374,7 +1374,7 @@ final class SfuCallSession {
     }
 
     private func sampleMediaLog() async {
-        guard let connection = pc, let entries = await connection.sampleVideoStatEntries() else {
+        guard let connection = pc, let entries = await connection.sampleMediaStatEntries() else {
             return
         }
         // What each sender's encoding holds, read behind every write queued

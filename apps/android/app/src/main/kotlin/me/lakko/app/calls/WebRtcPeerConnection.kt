@@ -646,6 +646,9 @@ public class WebRtcPeerConnection(
          * [MediaWatchdog] needs.
          */
         public val mediaPacketsReceived: Long,
+        /** Every entry of the same report, with its id, for the one-to-one
+         *  call's receiver counters (`CallMediaCounters.kt`). */
+        internal val stats: List<RtcStat> = emptyList(),
     )
 
     public suspend fun sampleConnectionStats(): ConnectionStatsSnapshot? {
@@ -658,6 +661,7 @@ public class WebRtcPeerConnection(
             }
         } ?: return null
         val stats = report.statsMap
+        val entries = stats.values.map { RtcStat(type = it.type, members = it.members, id = it.id) }
         val mediaPackets = stats.values
             .filter { it.type == "inbound-rtp" }
             .sumOf { (it.members["packetsReceived"] as? Number)?.toLong() ?: 0L }
@@ -670,6 +674,7 @@ public class WebRtcPeerConnection(
                 rttMs = null, relayed = false, hasActivePair = false,
                 bytesReceived = 0L, bytesSent = 0L,
                 mediaPacketsReceived = mediaPackets,
+                stats = entries,
             )
         val rttSec = (active.members["currentRoundTripTime"] as? Number)?.toDouble()
         val rttMs = rttSec?.let { Math.round(it * 1000.0).toInt() }
@@ -683,6 +688,7 @@ public class WebRtcPeerConnection(
             rttMs = rttMs, relayed = relayed, hasActivePair = true,
             bytesReceived = bytesReceived, bytesSent = bytesSent,
             mediaPacketsReceived = mediaPackets,
+            stats = entries,
         )
     }
 
