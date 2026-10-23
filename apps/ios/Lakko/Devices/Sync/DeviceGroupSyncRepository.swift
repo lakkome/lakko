@@ -976,17 +976,15 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// Wait until a fetch that STARTED after this call has found the
     /// DeviceGroup journal drained, so every row up to a claim just published
     /// has been applied. `false` when that did not happen in time.
+    ///
+    /// The same wait as ``waitForJournalHead(timeoutMs:)``, which cuts short a
+    /// long poll already out and reads with wait 0 while a caller waits. This
+    /// copy had neither and waited for the poll that was out to end on its
+    /// own: on a simulator an invite-link answer took 37 s (2026-10-23).
     public func waitForJournalReadPastNow(
         timeoutMs: Int64 = DeviceGroupSyncRepository.journalHeadTimeoutMs
     ) async -> Bool {
-        guard ready, group != nil, !deviceRemoved else { return false }
-        let start = Int64(Date().timeIntervalSince1970 * 1000)
-        while Int64(Date().timeIntervalSince1970 * 1000) - start < timeoutMs {
-            if lastDrainedFetchStartedAtMs > start { return true }
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            if Task.isCancelled { return false }
-        }
-        return lastDrainedFetchStartedAtMs > start
+        await waitForJournalHead(timeoutMs: timeoutMs)
     }
 
     /// ADR-0079 (reworked 2026-10-17) — another device's claim of a link
