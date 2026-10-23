@@ -662,7 +662,18 @@ public final class WebRTCPeerConnection: NSObject {
         guard let peer = peer else { return }
         let track = Self.sharedFactory.videoTrack(
             with: source, trackId: CameraSender.trackId(of: .main))
-        let sender = peer.add(track, streamIds: ["lakko-local-stream"])
+        // On a transceiver of its own, never `add(_:streamIds:)`: mid-call
+        // that hands the camera the first video transceiver whose sender
+        // never sent, which is one the SFU opened to bring this device
+        // another person's camera, and the SFU does not take what arrives on
+        // its own downstream line as this person's main picture (the web
+        // client did this until 2026-10-23: its camera turned on after an
+        // Android one reached the others only as the light and middle
+        // copies). Android adds its group camera the same way.
+        let transceiverInit = RTCRtpTransceiverInit()
+        transceiverInit.direction = .sendRecv
+        transceiverInit.streamIds = ["lakko-local-stream"]
+        let sender = peer.addTransceiver(with: track, init: transceiverInit)?.sender
         self.localVideoTrack = track
         self.localVideoSender = sender
         if let sender { configureMainCameraSender(sender) }
@@ -671,8 +682,8 @@ public final class WebRTCPeerConnection: NSObject {
     /// Ask the main camera sender for its temporal layers
     /// (``CameraSender/mainTemporalLayers``) and for the frame-rate
     /// preference, in one set of its parameters, then read the layers back
-    /// and say in one line what the stack kept. `add(_:streamIds:)` takes no
-    /// encodings, so this is the only way to ask. Best effort: a stack that
+    /// and say in one line what the stack kept. The transceiver is added
+    /// without encodings, so this is the only way to ask. Best effort: a stack that
     /// refuses keeps one layer, and the line says so.
     private func configureMainCameraSender(_ sender: RTCRtpSender) {
         let asked = CameraSender.mainTemporalLayers

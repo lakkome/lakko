@@ -187,6 +187,55 @@ class VideoWantsTest {
         }
     }
 
+    /** The call's real timers launch on the main thread's immediate
+     *  dispatcher, where a zero delay runs the work before `schedule`
+     *  returns. Later delays wait for [advance], as in [FakeCallTimers]. */
+    private class ImmediateZeroTimers : CallTimers {
+        val later = FakeCallTimers()
+
+        override fun nowMs(): Long = later.nowMs()
+
+        override fun schedule(ms: Long, run: () -> Unit): Any {
+            if (ms == 0L) {
+                run()
+                return Any()
+            }
+            return later.schedule(ms, run)
+        }
+
+        override fun cancel(handle: Any) = later.cancel(handle)
+    }
+
+    @Test
+    fun `a timer that runs at once does not stop every later frame`() {
+        // Seen on an emulator 2026-10-23: one frame in a call, then nothing,
+        // because the finished handle was kept as a timer still pending.
+        val timers = ImmediateZeroTimers()
+        val book = VideoWantsBook().apply { setPeers(listOf("a")) }
+        val wire = Wire()
+        val sender = VideoWantsSender(book, wire.send, timers)
+        val tile = Any()
+        sender.changed()
+        assertEquals(listOf(listOf("a" to light)), wire.frames.toList())
+        book.setTile(tile, "a", middle)
+        sender.changed()
+        timers.later.advance(VIDEO_WANTS_MIN_INTERVAL_MS)
+        assertEquals(listOf("a" to middle), wire.frames.last())
+        assertEquals(2, wire.frames.size)
+    }
+
+    @Test
+    fun `a frame refused at once is sent at the next change`() {
+        val timers = ImmediateZeroTimers()
+        val book = VideoWantsBook().apply { setPeers(listOf("a")) }
+        val wire = Wire().apply { open = false }
+        val sender = VideoWantsSender(book, wire.send, timers)
+        sender.changed() // before the publish offer: not sent
+        wire.open = true
+        sender.resend()
+        assertEquals(listOf(listOf("a" to light)), wire.frames.toList())
+    }
+
     @Test
     fun `the reports of one pass become one frame with the whole set`() {
         val timers = FakeCallTimers()

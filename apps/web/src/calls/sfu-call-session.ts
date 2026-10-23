@@ -1256,9 +1256,8 @@ export class SfuCallSession {
         return;
       }
       localStream.addTrack(track);
-      // The main sender: `addTrack`, which mid-call may reuse a video
-      // transceiver the SFU already negotiated; the layers are asked for
-      // separately.
+      // The main sender, on a transceiver of its own (never one the SFU
+      // opened to send this device another person's camera).
       const sender = addCameraSenderMidCall(pc2, track, localStream);
       this.transformIds.add(
         attachSenderSFrame(sender, { seed, localLeaf: this.publishLeaf }),

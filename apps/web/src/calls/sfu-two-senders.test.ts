@@ -659,20 +659,20 @@ describe("a browser that is awkward about the light sender", () => {
 // ---- Camera on mid-call ---------------------------------------------------
 
 describe("turning the camera on mid-call", () => {
-  it("adds the main sender with addTrack, one encoding and no rid, and the light sender, and names its mid in the renegotiation", async () => {
+  it("adds the main sender on a transceiver of its own, one encoding and no rid, and the light sender, and names its mid in the renegotiation", async () => {
     const { session, pc } = await connected({ media: { audio: true, video: false } });
     expect(hooks.offers).toEqual([{ sdp: "offer-1", lightMids: [], middleMids: [] }]);
     await answer();
 
     await session.publishVideo();
     const main = pc.main();
-    expect(main?.via).toBe("addTrack");
-    expect(main?.init).toBeNull();
-    await flush();
-    // The layers are asked for on the one encoding addTrack gave it.
-    expect(main?.sender.setParametersCalls).toEqual([
-      { encodings: [{ scalabilityMode: "L1T3" }], degradationPreference: "maintain-framerate" },
-    ]);
+    // Never addTrack: mid-call that would take the transceiver the SFU opened
+    // for another person's camera, and the SFU would not take this camera as
+    // this person's main picture.
+    expect(main?.via).toBe("addTransceiver");
+    expect(main?.init?.direction).toBe("sendrecv");
+    expect(main?.init?.sendEncodings).toEqual([{ scalabilityMode: "L1T3" }]);
+    expect(main?.init?.sendEncodings?.[0]).not.toHaveProperty("rid");
     const lights = pc.lights();
     expect(lights).toHaveLength(1);
     expect(lights[0]?.init).toEqual({

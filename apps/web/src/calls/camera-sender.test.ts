@@ -140,18 +140,19 @@ describe("the main camera sender", () => {
     warn.mockRestore();
   });
 
-  it("is added with addTrack mid-call, then asked for one layered encoding with no rid", async () => {
+  it("mid-call too gets a transceiver of its own, never one addTrack would reuse", () => {
+    // `addTrack` mid-call takes the transceiver the SFU opened for another
+    // person's camera, and the SFU does not take what arrives there as this
+    // person's main picture.
     const f = fakePc();
     const t = track("video");
     expect(addCameraSenderMidCall(f.pc, t, stream)).toBe(f.sender);
-    expect(f.addTrack).toHaveBeenCalledWith(t, stream);
-    expect(f.addTransceiver).not.toHaveBeenCalled();
-    await Promise.resolve();
-    expect(f.setParameters).toHaveBeenCalledOnce();
-    const params = f.setParameters.mock.calls[0]?.[0];
-    expect(params?.encodings).toEqual([{ active: true, scalabilityMode: "L1T3" }]);
-    expect(params?.encodings[0]).not.toHaveProperty("rid");
-    expect(params?.degradationPreference).toBe("maintain-framerate");
+    expect(f.addTrack).not.toHaveBeenCalled();
+    expect(f.addTransceiver).toHaveBeenCalledOnce();
+    const [given, init] = f.addTransceiver.mock.calls[0] ?? [];
+    expect(given).toBe(t);
+    expect(init?.direction).toBe("sendrecv");
+    expect(init?.streams).toEqual([stream]);
   });
 
   it("leaves the microphone as before", () => {
