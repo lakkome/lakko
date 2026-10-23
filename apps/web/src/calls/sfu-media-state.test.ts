@@ -400,6 +400,29 @@ describe("SfuCallSession — send triggers", () => {
     expect(hooks.broadcasts).toHaveLength(0);
   });
 
+  it("announces who it is as soon as the Welcome names it", async () => {
+    // `connect()` resolves when the socket opens, before the Welcome: there
+    // is no self peer id then, so the announcement has to wait for it, or
+    // the peers already in the call see "Participant" until the periodic
+    // re-announcement.
+    const session = new SfuCallSession(
+      baseConfig({
+        peerAnnouncer: {
+          compose: (self: string) => new TextEncoder().encode(`ann:${self}`),
+          verify: () => null,
+        },
+      }),
+    );
+    await session.connect();
+    await flush();
+    expect(hooks.broadcasts.map(decode).filter((b) => b.includes("ann:"))).toEqual([]);
+
+    hooks.captured?.onWelcome?.({ kind: "welcome", peer_id: "self1", room: "r", roster: [], server_ts: 0 });
+    await flush();
+    expect(hooks.broadcasts.map(decode).filter((b) => b.includes("ann:"))).toEqual(["sealed:ann:self1"]);
+    session.hangUp();
+  });
+
   it("re-announces the local camera state when a new peer joins", async () => {
     const session = new SfuCallSession(baseConfig({ media: { audio: true, video: true } }));
     await session.connect();

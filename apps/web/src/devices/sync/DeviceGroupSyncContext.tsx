@@ -60,7 +60,7 @@ import { useAuth } from "../../auth/AuthContext";
 import { ensureDeviceIdentitySeed } from "../../auth/device-identity-store";
 import { getDeviceKey } from "../../auth/key-store";
 import { loadSyncState, saveSyncState, syncStateGeneration } from "./sync-state-idb";
-import { SyncStatePersister, type CapturedSyncState } from "./sync-state-persister";
+import { SyncStatePersister, type CapturedSyncState, type SyncStateCapture } from "./sync-state-persister";
 import { DsClient, DsHttpError, DsNetworkError } from "../../ds/client";
 import { dsAccess, takeSigner } from "../../ds/access";
 import { loadWasm } from "../../wasm";
@@ -1038,17 +1038,43 @@ export function DeviceGroupSyncProvider(props: {
     outbox();
     const account = activeAccountIdB64;
     if (account === null || synced === null || deviceRemoved()) return;
-    // The capture reads the newest fold and outbox when the write runs. It
-    // may run inside `teardown`, which an effect calls, so it reads untracked.
-    const capture = (): CapturedSyncState | null =>
+    persister.schedule(account, syncStateCapture(account));
+  });
+
+  /** Reads the newest fold and outbox for `account` when the write runs, or
+   *  `null` once the account is no longer bound. It may run inside
+   *  `teardown`, which an effect calls, so it reads untracked. */
+  function syncStateCapture(account: string): SyncStateCapture {
+    return (): CapturedSyncState | null =>
       untrack(() => {
         const generation = boundSyncGeneration;
         if (synced === null || activeAccountIdB64 !== account || deviceRemoved()) return null;
         if (generation === null || syncStateGeneration(account) !== generation) return null;
         return { row: { synced: synced.toBytes(), pending: outbox() }, generation };
       });
-    persister.schedule(account, capture);
-  });
+  }
+
+  /**
+   * Write the stored row now, past the debounce. `false` when it could not
+   * be written. An invite link's record must be on disk before the link is
+   * handed out: this device never reads its own record back from the
+   * journal, so a page closed within the debounce forgot the link, and every
+   * request through it then waited for a verdict that never came (seen on
+   * a local stack 2026-10-22: a reload right after making a link left the
+   * requester on "will get your messages when their app is next online").
+   */
+  async function persistSyncedNow(): Promise<boolean> {
+    const account = activeAccountIdB64;
+    if (account === null || synced === null || deviceRemoved()) return false;
+    try {
+      await persister.writeNow(account, syncStateCapture(account));
+      return true;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("device-sync state not written", err instanceof Error ? err.name : "");
+      return false;
+    }
+  }
 
   // ----- Growth re-send (ADR-0058 section 5.1) -------------------
 
@@ -1313,8 +1339,13 @@ export function DeviceGroupSyncProvider(props: {
       // A record out of bounds: nothing is kept.
       return false;
     }
-    if (written) await afterLinkRecordWrite(record.linkId);
-    return written;
+    if (!written) return false;
+    // On disk before the caller hands the link out; a record that could not
+    // be written mints no link (the caller revokes it).
+    refresh();
+    if (!(await persistSyncedNow())) return false;
+    await afterLinkRecordWrite(record.linkId);
+    return true;
   }
 
   async function revokeLinkRecordImpl(linkId: Uint8Array): Promise<boolean> {
@@ -1325,7 +1356,11 @@ export function DeviceGroupSyncProvider(props: {
     } catch {
       return false;
     }
-    if (written) await afterLinkRecordWrite(linkId);
+    if (written) {
+      refresh();
+      await persistSyncedNow();
+      await afterLinkRecordWrite(linkId);
+    }
     return written;
   }
 
@@ -1337,7 +1372,11 @@ export function DeviceGroupSyncProvider(props: {
     } catch {
       return false;
     }
-    if (written) await afterLinkRecordWrite(linkId);
+    if (written) {
+      refresh();
+      await persistSyncedNow();
+      await afterLinkRecordWrite(linkId);
+    }
     return written;
   }
 

@@ -1432,11 +1432,18 @@ public final class ContactsRepository: ObservableObject {
         // so every device of the account auto-accepts a request through it,
         // lists it and can revoke it. Since the 2026-10-17 rework it carries
         // the revocation seed, so a revoke on any device deletes the row.
-        await deviceGroupSync?.setLinkRecord(LinkRecord(
+        let recorded = await deviceGroupSync?.setLinkRecord(LinkRecord(
             hlc: 0, linkId: linkId, linkSecret: mint.linkSecret, kind: .contact, ledgerId: blobId,
             revocationSeed: revocation.seed,
             expiryMs: UInt64(max(0, expiryMs)), maxUses: maxUses, uses: 0, revoked: false,
-            mintedAtMs: UInt64(max(0, nowMs)), label: label, answered: []))
+            mintedAtMs: UInt64(max(0, nowMs)), label: label, answered: [])) ?? false
+        guard recorded else {
+            // A link this device would not remember after a restart is not
+            // handed out: every request through it would wait for ever. The
+            // row on the server is deleted with the link's own seed.
+            _ = try? await revokeInviteLink(blobId: blobId)
+            throw ContactsError.wrap(InviteLinkNotRecorded())
+        }
         let invite = GeneratedInvite(
             blobId: blobId,
             blobIdSlug: blobIdSlug,
@@ -2604,3 +2611,7 @@ public struct RequestLink: Equatable {
         self.target = target
     }
 }
+
+/// An invite link whose record could not be kept in the account's synced
+/// state: it is revoked instead of handed out.
+struct InviteLinkNotRecorded: Error {}

@@ -90,11 +90,11 @@ internal class SyncStatePersistence(
     val isBound: Boolean
         get() = synchronized(lock) { boundAccount != null }
 
-    private fun writeLocked(accountIdB64: String) {
+    private fun writeLocked(accountIdB64: String): Boolean {
         // The version is read before the encode: the fold bumps it after the
         // state it counts has changed, so the bytes hold at least this much.
         val version = versions.value
-        val bytes = encode() ?: return
+        val bytes = encode() ?: return false
         val written = runCatching { write(accountIdB64, bytes) }
             .onFailure { Log.w(LOG_TAG, "device-sync snapshot persist failed (${it.javaClass.simpleName})") }
             .isSuccess
@@ -102,6 +102,20 @@ internal class SyncStatePersistence(
         if (version != startVersion) {
             runCatching { onChanged(accountIdB64) }
         }
+        return written
+    }
+
+    /**
+     * Write the snapshot now, past the debounce. `false` when nothing is
+     * bound or the write failed. For a change that must be on disk before
+     * anything depends on it: an invite link's record, before the link is
+     * handed out (this device never reads its own record back from the
+     * journal, so a process ended within the debounce forgot the link and
+     * every request through it waited for ever).
+     */
+    fun writeNow(): Boolean = synchronized(lock) {
+        val account = boundAccount ?: return false
+        writeLocked(account)
     }
 
     private companion object {

@@ -262,7 +262,7 @@ export function InviteLinksPanel(): JSX.Element {
         );
         // ADR-0079 section 4 — the link joins the synced register, so every
         // device of the account recognises a request through it.
-        await sync.setLinkRecord({
+        const recorded = await sync.setLinkRecord({
           linkId,
           linkSecret,
           kind: "contact",
@@ -273,6 +273,9 @@ export function InviteLinksPanel(): JSX.Element {
           mintedAtMs: Date.now(),
           label: label(),
         });
+        // A link this device would not remember after a reload is not handed
+        // out: every request through it would wait for ever.
+        if (!recorded) throw new Error("invite link not recorded");
         await load();
       } catch (uploadErr) {
         // Any failure, a network one included, mints no link: nothing was

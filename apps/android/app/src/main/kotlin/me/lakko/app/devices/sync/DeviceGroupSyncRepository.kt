@@ -864,7 +864,11 @@ public class DeviceGroupSyncRepository(
     /** Fold one local link-record write, then send that record to the
      *  account's other devices. A failed publish is kept by the pending
      *  flag and re-sent with the catch-up. */
-    private suspend fun writeLinkRecord(linkId: ByteArray, write: (SyncedState) -> Boolean): Boolean {
+    private suspend fun writeLinkRecord(
+        linkId: ByteArray,
+        mustPersist: Boolean = false,
+        write: (SyncedState) -> Boolean,
+    ): Boolean {
         val envelope = synchronized(stateLock) {
             val state = syncedState ?: return false
             val written = try {
@@ -877,6 +881,9 @@ public class DeviceGroupSyncRepository(
             runCatching { state.linkRecordEnvelopeFor(linkId) }.getOrNull()
         }
         republish()
+        // On disk at once rather than after the debounce; a link whose record
+        // could not be written is not handed out (the caller revokes it).
+        if (!syncStatePersistence.writeNow() && mustPersist) return false
         if (envelope != null) {
             try {
                 sendServiceEnvelope(envelope)
@@ -893,7 +900,7 @@ public class DeviceGroupSyncRepository(
     /** Record a link just minted. `false` when the state is not open or the
      *  record is refused. */
     public suspend fun setLinkRecord(record: LinkRecord): Boolean =
-        writeLinkRecord(record.linkId) { it.setLinkRecord(Hlc.mint(), record) }
+        writeLinkRecord(record.linkId, mustPersist = true) { it.setLinkRecord(Hlc.mint(), record) }
 
     /** Mark a link revoked (final). `false` when nothing changed. */
     public suspend fun revokeLinkRecord(linkId: ByteArray): Boolean =

@@ -2699,7 +2699,7 @@ public class ContactsRepository(
             // ADR-0079 section 4 — the link's record goes to the synced
             // register, so every device of the account accepts a request
             // through it, lists it and can revoke it.
-            deviceGroupSync?.setLinkRecord(
+            val recorded = deviceGroupSync?.setLinkRecord(
                 uniffi.lakko_ffi_uniffi.LinkRecord(
                     hlc = 0uL,
                     linkId = linkId,
@@ -2715,7 +2715,19 @@ public class ContactsRepository(
                     label = label,
                     answered = emptyList(),
                 ),
-            )
+            ) ?: false
+            if (!recorded) {
+                // A link this device would not remember after a restart is not
+                // handed out: every request through it would wait for ever.
+                try {
+                    revokeInviteLink(blobId)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    // The row stays on the server unanswered: nobody holds its secret.
+                }
+                throw ContactsError.wrap(IllegalStateException("invite link not recorded"))
+            }
             val invite = GeneratedInvite(
                 blobId = blobId,
                 blobIdSlug = slug,

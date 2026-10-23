@@ -2149,6 +2149,12 @@ export class SfuCallSession {
     );
     this.onRosterChanged(false);
     this.callbacks.onWelcome?.(frame.peer_id, frame.roster);
+    // The self peer id exists from here on. `connect()` resolves when the
+    // socket opens, before the Welcome, so its announcement had no id to
+    // name and was not sent: the peers already in the call showed this
+    // person as "Participant" until the periodic re-announcement, up to
+    // PEER_ANNOUNCE_INTERVAL_MS later (seen on a local stack 2026-10-22).
+    this.announceSelf();
   }
 
   /** Whether the SFU refused this device because the call had already
