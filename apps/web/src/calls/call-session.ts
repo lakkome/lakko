@@ -86,7 +86,7 @@ export interface SFrameAttachers {
   readonly supported: () => boolean;
   readonly attachSender: (
     sender: RTCRtpSender,
-    opts: { readonly seed: Uint8Array; readonly localLeaf: number },
+    opts: { readonly seed: Uint8Array; readonly localLeaf: number; readonly kind?: "audio" | "video" },
   ) => void;
   readonly attachReceiver: (
     receiver: RTCRtpReceiver,
@@ -431,6 +431,53 @@ export class CallSession {
 
   /** Receivers that already carry this session's decrypt transform. */
   private readonly sealedReceivers = new WeakSet<RTCRtpReceiver>();
+
+  /** Senders that already carry this session's encrypt transform. */
+  private readonly sealedSenders = new WeakSet<RTCRtpSender>();
+
+  /** Attach the encrypt transform to `sender` unless it has one. A second
+   *  attach would build a new transform on the script-transform path, which
+   *  Chromium may not run (see {@link sealSendersOfTransceivers}). */
+  private sealSender(
+    sender: RTCRtpSender,
+    key: { readonly seed: Uint8Array; readonly localLeaf: number },
+    kind?: "audio" | "video",
+  ): void {
+    if (this.sealedSenders.has(sender)) return;
+    this.sframe.attachSender(sender, {
+      seed: key.seed,
+      localLeaf: key.localLeaf,
+      ...(kind !== undefined ? { kind } : {}),
+    });
+    this.sealedSenders.add(sender);
+  }
+
+  /**
+   * Attach the encrypt transform to the sender of every transceiver that has
+   * none yet, right after a remote offer was applied and before the answer.
+   *
+   * Chromium does not run a send transform set on the sender that `addTrack`
+   * hands back when it REUSES a transceiver a remote offer created: the
+   * answerer of a video call turning its camera on (it captures audio only and
+   * adds the camera to the video transceiver the caller's offer made) sent its
+   * video unsealed, and the caller dropped every frame of it ("media frame
+   * version ... is not supported"; seen on test.lakko.me 2026-10-24, both
+   * peers Chrome). Measured in Chromium 1243 (Playwright 1.63) with a marking
+   * worker: that transform received 0 of 58 frames, with the transform set
+   * after `addTrack`, after the renegotiation, or one task later; set on the
+   * transceiver's sender as soon as the transceiver existed, before any track,
+   * it received all 58, and it kept them when `addTrack` later reused the
+   * sender. A transceiver `addTrack` creates is not affected. Nothing leaves
+   * unsealed when this is skipped on another browser: the peer drops it.
+   */
+  private sealSendersOfTransceivers(pc: RTCPeerConnection): void {
+    const key = this.callKey;
+    if (key === null) return;
+    for (const t of pc.getTransceivers()) {
+      const kind = t.receiver.track.kind === "video" ? "video" : "audio";
+      this.sealSender(t.sender, key, kind);
+    }
+  }
 
   /** Attach the decrypt transform to `receiver` unless it has one. Returns
    *  whether it attached. */
@@ -809,6 +856,7 @@ export class CallSession {
       await this.sealReceiversBeforeDescription(pc);
       if (this.state !== "ringing" || this.pc !== pc) return;
       await pc.setRemoteDescription({ type: "offer", sdp: offer.sdp });
+      this.sealSendersOfTransceivers(pc);
       this.coverSFrame();
       this.pendingOffer = null;
       await this.applyQueuedCandidates();
@@ -957,13 +1005,11 @@ export class CallSession {
       // The camera arriving mid-call is a new sender and needs its own seal;
       // without this the video would leave unsealed while the audio beside it
       // is sealed, and the peer would drop every frame of it.
+      // A sender `addTrack` reused already carries the seal it was given when
+      // its transceiver appeared (`sealSendersOfTransceivers`); it is not
+      // replaced.
       const midCallKey = this.callKey;
-      if (midCallKey !== null) {
-        this.sframe.attachSender(sender, {
-          seed: midCallKey.seed,
-          localLeaf: midCallKey.localLeaf,
-        });
-      }
+      if (midCallKey !== null) this.sealSender(sender, midCallKey, "video");
       // Refresh the self-preview stream (it now carries a video track).
       this.callbacks.onLocalStream?.(localStream);
       // The local self-preview is live now (the track is captured + attached);
@@ -1206,7 +1252,7 @@ export class CallSession {
       // Attached between `addTrack` and the SDP build, the ordering the native
       // shims keep (C-48): the sender's track decides the stream index the
       // KID carries, so it must already be set.
-      this.sframe.attachSender(sender, { seed: key.seed, localLeaf: key.localLeaf });
+      this.sealSender(sender, key);
     }
 
     pc.onicecandidate = (ev): void => {
@@ -1390,6 +1436,7 @@ export class CallSession {
     if (ignoreOffer) return;
     try {
       await pc.setRemoteDescription({ type: "offer", sdp });
+      this.sealSendersOfTransceivers(pc);
       // The peer turning its camera on mid-call is a NEW video transceiver,
       // created by the line above, and a fresh transceiver starts with the
       // descriptor stopped. Arm it here, between the remote offer and the

@@ -371,14 +371,18 @@ export function attachSenderSFrame(
     readonly seed: Uint8Array;
     readonly localLeaf: number;
     readonly streamIndex?: SFrameStreamIndex;
+    /** The media kind, when the sender has no track yet (a sender sealed as
+     *  soon as its transceiver appears, before the camera is put on it). */
+    readonly kind?: "audio" | "video";
   },
 ): string {
   transportOrRefuse();
+  const kind = opts.kind ?? (sender.track?.kind === "video" ? "video" : "audio");
   // The sender's track is set by the caller's `addTrack` before this attach
   // (the native-shim sequencing), so without a stated index its kind is the
   // authoritative stream for every frame this transform seals: audio -> 0,
   // camera -> 1 (ADR-0035).
-  const streamIndex = opts.streamIndex ?? streamIndexOfKind(sender.track?.kind ?? "audio");
+  const streamIndex = opts.streamIndex ?? streamIndexOfKind(kind);
   if (!Number.isInteger(streamIndex) || streamIndex < 0 || streamIndex > 255) {
     throw new Error(`SFrame stream index ${String(streamIndex)} is outside 0..=255`);
   }
@@ -389,7 +393,7 @@ export function attachSenderSFrame(
     seed: opts.seed,
     localLeaf: opts.localLeaf,
     streamIndex,
-    mediaKind: sender.track?.kind === "video" ? "video" : "audio",
+    mediaKind: kind,
   };
   const attachedId = attachTransform(sender, options);
   attachedSenders.set(attachedId, sender);

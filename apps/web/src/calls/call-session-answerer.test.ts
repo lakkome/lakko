@@ -103,6 +103,13 @@ class FakePeerConnection {
   private senders: FakeSender[] = [];
   constructor(_config?: unknown) {}
   addTrack(track: FakeTrack, _stream: FakeStream): FakeSender {
+    // A browser reuses a transceiver of the same kind that is not sending
+    // yet (one a remote offer created), and hands back its sender.
+    const idle = this.senders.find((s) => s.track === null && s.receiver.track.kind === track.kind);
+    if (idle !== undefined) {
+      idle.track = track;
+      return idle;
+    }
     const sender: FakeSender = {
       track,
       receiver: { track: new FakeTrack(track.kind) },
@@ -147,6 +154,16 @@ class FakePeerConnection {
   async setRemoteDescription(desc: { type: string; sdp: string }): Promise<void> {
     descriptionLog.push(`remote:${desc.type}`);
     this.remoteDescription = desc;
+    if (desc.type === "offer" && offerCreatesVideoTransceiver && !this.senders.some((s) => s.receiver.track.kind === "video")) {
+      const sender: FakeSender = {
+        track: null,
+        receiver: { track: new FakeTrack("video") },
+        replaceTrack: async (t: FakeTrack): Promise<void> => {
+          sender.track = t;
+        },
+      };
+      this.senders.push(sender);
+    }
     this.signalingState = desc.type === "offer" ? "have-remote-offer" : "stable";
   }
   addedCandidates: unknown[] = [];
@@ -172,6 +189,9 @@ let pcs: FakePeerConnection[] = [];
  *  receiver, the way a browser does after `addTrack`. Off by default: the
  *  other tests model senders only. */
 let modelTransceivers = false;
+/** When set, an applied remote offer creates a video transceiver whose
+ *  sender has no track, as the caller's video offer does on the answerer. */
+let offerCreatesVideoTransceiver = false;
 /** Descriptions applied and receive transforms attached, in order. */
 let descriptionLog: string[] = [];
 
@@ -192,6 +212,7 @@ async function fakeGetUserMedia(
 
 beforeEach(() => {
   modelTransceivers = false;
+  offerCreatesVideoTransceiver = false;
   descriptionLog = [];
   gumCalls = [];
   gumStreams = [];
@@ -787,3 +808,45 @@ describe("1x1 receive transform is attached before the description", () => {
     expect(descriptionLog.filter((e) => e.startsWith("receiver:"))).toEqual(["receiver:audio"]);
   });
 });
+
+describe("1x1 answerer's camera on the transceiver the caller's offer made", () => {
+  // Chromium does not run a send transform set on the sender `addTrack` hands
+  // back when it reuses such a transceiver (seen 2026-10-24: the caller
+  // dropped every frame of the answerer's camera). The sender is sealed when
+  // the offer is applied, before the answer, and never sealed again.
+  it("seals that sender before the answer and does not seal it again when the camera goes on", async () => {
+    modelTransceivers = true;
+    offerCreatesVideoTransceiver = true;
+    const session = new CallSession(
+      new Uint8Array(16),
+      {
+        onRemoteStream: () => {},
+        onLocalStream: () => {},
+        onOutboundSignaling: () => {},
+        onStateChange: () => {},
+      },
+      { ringTimeoutMs: TEST_RING_WINDOW_MS },
+      {
+        supported: () => true,
+        attachSender: (sender, opts) =>
+          descriptionLog.push(`sender:${opts.kind ?? sender.track?.kind ?? "?"}`),
+        attachReceiver: () => {},
+      },
+    );
+    session.setCallKey(new Uint8Array(32), 3);
+    await session.applyIncomingSignaling(fakeOffer(true));
+    await session.accept();
+    const remote = descriptionLog.indexOf("remote:offer");
+    const video = descriptionLog.indexOf("sender:video");
+    const local = descriptionLog.indexOf("local");
+    expect(remote).toBeGreaterThanOrEqual(0);
+    expect(video).toBeGreaterThan(remote);
+    expect(local).toBeGreaterThan(video);
+    await session.addLocalVideo();
+    await settle();
+    expect(descriptionLog.filter((e) => e === "sender:video")).toHaveLength(1);
+    const pc = at(pcs, 0);
+    expect(pc.getSenders().filter((s) => s.track?.kind === "video")).toHaveLength(1);
+  });
+});
+
