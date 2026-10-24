@@ -37,6 +37,7 @@ import {
   createResource,
   createSignal,
   Match,
+  onCleanup,
   onMount,
   Show,
   Switch,
@@ -48,7 +49,12 @@ import { useAuth } from "../auth/AuthContext";
 import { buildAuthUrlWithReturn } from "../auth/return-url";
 import { ContactsClient } from "../contacts/client";
 import { establishedContactOfAccount, pinKeysOf } from "../contacts/known-contact-request";
-import { accountKeysOf, loadAccepted } from "../contacts/local-store";
+import {
+  accountKeysOf,
+  loadAccepted,
+  restoreRemovedContact,
+  subscribeAcceptedChanged,
+} from "../contacts/local-store";
 import { readVerifiedBinding } from "../contacts/verified-binding";
 import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { groupIdHex } from "../devices/sync/state";
@@ -65,7 +71,13 @@ import {
   openInviteLinkFromUrl,
   parseInviteLinkFragment,
 } from "../contacts/invite-link";
-import { updatePendingContacts, withPendingContact, withoutPendingContact } from "../contacts/pending-contacts";
+import {
+  pendingContacts,
+  updatePendingContacts,
+  withPendingContact,
+  withoutPendingContact,
+} from "../contacts/pending-contacts";
+import { readIsActive } from "../chat/membership-ended";
 import { useChats } from "../chat/ChatContext";
 import { conversationKindOf } from "../chat/conversation-kind";
 import { personKeysOf } from "../chat/person-key";
@@ -97,6 +109,11 @@ export default function Invite(): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
+  const navigate = useNavigate();
+  // The contact list can change while the page is open (the inviter's answer
+  // to an earlier Add lands): the page's decision is read again then.
+  const [acceptedVersion, setAcceptedVersion] = createSignal(0);
+  onCleanup(subscribeAcceptedChanged(() => setAcceptedVersion((v) => v + 1)));
 
   const signedIn = (): boolean => auth.state().kind === "session" && auth.identitySecrets() !== null;
   // A signed-out visitor sees no inviter card: the link is opened only once
@@ -168,6 +185,8 @@ export default function Invite(): JSX.Element {
     if (d === DEAD) return { kind: "dead" };
     const s = auth.state();
     const own = s.kind === "session" && base64Encode(d.cap.ownerAccountId) === s.account.accountId;
+    acceptedVersion();
+    const ownerHex = groupIdHex(d.cap.ownerAccountId);
     return invitePageView({
       link: "opened",
       expired: !d.cap.isValidNow(BigInt(Date.now())),
@@ -177,6 +196,7 @@ export default function Invite(): JSX.Element {
       signedIn: signedIn(),
       isOwn: own,
       existingContactKeyB64: signedIn() ? existingContactKeyB64(d.cap) : null,
+      pendingInviter: pendingContacts().some((p) => p.accountIdHex === ownerHex),
     });
   });
 
@@ -250,6 +270,25 @@ export default function Invite(): JSX.Element {
               client={client}
               discovery={discovery}
             />
+          )}
+        </Match>
+        <Match when={(() => { const v = view(); return v.kind === "pending" ? v : undefined; })()}>
+          {(v) => (
+            <section class="lk-stack" style={{ gap: "12px", "align-items": "center", "text-align": "center" }}>
+              <h1>{t("invite.contact.page.already_title", { name: nameOr(v().name) })}</h1>
+              <div class="lk-actions">
+                <button
+                  class="primary"
+                  type="button"
+                  onClick={() => {
+                    const d = invite();
+                    if (d !== null) navigate(paths.pendingChat(groupIdHex(d.cap.ownerAccountId)));
+                  }}
+                >
+                  {t("invite.contact.page.open_chat")}
+                </button>
+              </div>
+            </section>
           )}
         </Match>
         <Match when={(() => { const v = view(); return v.kind === "default" ? v : undefined; })()}>
@@ -327,9 +366,30 @@ function AddPanel(props: {
 }): JSX.Element {
   const auth = useAuth();
   const navigate = useNavigate();
+  const chats = useChats();
   const cap = props.invite.cap;
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createLiveText();
+
+  /** A live one-to-one with the inviter, when the visitor removed them from
+   *  their contacts and the conversation remains (2026-10-24). Add then puts
+   *  them back with it: the inviter's device answers such a request by
+   *  restoring, never by founding, so a pending contact would wait for an
+   *  answer that is never sent. */
+  const liveChatWithOwner = (): { readonly groupIdB64: string; readonly href: string } | null => {
+    const ownerKeyB64 = base64Encode(cap.ownerSignaturePubkey);
+    const g = chats
+      .groups()
+      .find(
+        (c) =>
+          conversationKindOf(c.group) === "chat" &&
+          personKeysOf(c.group).includes(ownerKeyB64) &&
+          readIsActive(c.group) === true,
+      );
+    return g === undefined
+      ? null
+      : { groupIdB64: g.groupIdB64, href: paths.chat(base64UrlEncodeNoPad(g.group.groupId)) };
+  };
 
   // ADR-0005 section 13.4 — a referral link presses Add by itself.
   onMount(() => {
@@ -349,6 +409,7 @@ function AddPanel(props: {
       // keys; the published identity passes the fail-closed gate first.
       await props.client.refuseContactRequestToUnverifiedKeys(cap.ownerAccountId, cap.ownerSignaturePubkey);
       const blobId = props.invite.blobId;
+      const live = liveChatWithOwner();
       const outcome = await addThroughInviteLink({
         // The ledger's soft use count. A link this account used before is
         // sent again: the inviter's device answers it either way.
@@ -356,7 +417,10 @@ function AddPanel(props: {
           (await props.discovery.consumeInvite(blobId, props.invite.capabilityBytes, secrets.accountId)).kind,
         // ADR-0079 section 5 — the inviter is this account's contact from now
         // on, written only once the link was found live.
+        // With a live one-to-one nothing is pending: the contact is put back
+        // once the request is sent (below).
         recordPending: async () =>
+          live === null &&
           (await updatePendingContacts(account, (list) =>
             withPendingContact(list, {
               accountIdHex: ownerHex,
@@ -379,6 +443,16 @@ function AddPanel(props: {
         // The link died while the page was open: nothing is kept, nothing is
         // held, the visitor lands on Contacts (amended 2026-10-19).
         navigate(paths.contacts, { replace: true });
+        return;
+      }
+      if (live !== null) {
+        restoreRemovedContact({
+          signatureKey: base64Encode(cap.ownerSignaturePubkey),
+          accountIdHex: ownerHex,
+          groupIdB64: live.groupIdB64,
+          nowMs: Date.now(),
+        });
+        navigate(live.href);
         return;
       }
       navigate(paths.pendingChat(ownerHex));

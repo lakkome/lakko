@@ -1833,7 +1833,7 @@ public final class ContactsRepository: ObservableObject {
     /// open it under the fragment's secret, and decide the page's state. No
     /// use of the link is spent and nothing is sent here.
     public func openInviteLink(slug token: String) async -> InviteOpenResult {
-        guard let secrets = authRepository.identitySecrets else { return .requiresReauth }
+        guard authRepository.identitySecrets != nil else { return .requiresReauth }
         // ADR-0028 amendment 2026-09-28 — `token` is `slug#fragment`; a
         // missing or malformed fragment is a damaged link, which the page
         // shows exactly like one that no longer works.
@@ -1859,9 +1859,6 @@ public final class ContactsRepository: ObservableObject {
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         guard capability.isValidNow(nowMs: nowMs) else { return .dead }
         let ownerAccountId = capability.ownerAccountId()
-        if ownerAccountId == secrets.accountId { return .own }
-        // ADR-0073 R.7 case 1 / UX 16.6 — "already a contact" is the pin or a
-        // verified binding naming the row's key.
         let opened = OpenedInvite(
             blobId: blobId,
             capabilityBytes: capability.wire(),
@@ -1875,12 +1872,36 @@ public final class ContactsRepository: ObservableObject {
             username: capability.inviterUsername(),
             label: capability.label(),
             bootstrapReferral: capability.bootstrapReferral())
-        if let existing = establishedContact(ofAccountId: ownerAccountId) {
+        return inviteOpenResult(for: opened)
+    }
+
+    /// The page's state for a link already opened (``InvitePageDecision``),
+    /// decided from this device's lists alone, so the page can decide again
+    /// when the contact list or the pending contacts change while it is open
+    /// (the inviter's answer to an earlier Add lands).
+    public func inviteOpenResult(for opened: OpenedInvite) -> InviteOpenResult {
+        guard let secrets = authRepository.identitySecrets else { return .requiresReauth }
+        // ADR-0073 R.7 case 1 / UX 16.6 — "already a contact" is the pin or a
+        // verified binding naming the row's key.
+        let established = establishedContact(ofAccountId: opened.ownerAccountId)
+        let ownerHex = groupIdHex(opened.ownerAccountId)
+        let decision = InvitePageDecision.decide(
+            isOwn: opened.ownerAccountId == secrets.accountId,
+            established: established != nil,
+            pending: invited.contains { $0.accountIdHex == ownerHex })
+        switch decision {
+        case .own:
+            return .own
+        case .established:
+            guard let established else { return .opened(opened) }
             return .knownContact(
-                contactMessageId: existing.request.messageId, groupIdHex: existing.groupIdHex,
+                contactMessageId: established.request.messageId, groupIdHex: established.groupIdHex,
                 statedName: opened.statedName, invite: opened)
+        case .pending:
+            return .pendingInviter(accountIdHex: ownerHex, statedName: opened.statedName, invite: opened)
+        case .open:
+            return .opened(opened)
         }
-        return .opened(opened)
     }
 
     /// **Add** on the invite page (ADR-0079 sections 2 and 5, amended
@@ -1905,6 +1926,31 @@ public final class ContactsRepository: ObservableObject {
         }
         guard bound.isCurrent else { return .requiresReauth }
         guard let accountIdB64 = boundAccountIdB64 else { return .requiresReauth }
+        // 2026-10-24 — the visitor removed the inviter and the one-to-one
+        // remains: no pending contact; the inviter is put back with that
+        // conversation once the request is sent (``InviteRestoreOrder``).
+        if let liveGroupIdHex = liveOneToOne(with: invite.ownerSignaturePubkey) {
+            do {
+                let outcome = try await InviteRestoreOrder.run(
+                    consumeLive: { try await consumeInviteUse(invite, secrets: secrets) },
+                    sendRequest: { try await sendLinkAnswer(invite, secrets: secrets) },
+                    restore: {
+                        guard bound.isCurrent, boundAccountIdB64 == accountIdB64 else {
+                            throw InviteAddStop(result: .requiresReauth)
+                        }
+                        restoreRemovedContact(
+                            signatureKey: invite.ownerSignaturePubkey, accountId: invite.ownerAccountId,
+                            groupIdHex: liveGroupIdHex,
+                            nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                            createdAt: ISO8601DateFormatter().string(from: Date()))
+                    })
+                return outcome == .dead ? .dead : .restored(groupIdHex: liveGroupIdHex)
+            } catch let stop as InviteAddStop {
+                return stop.result
+            } catch {
+                return .failed(message: (error as? LocalizedError)?.errorDescription ?? "request send failed")
+            }
+        }
         let contact = PendingContact(
             accountIdHex: groupIdHex(invite.ownerAccountId),
             signaturePubkey: invite.ownerSignaturePubkey,
@@ -1969,7 +2015,7 @@ public final class ContactsRepository: ObservableObject {
             case .requiresReauth: return .requiresReauth
             case .failed(let message): return .failed(message: message)
             case .dead: return .dead
-            case .added: return .sent
+            case .added, .restored: return .sent
             }
         } catch {
             return .failed(message: (error as? LocalizedError)?.errorDescription ?? "request send failed")
@@ -2350,6 +2396,11 @@ public enum InviteOpenResult: Equatable {
     /// whose answer Open chat still delivers (amended 2026-10-24).
     case knownContact(
         contactMessageId: Int64, groupIdHex: String?, statedName: String?, invite: OpenedInvite? = nil)
+    /// The visitor already pressed Add on one of the inviter's links and
+    /// waits for the answer (a pending contact for the owner's account): the
+    /// page says they are contacts and Open chat opens the waiting chat,
+    /// sending nothing (2026-10-24).
+    case pendingInviter(accountIdHex: String, statedName: String?, invite: OpenedInvite? = nil)
     case rateLimited
     case requiresReauth
     case failed(message: String)
@@ -2378,6 +2429,9 @@ public enum KnownContactAnswerResult: Equatable {
 public enum InviteAddResult: Equatable {
     /// The inviter is a pending contact now; the page closes into the chat.
     case added(PendingContact)
+    /// The inviter, removed earlier, is a contact again with the one-to-one
+    /// that remained; the page closes into it (2026-10-24).
+    case restored(groupIdHex: String)
     /// Used up or gone since the page opened.
     case dead
     case rateLimited

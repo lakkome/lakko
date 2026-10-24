@@ -132,6 +132,44 @@ class PendingContactsTest {
         assertEquals("offline", thrown?.message)
     }
 
+    /** UX section 3 (amended 2026-10-24): own > established > pending > default. */
+    @Test
+    fun `the invite page is the own link, then a contact, then a pending one, then Add`() {
+        assertEquals(InvitePageKind.OWN, invitePageKind(isOwn = true, established = true, pendingInviter = true))
+        assertEquals(InvitePageKind.ALREADY, invitePageKind(isOwn = false, established = true, pendingInviter = true))
+        assertEquals(InvitePageKind.PENDING, invitePageKind(isOwn = false, established = false, pendingInviter = true))
+        assertEquals(InvitePageKind.DEFAULT, invitePageKind(isOwn = false, established = false, pendingInviter = false))
+    }
+
+    @Test
+    fun `a pending inviter's page opens the waiting chat and carries nothing to send`() {
+        val state = InviteLandingViewModel.stateFor(InviteOpenResult.PendingInviter("ab", "Anna"))
+        assertEquals(InviteLandingState.AlreadyContacts(InviteChatTarget.Pending("ab"), "Anna"), state)
+        assertNull((state as InviteLandingState.AlreadyContacts).invite)
+    }
+
+    @Test
+    fun `Add to a removed inviter sends before it restores and writes nothing pending`() = kotlinx.coroutines.runBlocking {
+        val log = mutableListOf<String>()
+        assertEquals(
+            InviteRestoreOrder.Outcome.RESTORED,
+            InviteRestoreOrder.run({ log += "consume"; true }, { log += "send" }, { log += "restore" }),
+        )
+        assertEquals(listOf("consume", "send", "restore"), log)
+        log.clear()
+        assertEquals(
+            InviteRestoreOrder.Outcome.DEAD,
+            InviteRestoreOrder.run({ log += "consume"; false }, { log += "send" }, { log += "restore" }),
+        )
+        assertEquals(listOf("consume"), log)
+        log.clear()
+        val thrown = runCatching {
+            InviteRestoreOrder.run({ log += "consume"; true }, { log += "send"; error("offline") }, { log += "restore" })
+        }.exceptionOrNull()
+        assertEquals("offline", thrown?.message)
+        assertEquals(listOf("consume", "send"), log)
+    }
+
     @Test
     fun `a second Add keeps the first Add time`() {
         val list = PendingContacts.adding(

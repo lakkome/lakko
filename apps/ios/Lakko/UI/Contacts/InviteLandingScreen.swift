@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import SwiftUI
 
 /// The invite page (ADR-0079, `docs/ux/contact-invite-link.md` section 3): the
@@ -256,11 +257,46 @@ public final class InviteLandingViewModel: ObservableObject {
     private let repository: ContactsRepository
     private let intake: InviteIntake
     private var didOpen = false
+    /// The link as last opened, decided again when the lists change.
+    private var opened: OpenedInvite?
+    private var cancellables: Set<AnyCancellable> = []
 
     public init(slug: String, repository: ContactsRepository, intake: InviteIntake) {
         self.slug = slug
         self.repository = repository
         self.intake = intake
+        // The contact list and the pending contacts can change while the page
+        // is open (the inviter's answer to an earlier Add lands): the page's
+        // decision is read again then, from this device's lists alone. Read
+        // on the next run-loop pass, once `@Published` has stored the value.
+        repository.$state.map(\.accepted).removeDuplicates().map { _ in () }
+            .merge(with: repository.$invited.removeDuplicates().map { _ in () })
+            .dropFirst(2)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] in self?.decideAgain() }
+            .store(in: &cancellables)
+    }
+
+    /// The page's state for the opened link again, when nothing runs on it.
+    /// A change of kind replaces the page; the same kind keeps its line.
+    private func decideAgain() {
+        guard let opened, chatToOpen == nil else { return }
+        switch state {
+        case .ready(_, adding: false, _), .alreadyContacts(_, _, _, false, _): break
+        default: return
+        }
+        let next = Self.state(for: repository.inviteOpenResult(for: opened))
+        if Self.kind(of: next) != Self.kind(of: state) { state = next }
+    }
+
+    /// What tells two page states apart for ``decideAgain()``: the case, and
+    /// for "already" where Open chat goes.
+    private static func kind(of state: State) -> String {
+        switch state {
+        case .ready: return "ready"
+        case .alreadyContacts(let target, _, _, _, _): return "already:\(target)"
+        default: return "\(state)"
+        }
     }
 
     /// What the page shows for each result of opening the link.
@@ -273,6 +309,10 @@ public final class InviteLandingViewModel: ObservableObject {
             let target: ChatTarget = groupIdHex.map { .conversation(groupIdHex: $0) }
                 ?? .contact(messageId: messageId)
             return .alreadyContacts(target, statedName: statedName, invite: invite)
+        case .pendingInviter(let accountIdHex, let statedName, _):
+            // The same page as an established contact; Open chat opens the
+            // waiting chat and sends nothing (no link to answer here).
+            return .alreadyContacts(.pending(accountIdHex: accountIdHex), statedName: statedName)
         case .rateLimited: return .rateLimited
         case .requiresReauth: return .requiresReauth
         case .failed: return .openFailed
@@ -295,6 +335,11 @@ public final class InviteLandingViewModel: ObservableObject {
     private func load() async {
         let result = await repository.openInviteLink(slug: slug)
         if case .failed(let message) = result { NSLog("[invite] open failed: \(message)") }
+        switch result {
+        case .opened(let invite): opened = invite
+        case .knownContact(_, _, _, let invite), .pendingInviter(_, _, let invite): opened = invite
+        default: opened = nil
+        }
         state = Self.state(for: result)
     }
 
@@ -310,6 +355,8 @@ public final class InviteLandingViewModel: ObservableObject {
         switch result {
         case .added(let contact):
             chatToOpen = .pending(accountIdHex: contact.accountIdHex)
+        case .restored(let groupIdHex):
+            chatToOpen = .conversation(groupIdHex: groupIdHex)
         case .dead:
             state = .dead
         case .rateLimited:

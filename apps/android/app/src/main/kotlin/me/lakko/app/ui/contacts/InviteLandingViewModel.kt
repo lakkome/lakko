@@ -9,6 +9,9 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.lakko.app.contacts.ContactsRepository
@@ -43,8 +46,39 @@ public class InviteLandingViewModel(
      *  that chat. */
     public val chatToOpen: StateFlow<InviteChatTarget?> = mutableChatToOpen.asStateFlow()
 
+    /** The link as last opened, so the page can be decided again without
+     *  fetching it again. */
+    private var opened: OpenedInvite? = null
+
     init {
         load()
+        // The contact list or the pending contacts can change while the page
+        // is open (the inviter's answer to an earlier Add lands): the page's
+        // decision is read again then (amended 2026-10-24).
+        viewModelScope.launch {
+            combine(repo.state.map { it.accepted }.distinctUntilChanged(), repo.invited) { _, _ -> }
+                .collect { reevaluate() }
+        }
+    }
+
+    /** Decide the page again over the link already opened. Never while Add or
+     *  Open chat runs: their own writes would flip the page under them. */
+    private fun reevaluate() {
+        val link = opened ?: return
+        val current = mutableState.value
+        when (current) {
+            is InviteLandingState.Ready -> if (current.adding) return
+            is InviteLandingState.AlreadyContacts -> if (current.answering) return
+            else -> return
+        }
+        val next = stateFor(repo.classifyOpenedInvite(link))
+        val same = when {
+            current is InviteLandingState.Ready && next is InviteLandingState.Ready -> true
+            current is InviteLandingState.AlreadyContacts && next is InviteLandingState.AlreadyContacts ->
+                current.target == next.target
+            else -> false
+        }
+        if (!same) mutableState.value = next
     }
 
     /** Open again after a refusal or a network failure. */
@@ -64,6 +98,12 @@ public class InviteLandingViewModel(
             }
             if (result is InviteOpenResult.Failed) {
                 android.util.Log.w("LakkoInvite", "WARN open invite failed")
+            }
+            opened = when (result) {
+                is InviteOpenResult.Opened -> result.invite
+                is InviteOpenResult.KnownContact -> result.invite
+                is InviteOpenResult.PendingInviter -> result.invite
+                else -> null
             }
             mutableState.value = stateFor(result)
         }
@@ -86,6 +126,8 @@ public class InviteLandingViewModel(
             when (result) {
                 is InviteAddResult.Added ->
                     mutableChatToOpen.value = InviteChatTarget.Pending(result.contact.accountIdHex)
+                is InviteAddResult.Restored ->
+                    mutableChatToOpen.value = InviteChatTarget.Conversation(result.groupIdHex)
                 InviteAddResult.Dead -> mutableState.value = InviteLandingState.Dead
                 InviteAddResult.RateLimited -> mutableState.value = current.copy(adding = false, failed = true)
                 InviteAddResult.RequiresReauth -> mutableState.value = InviteLandingState.RequiresReauth
@@ -150,6 +192,13 @@ public class InviteLandingViewModel(
                     ?: InviteChatTarget.Contact(result.routeKey),
                 statedName = result.statedName,
                 invite = result.invite,
+            )
+            // The waiting chat; nothing is sent from it (no invite on the
+            // state), since a request on a second link could give the two a
+            // second one-to-one.
+            is InviteOpenResult.PendingInviter -> InviteLandingState.AlreadyContacts(
+                target = InviteChatTarget.Pending(result.accountIdHex),
+                statedName = result.statedName,
             )
             InviteOpenResult.RateLimited -> InviteLandingState.RateLimited
             InviteOpenResult.RequiresReauth -> InviteLandingState.RequiresReauth

@@ -66,6 +66,13 @@ describe("invitePageView (docs/ux/contact-invite-link.md section 3)", () => {
     });
   });
 
+  it("tells a visitor who already added the inviter and waits for the answer that they are contacts (2026-10-24)", () => {
+    expect(invitePageView({ ...base, pendingInviter: true })).toEqual({ kind: "pending", name: "Anna" });
+    // An established contact row comes first; the own link before both.
+    expect(invitePageView({ ...base, pendingInviter: true, existingContactKeyB64: "a2V5" }).kind).toBe("already");
+    expect(invitePageView({ ...base, pendingInviter: true, isOwn: true }).kind).toBe("own");
+  });
+
   it("passes loading and rate-limited through", () => {
     expect(invitePageView({ ...base, link: "loading" })).toEqual({ kind: "loading" });
     expect(invitePageView({ ...base, link: "rate-limited" })).toEqual({ kind: "rate-limited" });

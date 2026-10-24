@@ -73,6 +73,21 @@ a live one-to-one with is not a new contact: each of A's devices puts B back
 on its contact list with that conversation, founds nothing and sends nothing,
 and a live link records its use.
 
+**Already added, waiting for A** (amended 2026-10-24). B pressed Add on one of
+A's links and A's answer has not arrived (A is B's pending contact, section 4).
+Seen on the local stack: a second link from A, opened in that window, showed
+the Add page again. The page now says **Anna is already in your contacts** and
+**Open chat** opens the waiting chat; nothing is sent, because a request on a
+second link is decided apart from the first and could give the two a second
+one-to-one. The page follows the contact list while it is open, so A's answer
+landing turns it into the ordinary "already" state.
+
+**B removed A, the chat remains** (amended 2026-10-24). A's link opens the
+ordinary Add page (A is not on B's list). Add sends the request as usual but
+writes no pending contact: A's devices answer it by restoring, never by
+founding (above), so B puts A back on the list with the conversation they have
+once the request is sent, and the page opens that chat.
+
 **Own link.** Title **This is your own invite link**, body "Share it with the
 person you want to add.", one button **Done**.
 

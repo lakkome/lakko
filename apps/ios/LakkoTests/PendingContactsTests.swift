@@ -99,6 +99,61 @@ final class PendingContactsTests: XCTestCase {
         XCTAssertEqual(state, .alreadyContacts(.conversation(groupIdHex: "ab"), statedName: "Anna"))
     }
 
+    /// The invite page's order (2026-10-24): the own link before everything,
+    /// an established contact before a pending one, the default page last.
+    func testTheInvitePageDecidesOwnThenEstablishedThenPending() {
+        typealias D = InvitePageDecision
+        XCTAssertEqual(D.decide(isOwn: true, established: true, pending: true), .own)
+        XCTAssertEqual(D.decide(isOwn: true, established: false, pending: false), .own)
+        XCTAssertEqual(D.decide(isOwn: false, established: true, pending: true), .established)
+        XCTAssertEqual(D.decide(isOwn: false, established: true, pending: false), .established)
+        XCTAssertEqual(D.decide(isOwn: false, established: false, pending: true), .pending)
+        XCTAssertEqual(D.decide(isOwn: false, established: false, pending: false), .open)
+    }
+
+    /// A pending inviter reads as "already in your contacts", and Open chat
+    /// goes to the waiting chat with no link to answer.
+    @MainActor
+    func testAPendingInviterShowsTheAlreadyPageOpeningTheWaitingChat() {
+        let state = InviteLandingViewModel.state(for: .pendingInviter(
+            accountIdHex: "abcd", statedName: "Anna", invite: nil))
+        XCTAssertEqual(state, .alreadyContacts(.pending(accountIdHex: "abcd"), statedName: "Anna"))
+        guard case .alreadyContacts(_, _, let invite, _, _) = state else { return XCTFail("not already") }
+        XCTAssertNil(invite, "Open chat on a pending inviter must have nothing to send")
+    }
+
+    /// Add on an inviter the visitor removed, whose one-to-one remains: the
+    /// consume, then the request, then the restore; no pending contact.
+    @MainActor
+    func testAddOnARemovedInviterRestoresOnlyOnceTheRequestIsSent() async throws {
+        var log: [String] = []
+        let restored = try await InviteRestoreOrder.run(
+            consumeLive: { log.append("consume"); return true },
+            sendRequest: { log.append("send") },
+            restore: { log.append("restore") })
+        XCTAssertEqual(restored, .restored)
+        XCTAssertEqual(log, ["consume", "send", "restore"])
+
+        log = []
+        let dead = try await InviteRestoreOrder.run(
+            consumeLive: { log.append("consume"); return false },
+            sendRequest: { log.append("send") },
+            restore: { log.append("restore") })
+        XCTAssertEqual(dead, .dead)
+        XCTAssertEqual(log, ["consume"])
+
+        struct Offline: Error {}
+        log = []
+        do {
+            _ = try await InviteRestoreOrder.run(
+                consumeLive: { log.append("consume"); return true },
+                sendRequest: { log.append("send"); throw Offline() },
+                restore: { log.append("restore") })
+            XCTFail("the send failure propagates")
+        } catch is Offline {}
+        XCTAssertEqual(log, ["consume", "send"], "a failed send changes nothing")
+    }
+
     /// ADR-0079 amendment of 2026-10-19 — only a refusal signed by the key
     /// the link named, over that link and this account, cancels a pending
     /// contact (through the core).

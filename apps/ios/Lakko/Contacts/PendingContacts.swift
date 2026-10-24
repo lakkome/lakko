@@ -244,3 +244,49 @@ public enum KnownContactAnswerOrder {
         return .sent
     }
 }
+
+/// **Add** on a contact invite page when the visitor removed the inviter from
+/// their contacts and the one-to-one remains (`docs/ux/contact-invite-link.md`
+/// section 3, "B removed A, the chat remains"; 2026-10-24). The inviter's
+/// device answers such a request by restoring, never by founding, so no
+/// pending contact is written: it would wait for an answer that is never
+/// sent. The ledger consume first (a dead link keeps nothing and sends
+/// nothing); then the request; only once it is sent the inviter is put back
+/// on the list with that one-to-one. A send failure leaves nothing changed.
+@MainActor
+public enum InviteRestoreOrder {
+    /// How Add ended.
+    public enum Outcome: Equatable { case restored, dead }
+
+    public static func run(
+        consumeLive: () async throws -> Bool,
+        sendRequest: () async throws -> Void,
+        restore: () throws -> Void
+    ) async throws -> Outcome {
+        guard try await consumeLive() else { return .dead }
+        try await sendRequest()
+        try restore()
+        return .restored
+    }
+}
+
+/// What the invite page shows once the link opened
+/// (`docs/ux/contact-invite-link.md` section 3): the visitor's own link wins
+/// over everything; an established contact over a pending one (2026-10-24:
+/// the visitor already pressed Add on one of the inviter's links and waits
+/// for the answer, so the inviter already is their contact and nothing is
+/// sent again); otherwise the default page with Add. Pure. Mirror of web
+/// `invitePageView`.
+public enum InvitePageDecision: Equatable {
+    case own
+    case established
+    case pending
+    case open
+
+    public static func decide(isOwn: Bool, established: Bool, pending: Bool) -> InvitePageDecision {
+        if isOwn { return .own }
+        if established { return .established }
+        if pending { return .pending }
+        return .open
+    }
+}

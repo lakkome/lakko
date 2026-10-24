@@ -295,3 +295,63 @@ public object KnownContactAnswerOrder {
         return Outcome.SENT
     }
 }
+
+/** Which invite page an opened link shows a signed-in visitor (UX section 3). */
+public enum class InvitePageKind {
+    /** The link is this account's own. */
+    OWN,
+
+    /** The inviter is an established contact: Open chat. */
+    ALREADY,
+
+    /** The visitor already pressed Add on one of the inviter's links and the
+     *  answer has not arrived: the same "already in your contacts" title, and
+     *  Open chat opens the waiting chat and sends nothing (amended
+     *  2026-10-24). */
+    PENDING,
+
+    /** The ordinary page with Add. */
+    DEFAULT,
+}
+
+/**
+ * The page for an opened link, in the order the UX spec fixes: the own link
+ * first, then an established contact, then a pending one, then the ordinary
+ * page. Mirror of the web `invitePageView`.
+ */
+public fun invitePageKind(isOwn: Boolean, established: Boolean, pendingInviter: Boolean): InvitePageKind =
+    when {
+        isOwn -> InvitePageKind.OWN
+        established -> InvitePageKind.ALREADY
+        pendingInviter -> InvitePageKind.PENDING
+        else -> InvitePageKind.DEFAULT
+    }
+
+/**
+ * **Add** on the invite page of an inviter the visitor removed while their
+ * one-to-one remains (`docs/ux/contact-invite-link.md` section 3, amended
+ * 2026-10-24), with the steps passed in so the order is unit-tested:
+ *
+ *  1. the ledger's consume: a dead link changes nothing;
+ *  2. the request carrying the link answer, with NO pending contact written:
+ *     the inviter's devices answer it by restoring, never by founding, so a
+ *     pending contact would wait for an answer that never comes; a failure
+ *     propagates and nothing has changed;
+ *  3. only after the send, the inviter is put back on the list with that
+ *     one-to-one.
+ */
+public object InviteRestoreOrder {
+    /** How Add ended. */
+    public enum class Outcome { RESTORED, DEAD }
+
+    public suspend inline fun run(
+        consumeLive: suspend () -> Boolean,
+        sendRequest: suspend () -> Unit,
+        restore: () -> Unit,
+    ): Outcome {
+        if (!consumeLive()) return Outcome.DEAD
+        sendRequest()
+        restore()
+        return Outcome.RESTORED
+    }
+}

@@ -2015,7 +2015,6 @@ public class ContactsRepository(
             if (!capability.isValidNow(System.currentTimeMillis().toULong())) return@use InviteOpenResult.Dead
             val ownerAccountId = capability.ownerAccountId()
             if (ownerAccountId.contentEquals(secrets.accountId)) return@use InviteOpenResult.Own
-            val statedName = PendingContacts.statedName(capability.inviterDisplayName(), capability.inviterUsername())
             val opened = OpenedInvite(
                 blobId = blobId,
                 capabilityBytes = capability.wire(),
@@ -2029,17 +2028,41 @@ public class ContactsRepository(
                 username = capability.inviterUsername(),
                 label = capability.label(),
             )
-            // ADR-0073 R.7 case 1 / UX 16.6 — "already a contact" is the pin or
-            // a verified binding naming the row's own key.
-            establishedContact(ownerAccountId)?.let { existing ->
-                return@use InviteOpenResult.KnownContact(
+            classifyOpenedInvite(opened)
+        }
+    }
+
+    /**
+     * The page an opened link shows now ([invitePageKind]): the own link,
+     * an established contact, a pending one, or the ordinary page. Local
+     * reads only, so the page asks again whenever the contact list or the
+     * pending contacts change while it is open (the inviter's answer to an
+     * earlier Add landing).
+     */
+    public fun classifyOpenedInvite(invite: OpenedInvite): InviteOpenResult {
+        val ownAccountId = authRepo.identitySecrets.value?.accountId
+        val isOwn = ownAccountId != null && invite.ownerAccountId.contentEquals(ownAccountId)
+        // ADR-0073 R.7 case 1 / UX 16.6 — "already a contact" is the pin or
+        // a verified binding naming the row's own key.
+        val established = if (isOwn) null else establishedContact(invite.ownerAccountId)
+        val ownerHex = me.lakko.app.ds.hexOf(invite.ownerAccountId)
+        return when (invitePageKind(isOwn, established != null, pendingContact(ownerHex) != null)) {
+            InvitePageKind.OWN -> InviteOpenResult.Own
+            InvitePageKind.ALREADY -> {
+                val existing = established ?: return InviteOpenResult.Opened(invite)
+                InviteOpenResult.KnownContact(
                     routeKey = base64UrlEncodeNoPad(existing.request.fromPubkey),
                     groupIdHex = existing.groupIdHex,
-                    statedName = statedName,
-                    invite = opened,
+                    statedName = invite.statedName,
+                    invite = invite,
                 )
             }
-            InviteOpenResult.Opened(opened)
+            InvitePageKind.PENDING -> InviteOpenResult.PendingInviter(
+                accountIdHex = ownerHex,
+                statedName = invite.statedName,
+                invite = invite,
+            )
+            InvitePageKind.DEFAULT -> InviteOpenResult.Opened(invite)
         }
     }
 
@@ -2083,6 +2106,51 @@ public class ContactsRepository(
             addedAtMs = System.currentTimeMillis(),
             linkIdHex = me.lakko.app.ds.hexOf(invite.linkId),
         )
+        // A live one-to-one with the inviter, when the visitor removed them
+        // and the conversation remains (amended 2026-10-24): the inviter's
+        // devices answer such a request by restoring, never by founding, so
+        // nothing is pending; the inviter is put back once the request is
+        // sent, and the page opens that chat.
+        val liveGroupIdHex = withContext(Dispatchers.Default) { chatRepo?.liveOneToOneWith(invite.ownerSignaturePubkey) }
+        if (liveGroupIdHex != null) {
+            val restored = try {
+                InviteRestoreOrder.run(
+                    consumeLive = {
+                        val consumed = try {
+                            consumeInviteUse(invite, secrets.accountId)
+                        } catch (e: Throwable) {
+                            me.lakko.app.rethrowIfCancelled(e)
+                            if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return InviteAddResult.RateLimited
+                            if (me.lakko.app.anon.isAnonTokenQuotaExhausted(e)) return InviteAddResult.RateLimited
+                            return InviteAddResult.Failed(message = e.message ?: "consume failed")
+                        }
+                        consumed !is me.lakko.app.discovery.ConsumeInviteResult.Exhausted &&
+                            consumed !is me.lakko.app.discovery.ConsumeInviteResult.NotFound
+                    },
+                    sendRequest = {
+                        if (!bound.isCurrent) return InviteAddResult.RequiresReauth
+                        sendLinkAnswer(invite, secrets)
+                    },
+                    restore = {
+                        if (!bound.isCurrent) return InviteAddResult.RequiresReauth
+                        restoreRemovedContact(
+                            signatureKey = invite.ownerSignaturePubkey,
+                            accountId = invite.ownerAccountId,
+                            groupIdHex = liveGroupIdHex,
+                            nowMs = System.currentTimeMillis().toULong(),
+                            createdAt = java.time.Instant.now().toString(),
+                        )
+                    },
+                )
+            } catch (e: Throwable) {
+                me.lakko.app.rethrowIfCancelled(e)
+                return InviteAddResult.Failed(message = e.message ?: "request send failed")
+            }
+            return when (restored) {
+                InviteRestoreOrder.Outcome.DEAD -> InviteAddResult.Dead
+                InviteRestoreOrder.Outcome.RESTORED -> InviteAddResult.Restored(liveGroupIdHex)
+            }
+        }
         val outcome = try {
             InviteAddOrder.run(
                 // The ledger's soft use count. Used before by this account:
@@ -3298,6 +3366,16 @@ public sealed interface InviteOpenResult {
         val invite: OpenedInvite? = null,
     ) : InviteOpenResult
 
+    /** The visitor already pressed Add on one of the inviter's links and the
+     *  answer has not arrived (amended 2026-10-24): "already in your
+     *  contacts", and Open chat opens the waiting chat and sends nothing.
+     *  [invite] is kept so the page can ask again when the lists change. */
+    public data class PendingInviter(
+        val accountIdHex: String,
+        val statedName: String?,
+        val invite: OpenedInvite? = null,
+    ) : InviteOpenResult
+
     public data object RateLimited : InviteOpenResult
     public data object RequiresReauth : InviteOpenResult
     public data class Failed(val message: String) : InviteOpenResult
@@ -3307,6 +3385,10 @@ public sealed interface InviteOpenResult {
 public sealed interface InviteAddResult {
     /** The inviter is a pending contact now; the page closes into the chat. */
     public data class Added(val contact: PendingContact) : InviteAddResult
+
+    /** A removed inviter is back on the list with the live one-to-one
+     *  [groupIdHex] (amended 2026-10-24); the page closes into that chat. */
+    public data class Restored(val groupIdHex: String) : InviteAddResult
 
     /** Used up or gone since the page opened. */
     public data object Dead : InviteAddResult

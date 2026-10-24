@@ -15,7 +15,15 @@
  * | signed in   | does not open / expired / gone | `dead`         |
  * | signed in   | opens, made by this account    | `own`          |
  * | signed in   | opens, inviter a contact       | `already`      |
+ * | signed in   | opens, inviter added, waiting  | `pending`      |
  * | signed in   | opens                          | `default`      |
+ *
+ * `pending` (2026-10-24): the visitor already pressed Add on one of the
+ * inviter's links and the inviter's answer has not arrived. By ADR-0079
+ * section 5 the inviter already is their contact, so the page says so and
+ * Open chat opens the waiting chat; nothing is sent, since a second request
+ * on another link would be decided apart from the first and could give the
+ * two a second one-to-one.
  *
  * Amended 2026-10-19 (ADR-0079): a signed-out visitor sees no inviter card at
  * all, only the sign-in screen, and the link is checked again once signed in;
@@ -36,6 +44,7 @@ export type InvitePageView =
   | { readonly kind: "sign-in" }
   | { readonly kind: "own" }
   | { readonly kind: "already"; readonly name: string | null; readonly contactKeyB64: string }
+  | { readonly kind: "pending"; readonly name: string | null }
   | {
       readonly kind: "default";
       readonly name: string | null;
@@ -69,6 +78,9 @@ export interface InvitePageInput {
   /** The visitor's contact row for the inviter, when the inviter already is
    *  one. */
   readonly existingContactKeyB64: string | null;
+  /** The visitor already added the inviter through a link and waits for
+   *  their answer (a pending contact for the link owner's account). */
+  readonly pendingInviter?: boolean;
 }
 
 /** The page's state for `input`. Pure. */
@@ -85,6 +97,7 @@ export function invitePageView(input: InvitePageInput): InvitePageView {
   if (input.existingContactKeyB64 !== null) {
     return { kind: "already", name, contactKeyB64: input.existingContactKeyB64 };
   }
+  if (input.pendingInviter === true) return { kind: "pending", name };
   return { kind: "default", name, username, label };
 }
 
