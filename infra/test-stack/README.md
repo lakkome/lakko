@@ -91,6 +91,19 @@ Optional SFU switches, set by hand in `/etc/lakko-test/lakko.env` and followed b
   coturn branch passes through a `127.0.0.1:5350` stream server that strips the header
   (coturn does not accept it). Without this every client appears as `127.0.0.1` and shares
   one discovery rate-limit bucket.
+- The `127.0.0.1:5350` hop connects to coturn from the public IPv4 (`proxy_bind`), not from
+  `127.0.0.1`: coturn reports the address it sees back to the client as its mapped address,
+  and Firefox drops a TURN allocation whose mapped address is a loopback one. Measured
+  2026-10-24: Firefox gathered no relay candidate through `turns:edge.lakko.me:443` until
+  this, while Chromium and WebKit did. coturn still sees one address for every TLS client
+  on 443, so its per-address limits do not tell those clients apart.
+- Two coturn instances share the host: `coturn` (`/etc/turnserver.conf`, edge.lakko.me, TCP
+  and TLS only) and `coturn2` (`/etc/turnserver2.conf`, edge2.lakko.me, UDP only). Both
+  names share the IPv4 address; their IPv6 addresses (`::ed6e`, `::ed62`, also in each
+  config's `relay-ip` / `external-ip`) are added to `eth0` by `/etc/netplan/60-lakko-edge.yaml`.
+  They were missing until 2026-10-24, so nothing answered on either AAAA record. STUN over
+  IPv6 answers on edge2's address only (UDP there is `coturn2`'s); clients take STUN from
+  the UDP TURN URI alone, which names edge2.
 - nginx 1.18 knows no `.wasm` MIME type; the vhost sets `application/wasm` itself.
 - coturn loads its certificate only at startup. `/etc/letsencrypt/renewal-hooks/deploy/lakko-reload.sh`
   restarts the matching coturn after a renewal and reloads nginx.
