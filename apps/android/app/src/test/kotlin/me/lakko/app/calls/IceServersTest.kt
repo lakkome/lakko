@@ -14,11 +14,26 @@ import org.junit.Test
 class IceServersTest {
 
     @Test
-    fun `takes the host and port of each turn URI, without its transport`() {
+    fun `takes the host and port of each UDP turn URI, without its transport`() {
         assertEquals(
             listOf("stun:edge2.lakko.me:3478"),
             IceServers.stunUrlsFromTurn(
-                listOf("turn:edge2.lakko.me:3478?transport=tcp", "turn:edge2.lakko.me:3478?transport=udp"),
+                listOf("turn:edge2.lakko.me:3478?transport=udp", "turn:edge2.lakko.me:3478"),
+            ),
+        )
+    }
+
+    @Test
+    fun `gives nothing for a turn URI over TCP, whose host may accept no UDP`() {
+        assertEquals(
+            listOf("stun:edge2.lakko.me:3478"),
+            IceServers.stunUrlsFromTurn(
+                listOf(
+                    "turn:edge2.lakko.me:3478?transport=udp",
+                    "turn:edge.lakko.me:3478?transport=tcp",
+                    "turn:edge.lakko.me:3478?TRANSPORT=TCP",
+                    "turns:edge.lakko.me:443?transport=tcp",
+                ),
             ),
         )
     }
@@ -50,12 +65,12 @@ class IceServersTest {
 
     @Test
     fun `is STUN on the TURN host then the TURN entry, and nothing on google`() {
-        val turn = TurnCredential(listOf("turn:edge2.lakko.me:3478?transport=tcp"), "u", "c")
+        val turn = TurnCredential(listOf("turn:edge2.lakko.me:3478?transport=udp"), "u", "c")
         val servers = IceServers.forTurn(turn)
         assertEquals(
             listOf(
                 IceServers.Entry(listOf("stun:edge2.lakko.me:3478")),
-                IceServers.Entry(listOf("turn:edge2.lakko.me:3478?transport=tcp"), "u", "c"),
+                IceServers.Entry(listOf("turn:edge2.lakko.me:3478?transport=udp"), "u", "c"),
             ),
             servers,
         )
@@ -67,6 +82,15 @@ class IceServersTest {
         val turn = TurnCredential(listOf("turns:edge2.lakko.me:5349"), "u", "c")
         assertEquals(
             listOf(IceServers.Entry(listOf("turns:edge2.lakko.me:5349"), "u", "c")),
+            IceServers.forTurn(turn),
+        )
+    }
+
+    @Test
+    fun `a TURN entry with no UDP turn URI stands alone`() {
+        val turn = TurnCredential(listOf("turn:edge.lakko.me:3478?transport=tcp", "turns:edge.lakko.me:443"), "u", "c")
+        assertEquals(
+            listOf(IceServers.Entry(listOf("turn:edge.lakko.me:3478?transport=tcp", "turns:edge.lakko.me:443"), "u", "c")),
             IceServers.forTurn(turn),
         )
     }

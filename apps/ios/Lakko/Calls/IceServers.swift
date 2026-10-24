@@ -12,11 +12,15 @@ import WebRTC
 /// network address and when they called. The rule now:
 ///
 ///   - the TURN entry `services/auth` mints with the call admission, as given;
-///   - a STUN entry on the host and port of each of its `turn:` URIs, since
-///     Lakko's coturn answers STUN there (measured on the test stack
-///     2026-10-24: a binding request to edge2.lakko.me:3478 got a success
-///     response). `turns:` URIs give none: STUN is UDP, and TLS is another
-///     port;
+///   - a STUN entry on the host and port of each of its UDP `turn:` URIs
+///     (`transport=udp`, or no transport named), since Lakko's coturn answers
+///     STUN there. A WebRTC client sends STUN to a server over UDP only, so a
+///     `turn:` URI with `transport=tcp` and a `turns:` URI give none: their
+///     host may accept no UDP at all. The test stack runs two coturn
+///     instances: edge2.lakko.me takes UDP only, edge.lakko.me takes TCP and
+///     TLS only. Measured 2026-10-24 in Chromium with UDP forbidden: STUN
+///     gave no candidate, and a call connected through TURN over TCP
+///     (edge.lakko.me:3478) and over TLS (edge.lakko.me:443);
 ///   - nothing else. Without a TURN entry (no TURN configured, or minting
 ///     failed) the list is empty: host candidates only. A group call still
 ///     connects then, since the SFU learns the person's outside address from
@@ -42,20 +46,31 @@ enum IceServers {
         }
     }
 
-    /// The STUN URLs on the hosts of `turn:` URIs: `stun:host:port`, the port
-    /// 3478 when the URI names none, each host and port once. Pure.
+    /// The STUN URLs on the hosts of UDP `turn:` URIs: `stun:host:port`, the
+    /// port 3478 when the URI names none, each host and port once. Pure.
     static func stunUrls(fromTurn urls: [String]) -> [String] {
         var out: [String] = []
         for url in urls {
             guard url.lowercased().hasPrefix("turn:") else { continue }
             let afterScheme = url.dropFirst("turn:".count)
-            let rest = afterScheme.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-                .first.map(String.init) ?? ""
-            guard let hostPort = parseHostPort(rest) else { continue }
+            let parts = afterScheme.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+            let rest = parts.first.map(String.init) ?? ""
+            let query = parts.count > 1 ? String(parts[1]) : ""
+            guard isUdpQuery(query), let hostPort = parseHostPort(rest) else { continue }
             let stun = "stun:\(hostPort.host):\(hostPort.port)"
             if !out.contains(stun) { out.append(stun) }
         }
         return out
+    }
+
+    /// True when a `turn:` URI's query names no transport or `transport=udp`.
+    private static func isUdpQuery(_ query: String) -> Bool {
+        for pair in query.split(separator: "&", omittingEmptySubsequences: false) {
+            let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard kv.first?.lowercased() == "transport" else { continue }
+            return kv.count > 1 && kv[1].lowercased() == "udp"
+        }
+        return true
     }
 
     private static func parseHostPort(_ s: String) -> (host: String, port: Int)? {

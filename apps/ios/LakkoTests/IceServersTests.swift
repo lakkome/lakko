@@ -8,11 +8,23 @@ import WebRTC
 /// The call ICE-server rule (`IceServers.swift`), with the cases of the web
 /// twin `apps/web/src/calls/ice-servers.test.ts`.
 final class IceServersTests: XCTestCase {
-    func testTakesTheHostAndPortOfEachTurnUriWithoutItsTransport() {
+    func testTakesTheHostAndPortOfEachUdpTurnUriWithoutItsTransport() {
         XCTAssertEqual(
             IceServers.stunUrls(fromTurn: [
-                "turn:edge2.lakko.me:3478?transport=tcp",
                 "turn:edge2.lakko.me:3478?transport=udp",
+                "turn:edge2.lakko.me:3478",
+            ]),
+            ["stun:edge2.lakko.me:3478"]
+        )
+    }
+
+    func testGivesNothingForATurnUriOverTcp() {
+        XCTAssertEqual(
+            IceServers.stunUrls(fromTurn: [
+                "turn:edge2.lakko.me:3478?transport=udp",
+                "turn:edge.lakko.me:3478?transport=tcp",
+                "turn:edge.lakko.me:3478?TRANSPORT=TCP",
+                "turns:edge.lakko.me:443?transport=tcp",
             ]),
             ["stun:edge2.lakko.me:3478"]
         )
@@ -48,7 +60,7 @@ final class IceServersTests: XCTestCase {
 
     func testIsStunOnTheTurnHostThenTheTurnEntryAndNothingOnGoogle() {
         let turn = IceServers.Entry(
-            urls: ["turn:edge2.lakko.me:3478?transport=tcp"],
+            urls: ["turn:edge2.lakko.me:3478?transport=udp"],
             username: "u",
             credential: "c"
         )
@@ -59,6 +71,15 @@ final class IceServersTests: XCTestCase {
 
     func testATurnEntryWithOnlyTurnsUrisStandsAlone() {
         let turn = IceServers.Entry(urls: ["turns:edge2.lakko.me:5349"], username: "u", credential: "c")
+        XCTAssertEqual(IceServers.entries(for: turn), [turn])
+    }
+
+    func testATurnEntryWithNoUdpTurnUriStandsAlone() {
+        let turn = IceServers.Entry(
+            urls: ["turn:edge.lakko.me:3478?transport=tcp", "turns:edge.lakko.me:443"],
+            username: "u",
+            credential: "c"
+        )
         XCTAssertEqual(IceServers.entries(for: turn), [turn])
     }
 
@@ -83,7 +104,7 @@ final class IceServersTests: XCTestCase {
     @MainActor
     func testResolveCarriesTheMintedCredentialOnTheTurnRowOnly() async throws {
         let credential = try XCTUnwrap(TurnCredential(wire: TurnCredentialWire(
-            urls: ["turn:edge2.lakko.me:3478?transport=tcp"],
+            urls: ["turn:edge2.lakko.me:3478?transport=udp"],
             username: "user-x",
             password: "secret-y"
         )))
@@ -92,7 +113,7 @@ final class IceServersTests: XCTestCase {
         XCTAssertEqual(servers[0].urlStrings, ["stun:edge2.lakko.me:3478"])
         XCTAssertNil(servers[0].username)
         XCTAssertNil(servers[0].credential)
-        XCTAssertEqual(servers[1].urlStrings, ["turn:edge2.lakko.me:3478?transport=tcp"])
+        XCTAssertEqual(servers[1].urlStrings, ["turn:edge2.lakko.me:3478?transport=udp"])
         XCTAssertEqual(servers[1].username, "user-x")
         XCTAssertEqual(servers[1].credential, "secret-y")
     }

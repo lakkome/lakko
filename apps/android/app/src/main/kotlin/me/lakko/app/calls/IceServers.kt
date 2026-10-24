@@ -14,11 +14,15 @@ import org.webrtc.PeerConnection
  * the same as the web client's `ice-servers.ts` and iOS `IceServers.swift`:
  *
  *   - the TURN entry `services/auth` mints with the call admission, as given;
- *   - a STUN entry on the host and port of each of its `turn:` URIs, since
- *     Lakko's coturn answers STUN there (measured on the test stack
- *     2026-10-24: a binding request to edge2.lakko.me:3478 got a success
- *     response). `turns:` URIs give none: STUN is UDP, and TLS is another
- *     port;
+ *   - a STUN entry on the host and port of each of its UDP `turn:` URIs
+ *     (`transport=udp`, or no transport named), since Lakko's coturn answers
+ *     STUN there. A WebRTC client sends STUN to a server over UDP only, so a
+ *     `turn:` URI with `transport=tcp` and a `turns:` URI give none: their
+ *     host may accept no UDP at all. The test stack runs two coturn
+ *     instances: edge2.lakko.me takes UDP only, edge.lakko.me takes TCP and
+ *     TLS only. Measured 2026-10-24 in Chromium with UDP forbidden: STUN
+ *     gave no candidate, and a call connected through TURN over TCP
+ *     (edge.lakko.me:3478) and over TLS (edge.lakko.me:443);
  *   - nothing else. Without a TURN entry (no TURN configured, or minting
  *     failed) the list is empty: host candidates only. A group call still
  *     connects then, since the SFU learns the person's outside address from
@@ -41,18 +45,28 @@ internal object IceServers {
         override fun toString(): String = "Entry(urls=$urls)"
     }
 
-    /** The STUN URLs on the hosts of `turn:` URIs: `stun:host:port`, the port
-     *  3478 when the URI names none, each host and port once. */
+    /** The STUN URLs on the hosts of UDP `turn:` URIs: `stun:host:port`, the
+     *  port 3478 when the URI names none, each host and port once. */
     fun stunUrlsFromTurn(urls: List<String>): List<String> {
         val out = mutableListOf<String>()
         for (url in urls) {
             if (!url.lowercase().startsWith("turn:")) continue
-            val rest = url.substring("turn:".length).substringBefore('?')
-            val hostPort = parseHostPort(rest) ?: continue
+            val afterScheme = url.substring("turn:".length)
+            if (!isUdpQuery(afterScheme.substringAfter('?', ""))) continue
+            val hostPort = parseHostPort(afterScheme.substringBefore('?')) ?: continue
             val stun = "stun:${hostPort.first}:${hostPort.second}"
             if (stun !in out) out.add(stun)
         }
         return out
+    }
+
+    /** True when a `turn:` URI's query names no transport or `transport=udp`. */
+    private fun isUdpQuery(query: String): Boolean {
+        for (pair in query.split('&')) {
+            if (pair.substringBefore('=').lowercase() != "transport") continue
+            return pair.contains('=') && pair.substringAfter('=').lowercase() == "udp"
+        }
+        return true
     }
 
     private fun parseHostPort(s: String): Pair<String, Int>? {

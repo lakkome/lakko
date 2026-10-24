@@ -9,11 +9,15 @@
  * Google each person's network address and when they called. The rule now:
  *
  *   - the TURN entry `services/auth` mints with the call admission, as given;
- *   - a STUN entry on the host and port of each of its `turn:` URIs, since
- *     Lakko's coturn answers STUN there (measured on the test stack
- *     2026-10-24: a binding request to edge2.lakko.me:3478 got a success
- *     response). `turns:` URIs give none: STUN is UDP, and TLS is another
- *     port;
+ *   - a STUN entry on the host and port of each of its UDP `turn:` URIs
+ *     (`transport=udp`, or no transport named), since Lakko's coturn answers
+ *     STUN there. A WebRTC client sends STUN to a server over UDP only, so a
+ *     `turn:` URI with `transport=tcp` and a `turns:` URI give none: their
+ *     host may accept no UDP at all. The test stack runs two coturn
+ *     instances: edge2.lakko.me takes UDP only, edge.lakko.me takes TCP and
+ *     TLS only. Measured 2026-10-24 in Chromium with UDP forbidden: STUN
+ *     gave no candidate, and a call connected through TURN over TCP
+ *     (edge.lakko.me:3478) and over TLS (edge.lakko.me:443);
  *   - nothing else. Without a TURN entry (no TURN configured, or minting
  *     failed) the list is empty: host candidates only. A group call still
  *     connects then, since the SFU learns the person's outside address from
@@ -23,20 +27,31 @@
  * iOS and Android follow the same rule (`IceServers.swift`, `IceServers.kt`).
  */
 
-/** The STUN URLs on the hosts of `turn:` URIs: `stun:host:port`, the port
- *  3478 when the URI names none, each host and port once. Pure. */
+/** The STUN URLs on the hosts of UDP `turn:` URIs: `stun:host:port`, the
+ *  port 3478 when the URI names none, each host and port once. Pure. */
 export function stunUrlsFromTurn(urls: string | readonly string[]): string[] {
   const list = typeof urls === "string" ? [urls] : urls;
   const out: string[] = [];
   for (const url of list) {
     if (!url.toLowerCase().startsWith("turn:")) continue;
-    const rest = url.slice("turn:".length).split("?")[0] ?? "";
+    const [rest = "", query = ""] = url.slice("turn:".length).split("?", 2);
+    if (!isUdpQuery(query)) continue;
     const hostPort = parseHostPort(rest);
     if (hostPort === null) continue;
     const stun = `stun:${hostPort.host}:${hostPort.port}`;
     if (!out.includes(stun)) out.push(stun);
   }
   return out;
+}
+
+/** True when a `turn:` URI's query names no transport or `transport=udp`. */
+function isUdpQuery(query: string): boolean {
+  for (const pair of query.split("&")) {
+    const eq = pair.indexOf("=");
+    const key = (eq < 0 ? pair : pair.slice(0, eq)).toLowerCase();
+    if (key === "transport") return (eq < 0 ? "" : pair.slice(eq + 1)).toLowerCase() === "udp";
+  }
+  return true;
 }
 
 function parseHostPort(s: string): { host: string; port: number } | null {
