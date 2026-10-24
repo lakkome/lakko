@@ -87,7 +87,7 @@ import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js"
 import { Portal } from "solid-js/web";
 
 import { REACTION_EMOJI } from "./message-ops";
-import { messageMenuLayout, type MessageMenuLayout } from "./message-menu-placement";
+import { messageMenuLayout, SURFACE_GAP_PX, type MessageMenuLayout } from "./message-menu-placement";
 import { Icon } from "../ui/icons";
 
 /** The part of a DOM rect the anchor carries. Viewport coordinates. */
@@ -117,9 +117,7 @@ export const LONG_PRESS_MS = 500;
 /** How far a touch may drift and still be a long press rather than a scroll. */
 export const LONG_PRESS_SLOP_PX = 10;
 const MARGIN_PX = 8;
-/** Between the reaction row and the action card. Section 2 asks for "a visible
- *  gap"; the 6px the two cards used to sit apart did not read as one. */
-export const SURFACE_GAP_PX = 8;
+export { SURFACE_GAP_PX };
 
 export interface MessageMenuProps {
   anchor: MenuAnchor;

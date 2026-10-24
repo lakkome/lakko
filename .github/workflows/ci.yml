@@ -239,6 +239,19 @@ jobs:
       - name: npm run build
         # Drives wasm-pack (release) + tsc --noEmit + vite build.
         run: npm run build
+      - name: Type-check the browser tests
+        # `playwright/` is outside the app's tsconfig: its harness fell
+        # behind the components it renders and nothing reported it.
+        run: npm run typecheck:e2e
+      - name: Unit tests
+        run: npm test
+      - name: Install the Playwright browsers
+        run: npx playwright install --with-deps chromium webkit
+      - name: Browser tests
+        # Chromium and WebKit; includes the one-to-one call spec.
+        env:
+          CI: "1"
+        run: npm run test:e2e
       - name: Report bundle size
         # Phase 1.16c bundle target is < 2 MB gzipped — the report
         # is informational here so we can watch the trend, not a

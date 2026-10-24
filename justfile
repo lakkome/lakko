@@ -287,8 +287,16 @@ test-receiver-delay:
 # Both host tests of apps/shared/sframe-bridge.
 test-sframe-bridge-all: test-sframe-bridge test-receiver-delay
 
+# The web client: both type checks (the app, and the browser tests in
+# `playwright/`, which the app's tsconfig does not cover), the unit tests and
+# the browser tests (Chromium and WebKit). Needs `apps/web/wasm`
+# (`npm run build:wasm:dev`) and the Playwright browsers
+# (`npx playwright install chromium webkit`).
+web-check:
+    cd apps/web && npm run typecheck && npm run typecheck:e2e && npm test && npm run test:e2e
+
 # Everything CI does — run locally before pushing.
-ci: fmt-check lint test audit reuse fuzz-check audit-index-check spec-check log-lint
+ci: fmt-check lint test audit reuse fuzz-check audit-index-check spec-check log-lint web-check
 
 # Build for all release targets (host platform only here; cross-builds via Nix).
 build:
