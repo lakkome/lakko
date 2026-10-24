@@ -191,6 +191,9 @@ public final class WebRTCPeerConnection: NSObject {
     /// `addLocalVideoTrack(_:)` on a video-enabled call.
     internal var localVideoSender: RTCRtpSender?
 
+    /// Logged once per peer connection; see `preferVp8(on:)`.
+    private var vp8Warned = false
+
     // MARK: - Lifecycle
 
     /// Construct a peer connection.
@@ -1192,6 +1195,52 @@ public final class WebRTCPeerConnection: NSObject {
 
     // MARK: - SDP exchange
 
+    /// Tell every video transceiver to prefer VP8 and its wrapper formats
+    /// (`VideoCodecPreference`). Runs before every local description: before
+    /// `offer(for:)`, and on the answering side after the remote offer is set
+    /// (which is what creates the transceivers for the remote's m-lines) and
+    /// before `answer(for:)`. Setting the same list again is harmless.
+    ///
+    /// Reading the capabilities and the transceivers, and setting the
+    /// preferences, all block on libwebrtc's signaling thread, so they run on
+    /// `libwebrtcQueue` like every other blocking call here.
+    ///
+    /// In this binding `setCodecPreferences:` returns nothing, so a list
+    /// libwebrtc refuses is not seen here; what is seen is a factory that
+    /// offers no VP8 at all, and then every video transceiver is left as it is
+    /// and the count is logged once.
+    ///
+    /// Not covered: a receive-only video transceiver that `offer(for:)` itself
+    /// adds for `OfferToReceiveVideo` when none exists yet, which happens only
+    /// for a video offer from a device with no usable camera (the camera
+    /// track, when there is one, is added before the offer). This device sends
+    /// no video on that line, and the answering side chooses what it sends by
+    /// its own preferences.
+    private func preferVp8(on peer: RTCPeerConnection) async {
+        let factory = Self.sharedFactory
+        let unset: Int = await withCheckedContinuation { cont in
+            Self.libwebrtcQueue.async {
+                let video = peer.transceivers.filter { $0.mediaType == .video }
+                if video.isEmpty { cont.resume(returning: 0); return }
+                let capabilities = factory
+                    .rtpReceiverCapabilities(forKind: kRTCMediaStreamTrackKindVideo).codecs
+                guard let preferences = VideoCodecPreference.vp8Preferences(
+                    capabilities, mimeType: { $0.mimeType })
+                else {
+                    cont.resume(returning: video.count); return
+                }
+                for transceiver in video {
+                    transceiver.setCodecPreferences(preferences)
+                }
+                cont.resume(returning: 0)
+            }
+        }
+        if unset > 0 && !vp8Warned {
+            vp8Warned = true
+            NSLog("WebRTCPeerConnection: %@", VideoCodecPreference.unsetWarning(count: unset))
+        }
+    }
+
     /// Build the SDP offer that goes into
     /// `ClientFrame::SdpOffer`. Sets the local description
     /// internally as a side-effect of `createOffer`.
@@ -1213,6 +1262,7 @@ public final class WebRTCPeerConnection: NSObject {
             ],
             optionalConstraints: nil
         )
+        await preferVp8(on: peer)
         let offer: RTCSessionDescription = try await withCheckedThrowingContinuation { cont in
             Self.libwebrtcQueue.async {
             peer.offer(for: constraints) { sdp, err in
@@ -1256,6 +1306,7 @@ public final class WebRTCPeerConnection: NSObject {
             mandatoryConstraints: nil,
             optionalConstraints: nil
         )
+        await preferVp8(on: peer)
         let offer: RTCSessionDescription = try await withCheckedThrowingContinuation { cont in
             Self.libwebrtcQueue.async {
             peer.offer(for: constraints) { sdp, err in
@@ -1301,6 +1352,9 @@ public final class WebRTCPeerConnection: NSObject {
             }
             }
         }
+        // The remote offer has created this side's transceivers; set the
+        // codec before the answer is built from them.
+        await preferVp8(on: peer)
         let answer: RTCSessionDescription = try await withCheckedThrowingContinuation { cont in
             Self.libwebrtcQueue.async {
             peer.answer(for: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)) { sdp, err in

@@ -18,6 +18,7 @@ import org.webrtc.EglBase
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
+import org.webrtc.MediaStreamTrack
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpReceiver
@@ -269,6 +270,10 @@ public class WebRtcPeerConnection(
      * fails, see [MidCallVideoDiagnosis] — is to remember having armed it.
      */
     private var videoSenderSealed: Boolean = false
+
+    /** The "could not be set to VP8" line was logged once for this
+     *  connection ([preferVp8BeforeDescription]). */
+    private var vp8Warned: Boolean = false
 
     /**
      * The encryptor armed on the video sender, held for diagnosis only — the
@@ -1646,11 +1651,69 @@ public class WebRtcPeerConnection(
                 )
             )
         }
+        if (video) ensureVideoTransceiverForOffer(peer)
+        preferVp8BeforeDescription(peer)
         val offer = createOfferSuspend(peer, constraints)
         requireStillOpen(peer)
         setLocalDescriptionSuspend(peer, offer)
         requireStillOpen(peer)
         return offer.description
+    }
+
+    /**
+     * Prefer VP8 on every video transceiver of [peer], before the description
+     * about to be built (see [VideoCodecPreference] for why a sealed frame
+     * travels only as VP8). Audio transceivers are untouched. When the factory
+     * offers no VP8 or libwebrtc refuses the list, the transceiver is left as
+     * it is and this says so once per connection.
+     */
+    private fun preferVp8BeforeDescription(peer: PeerConnection) {
+        val preferences = runCatching {
+            sharedFactory
+                ?.getRtpReceiverCapabilities(MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO)
+                ?.codecs
+                ?.let { VideoCodecPreference.vp8Preferences(it) }
+        }.getOrNull()
+        val transceivers = runCatching { peer.transceivers }.getOrElse { emptyList() }
+        val outcome = VideoCodecPreference.preferVp8(
+            transceivers = transceivers,
+            isVideo = { tr ->
+                runCatching {
+                    !tr.isStopped && tr.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
+                }.getOrDefault(false)
+            },
+            preferences = preferences,
+            set = { tr, list -> tr.setCodecPreferences(list) },
+        )
+        if (outcome.unsupported > 0 && !vp8Warned) {
+            vp8Warned = true
+            Log.w(
+                TAG,
+                "${outcome.unsupported} video transceiver(s) could not be set to VP8; " +
+                    "this device's video may not reach the other person",
+            )
+        }
+    }
+
+    /**
+     * An offer that asks to receive video when no video transceiver exists yet
+     * (a video call whose camera did not start): `OfferToReceiveVideo` would
+     * make a receive-only one inside `createOffer`, after
+     * [preferVp8BeforeDescription] ran. Make that same transceiver here
+     * instead, so it is told to prefer VP8 too.
+     */
+    private fun ensureVideoTransceiverForOffer(peer: PeerConnection) {
+        runCatching {
+            val hasVideo = peer.transceivers.any { tr ->
+                !tr.isStopped && tr.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
+            }
+            if (!hasVideo) {
+                peer.addTransceiver(
+                    MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
+                    RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.RECV_ONLY),
+                )
+            }
+        }.onFailure { cause -> Log.w(TAG, "could not add a receive-only video transceiver", cause) }
     }
 
     /**
@@ -1678,6 +1741,7 @@ public class WebRtcPeerConnection(
      */
     public suspend fun createRenegotiationOffer(): String {
         val peer = peer ?: throw WebRtcException("PeerConnection is not allocated")
+        preferVp8BeforeDescription(peer)
         val offer = createOfferSuspend(peer, MediaConstraints())
         requireStillOpen(peer)
         setLocalDescriptionSuspend(peer, offer)
@@ -1700,6 +1764,8 @@ public class WebRtcPeerConnection(
         val remoteOffer = SessionDescription(SessionDescription.Type.OFFER, remoteOfferSdp)
         setRemoteDescriptionSuspend(peer, remoteOffer)
         requireStillOpen(peer)
+        // After the remote offer: it may have made new video transceivers.
+        preferVp8BeforeDescription(peer)
         val answer = createAnswerSuspend(peer, MediaConstraints())
         requireStillOpen(peer)
         setLocalDescriptionSuspend(peer, answer)
