@@ -100,6 +100,22 @@ export default defineConfig({
       name: "webkit",
       use: { ...devices["Desktop Safari"] },
     },
+    {
+      // The one-to-one call only: the other specs measure layout and
+      // recording against Chromium and WebKit, and were never run in Firefox.
+      name: "firefox",
+      testMatch: /one-to-one-call\.spec\.ts$/,
+      use: {
+        ...devices["Desktop Firefox"],
+        launchOptions: {
+          // A fake camera and microphone, granted without a prompt.
+          firefoxUserPrefs: {
+            "media.navigator.streams.fake": true,
+            "media.navigator.permission.disabled": true,
+          },
+        },
+      },
+    },
   ],
 
   webServer: {

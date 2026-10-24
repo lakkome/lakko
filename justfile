@@ -289,9 +289,9 @@ test-sframe-bridge-all: test-sframe-bridge test-receiver-delay
 
 # The web client: both type checks (the app, and the browser tests in
 # `playwright/`, which the app's tsconfig does not cover), the unit tests and
-# the browser tests (Chromium and WebKit). Needs `apps/web/wasm`
-# (`npm run build:wasm:dev`) and the Playwright browsers
-# (`npx playwright install chromium webkit`).
+# the browser tests (Chromium and WebKit, and Firefox for the one-to-one
+# call). Needs `apps/web/wasm` (`npm run build:wasm:dev`) and the Playwright
+# browsers (`npx playwright install chromium webkit firefox`).
 web-check:
     cd apps/web && npm run typecheck && npm run typecheck:e2e && npm test && npm run test:e2e
 

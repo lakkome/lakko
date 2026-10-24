@@ -28,6 +28,7 @@ import { expect, test, type Page } from "@playwright/test";
 interface SideReport {
   state: string;
   videoFrames: number;
+  videoFramesDecoded: number;
   videoWidth: number;
   audioPackets: number;
   audioConcealedRatio: number;
@@ -42,16 +43,27 @@ type CallStep =
   | { do: "camera"; side: "a" | "b" }
   | { do: "wait"; ms: number };
 
-/** Enough decoded frames that a picture was shown, not one stray key frame. */
+/** Enough decoded frames that a picture was shown, not one stray key frame.
+ *  Counted by the receiver's own statistics (`framesDecoded`) rather than by
+ *  the video element: Firefox reports 0 from `getVideoPlaybackQuality()` for
+ *  a call's stream while it decodes and shows every frame. */
 const SHOWN = 10;
 
 test.describe.configure({ timeout: 60_000 });
 // WebKit has mock capture devices but asks for them; Chromium's project grants
-// both already.
-test.use({ permissions: ["camera", "microphone"] });
+// both already. Firefox knows neither permission name: its project turns on
+// fake devices and turns off the prompt instead (playwright.config.ts).
+test.use({
+  permissions: async ({ browserName }, use) => {
+    await use(browserName === "firefox" ? [] : ["camera", "microphone"]);
+  },
+});
 
 test.beforeEach(async ({ page, browserName }) => {
-  test.skip(browserName !== "chromium" && browserName !== "webkit", "no fake camera configured for this engine");
+  test.skip(
+    browserName !== "chromium" && browserName !== "webkit" && browserName !== "firefox",
+    "no fake camera configured for this engine",
+  );
   await page.goto("/playwright/harness/call.html");
   await page.waitForFunction(() => document.body.dataset["ready"] === "1");
 });
@@ -76,16 +88,16 @@ test("a video call answered with video: each side sees and hears the other", asy
     { do: "camera", side: "b" },
     { do: "wait", ms: 4_000 },
   ]);
-  expect(r.b.videoFrames, "the answerer does not see the caller").toBeGreaterThan(SHOWN);
-  expect(r.a.videoFrames, "the caller does not see the answerer").toBeGreaterThan(SHOWN);
+  expect(r.b.videoFramesDecoded, "the answerer does not see the caller").toBeGreaterThan(SHOWN);
+  expect(r.a.videoFramesDecoded, "the caller does not see the answerer").toBeGreaterThan(SHOWN);
   expectAudio(r.a, "the caller");
   expectAudio(r.b, "the answerer");
 });
 
 test("a video call answered with audio only: the answerer sees the caller, the caller sees nothing", async ({ page }) => {
   const r = await call(page, [{ do: "dial", video: true }, { do: "accept" }, { do: "wait", ms: 4_000 }]);
-  expect(r.b.videoFrames, "the answerer does not see the caller").toBeGreaterThan(SHOWN);
-  expect(r.a.videoFrames).toBe(0);
+  expect(r.b.videoFramesDecoded, "the answerer does not see the caller").toBeGreaterThan(SHOWN);
+  expect(r.a.videoFramesDecoded).toBe(0);
   expectAudio(r.a, "the caller");
   expectAudio(r.b, "the answerer");
 });
@@ -100,8 +112,8 @@ test("an audio call where each side turns its camera on during the call", async 
     { do: "camera", side: "b" },
     { do: "wait", ms: 4_000 },
   ]);
-  expect(r.b.videoFrames, "the answerer does not see the caller's camera").toBeGreaterThan(SHOWN);
-  expect(r.a.videoFrames, "the caller does not see the answerer's camera").toBeGreaterThan(SHOWN);
+  expect(r.b.videoFramesDecoded, "the answerer does not see the caller's camera").toBeGreaterThan(SHOWN);
+  expect(r.a.videoFramesDecoded, "the caller does not see the answerer's camera").toBeGreaterThan(SHOWN);
   expectAudio(r.a, "the caller");
   expectAudio(r.b, "the answerer");
 });
@@ -110,6 +122,6 @@ test("an audio call: each side hears the other", async ({ page }) => {
   const r = await call(page, [{ do: "dial", video: false }, { do: "accept" }, { do: "wait", ms: 3_000 }]);
   expectAudio(r.a, "the caller");
   expectAudio(r.b, "the answerer");
-  expect(r.a.videoFrames).toBe(0);
-  expect(r.b.videoFrames).toBe(0);
+  expect(r.a.videoFramesDecoded).toBe(0);
+  expect(r.b.videoFramesDecoded).toBe(0);
 });

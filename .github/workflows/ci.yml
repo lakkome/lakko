@@ -246,9 +246,9 @@ jobs:
       - name: Unit tests
         run: npm test
       - name: Install the Playwright browsers
-        run: npx playwright install --with-deps chromium webkit
+        run: npx playwright install --with-deps chromium webkit firefox
       - name: Browser tests
-        # Chromium and WebKit; includes the one-to-one call spec.
+        # Chromium and WebKit, and Firefox for the one-to-one call spec.
         env:
           CI: "1"
         run: npm run test:e2e
