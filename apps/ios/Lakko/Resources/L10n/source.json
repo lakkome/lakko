@@ -3950,6 +3950,18 @@
       "text": "@alice",
       "comment": "Example in the empty username field. Keep the @ and a short Latin-letter name (usernames are Latin letters, digits and _)."
     },
+    "contacts.add_back.action": {
+      "text": "Add",
+      "comment": "Button on the \"Add to contacts\" card."
+    },
+    "contacts.add_back.control": {
+      "text": "Add to contacts",
+      "comment": "Title of the card on the page of a person the viewer removed from their contacts while their one-to-one remains. Puts them back on the list."
+    },
+    "contacts.add_back.sub": {
+      "text": "Puts {name} back on your contact list on this account.",
+      "comment": "Line under \"Add to contacts\": what it does. Local; nothing is sent. {name} is the person's name."
+    },
     "contacts.detail.actions": {
       "text": "Contact actions",
       "comment": "Accessible name of the row of Message / Call / Video buttons on a contact's page."
@@ -6151,6 +6163,10 @@
     "invite.contact.page.already_title": {
       "text": "{name} is already in your contacts",
       "comment": "Contact invite page when the inviter is already a contact. Nothing is sent."
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "Could not reach {name}. Check your connection and try again.",
+      "comment": "Line under Open chat on the invite page of a person already in the contacts, when the answer to the link could not be sent for a network reason. {name} as in the heading."
     },
     "invite.contact.page.done": {
       "text": "Done",

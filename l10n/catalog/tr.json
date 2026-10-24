@@ -8441,6 +8441,22 @@
     "chat.pending.call_disabled": {
       "text": "{name} bağlandığında kullanılabilir.",
       "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "Kişilere ekle",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "{name} kişisini bu hesaptaki kişi listenize geri ekler.",
+      "status": "machine"
+    },
+    "contacts.add_back.action": {
+      "text": "Ekle",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "{name} ile bağlantı kurulamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
     }
   }
 }

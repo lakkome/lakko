@@ -250,6 +250,11 @@ public object LinkClaims {
         RECHECK,
         /** Claim won: found the one-to-one (again, after a failure). */
         BUILD,
+        /** The requester already has a live one-to-one with this account:
+         *  put them back on the contact list with that conversation, found
+         *  nothing, send nothing (a person removed and invited again;
+         *  amended 2026-10-24). */
+        RESTORE,
     }
 
     /**
@@ -269,6 +274,12 @@ public object LinkClaims {
      * | none              | no                 | dead             | REFUSE     |
      * | none              | no                 | accept           | POST_CLAIM |
      *
+     * Before the rows after the first: a requester this device already holds
+     * a live one-to-one with is answered by RESTORE whenever the link counts
+     * (accept) or was already answered for them (answered). Every device of
+     * the account restores on its own; nothing is founded, so no claim
+     * decides between them. A claim this device already won keeps building.
+     *
      * "Answered elsewhere" is the core's `linkClaimAnsweredElsewhere`: a
      * claim from a device in the current roster. The verdict judges the
      * link's expiry at the moment the server stamped the request and its
@@ -279,11 +290,19 @@ public object LinkClaims {
      * dead request without a refusal: the claimer answers it. A link this
      * device holds no record of waits. Mirror of web `linkRequestStep`.
      */
-    public fun step(own: Own?, answeredElsewhere: Boolean, verdict: Verdict?, noteHeld: Boolean = false): Step {
+    public fun step(
+        own: Own?,
+        answeredElsewhere: Boolean,
+        verdict: Verdict?,
+        noteHeld: Boolean = false,
+        /** This device holds a live one-to-one with the requester. */
+        liveOneToOne: Boolean = false,
+    ): Step {
         if (own != null && own.holdsClaim && own.won != null) {
             val answered = own.founded != null || noteHeld
             return if (verdict == Verdict.DEAD && !answered) Step.REFUSE else Step.BUILD
         }
+        if (liveOneToOne && (verdict == Verdict.ACCEPT || verdict == Verdict.ANSWERED)) return Step.RESTORE
         if (verdict == Verdict.ANSWERED) return Step.DROP
         if (own != null && own.holdsClaim) {
             if (!own.settled) return Step.DECIDE

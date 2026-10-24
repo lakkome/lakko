@@ -620,3 +620,29 @@ own-link states, and one device answering a request (the claims, sections
   mailbox row.
 - An unparseable stamp (none observed; the DS always serves one) refuses a
   request that might have counted.
+
+## Amendment (2026-10-24): a link from a person already in the contacts still answers
+
+Seen on test.lakko.me: A removed B from contacts (the one-to-one remains and
+the removal stays) and sent B a new link; B's page said "A is already in your
+contacts", Open chat sent nothing, and A never got B back. The maintainer
+chose both remedies.
+
+1. **Open chat sends the link answer.** On the "already in your contacts"
+   page, Open chat runs the ledger consume and, unless the link no longer
+   works, sends the ordinary contact request carrying the link answer
+   (section 2), writes no pending contact (A already is one) and opens the
+   chat. A network failure keeps B on the page with a retryable line.
+2. **A's device restores instead of founding.** In the decision of section 3,
+   a request from a person this device already holds a live one-to-one with,
+   whose link counts or was already answered for that person, takes a new
+   step, `restore`: the removal is forgotten, the person is re-added with that
+   one-to-one, a live link records its use, and nothing is founded or sent.
+   Every device of the account restores on its own, so no claim decides
+   between them; a claim this device already won keeps building. A dead link
+   is refused as before.
+
+Separately, the person card of a removed person offers **Add to contacts**
+(local, sends nothing); the shared rule `lakko_ui_rules::info` takes
+`is_contact` again for that one case and gains `InfoSection::AddContact`
+(UX `docs/ux/conversation-info.md` section 2.1).

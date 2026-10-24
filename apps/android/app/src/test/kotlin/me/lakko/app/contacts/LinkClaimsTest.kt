@@ -36,6 +36,35 @@ class LinkClaimsTest {
     private val won = LinkClaims.Own(ids = listOf(9L), won = 9L)
     private val author = "bb".repeat(32)
 
+    /** Amended 2026-10-24 - a person removed and invited again is put back
+     *  with the one-to-one they have; nothing is founded. */
+    @Test
+    fun `restores a requester who already has a live one-to-one, founding nothing`() {
+        val lost = LinkClaims.Own(ids = listOf(9L), settled = true)
+        for (verdict in listOf(LinkClaims.Verdict.ACCEPT, LinkClaims.Verdict.ANSWERED)) {
+            assertEquals(LinkClaims.Step.RESTORE, LinkClaims.step(null, false, verdict, liveOneToOne = true))
+            assertEquals(LinkClaims.Step.RESTORE, LinkClaims.step(lost, true, verdict, liveOneToOne = true))
+            assertEquals(LinkClaims.Step.RESTORE, LinkClaims.step(posted, false, verdict, liveOneToOne = true))
+        }
+        // A dead link is refused as for anyone; an unknown one waits.
+        assertEquals(
+            LinkClaims.Step.REFUSE,
+            LinkClaims.step(null, false, LinkClaims.Verdict.DEAD, liveOneToOne = true),
+        )
+        assertEquals(
+            LinkClaims.Step.WAIT,
+            LinkClaims.step(null, false, LinkClaims.Verdict.UNKNOWN, liveOneToOne = true),
+        )
+        assertEquals(LinkClaims.Step.WAIT, LinkClaims.step(null, false, null, liveOneToOne = true))
+        // A claim this device already won keeps building.
+        assertEquals(
+            LinkClaims.Step.BUILD,
+            LinkClaims.step(won, false, LinkClaims.Verdict.ACCEPT, liveOneToOne = true),
+        )
+        // Without a live one-to-one nothing changes.
+        assertEquals(LinkClaims.Step.POST_CLAIM, LinkClaims.step(null, false, LinkClaims.Verdict.ACCEPT))
+    }
+
     @Test
     fun `waits with no timer while the synced state is not loaded`() {
         assertEquals(LinkClaims.Step.WAIT, LinkClaims.step(null, false, null))

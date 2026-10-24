@@ -8441,6 +8441,22 @@
     "chat.pending.call_disabled": {
       "text": "متاح بمجرد اتصال {name}.",
       "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "إضافة إلى جهات الاتصال",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "يعيد {name} إلى قائمة جهات الاتصال في هذا الحساب.",
+      "status": "machine"
+    },
+    "contacts.add_back.action": {
+      "text": "إضافة",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "تعذّر الوصول إلى {name}. تحقّق من اتصالك وحاول مرة أخرى.",
+      "status": "machine"
     }
   }
 }

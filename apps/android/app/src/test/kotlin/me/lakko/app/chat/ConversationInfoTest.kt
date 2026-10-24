@@ -117,28 +117,41 @@ class ConversationInfoTest {
     }
 
     @Test
-    fun `a one-to-one whose record cannot be resolved is a person with no card`() {
-        // A roster that cannot be read: still a person, never the group
-        // panel, and no card to open (every peer is a contact by construction,
-        // so this is the only way the key is absent).
+    fun `a one-to-one with no contact record opens the peer's card`() {
+        // Amended 2026-10-24: a person the viewer removed keeps the
+        // conversation, and its header opens their card by the peer's key,
+        // which then offers Add to contacts.
         val info = conversationInfo(
             kind = ConversationKind.Chat,
             groupIdHex = "ZZ99",
             peerRouteKey = "gone-key",
             contacts = listOf(anna, ivan),
         )
+        assertEquals(ConversationInfo.Person("gone-key"), info)
+    }
+
+    @Test
+    fun `a one-to-one whose peer cannot be read is a person with no card`() {
+        // A roster that cannot be read and no recorded chat: still a person,
+        // never the group panel, and no card to open.
+        val info = conversationInfo(
+            kind = ConversationKind.Chat,
+            groupIdHex = "ZZ99",
+            peerRouteKey = null,
+            contacts = listOf(anna, ivan),
+        )
         assertEquals(ConversationInfo.Person(contactKey = null), info)
     }
 
     @Test
-    fun `no contacts at all is still a person, with no card`() {
+    fun `no contacts at all still opens the peer's card`() {
         val info = conversationInfo(
             kind = ConversationKind.Chat,
             groupIdHex = "AA11",
             peerRouteKey = "anna-key",
             contacts = emptyList(),
         )
-        assertEquals(ConversationInfo.Person(contactKey = null), info)
+        assertEquals(ConversationInfo.Person("anna-key"), info)
     }
 
     // ---------------------------------------------------------------------

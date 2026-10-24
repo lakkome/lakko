@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { addThroughInviteLink, type InviteConsume } from "./invite-add";
+import { addThroughInviteLink, answerAsKnownContact, type InviteConsume } from "./invite-add";
 
 function deps(consume: InviteConsume, sendFails = false) {
   const log: string[] = [];
@@ -49,5 +49,32 @@ describe("Add on an invite page (ADR-0079 amendment of 2026-10-19)", () => {
     const { log, d } = deps("already-consumed", true);
     await expect(addThroughInviteLink(d)).rejects.toThrow("offline");
     expect(log).toEqual(["consume:already-consumed", "record", "send", "forget"]);
+  });
+});
+
+describe("Open chat on the page of a person already in the contacts (2026-10-24)", () => {
+  it("consumes, then sends the answer, and keeps no pending contact", async () => {
+    const { log, d } = deps("consumed");
+    expect(await answerAsKnownContact(d)).toBe("sent");
+    expect(log).toEqual(["consume:consumed", "send"]);
+  });
+
+  it("sends again on a link this account used before", async () => {
+    const { log, d } = deps("already-consumed");
+    expect(await answerAsKnownContact(d)).toBe("sent");
+    expect(log).toEqual(["consume:already-consumed", "send"]);
+  });
+
+  it("sends nothing on a link that no longer works", async () => {
+    for (const dead of ["exhausted", "not-found"] as const) {
+      const { log, d } = deps(dead);
+      expect(await answerAsKnownContact(d)).toBe("dead");
+      expect(log).toEqual([`consume:${dead}`]);
+    }
+  });
+
+  it("lets a failed send reach the page", async () => {
+    const { d } = deps("consumed", true);
+    await expect(answerAsKnownContact(d)).rejects.toThrow("offline");
   });
 });

@@ -46,3 +46,25 @@ export async function addThroughInviteLink(d: InviteAddDeps): Promise<InviteAddO
   }
   return "added";
 }
+
+/**
+ * **Open chat** on the page of a person already in the visitor's contacts
+ * (`docs/ux/contact-invite-link.md` section 3, amended 2026-10-24): the link
+ * still carries its answer, so an inviter who removed the visitor gets them
+ * back. The ledger consume first; a dead link sends nothing; no pending
+ * contact is written, since the inviter already is one.
+ */
+export interface KnownContactAnswerDeps {
+  readonly consume: () => Promise<InviteConsume>;
+  readonly sendRequest: () => Promise<void>;
+}
+
+/** How Open chat's answer ended; a throw propagates so the page can say so. */
+export type KnownContactAnswer = "sent" | "dead";
+
+export async function answerAsKnownContact(d: KnownContactAnswerDeps): Promise<KnownContactAnswer> {
+  const result = await d.consume();
+  if (result === "exhausted" || result === "not-found") return "dead";
+  await d.sendRequest();
+  return "sent";
+}

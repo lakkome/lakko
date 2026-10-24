@@ -5,6 +5,7 @@ package me.lakko.app.contacts
 
 import me.lakko.app.auth.AuthRepository
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -57,5 +58,26 @@ class RemovedContactStaysRemovedTest {
         assertTrue(relaunched.state.value.accepted.isEmpty())
         // Another person's one-to-one is still adopted.
         assertTrue(relaunched.adopt(other, "cafe"))
+    }
+
+    @Test
+    fun `Add to contacts puts a removed person back with their conversation, also after a relaunch`() {
+        val first = repo()
+        assertTrue(first.adopt(peer, "beef"))
+        val row = first.state.value.accepted.single { it.request.fromPubkey.contentEquals(peer) }
+        first.removeContact(row.request.messageId)
+        assertTrue(first.isRemovedContact(peer))
+
+        assertTrue(first.restoreRemovedContact(peer, null, "beef", 2uL, "2026-10-24T00:00:00Z"))
+        assertFalse(first.isRemovedContact(peer))
+        val back = first.state.value.accepted.single()
+        assertTrue(back.request.fromPubkey.contentEquals(peer))
+        assertEquals("beef", back.groupIdHex)
+        // Nothing more to do for a contact already on the list.
+        assertFalse(first.restoreRemovedContact(peer, null, "beef", 3uL, "2026-10-24T00:00:00Z"))
+
+        val relaunched = repo()
+        assertFalse(relaunched.isRemovedContact(peer))
+        assertEquals(1, relaunched.state.value.accepted.size)
     }
 }

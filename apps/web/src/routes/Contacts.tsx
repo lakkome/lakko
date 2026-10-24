@@ -66,6 +66,7 @@ import { atLabel, contactsErrorText } from "../contacts/errors";
 import { InviteLinksPanel } from "../contacts/InviteLinksPanel";
 import {
   loadAccepted,
+  restoreRemovedContact,
   removeAccepted,
   subscribeAcceptedChanged,
   upsertAccepted,
@@ -382,7 +383,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     setSearchInput(username);
   });
   const [filter, setFilter] = createSignal("");
-  const selected = (): AcceptedContact | undefined =>
+  const selectedContact = (): AcceptedContact | undefined =>
     accepted().find((c) => c.signaturePubkeyB64 === selectedKey()) ??
     // ADR-0073 R.2 — a contact re-keyed by an accepted reset while its page
     // is open stays the selected one: found by the key it had.
@@ -390,6 +391,50 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       const key = selectedKey();
       return key !== null && (c.previousSignaturePubkeysB64 ?? []).includes(key);
     });
+  /**
+   * A person the viewer removed from their contacts whose one-to-one remains
+   * (`docs/ux/conversation-info.md` section 2.1, amended 2026-10-24): the
+   * conversation's header still opens their card, which offers `Add to
+   * contacts`. Read off the live conversation, as the one-to-one rule reads
+   * it; never listed.
+   */
+  const removedPeer = (): AcceptedContact | undefined => {
+    const key = selectedKey();
+    if (key === null) return undefined;
+    const own = ownPersonKeyB64(chats.identity());
+    const g = chats
+      .groups()
+      .find(
+        (c) =>
+          conversationKindOf(c.group) === "chat" &&
+          personKeysOf(c.group).includes(key) &&
+          key !== own,
+      );
+    if (g === undefined) return undefined;
+    const accountIdHex = profiles.accountIdHexOf(key);
+    return {
+      signaturePubkeyB64: key,
+      displayName: "",
+      acceptedAtMs: 0,
+      groupIdB64: g.groupIdB64,
+      ...(accountIdHex !== null && accountIdHex !== undefined && accountIdHex.length > 0
+        ? { accountIdHex }
+        : {}),
+    };
+  };
+  const selected = (): AcceptedContact | undefined => selectedContact() ?? removedPeer();
+  const selectedIsContact = (): boolean => selectedContact() !== undefined;
+  /** `Add to contacts`: back on the list with the conversation they have. */
+  function onAddBack(c: AcceptedContact): void {
+    if (c.groupIdB64 === undefined) return;
+    restoreRemovedContact({
+      signatureKey: c.signaturePubkeyB64,
+      accountIdHex: c.accountIdHex ?? null,
+      groupIdB64: c.groupIdB64,
+      nowMs: Date.now(),
+    });
+    setAccepted(loadAccepted());
+  }
 
   /** The registry row of the one-to-one with this contact, if this device
    *  holds one. The rule is `contacts/contact-conversation.ts`, shared with
@@ -662,6 +707,8 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               // terminal, so a stale `false` lasts only until the card is
               // next opened.
               membershipEnded={chatMembershipEnded(c())}
+              isContact={selectedIsContact()}
+              onAddContact={() => onAddBack(c())}
               onDeleteChat={
                 chatMembershipEnded(c()) ? () => void onDeleteChat(c()) : null
               }

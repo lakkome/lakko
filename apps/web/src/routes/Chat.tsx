@@ -1310,18 +1310,17 @@ function ChatView(props: {
    * exactly the way the contact list opens it, Message included - from here
    * Message is just the way back. Until 2026-09-26 the chat rendered a
    * second copy of that card as a layer, with Message withheld, and the same
-   * person had two cards. A one-to-one whose contact record cannot be found
-   * (a roster that cannot be read) opens nothing at all (`infoOpening`):
-   * every one-to-one peer is a contact by construction
-   * (`contacts/adopt-one-to-one.ts`), so there is no "not a contact" card
-   * left to draw.
+   * person had two cards. A person the viewer removed has no contact record
+   * but keeps the conversation; their card is the same page, which then
+   * offers `Add to contacts` (amended 2026-10-24). A one-to-one whose peer
+   * cannot be read opens nothing at all (`infoOpening`).
    */
   function openInfo(): void {
     setHeaderMenuOpen(false);
-    const opening = infoOpening(infoTarget(), personRecord());
+    const opening = infoOpening(infoTarget(), infoPerson());
     if (opening === "nothing") return;
     if (opening === "contact-page") {
-      const record = personRecord();
+      const record = infoPerson();
       if (record === null) return;
       navigate(paths.contact(base64UrlEncodeNoPad(base64Decode(record.signaturePubkeyB64))));
       return;
@@ -6595,6 +6594,17 @@ function ChatView(props: {
     });
   });
 
+  /** Who the header's info opens for a person: their contact record, else -
+   *  a person the viewer removed, whose conversation remains - the peer of
+   *  this one-to-one, whose card then offers `Add to contacts`. */
+  const infoPerson = (): { readonly signaturePubkeyB64: string } | null => {
+    const record = personRecord();
+    if (record !== null) return record;
+    if (isGroupChat()) return null;
+    const peer = peerKeyB64();
+    return peer === null ? null : { signaturePubkeyB64: peer };
+  };
+
   // The timeline scrolls in its own region. Follow new rows while the reader
   // is at (or near) the bottom; leave the position alone once they have
   // scrolled up to read.
@@ -6878,7 +6888,7 @@ function ChatView(props: {
           // A dialog only where one opens: a contact's info is their own
           // page, and the button is then a plain link-like control.
           aria-haspopup={
-            infoOpening(infoTarget(), personRecord()) === "layer" ? "dialog" : undefined
+            infoOpening(infoTarget(), infoPerson()) === "layer" ? "dialog" : undefined
           }
           aria-expanded={infoOpen()}
           onClick={openInfo}

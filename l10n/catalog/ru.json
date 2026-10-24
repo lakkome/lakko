@@ -3890,6 +3890,18 @@
       "text": "@alice",
       "status": "machine"
     },
+    "contacts.add_back.action": {
+      "text": "Добавить",
+      "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "Добавить в контакты",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "Возвращает {name} в список контактов этого аккаунта.",
+      "status": "machine"
+    },
     "contacts.detail.actions": {
       "text": "Действия с контактом",
       "status": "machine"
@@ -5940,6 +5952,10 @@
     },
     "invite.contact.page.already_title": {
       "text": "{name} уже есть в ваших контактах",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "Не удалось связаться с {name}. Проверьте подключение и попробуйте снова.",
       "status": "machine"
     },
     "invite.contact.page.done": {

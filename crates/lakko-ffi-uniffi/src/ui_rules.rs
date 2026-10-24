@@ -330,6 +330,10 @@ pub enum InfoSection {
     /// UX `who-can-find-me.md` 6.3). Appended last: uniffi decodes by
     /// ordinal.
     ChannelMembers,
+    /// Put a person the viewer removed back on the contact list: local,
+    /// sends nothing (UX `conversation-info.md` 2.1). Appended last: uniffi
+    /// decodes by ordinal.
+    AddContact,
 }
 
 impl From<RustInfoSection> for InfoSection {
@@ -355,6 +359,7 @@ impl From<RustInfoSection> for InfoSection {
             RustInfoSection::ManageChannel => Self::ManageChannel,
             RustInfoSection::Unsubscribe => Self::Unsubscribe,
             RustInfoSection::ChannelMembers => Self::ChannelMembers,
+            RustInfoSection::AddContact => Self::AddContact,
         }
     }
 }
@@ -363,14 +368,17 @@ impl From<RustInfoSection> for InfoSection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct PersonInfoCapabilities {
     /// This device's membership in the conversation is over (ADR-0045 UX 6.2).
-    /// A person's card is the contact card; there is no `is_contact`.
     pub membership_ended: bool,
+    /// The person is on this device's contact list. `false` only for a
+    /// person the viewer removed, whose one-to-one remains.
+    pub is_contact: bool,
 }
 
 impl From<PersonInfoCapabilities> for RustPersonInfoCapabilities {
     fn from(c: PersonInfoCapabilities) -> Self {
         Self {
             membership_ended: c.membership_ended,
+            is_contact: c.is_contact,
         }
     }
 }
@@ -1880,9 +1888,16 @@ mod tests {
     fn the_sections_cross_the_boundary_as_the_core_decided_them() {
         let ended = person_info_sections(PersonInfoCapabilities {
             membership_ended: true,
+            is_contact: true,
         });
         assert!(ended.contains(&InfoSection::DeleteChat));
         assert!(!ended.contains(&InfoSection::Call));
+        let removed = person_info_sections(PersonInfoCapabilities {
+            membership_ended: false,
+            is_contact: false,
+        });
+        assert!(removed.contains(&InfoSection::AddContact));
+        assert!(!removed.contains(&InfoSection::RemoveContact));
         assert!(channel_info_sections(ChannelInfoCapabilities {
             is_publisher: false,
             is_subscriber: true,

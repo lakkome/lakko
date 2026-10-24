@@ -59,9 +59,13 @@ struct ContactDetailScreen: View {
 
     @ViewBuilder
     private var content: some View {
-        if let contact = viewModel.contact(messageId: messageId) {
+        // The accepted contact, else a person the viewer removed whose
+        // one-to-one remains (section 2.1, amended 2026-10-24).
+        if let contact = viewModel.person(messageId: messageId) {
             ResolvedName(signatureKey: contact.request.fromPubkey) { resolved in
-                detail(contact: contact, resolved: resolved)
+                detail(
+                    contact: contact, isContact: viewModel.isContact(messageId: messageId),
+                    resolved: resolved)
             }
         } else {
             ContentUnavailableView(
@@ -75,16 +79,17 @@ struct ContactDetailScreen: View {
     }
 
     @ViewBuilder
-    private func detail(contact: AcceptedContact, resolved: ResolvedDisplayName) -> some View {
+    private func detail(contact: AcceptedContact, isContact: Bool, resolved: ResolvedDisplayName) -> some View {
         let chat = viewModel.chatGroupIdHex(for: contact)
         let callable = chat.map { viewModel.canCall(groupIdHex: $0) } ?? false
         // Section 2.1, decided once in `crates/lakko-ui-rules` where the host
-        // test suite can run it, never by a flag read down in the layout. The
-        // contact is in the list by construction — this branch only draws when
-        // `viewModel.contact(messageId:)` found one.
+        // test suite can run it, never by a flag read down in the layout. A
+        // person the viewer removed is not a contact: their card offers `Add
+        // to contacts` in place of Rename and Remove (amended 2026-10-24).
         let sections = personInfoSections(
             caps: PersonInfoCapabilities(
-                membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false))
+                membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false,
+                isContact: isContact))
         List {
             Section {
                 VStack(spacing: 8) {
@@ -178,6 +183,27 @@ struct ContactDetailScreen: View {
             } footer: {
                 if sections.contains(.safetyNumber) {
                     Text(l10n.t("contacts.safety.row_sub"))
+                }
+            }
+
+            // `Add to contacts` (section 2.1, amended 2026-10-24): local and
+            // instant, it sends nothing, so it asks nothing first.
+            if sections.contains(.addContact) {
+                Section {
+                    Button {
+                        viewModel.onAddContactClicked(person: contact)
+                    } label: {
+                        HStack {
+                            Label(l10n.t("contacts.add_back.control"), systemImage: "person.badge.plus")
+                                .foregroundStyle(Color.lakkoText)
+                            Spacer()
+                            Text(l10n.t("contacts.add_back.action"))
+                                .foregroundStyle(chat == nil ? Color.lakkoTextMuted : Color.lakkoAccent)
+                        }
+                    }
+                    .disabled(chat == nil)
+                } footer: {
+                    Text(l10n.t("contacts.add_back.sub", texts: ["name": resolved.name]))
                 }
             }
 
@@ -304,7 +330,7 @@ struct SafetyNumberScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                if let contact = viewModel.contact(messageId: messageId) {
+                if let contact = viewModel.person(messageId: messageId) {
                     if let number = viewModel.safetyNumber(for: contact) {
                         ResolvedName(signatureKey: contact.request.fromPubkey) { resolved in
                             Text(resolved.isPlaceholder

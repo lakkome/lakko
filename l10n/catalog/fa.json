@@ -8441,6 +8441,22 @@
     "chat.pending.call_disabled": {
       "text": "وقتی {name} وصل شود در دسترس است.",
       "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "افزودن به مخاطبان",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "{name} را به فهرست مخاطبان این حساب برمی‌گرداند.",
+      "status": "machine"
+    },
+    "contacts.add_back.action": {
+      "text": "افزودن",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "ارتباط با {name} برقرار نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
     }
   }
 }

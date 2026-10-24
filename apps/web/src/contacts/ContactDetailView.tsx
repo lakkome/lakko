@@ -88,6 +88,14 @@ export interface ContactDetailViewProps {
    */
   readonly membershipEnded: boolean;
   /**
+   * Whether the person is on this device's contact list. `false` only for a
+   * person the viewer removed whose one-to-one remains: the card then offers
+   * `Add to contacts` in place of Rename and Remove (amended 2026-10-24).
+   */
+  readonly isContact: boolean;
+  /** Put the person back on the contact list. Local; sends nothing. */
+  readonly onAddContact: () => void;
+  /**
    * Forget this conversation and its transcript (ADR-0045 UX 6.2.4). `null`
    * where this screen is not about a conversation at all, in which case there
    * is nothing to delete; the block is then absent whatever the rule says.
@@ -100,7 +108,10 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   // Which blocks this screen holds - the shared rule
   // (`chat/conversation-info.ts` -> `crates/lakko-ui-rules`), not this file.
   const sections = createMemo(() =>
-    personInfoSections(uiRules(), { membershipEnded: props.membershipEnded }),
+    personInfoSections(uiRules(), {
+      membershipEnded: props.membershipEnded,
+      isContact: props.isContact,
+    }),
   );
   const resolved = (): ReturnType<typeof profiles.resolve> =>
     profiles.resolve(props.personKeyB64);
@@ -388,6 +399,28 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                 </button>
               </div>
             </Show>
+          </section>
+        </Show>
+
+        <Show when={sections().includes("add-contact")}>
+          <section class="lk-card">
+            <div class="lk-card-row">
+              <span class="lk-card-row-icon">
+                <Icon name="plus" size={18} />
+              </span>
+              <div class="lk-card-row-body">
+                <span class="lk-card-row-title">{t("contacts.add_back.control")}</span>
+                <span class="lk-card-row-sub">{t("contacts.add_back.sub", { name: name() })}</span>
+              </div>
+              <button
+                type="button"
+                class="lk-card-row-action"
+                disabled={props.busy()}
+                onClick={() => props.onAddContact()}
+              >
+                {t("contacts.add_back.action")}
+              </button>
+            </div>
           </section>
         </Show>
 

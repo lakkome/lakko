@@ -14,6 +14,7 @@ import kotlinx.coroutines.withContext
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.contacts.InviteAddResult
 import me.lakko.app.contacts.InviteOpenResult
+import me.lakko.app.contacts.KnownContactAnswerResult
 import me.lakko.app.contacts.OpenedInvite
 
 /**
@@ -96,6 +97,48 @@ public class InviteLandingViewModel(
         }
     }
 
+    /**
+     * **Open chat** on the page of a person already in the contacts
+     * (`docs/ux/contact-invite-link.md` section 3, amended 2026-10-24): the
+     * link's answer is still delivered, then the chat opens; a dead link
+     * sends nothing and the chat opens. A failure keeps the page with a line
+     * under the button. Runs to its end even when the screen goes away, like
+     * [add]: stopped half way, the ledger use would be spent with nothing
+     * sent.
+     */
+    public fun openChat() {
+        val current = mutableState.value as? InviteLandingState.AlreadyContacts ?: return
+        if (current.answering) return
+        val invite = current.invite
+        if (invite == null) {
+            mutableChatToOpen.value = current.target
+            return
+        }
+        mutableState.value = current.copy(answering = true, failure = null)
+        viewModelScope.launch {
+            val result = withContext(NonCancellable) {
+                try {
+                    repo.answerAsKnownContact(invite)
+                } catch (err: Throwable) {
+                    KnownContactAnswerResult.Failed(err.message ?: "unexpected error")
+                }
+            }
+            when (result) {
+                KnownContactAnswerResult.Sent, KnownContactAnswerResult.Dead -> {
+                    mutableState.value = current.copy(answering = false, failure = null)
+                    mutableChatToOpen.value = current.target
+                }
+                KnownContactAnswerResult.RateLimited ->
+                    mutableState.value = current.copy(answering = false, failure = AnswerFailure.RATE_LIMITED)
+                KnownContactAnswerResult.RequiresReauth -> mutableState.value = InviteLandingState.RequiresReauth
+                is KnownContactAnswerResult.Failed -> {
+                    android.util.Log.w("LakkoInvite", "WARN answer as known contact failed")
+                    mutableState.value = current.copy(answering = false, failure = AnswerFailure.FAILED)
+                }
+            }
+        }
+    }
+
     public companion object {
         /** What the page shows for each result of opening the link. */
         public fun stateFor(result: InviteOpenResult): InviteLandingState = when (result) {
@@ -106,6 +149,7 @@ public class InviteLandingViewModel(
                 target = result.groupIdHex?.let { InviteChatTarget.Conversation(it) }
                     ?: InviteChatTarget.Contact(result.routeKey),
                 statedName = result.statedName,
+                invite = result.invite,
             )
             InviteOpenResult.RateLimited -> InviteLandingState.RateLimited
             InviteOpenResult.RequiresReauth -> InviteLandingState.RequiresReauth
@@ -135,7 +179,16 @@ public sealed interface InviteLandingState {
      *  failure (the line under the button). */
     public data class Ready(val invite: OpenedInvite, val adding: Boolean, val failed: Boolean) : InviteLandingState
 
-    public data class AlreadyContacts(val target: InviteChatTarget, val statedName: String?) : InviteLandingState
+    /** The inviter is already a contact. [invite] is the opened link whose
+     *  answer Open chat delivers; `answering` while it runs, [failure] after
+     *  it failed (amended 2026-10-24). */
+    public data class AlreadyContacts(
+        val target: InviteChatTarget,
+        val statedName: String?,
+        val invite: OpenedInvite? = null,
+        val answering: Boolean = false,
+        val failure: AnswerFailure? = null,
+    ) : InviteLandingState
 
     public data object Own : InviteLandingState
 
@@ -145,4 +198,13 @@ public sealed interface InviteLandingState {
     public data object RateLimited : InviteLandingState
     public data object OpenFailed : InviteLandingState
     public data object RequiresReauth : InviteLandingState
+}
+
+/** Why Open chat's answer did not go out: the line under the button. */
+public enum class AnswerFailure {
+    /** The ledger refused for now: the existing rate-limited text. */
+    RATE_LIMITED,
+
+    /** Any other failure: `invite.contact.page.answer_failed`. */
+    FAILED,
 }

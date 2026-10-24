@@ -74,6 +74,8 @@ import {
   loadRenames,
   removeAccepted,
   adoptOneToOne,
+  isRemovedContact,
+  restoreRemovedContact,
   subscribeAcceptedChanged,
   type AcceptedChange,
 } from "./local-store";
@@ -350,6 +352,19 @@ describe("the contact list belongs to the signed-in account", () => {
     // And the rule may complete that row again (its conversation).
     expect(adoptOneToOne(peer)).toBe(true);
     expect(loadAccepted()[0]?.groupIdB64).toBe("Z3JvdXA=");
+  });
+
+  it("Add to contacts puts a removed person back with their conversation (2026-10-24)", () => {
+    bindContactsAccount(ACCOUNT_CARA);
+    upsertAccepted({ ...dan, groupIdB64: "Z3JvdXA=" });
+    removeAccepted(PUB_OLD);
+    expect(isRemovedContact(PUB_OLD)).toBe(true);
+    const peer = { signatureKey: PUB_OLD, groupIdB64: "Z3JvdXA=", nowMs: 10 };
+    expect(restoreRemovedContact(peer)).toBe(true);
+    expect(isRemovedContact(PUB_OLD)).toBe(false);
+    expect(loadAccepted().map((c) => [c.signaturePubkeyB64, c.groupIdB64])).toEqual([[PUB_OLD, "Z3JvdXA="]]);
+    // Nothing more to do for a contact already on the list.
+    expect(restoreRemovedContact(peer)).toBe(false);
   });
 
   it("with no account bound a read is empty and a write writes nothing", () => {

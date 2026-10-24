@@ -102,6 +102,36 @@ class PendingContactsTest {
         assertEquals(listOf("consume", "record", "send", "forget"), log)
     }
 
+    /** Open chat on the page of a known contact (amended 2026-10-24). */
+    @Test
+    fun `Open chat as a known contact consumes, then sends, and keeps no pending contact`() =
+        kotlinx.coroutines.runBlocking {
+            val log = mutableListOf<String>()
+            assertEquals(
+                KnownContactAnswerOrder.Outcome.SENT,
+                KnownContactAnswerOrder.run({ log += "consume"; true }, { log += "send" }),
+            )
+            assertEquals(listOf("consume", "send"), log)
+        }
+
+    @Test
+    fun `Open chat as a known contact sends nothing on a dead link`() = kotlinx.coroutines.runBlocking {
+        val log = mutableListOf<String>()
+        assertEquals(
+            KnownContactAnswerOrder.Outcome.DEAD,
+            KnownContactAnswerOrder.run({ log += "consume"; false }, { log += "send" }),
+        )
+        assertEquals(listOf("consume"), log)
+    }
+
+    @Test
+    fun `Open chat as a known contact lets a failed send reach the page`() = kotlinx.coroutines.runBlocking {
+        val thrown = runCatching {
+            KnownContactAnswerOrder.run({ true }, { error("offline") })
+        }.exceptionOrNull()
+        assertEquals("offline", thrown?.message)
+    }
+
     @Test
     fun `a second Add keeps the first Add time`() {
         val list = PendingContacts.adding(

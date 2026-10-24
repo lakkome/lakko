@@ -123,18 +123,35 @@ public struct InviteLandingScreen: View {
                     .multilineTextAlignment(.center)
             }
 
-        case .alreadyContacts(let target, let statedName):
+        case .alreadyContacts(_, let statedName, _, let answering, let failure):
             Text(l10n.t("invite.contact.page.already_title", texts: ["name": name(statedName)]))
                 .font(.title2.weight(.semibold))
                 .multilineTextAlignment(.center)
+            // Amended 2026-10-24 — Open chat still delivers the link's
+            // answer, then the chat opens (``InviteLandingViewModel/openChatAsKnownContact()``).
             Button {
-                viewModel.dismiss()
-                onOpenChat(target)
+                Task { await viewModel.openChatAsKnownContact() }
             } label: {
-                Text(l10n.t("invite.contact.page.open_chat")).frame(maxWidth: .infinity)
+                Group {
+                    if answering {
+                        ProgressView()
+                    } else {
+                        Text(l10n.t("invite.contact.page.open_chat"))
+                    }
+                }
+                .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+            .disabled(answering)
+            if let failure {
+                Text(failure == .rateLimited
+                    ? inviteRateLimitedMessage
+                    : l10n.t("invite.contact.page.answer_failed", texts: ["name": name(statedName)]))
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoDanger)
+                    .multilineTextAlignment(.center)
+            }
 
         case .own:
             message(title: l10n.t("invite.contact.page.own_title"), body: l10n.t("invite.contact.page.own_body"))
@@ -202,12 +219,25 @@ public final class InviteLandingViewModel: ObservableObject {
         case contact(messageId: Int64)
     }
 
+    /// Why Open chat's answer did not go (the line under the button).
+    public enum AnswerFailure: Equatable {
+        /// The ledger refused for too many attempts: the shared text.
+        case rateLimited
+        /// A network or server failure: `invite.contact.page.answer_failed`.
+        case failed
+    }
+
     public enum State: Equatable {
         case loading
         /// The default page. `adding` while Add runs; `failed` after a
         /// network failure (the line under the button).
         case ready(OpenedInvite, adding: Bool, failed: Bool)
-        case alreadyContacts(ChatTarget, statedName: String?)
+        /// The inviter is already a contact. `invite` is the opened link,
+        /// whose answer Open chat delivers; `answering` while it does;
+        /// `failure` after it could not (amended 2026-10-24).
+        case alreadyContacts(
+            ChatTarget, statedName: String?, invite: OpenedInvite? = nil,
+            answering: Bool = false, failure: AnswerFailure? = nil)
         case own
         /// Revoked, expired, used up, unknown or damaged: one state, which
         /// takes the person to Contacts (amended 2026-10-19).
@@ -239,10 +269,10 @@ public final class InviteLandingViewModel: ObservableObject {
         case .opened(let invite): return .ready(invite, adding: false, failed: false)
         case .dead: return .dead
         case .own: return .own
-        case .knownContact(let messageId, let groupIdHex, let statedName):
+        case .knownContact(let messageId, let groupIdHex, let statedName, let invite):
             let target: ChatTarget = groupIdHex.map { .conversation(groupIdHex: $0) }
                 ?? .contact(messageId: messageId)
-            return .alreadyContacts(target, statedName: statedName)
+            return .alreadyContacts(target, statedName: statedName, invite: invite)
         case .rateLimited: return .rateLimited
         case .requiresReauth: return .requiresReauth
         case .failed: return .openFailed
@@ -289,6 +319,38 @@ public final class InviteLandingViewModel: ObservableObject {
         case .failed(let message):
             NSLog("[invite] add failed: \(message)")
             state = .ready(invite, adding: false, failed: true)
+        }
+    }
+
+    /// **Open chat** on the "already in your contacts" page
+    /// (`docs/ux/contact-invite-link.md` section 3, amended 2026-10-24): the
+    /// link's answer is delivered first, so an inviter who removed this person
+    /// gets them back, and the chat opens once it is written, or at once when
+    /// the link no longer works. A failure keeps the page with its line and
+    /// the button back. Runs to its end even when the screen goes away, as
+    /// Add does.
+    public func openChatAsKnownContact() async {
+        guard case .alreadyContacts(let target, let statedName, let invite, false, _) = state else { return }
+        guard let invite else {
+            chatToOpen = target
+            return
+        }
+        state = .alreadyContacts(target, statedName: statedName, invite: invite, answering: true)
+        let repository = self.repository
+        let result = await Cancellation.shielded {
+            await repository.answerAsKnownContact(invite)
+        }
+        switch result {
+        case .sent, .dead:
+            chatToOpen = target
+        case .rateLimited:
+            state = .alreadyContacts(
+                target, statedName: statedName, invite: invite, failure: .rateLimited)
+        case .requiresReauth:
+            state = .requiresReauth
+        case .failed(let message):
+            NSLog("[invite] answer failed: \(message)")
+            state = .alreadyContacts(target, statedName: statedName, invite: invite, failure: .failed)
         }
     }
 

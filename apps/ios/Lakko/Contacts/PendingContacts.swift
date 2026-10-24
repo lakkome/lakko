@@ -221,3 +221,26 @@ public enum InviteAddOrder {
         return .added
     }
 }
+
+/// **Open chat** on the page of a person already in the visitor's contacts
+/// (`docs/ux/contact-invite-link.md` section 3, amended 2026-10-24): the link
+/// still carries its answer, so an inviter who removed the visitor gets them
+/// back. The ledger consume first; a dead link sends nothing; no pending
+/// contact is written, since the inviter already is one. A failed send
+/// propagates so the page can say so. Mirror of web `answerAsKnownContact`.
+@MainActor
+public enum KnownContactAnswerOrder {
+    /// How Open chat's answer ended.
+    public enum Outcome: Equatable { case sent, dead }
+
+    /// - Parameter consumeLive: `false` when the ledger answered used up or
+    ///   gone.
+    public static func run(
+        consumeLive: () async throws -> Bool,
+        sendRequest: () async throws -> Void
+    ) async throws -> Outcome {
+        guard try await consumeLive() else { return .dead }
+        try await sendRequest()
+        return .sent
+    }
+}

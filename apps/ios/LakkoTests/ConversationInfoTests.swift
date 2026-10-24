@@ -21,8 +21,8 @@ import XCTest
 /// to stop following it.
 final class ConversationInfoTests: XCTestCase {
 
-    private func person(ended: Bool) -> PersonInfoCapabilities {
-        PersonInfoCapabilities(membershipEnded: ended)
+    private func person(ended: Bool, contact: Bool = true) -> PersonInfoCapabilities {
+        PersonInfoCapabilities(membershipEnded: ended, isContact: contact)
     }
 
     // MARK: - Section 1: which info opens, and what iOS routes on
@@ -91,11 +91,13 @@ final class ConversationInfoTests: XCTestCase {
             .inviteLink, .roles, .transferOwnership, .leaveGroup,
         ]
         for ended in [false, true] {
-            let sections = personInfoSections(caps: person(ended: ended))
-            for forbidden in groupShaped {
-                XCTAssertFalse(
-                    sections.contains(forbidden),
-                    "ended=\(ended) showed \(forbidden)")
+            for contact in [false, true] {
+                let sections = personInfoSections(caps: person(ended: ended, contact: contact))
+                for forbidden in groupShaped {
+                    XCTAssertFalse(
+                        sections.contains(forbidden),
+                        "ended=\(ended) contact=\(contact) showed \(forbidden)")
+                }
             }
         }
     }
@@ -105,6 +107,19 @@ final class ConversationInfoTests: XCTestCase {
         XCTAssertTrue(sections.contains(.safetyNumber))
         XCTAssertTrue(sections.contains(.renameContact))
         XCTAssertTrue(sections.contains(.removeContact))
+        XCTAssertFalse(sections.contains(.addContact))
+    }
+
+    /// Amended 2026-10-24: a person the viewer removed keeps the conversation,
+    /// and its card puts them back instead of offering rename and remove.
+    func testARemovedPersonIsOfferedAddToContactsInsteadOfRenameAndRemove() {
+        let sections = personInfoSections(caps: person(ended: false, contact: false))
+        XCTAssertTrue(sections.contains(.addContact))
+        XCTAssertTrue(sections.contains(.safetyNumber))
+        XCTAssertTrue(sections.contains(.call))
+        XCTAssertTrue(sections.contains(.message))
+        XCTAssertFalse(sections.contains(.renameContact))
+        XCTAssertFalse(sections.contains(.removeContact))
     }
 
     /// One card wherever it was opened from: Message is always there; from

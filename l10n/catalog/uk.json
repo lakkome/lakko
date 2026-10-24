@@ -8441,6 +8441,22 @@
     "chat.pending.call_disabled": {
       "text": "Буде доступно, коли {name} під'єднається.",
       "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "Додати до контактів",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "Повертає {name} до списку контактів цього акаунта.",
+      "status": "machine"
+    },
+    "contacts.add_back.action": {
+      "text": "Додати",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "Не вдалося зв’язатися з {name}. Перевірте з’єднання й спробуйте ще раз.",
+      "status": "machine"
     }
   }
 }

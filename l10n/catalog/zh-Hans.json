@@ -8441,6 +8441,22 @@
     "chat.pending.call_disabled": {
       "text": "{name} 连接后即可使用。",
       "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "添加到联系人",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "将 {name} 重新加入此账户的联系人列表。",
+      "status": "machine"
+    },
+    "contacts.add_back.action": {
+      "text": "添加",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "无法联系 {name}。请检查网络连接后重试。",
+      "status": "machine"
     }
   }
 }

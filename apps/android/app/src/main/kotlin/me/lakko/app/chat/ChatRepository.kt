@@ -11154,6 +11154,25 @@ public class ChatRepository(
             isOneToOne = { hex -> groupKind(hex) == GroupKind.ONE_TO_ONE },
         )
 
+    /**
+     * The live one-to-one with the person holding [peerKey]: a conversation
+     * whose kind is one-to-one (ADR-0062), whose people include that person
+     * and whose handle reads active. `null` when there is none. A person
+     * removed from the contacts and invited again is put back with it rather
+     * than given a second conversation (amended 2026-10-24).
+     */
+    public fun liveOneToOneWith(peerKey: ByteArray): String? {
+        val peer = outboxB64(peerKey)
+        for (hex in groups.keys.toList()) {
+            if (groupKind(hex) != GroupKind.ONE_TO_ONE) continue
+            val people = members(hex) ?: continue
+            if (people.none { outboxB64(it.signaturePublicKey) == peer }) continue
+            if (isGroupActive(hex) != true) continue
+            return hex
+        }
+        return null
+    }
+
     public fun isGroupActive(groupIdHex: String): Boolean? {
         val record = groups[groupIdHex] ?: return null
         return readIsActive { record.group.isActive() }

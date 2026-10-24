@@ -287,6 +287,11 @@ public enum LinkClaims {
         case recheck
         /// Claim won: found the one-to-one (again, after a failure).
         case build
+        /// The requester already has a live one-to-one with this account: put
+        /// them back on the contact list with that conversation, found
+        /// nothing, send nothing (a person removed and invited again; amended
+        /// 2026-10-24).
+        case restore
     }
 
     /// The next step for one request.
@@ -305,6 +310,13 @@ public enum LinkClaims {
     /// | none              | no                 | dead             | `refuse`    |
     /// | none              | no                 | accept           | `postClaim` |
     ///
+    /// Before the rows after the first: a requester this device already holds
+    /// a live one-to-one with is answered by `restore` whenever the link
+    /// counts (`accept`) or was already answered for them (`answered`). Every
+    /// device of the account restores on its own; nothing is founded, so no
+    /// claim decides between them. A claim this device already won keeps
+    /// building.
+    ///
     /// "Answered elsewhere" is the core's `linkClaimAnsweredElsewhere`: a
     /// claim from a device in the current roster. The verdict judges the
     /// link's expiry at the moment the server stamped the request and its
@@ -315,12 +327,14 @@ public enum LinkClaims {
     /// dead request without a refusal: the claimer answers it. A link this
     /// device holds no record of waits. Mirror of web `linkRequestStep`.
     public static func step(
-        own: Own?, answeredElsewhere: Bool, verdict: LinkAnswerVerdictValue?, noteHeld: Bool = false
+        own: Own?, answeredElsewhere: Bool, verdict: LinkAnswerVerdictValue?, noteHeld: Bool = false,
+        liveOneToOne: Bool = false
     ) -> Step {
         if let own, own.holdsClaim, own.won != nil {
             let answered = own.founded != nil || noteHeld
             return verdict == .dead && !answered ? .refuse : .build
         }
+        if liveOneToOne, verdict == .accept || verdict == .answered { return .restore }
         if verdict == .answered { return .drop }
         if let own, own.holdsClaim {
             if !own.settled { return .decide }

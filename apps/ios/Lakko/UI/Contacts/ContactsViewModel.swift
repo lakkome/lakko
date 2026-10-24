@@ -335,6 +335,63 @@ public final class ContactsViewModel: ObservableObject {
         repositoryState.accepted.first { $0.request.messageId == messageId }
     }
 
+    /// The person behind a detail screen: the accepted contact, else a person
+    /// the viewer removed whose one-to-one remains
+    /// (`docs/ux/conversation-info.md` section 2.1, amended 2026-10-24) — read
+    /// off the live conversation, as the one-to-one rule reads it, under the
+    /// row id the rule would give them (``ContactsRepository/syntheticContactMessageId(signatureKey:)``).
+    /// Never listed; its card offers `Add to contacts`.
+    public func person(messageId: Int64) -> AcceptedContact? {
+        contact(messageId: messageId) ?? oneToOnePeerWithoutRow(messageId: messageId)
+    }
+
+    /// Whether the person behind a detail screen is on the contact list.
+    public func isContact(messageId: Int64) -> Bool {
+        contact(messageId: messageId) != nil
+    }
+
+    /// The row id a conversation header opens the person card under: the
+    /// contact's, else — a person the viewer removed, whose conversation
+    /// remains — the id ``person(messageId:)`` reads them back under. `nil`
+    /// when the other person cannot be read.
+    public func personMessageId(forOneToOneChat groupIdHex: String) -> Int64? {
+        if let contact = contact(forOneToOneChat: groupIdHex) { return contact.request.messageId }
+        guard let peer = chatRepository?.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { return nil }
+        return ContactsRepository.syntheticContactMessageId(signatureKey: peer)
+    }
+
+    /// The other person of a one-to-one this device holds who has no contact
+    /// row and whose synthetic row id is `messageId`, as a row the card can
+    /// draw.
+    private func oneToOnePeerWithoutRow(messageId: Int64) -> AcceptedContact? {
+        guard messageId < 0, let chatRepository else { return nil }
+        let have = Set(repositoryState.accepted.map(\.request.fromPubkey))
+        for groupIdHex in chatRepository.conversationHeadIdHexes {
+            guard let peer = chatRepository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex),
+                  !have.contains(peer),
+                  ContactsRepository.syntheticContactMessageId(signatureKey: peer) == messageId
+            else { continue }
+            let accountId = ProfileDirectory.shared.profilesWithAccountId()
+                .first { $0.signatureKeyB64 == base64Encode(peer) }?.accountId
+            return ContactsRepository.adopting(
+                [], signatureKey: peer, accountId: accountId, groupIdHex: groupIdHex,
+                nowMs: 0, createdAt: "")?.first
+        }
+        return nil
+    }
+
+    /// `Add to contacts` on the card of a person the viewer removed: back on
+    /// the list with the conversation they have. Local; sends nothing.
+    public func onAddContactClicked(person: AcceptedContact) {
+        guard let groupIdHex = chatGroupIdHex(for: person) else { return }
+        repository.restoreRemovedContact(
+            signatureKey: person.request.fromPubkey,
+            accountId: person.request.fromAccountId,
+            groupIdHex: groupIdHex,
+            nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            createdAt: ISO8601DateFormatter().string(from: Date()))
+    }
+
     /// The 1x1 chat with this contact: the one linked on the contact record
     /// while this device still holds it, else the one-to-one whose two people
     /// are this account and the contact (the case where the OTHER side

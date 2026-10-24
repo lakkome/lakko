@@ -8441,6 +8441,22 @@
     "chat.pending.call_disabled": {
       "text": "יהיה זמין כש־{name} יתחבר.",
       "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "הוספה לאנשי הקשר",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "מחזיר את {name} לרשימת אנשי הקשר בחשבון הזה.",
+      "status": "machine"
+    },
+    "contacts.add_back.action": {
+      "text": "הוספה",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "לא ניתן היה להגיע אל {name}. כדאי לבדוק את החיבור ולנסות שוב.",
+      "status": "machine"
     }
   }
 }

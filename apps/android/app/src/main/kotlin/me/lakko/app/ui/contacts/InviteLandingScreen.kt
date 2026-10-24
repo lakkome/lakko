@@ -91,13 +91,7 @@ public fun InviteLandingScreen(
             when (val s = state) {
                 InviteLandingState.Loading -> CircularProgressIndicator(modifier = Modifier.size(48.dp))
                 is InviteLandingState.Ready -> ReadyPanel(s, onAdd = viewModel::add, onNotNow = onDone)
-                is InviteLandingState.AlreadyContacts -> {
-                    Title(t("invite.contact.page.already_title", mapOf("name" to nameOf(s.statedName))))
-                    Spacer(Modifier.height(24.dp))
-                    Button(onClick = { onOpenChat(s.target) }, modifier = Modifier.fillMaxWidth()) {
-                        Text(t("invite.contact.page.open_chat"))
-                    }
-                }
+                is InviteLandingState.AlreadyContacts -> KnownContactPanel(s, onOpenChat = viewModel::openChat)
                 InviteLandingState.Own -> MessagePanel(
                     title = t("invite.contact.page.own_title"),
                     body = t("invite.contact.page.own_body"),
@@ -182,6 +176,40 @@ private fun ReadyPanel(state: InviteLandingState.Ready, onAdd: () -> Unit, onNot
         Spacer(Modifier.height(12.dp))
         Text(
             text = t("invite.contact.page.add_failed", mapOf("name" to name)),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+/**
+ * "Anna is already in your contacts" and **Open chat** (UX section 3, amended
+ * 2026-10-24). The link still delivers its answer, so an inviter who removed
+ * this person and sent a new link gets them back; the button shows a spinner
+ * while it runs, and the chat opens once the answer is written, or at once
+ * when the link no longer works.
+ */
+@Composable
+private fun KnownContactPanel(state: InviteLandingState.AlreadyContacts, onOpenChat: () -> Unit) {
+    val name = nameOf(state.statedName)
+    Title(t("invite.contact.page.already_title", mapOf("name" to name)))
+    Spacer(Modifier.height(24.dp))
+    Button(onClick = onOpenChat, enabled = !state.answering, modifier = Modifier.fillMaxWidth()) {
+        if (state.answering) {
+            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+        } else {
+            Text(t("invite.contact.page.open_chat"))
+        }
+    }
+    val failure = state.failure
+    if (failure != null) {
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = when (failure) {
+                AnswerFailure.RATE_LIMITED -> me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT.text()
+                AnswerFailure.FAILED -> t("invite.contact.page.answer_failed", mapOf("name" to name))
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.error,
             textAlign = TextAlign.Center,

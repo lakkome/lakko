@@ -39,6 +39,19 @@ const posting = { wires: ["aa"], ids: [], won: null, settled: false, founded: nu
 const lost = { wires: [], ids: [9], won: null, settled: true, founded: null, noteWire: null, noteConfirmed: false };
 
 describe("linkRequestStep (ADR-0079, reworked 2026-10-17)", () => {
+  it("restores a requester who already has a live one-to-one, founding nothing (2026-10-24)", () => {
+    for (const verdict of ["accept", "answered"] as const) {
+      expect(linkRequestStep({ own: null, answeredElsewhere: false, verdict, liveOneToOne: true })).toBe("restore");
+      expect(linkRequestStep({ own: lost, answeredElsewhere: true, verdict, liveOneToOne: true })).toBe("restore");
+    }
+    // A dead link is refused as for anyone; an unknown one waits.
+    expect(linkRequestStep({ own: null, answeredElsewhere: false, verdict: "dead", liveOneToOne: true })).toBe("refuse");
+    expect(linkRequestStep({ own: null, answeredElsewhere: false, verdict: "unknown", liveOneToOne: true })).toBe("wait");
+    // A claim this device already won keeps building.
+    const won = { wires: [], ids: [9], won: 9, settled: false, founded: null, noteWire: null, noteConfirmed: false };
+    expect(linkRequestStep({ own: won, answeredElsewhere: false, verdict: "accept", liveOneToOne: true })).toBe("build");
+  });
+
   it("waits, with no timer, while the synced state is not loaded", () => {
     expect(linkRequestStep({ own: null, answeredElsewhere: false, verdict: null })).toBe("wait");
   });

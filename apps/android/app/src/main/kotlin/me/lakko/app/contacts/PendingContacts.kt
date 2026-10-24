@@ -269,3 +269,29 @@ public object InviteAddOrder {
         return Outcome.ADDED
     }
 }
+
+/**
+ * The order of **Open chat** on the invite page of a person already in the
+ * contacts (`docs/ux/contact-invite-link.md` section 3, amended 2026-10-24),
+ * with the steps passed in so the order is unit-tested. The web
+ * (`answerAsKnownContact` in `contacts/invite-add.ts`) keeps the same order:
+ *
+ *  1. the ledger's consume: a link used up or gone sends nothing;
+ *  2. the request carrying the link answer; no pending contact is written,
+ *     since the inviter already is one, and a failure propagates.
+ *
+ * Inline, so a step may return from the caller (a lost session).
+ */
+public object KnownContactAnswerOrder {
+    /** How the answer ended. */
+    public enum class Outcome { SENT, DEAD }
+
+    public suspend inline fun run(
+        consumeLive: suspend () -> Boolean,
+        sendRequest: suspend () -> Unit,
+    ): Outcome {
+        if (!consumeLive()) return Outcome.DEAD
+        sendRequest()
+        return Outcome.SENT
+    }
+}

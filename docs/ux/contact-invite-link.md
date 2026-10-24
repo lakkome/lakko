@@ -60,7 +60,18 @@ answers that the link no longer works, nothing is kept, no message is held and
 B lands on the Contacts screen with nothing else shown (amended 2026-10-19).
 
 **Already contacts.** Title **Anna is already in your contacts**, one button
-**Open chat**. Nothing is sent.
+**Open chat**. Amended 2026-10-24: Open chat still delivers the link's answer,
+because A may have removed B and sent the link to get B back (seen on
+test.lakko.me: B saw "already in your contacts", nothing was sent, and A still
+did not have B). The button shows a spinner, the ledger consume runs, the
+request carrying the link answer is sent, and the chat opens; nothing is kept
+on B's side (A already is a contact). A link that no longer works sends
+nothing and the chat opens. A network failure leaves B on the page with "Could
+not reach Anna. Check your connection and try again." On A's side, a request
+whose link counts (or was already answered for B) from a person A already holds
+a live one-to-one with is not a new contact: each of A's devices puts B back
+on its contact list with that conversation, founds nothing and sends nothing,
+and a live link records its use.
 
 **Own link.** Title **This is your own invite link**, body "Share it with the
 person you want to add.", one button **Done**.

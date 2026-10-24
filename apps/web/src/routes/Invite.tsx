@@ -55,7 +55,7 @@ import { groupIdHex } from "../devices/sync/state";
 import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
 import { inviteOpenFailure, invitePageView, type InvitePageView } from "../contacts/invite-page";
-import { addThroughInviteLink } from "../contacts/invite-add";
+import { addThroughInviteLink, answerAsKnownContact } from "../contacts/invite-add";
 import { DiscoveryClient, isDiscoveryRateLimited } from "../discovery/client";
 import {
   INVITE_LINK_RATE_LIMITED,
@@ -97,7 +97,6 @@ export default function Invite(): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
-  const navigate = useNavigate();
 
   const signedIn = (): boolean => auth.state().kind === "session" && auth.identitySecrets() !== null;
   // A signed-out visitor sees no inviter card: the link is opened only once
@@ -244,18 +243,13 @@ export default function Invite(): JSX.Element {
         </Match>
         <Match when={(() => { const v = view(); return v.kind === "already" ? v : undefined; })()}>
           {(v) => (
-            <section class="lk-stack" style={{ gap: "12px", "align-items": "center", "text-align": "center" }}>
-              <h1>
-                {t("invite.contact.page.already_title", {
-                  name: alreadyName(v().contactKeyB64, v().name),
-                })}
-              </h1>
-              <div class="lk-actions">
-                <button class="primary" type="button" onClick={() => navigate(chatPathOf(v().contactKeyB64))}>
-                  {t("invite.contact.page.open_chat")}
-                </button>
-              </div>
-            </section>
+            <KnownContactPanel
+              invite={invite() as DecodedInvite}
+              name={alreadyName(v().contactKeyB64, v().name)}
+              chatPath={chatPathOf(v().contactKeyB64)}
+              client={client}
+              discovery={discovery}
+            />
           )}
         </Match>
         <Match when={(() => { const v = view(); return v.kind === "default" ? v : undefined; })()}>
@@ -376,26 +370,7 @@ function AddPanel(props: {
           )) !== null,
         // ADR-0060 section 6 — written to the owner's closed mailbox under
         // the link's `link` grant, used for this one write and freed.
-        sendRequest: async () => {
-          const linkGrant = cap.linkGrant;
-          try {
-            await props.client.sendContactRequestToBundle(
-              secrets,
-              cap.ownerAccountId,
-              cap.ownerSignaturePubkey,
-              cap.ownerX25519Pubkey,
-              new Uint8Array(0),
-              {
-                writeGrant: linkGrant,
-                // ADR-0079 section 2 — the link answer: the inviter's device
-                // takes the request by itself.
-                linkAnswer: { linkId: cap.linkId, linkSecret: props.invite.linkSecret },
-              },
-            );
-          } finally {
-            linkGrant.free();
-          }
-        },
+        sendRequest: () => sendLinkAnswer(props.client, secrets, props.invite),
         forgetPending: async () => {
           await updatePendingContacts(account, (list) => withoutPendingContact(list, ownerHex));
         },
@@ -434,6 +409,96 @@ function AddPanel(props: {
         <Show when={error()}>{(message) => <p class="form-error">{message()}</p>}</Show>
       </InviterCard>
     </>
+  );
+}
+
+/**
+ * The request carrying the link answer (ADR-0079 section 2): written to the
+ * owner's closed mailbox under the link's `link` grant (ADR-0060 section 6),
+ * used for this one write and freed. The inviter's device takes it by itself.
+ */
+async function sendLinkAnswer(
+  client: ContactsClient,
+  secrets: NonNullable<ReturnType<ReturnType<typeof useAuth>["identitySecrets"]>>,
+  invite: DecodedInvite,
+): Promise<void> {
+  const cap = invite.cap;
+  const linkGrant = cap.linkGrant;
+  try {
+    await client.sendContactRequestToBundle(
+      secrets,
+      cap.ownerAccountId,
+      cap.ownerSignaturePubkey,
+      cap.ownerX25519Pubkey,
+      new Uint8Array(0),
+      {
+        writeGrant: linkGrant,
+        linkAnswer: { linkId: cap.linkId, linkSecret: invite.linkSecret },
+      },
+    );
+  } finally {
+    linkGrant.free();
+  }
+}
+
+/**
+ * "Anna is already in your contacts" and **Open chat**
+ * (`docs/ux/contact-invite-link.md` section 3, amended 2026-10-24). The link
+ * still delivers its answer: an inviter who removed the visitor and sent a
+ * new link gets them back on their device, with the conversation they have.
+ * Nothing is kept on this side; the chat opens once the answer is written,
+ * or at once when the link no longer works.
+ */
+function KnownContactPanel(props: {
+  invite: DecodedInvite;
+  name: string;
+  chatPath: string;
+  client: ContactsClient;
+  discovery: DiscoveryClient;
+}): JSX.Element {
+  const auth = useAuth();
+  const navigate = useNavigate();
+  const cap = props.invite.cap;
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createLiveText();
+
+  async function onOpenChat(): Promise<void> {
+    const secrets = auth.identitySecrets();
+    if (secrets === null || busy()) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await props.client.refuseContactRequestToUnverifiedKeys(cap.ownerAccountId, cap.ownerSignaturePubkey);
+      const blobId = props.invite.blobId;
+      await answerAsKnownContact({
+        consume: async () =>
+          (await props.discovery.consumeInvite(blobId, props.invite.capabilityBytes, secrets.accountId)).kind,
+        sendRequest: () => sendLinkAnswer(props.client, secrets, props.invite),
+      });
+      navigate(props.chatPath);
+    } catch (err) {
+      setError(() =>
+        isDiscoveryRateLimited(err)
+          ? INVITE_LINK_RATE_LIMITED()
+          : t("invite.contact.page.answer_failed", { name: props.name }),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section class="lk-stack" style={{ gap: "12px", "align-items": "center", "text-align": "center" }}>
+      <h1>{t("invite.contact.page.already_title", { name: props.name })}</h1>
+      <div class="lk-actions">
+        <button class="primary" type="button" disabled={busy()} onClick={() => void onOpenChat()}>
+          <Show when={busy()} fallback={t("invite.contact.page.open_chat")}>
+            <InlineSpinner />
+          </Show>
+        </button>
+      </div>
+      <Show when={error()}>{(message) => <p class="form-error">{message()}</p>}</Show>
+    </section>
   );
 }
 

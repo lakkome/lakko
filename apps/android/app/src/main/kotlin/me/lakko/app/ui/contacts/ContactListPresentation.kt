@@ -104,6 +104,37 @@ public fun safetyNumberRows(groups: List<String>, perRow: Int = 3): List<List<St
 public fun contactRouteKey(signatureKey: ByteArray): String =
     me.lakko.app.auth.base64UrlEncodeNoPad(signatureKey)
 
+/** The signature key a route key names, or `null` when it is not base64url. */
+public fun routeKeyBytes(routeKey: String): ByteArray? = try {
+    me.lakko.app.auth.base64UrlDecodeNoPad(routeKey)
+} catch (_: IllegalArgumentException) {
+    null
+}
+
+/**
+ * The card of a person with no contact row whose one-to-one remains — a
+ * person the viewer removed (docs/ux/conversation-info.md section 2.1,
+ * amended 2026-10-24). Built from the conversation, as the one-to-one rule
+ * builds a row ([me.lakko.app.contacts.adoptingOneToOnePeer]), but never
+ * stored: the card offers `Add to contacts`, which stores it. `null` when the
+ * route key is malformed or [chatFor] finds no one-to-one with the person.
+ */
+public fun removedPeerContact(
+    routeKey: String,
+    chatFor: (peerKey: ByteArray) -> String?,
+): me.lakko.app.contacts.AcceptedContact? {
+    val key = routeKeyBytes(routeKey) ?: return null
+    val groupIdHex = chatFor(key) ?: return null
+    return me.lakko.app.contacts.adoptingOneToOnePeer(
+        accepted = emptyList(),
+        signatureKey = key,
+        accountId = null,
+        groupIdHex = groupIdHex,
+        nowMs = 0uL,
+        createdAt = "",
+    )?.singleOrNull()
+}
+
 // =============================================================================
 // Invite links sheet
 // =============================================================================

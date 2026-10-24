@@ -55,6 +55,50 @@ final class PendingContactsTests: XCTestCase {
         XCTAssertEqual(log, ["consume", "record", "send", "forget"])
     }
 
+    /// Open chat on the page of a person already in the contacts (amended
+    /// 2026-10-24): the consume, then the answer, and no pending contact.
+    @MainActor
+    func testOpenChatOnAKnownContactConsumesThenSends() async throws {
+        var log: [String] = []
+        let outcome = try await KnownContactAnswerOrder.run(
+            consumeLive: { log.append("consume"); return true },
+            sendRequest: { log.append("send") })
+        XCTAssertEqual(outcome, .sent)
+        XCTAssertEqual(log, ["consume", "send"])
+    }
+
+    @MainActor
+    func testOpenChatOnADeadLinkSendsNothing() async throws {
+        var log: [String] = []
+        let outcome = try await KnownContactAnswerOrder.run(
+            consumeLive: { log.append("consume"); return false },
+            sendRequest: { log.append("send") })
+        XCTAssertEqual(outcome, .dead)
+        XCTAssertEqual(log, ["consume"])
+    }
+
+    @MainActor
+    func testOpenChatLetsAFailedSendReachThePage() async {
+        struct Offline: Error {}
+        do {
+            _ = try await KnownContactAnswerOrder.run(
+                consumeLive: { true },
+                sendRequest: { throw Offline() })
+            XCTFail("the send failure propagates")
+        } catch {
+            XCTAssertTrue(error is Offline)
+        }
+    }
+
+    /// The page's state carries the opened link, so Open chat can answer it;
+    /// a page with no link opens the chat as before.
+    @MainActor
+    func testTheAlreadyContactsStateCarriesTheLink() {
+        let state = InviteLandingViewModel.state(for: .knownContact(
+            contactMessageId: 41, groupIdHex: "ab", statedName: "Anna", invite: nil))
+        XCTAssertEqual(state, .alreadyContacts(.conversation(groupIdHex: "ab"), statedName: "Anna"))
+    }
+
     /// ADR-0079 amendment of 2026-10-19 — only a refusal signed by the key
     /// the link named, over that link and this account, cancels a pending
     /// contact (through the core).

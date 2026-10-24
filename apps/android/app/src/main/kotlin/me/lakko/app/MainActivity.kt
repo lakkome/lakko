@@ -2270,6 +2270,10 @@ private fun SessionRoot(
                         // is not evidence of an eviction.
                         chatMembershipEnded = { hex -> chatRepository.isGroupActive(hex) == false },
                         resolveChat = { linked, key -> chatRepository.chatGroupIdHexFor(linked, key) },
+                        // Section 2.1 (amended 2026-10-24) - a person the
+                        // viewer removed keeps the one-to-one; the header
+                        // still opens their card through it.
+                        removedPeerChat = { key -> chatRepository.chatGroupIdHexFor(null, key) },
                         // UX 6.2.4 — after the delete, land wherever the chat
                         // was opened from: pop the deleted chat off the stack
                         // too when this screen was pushed from it.

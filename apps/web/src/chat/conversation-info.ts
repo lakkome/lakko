@@ -67,6 +67,7 @@ const SECTION_NAMES = [
   "safety-number",
   "rename-contact",
   "remove-contact",
+  "add-contact",
   "delete-chat",
   /* A group (spec section 2.2). */
   "group-name",
@@ -121,13 +122,16 @@ export const GROUP_ONLY_SECTIONS: readonly InfoSection[] = [
 /**
  * What the viewer is to a one-to-one conversation (spec section 2.1).
  *
- * There is no `isContact`: the other person in a one-to-one IS a contact, by
- * construction (`contacts/adopt-one-to-one.ts`), so a person's card is always
- * the contact card and the shared rule takes no such flag.
+ * The other person in a one-to-one is a contact by construction
+ * (`contacts/adopt-one-to-one.ts`), except a person the viewer removed: the
+ * removal stays and the conversation remains, and that card offers
+ * `add-contact` in place of rename and remove (amended 2026-10-24).
  */
 export interface PersonInfoCapabilities {
   /** This device's membership in the conversation is over (ADR-0045 UX 6.2). */
   readonly membershipEnded: boolean;
+  /** The person is on this device's contact list. */
+  readonly isContact: boolean;
 }
 
 /** What the viewer may do in a group, as the chat already knows it. */
@@ -243,7 +247,7 @@ export function personInfoSections(
   if (rules === null) return [];
   return known(
     rules.personInfoSections(
-      new rules.PersonInfoCapabilities(caps.membershipEnded),
+      new rules.PersonInfoCapabilities(caps.membershipEnded, caps.isContact),
     ),
   );
 }

@@ -236,7 +236,11 @@ export type LinkRequestStep =
   /** Lost: decide again against the current roster (no journal read). */
   | "recheck"
   /** Claim won: found the one-to-one (again, after a failure). */
-  | "build";
+  | "build"
+  /** The requester already has a live one-to-one with this account: put them
+   *  back on the contact list with that conversation, found nothing, send
+   *  nothing (a person removed and invited again; amended 2026-10-24). */
+  | "restore";
 
 /** The verdict the fold gives a request's link answer (`null` while the fold
  *  is not loaded). */
@@ -263,6 +267,12 @@ function holdsClaim(own: OwnLinkClaims | null): own is OwnLinkClaims {
  * | none              | no                 | dead             | `refuse`     |
  * | none              | no                 | accept           | `post-claim` |
  *
+ * Before the rows after the first: a requester this device already holds a
+ * live one-to-one with is answered by `restore` whenever the link counts
+ * (`accept`) or was already answered for them (`answered`). Every device of
+ * the account restores on its own; nothing is founded, so no claim decides
+ * between them. A claim this device already won keeps building.
+ *
  * "Answered elsewhere" is the core's `linkClaimAnsweredElsewhere`: a claim
  * from a device in the current roster. The verdict judges the link's expiry
  * at the moment the server stamped the request and its revocation now, so a
@@ -281,10 +291,15 @@ export function linkRequestStep(input: {
   readonly verdict: LinkVerdict;
   /** A link-founded note from another device is held for the request. */
   readonly noteHeld?: boolean;
+  /** This device holds a live one-to-one with the requester. */
+  readonly liveOneToOne?: boolean;
 }): LinkRequestStep {
   if (holdsClaim(input.own) && input.own.won !== null) {
     const answered = input.own.founded !== null || input.noteHeld === true;
     return input.verdict === "dead" && !answered ? "refuse" : "build";
+  }
+  if (input.liveOneToOne === true && (input.verdict === "accept" || input.verdict === "answered")) {
+    return "restore";
   }
   if (input.verdict === "answered") return "drop";
   if (holdsClaim(input.own)) {

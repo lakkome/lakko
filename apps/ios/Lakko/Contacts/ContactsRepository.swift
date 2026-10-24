@@ -880,6 +880,45 @@ public final class ContactsRepository: ObservableObject {
         return true
     }
 
+    /// Put a person the viewer removed back on the contact list, with their
+    /// one-to-one (`docs/ux/conversation-info.md` section 2.1, amended
+    /// 2026-10-24): the removal is forgotten and the one-to-one rule applied.
+    /// Local; sends nothing. Returns whether anything changed.
+    @discardableResult
+    public func restoreRemovedContact(
+        signatureKey: Data,
+        accountId: Data?,
+        groupIdHex: String,
+        nowMs: UInt64,
+        createdAt: String
+    ) -> Bool {
+        guard let accountIdB64 = boundAccountIdB64 else { return false }
+        let wasRemoved = removedKeys.remove(signatureKey) != nil
+        if wasRemoved {
+            AcceptedContactsStore.saveRemovedKeys(removedKeys, accountIdB64: accountIdB64)
+        }
+        let adopted = adoptOneToOnePeer(
+            signatureKey: signatureKey, accountId: accountId, groupIdHex: groupIdHex,
+            nowMs: nowMs, createdAt: createdAt)
+        return wasRemoved || adopted
+    }
+
+    /// Whether the viewer removed this person from their contact list.
+    public func isRemovedContact(_ signatureKey: Data) -> Bool {
+        removedKeys.contains(signatureKey)
+    }
+
+    /// The live one-to-one this device holds with a person, if any: a
+    /// conversation of one-to-one kind whose other person is `signatureKey`
+    /// and whose membership is active on this device.
+    func liveOneToOne(with signatureKey: Data) -> String? {
+        guard let chatRepository else { return nil }
+        return chatRepository.conversationHeadIdHexes.first { groupIdHex in
+            chatRepository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) == signatureKey
+                && chatRepository.isActive(groupIdHex: groupIdHex) == true
+        }
+    }
+
     /// The pure half of ``adoptOneToOnePeer(signatureKey:accountId:groupIdHex:nowMs:createdAt:)``:
     /// the accepted list after adopting the peer, or `nil` when it is already
     /// complete. A row minted here carries a synthetic request (no mailbox
@@ -1823,13 +1862,7 @@ public final class ContactsRepository: ObservableObject {
         if ownerAccountId == secrets.accountId { return .own }
         // ADR-0073 R.7 case 1 / UX 16.6 — "already a contact" is the pin or a
         // verified binding naming the row's key.
-        if let existing = establishedContact(ofAccountId: ownerAccountId) {
-            return .knownContact(
-                contactMessageId: existing.request.messageId, groupIdHex: existing.groupIdHex,
-                statedName: OpenedInvite.statedName(
-                    displayName: capability.inviterDisplayName(), username: capability.inviterUsername()))
-        }
-        return .opened(OpenedInvite(
+        let opened = OpenedInvite(
             blobId: blobId,
             capabilityBytes: capability.wire(),
             ownerAccountId: ownerAccountId,
@@ -1841,7 +1874,13 @@ public final class ContactsRepository: ObservableObject {
             displayName: capability.inviterDisplayName(),
             username: capability.inviterUsername(),
             label: capability.label(),
-            bootstrapReferral: capability.bootstrapReferral()))
+            bootstrapReferral: capability.bootstrapReferral())
+        if let existing = establishedContact(ofAccountId: ownerAccountId) {
+            return .knownContact(
+                contactMessageId: existing.request.messageId, groupIdHex: existing.groupIdHex,
+                statedName: opened.statedName, invite: opened)
+        }
+        return .opened(opened)
     }
 
     /// **Add** on the invite page (ADR-0079 sections 2 and 5, amended
@@ -1874,48 +1913,17 @@ public final class ContactsRepository: ObservableObject {
             username: invite.username ?? "",
             addedAtMs: Int64(Date().timeIntervalSince1970 * 1000),
             linkId: invite.linkId)
-        // ADR-0078 — the link grant carries the owner's mailbox binding,
-        // verified against the key the request is sealed to.
-        let link = MailboxTarget.verifiedOrNil(grant: invite.linkGrant, accountKey: invite.ownerSignaturePubkey)
-            .map { RequestLink(seed: invite.linkGrant.seed, target: $0) }
         let outcome: InviteAddOrder.Outcome
         do {
             outcome = try await InviteAddOrder.run(
-                // The ledger's soft use count. Used before by this account:
-                // sent again, the inviter's device answers it either way.
-                consumeLive: {
-                    let result: ConsumeInviteResult
-                    do {
-                        result = try await authenticatedDiscoveryClient().consumeInvite(
-                            blobId: invite.blobId, capabilityBytes: invite.capabilityBytes,
-                            joinerAccountId: secrets.accountId)
-                    } catch {
-                        if DiscoveryClientError.isRateLimited(error) { throw InviteAddStop(result: .rateLimited) }
-                        throw InviteAddStop(
-                            result: .failed(message: (error as? LocalizedError)?.errorDescription ?? "consume failed"))
-                    }
-                    switch result {
-                    case .exhausted, .notFound: return false
-                    case .alreadyConsumed, .consumed: return true
-                    }
-                },
+                consumeLive: { try await consumeInviteUse(invite, secrets: secrets) },
                 recordPending: {
                     guard bound.isCurrent, boundAccountIdB64 == accountIdB64 else {
                         throw InviteAddStop(result: .requiresReauth)
                     }
                     setInvited(PendingContacts.adding(contact, to: invited), accountIdB64: accountIdB64)
                 },
-                sendRequest: {
-                    _ = try await sendRequestToBundle(
-                        client: clientFactory(), secrets: secrets,
-                        recipientAccountId: invite.ownerAccountId,
-                        recipientSignaturePubkey: invite.ownerSignaturePubkey,
-                        recipientX25519Pubkey: invite.ownerX25519Pubkey,
-                        introMessage: Data(),
-                        link: link,
-                        // ADR-0079 section 2 — the link answer.
-                        linkAnswer: FfiLinkAnswer(linkId: invite.linkId, linkSecret: invite.linkSecret))
-                },
+                sendRequest: { try await sendLinkAnswer(invite, secrets: secrets) },
                 forgetPending: {
                     if boundAccountIdB64 == accountIdB64 {
                         setInvited(invited.filter { $0.accountIdHex != contact.accountIdHex }, accountIdB64: accountIdB64)
@@ -1928,6 +1936,82 @@ public final class ContactsRepository: ObservableObject {
         }
         if outcome == .dead { return .dead }
         return .added(contact)
+    }
+
+    /// **Open chat** on the "already in your contacts" page
+    /// (`docs/ux/contact-invite-link.md` section 3, amended 2026-10-24): the
+    /// ledger use is spent and the request carrying the link answer is sent,
+    /// so an inviter who removed this person gets them back on their device,
+    /// with the conversation they have. No pending contact is written; a dead
+    /// link sends nothing (``KnownContactAnswerOrder``).
+    public func answerAsKnownContact(_ invite: OpenedInvite) async -> KnownContactAnswerResult {
+        guard let secrets = authRepository.identitySecrets else { return .requiresReauth }
+        let bound = binding.capture()
+        // The same pin question as Add asks before anything is spent.
+        do {
+            try await clientFactory().refuseContactRequestToUnverifiedKeys(
+                accountId: invite.ownerAccountId, recipientSignaturePubkey: invite.ownerSignaturePubkey)
+        } catch {
+            return .failed(message: "the link's keys are not the ones trusted for this account")
+        }
+        guard bound.isCurrent else { return .requiresReauth }
+        do {
+            let outcome = try await KnownContactAnswerOrder.run(
+                consumeLive: { try await consumeInviteUse(invite, secrets: secrets) },
+                sendRequest: {
+                    guard bound.isCurrent else { throw InviteAddStop(result: .requiresReauth) }
+                    try await sendLinkAnswer(invite, secrets: secrets)
+                })
+            return outcome == .dead ? .dead : .sent
+        } catch let stop as InviteAddStop {
+            switch stop.result {
+            case .rateLimited: return .rateLimited
+            case .requiresReauth: return .requiresReauth
+            case .failed(let message): return .failed(message: message)
+            case .dead: return .dead
+            case .added: return .sent
+            }
+        } catch {
+            return .failed(message: (error as? LocalizedError)?.errorDescription ?? "request send failed")
+        }
+    }
+
+    /// The ledger's soft use count for an opened link: `false` when it
+    /// answered used up or gone. Used before by this account: sent again, the
+    /// inviter's device answers it either way. A refusal throws
+    /// ``InviteAddStop`` with the page's result.
+    private func consumeInviteUse(_ invite: OpenedInvite, secrets: IdentitySecrets) async throws -> Bool {
+        let result: ConsumeInviteResult
+        do {
+            result = try await authenticatedDiscoveryClient().consumeInvite(
+                blobId: invite.blobId, capabilityBytes: invite.capabilityBytes,
+                joinerAccountId: secrets.accountId)
+        } catch {
+            if DiscoveryClientError.isRateLimited(error) { throw InviteAddStop(result: .rateLimited) }
+            throw InviteAddStop(
+                result: .failed(message: (error as? LocalizedError)?.errorDescription ?? "consume failed"))
+        }
+        switch result {
+        case .exhausted, .notFound: return false
+        case .alreadyConsumed, .consumed: return true
+        }
+    }
+
+    /// The request carrying the link answer (ADR-0079 section 2), written to
+    /// the owner's closed mailbox under the link's grant. ADR-0078 — the
+    /// grant carries the owner's mailbox binding, verified against the key
+    /// the request is sealed to.
+    private func sendLinkAnswer(_ invite: OpenedInvite, secrets: IdentitySecrets) async throws {
+        let link = MailboxTarget.verifiedOrNil(grant: invite.linkGrant, accountKey: invite.ownerSignaturePubkey)
+            .map { RequestLink(seed: invite.linkGrant.seed, target: $0) }
+        _ = try await sendRequestToBundle(
+            client: clientFactory(), secrets: secrets,
+            recipientAccountId: invite.ownerAccountId,
+            recipientSignaturePubkey: invite.ownerSignaturePubkey,
+            recipientX25519Pubkey: invite.ownerX25519Pubkey,
+            introMessage: Data(),
+            link: link,
+            linkAnswer: FfiLinkAnswer(linkId: invite.linkId, linkSecret: invite.linkSecret))
     }
 
     private func setInvited(_ list: [PendingContact], accountIdB64: String) {
@@ -2100,11 +2184,33 @@ public final class ContactsRepository: ObservableObject {
                 case .unknown: return .unknown
                 }
             }
+            // A requester this device already holds a live one-to-one with
+            // is put back on the contact list with it rather than given a
+            // second conversation (amended 2026-10-24).
+            let liveGroupIdHex = liveOneToOne(with: req.fromPubkey)
             var step = LinkClaims.step(
                 own: claims.own(key), answeredElsewhere: answeredElsewhere(key), verdict: verdict,
-                noteHeld: claims.note(key) != nil)
+                noteHeld: claims.note(key) != nil, liveOneToOne: liveGroupIdHex != nil)
             switch step {
             case .wait:
+                continue
+            case .restore:
+                // A person removed and invited again: back on the list with
+                // the conversation they already have. Nothing is founded or
+                // sent; a live link records its use, as the requester's
+                // consume did.
+                guard let liveGroupIdHex else { continue }
+                restoreRemovedContact(
+                    signatureKey: req.fromPubkey, accountId: req.fromAccountId,
+                    groupIdHex: liveGroupIdHex,
+                    nowMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                    createdAt: ISO8601DateFormatter().string(from: Date()))
+                if verdict == .accept, let sync = deviceGroupSync {
+                    await sync.recordLinkUse(linkId: row.linkId, requesterKey: req.fromPubkey)
+                }
+                guard bound.isCurrent else { return }
+                claims.forgetOwn(key)
+                inbox.remove(messageId: req.messageId)
                 continue
             case .drop:
                 claims.forgetOwn(key)
@@ -2240,8 +2346,10 @@ public enum InviteOpenResult: Equatable {
     case own
     /// The inviter is already an established contact: the page offers
     /// Open chat (the route key is the contact's request id, and the
-    /// one-to-one when this device holds it).
-    case knownContact(contactMessageId: Int64, groupIdHex: String?, statedName: String?)
+    /// one-to-one when this device holds it). `invite` is the opened link,
+    /// whose answer Open chat still delivers (amended 2026-10-24).
+    case knownContact(
+        contactMessageId: Int64, groupIdHex: String?, statedName: String?, invite: OpenedInvite? = nil)
     case rateLimited
     case requiresReauth
     case failed(message: String)
@@ -2252,6 +2360,19 @@ public enum InviteOpenResult: Equatable {
 /// consume, a session that moved).
 private struct InviteAddStop: Error {
     let result: InviteAddResult
+}
+
+/// What **Open chat** on the "already in your contacts" page did with the
+/// link's answer (amended 2026-10-24).
+public enum KnownContactAnswerResult: Equatable {
+    /// The request carrying the link answer was written: open the chat.
+    case sent
+    /// The link no longer works: nothing was sent; open the chat.
+    case dead
+    case rateLimited
+    case requiresReauth
+    /// A network or server failure: the page stays, Open chat comes back.
+    case failed(message: String)
 }
 
 public enum InviteAddResult: Equatable {

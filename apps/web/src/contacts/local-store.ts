@@ -503,6 +503,30 @@ export function adoptOneToOne(peer: OneToOnePeer, owner?: string): boolean {
   return true;
 }
 
+/** Put a person the viewer removed back on the contact list, with their
+ *  one-to-one (`docs/ux/conversation-info.md` section 2.1, amended
+ *  2026-10-24): the removal is forgotten and the one-to-one rule applied.
+ *  Local; sends nothing. Returns whether a write happened. */
+export function restoreRemovedContact(peer: OneToOnePeer, owner?: string): boolean {
+  const account = ownerOf(owner);
+  if (account === null) return false;
+  const current = load(account);
+  const wasRemoved = (current.removed ?? []).includes(peer.signatureKey);
+  const removed = (current.removed ?? []).filter((k) => k !== peer.signatureKey);
+  const next = adoptOneToOnePeer(current.accepted, peer);
+  if (!wasRemoved && next === null) return false;
+  save(account, { ...current, accepted: next ?? current.accepted, removed });
+  notifyAcceptedChanged("edited");
+  return true;
+}
+
+/** Whether the viewer removed this person from their contact list. */
+export function isRemovedContact(signaturePubkeyB64: string, owner?: string): boolean {
+  const account = ownerOf(owner);
+  if (account === null) return false;
+  return (load(account).removed ?? []).includes(signaturePubkeyB64);
+}
+
 /** Remove an accepted contact by its signature pubkey. No-op
  *  when there's no match or no account. */
 export function removeAccepted(signaturePubkeyB64: string, owner?: string): AcceptedContact[] {

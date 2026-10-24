@@ -128,6 +128,37 @@ final class ContactRemovalTests: XCTestCase {
             groupIdHex: "cafe", nowMs: 3, createdAt: "2026-10-24T00:00:00Z"))
     }
 
+    /// `Add to contacts` (amended 2026-10-24): the removal is forgotten and
+    /// the row comes back with the one-to-one's id; a second call changes
+    /// nothing; the adoption rule then holds for them again after a relaunch.
+    func testAddToContactsPutsARemovedPersonBackWithTheirConversation() {
+        seed([AcceptedContact(request: request(1, byte: 0xA1), groupIdHex: "beef", displayName: "Ada")])
+        let repository = makeRepository()
+        let key = Data(repeating: 0xA1, count: 32)
+        repository.removeContact(messageId: 1)
+        XCTAssertTrue(repository.isRemovedContact(key))
+
+        XCTAssertTrue(repository.restoreRemovedContact(
+            signatureKey: key, accountId: Data(repeating: 0xA1, count: 16),
+            groupIdHex: "beef", nowMs: 10, createdAt: "2026-10-24T00:00:00Z"))
+        XCTAssertFalse(repository.isRemovedContact(key))
+        XCTAssertEqual(repository.state.accepted.map(\.request.fromPubkey), [key])
+        XCTAssertEqual(repository.state.accepted.first?.groupIdHex, "beef")
+        XCTAssertEqual(
+            repository.state.accepted.first?.request.messageId,
+            ContactsRepository.syntheticContactMessageId(signatureKey: key))
+        XCTAssertEqual(persisted().map(\.request.fromPubkey), [key])
+
+        // Nothing more to do for a contact already on the list.
+        XCTAssertFalse(repository.restoreRemovedContact(
+            signatureKey: key, accountId: nil, groupIdHex: "beef", nowMs: 11,
+            createdAt: "2026-10-24T00:00:00Z"))
+
+        let relaunched = makeRepository()
+        XCTAssertFalse(relaunched.isRemovedContact(key))
+        XCTAssertEqual(relaunched.state.accepted.map(\.request.fromPubkey), [key])
+    }
+
     // MARK: - Fixtures
 
     private func makeRepository() -> ContactsRepository {

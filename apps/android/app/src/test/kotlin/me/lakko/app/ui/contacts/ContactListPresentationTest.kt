@@ -114,6 +114,19 @@ class ContactListPresentationTest {
         assertEquals(OTHER_SECTION, sectionLetterOf(row("k", "  ")))
         assertEquals(OTHER_SECTION, sectionLetterOf(row("k", "_under")))
     }
+
+    /** docs/ux/conversation-info.md section 2.1, amended 2026-10-24. */
+    @Test
+    fun `a removed person's card is built from the one-to-one they still have`() {
+        val key = ByteArray(32) { 0x21 }
+        val route = contactRouteKey(key)
+        val card = removedPeerContact(route) { k -> if (k.contentEquals(key)) "beef" else null }
+        assertTrue(card != null && card.request.fromPubkey.contentEquals(key))
+        assertEquals("beef", card?.groupIdHex)
+        // No one-to-one, or a malformed key: no card.
+        assertEquals(null, removedPeerContact(route) { null })
+        assertEquals(null, removedPeerContact("not base64url!") { "beef" })
+    }
 }
 
 /** The invite-links sheet rules. */

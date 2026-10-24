@@ -127,7 +127,12 @@ import { conversationKindOf } from "../chat/conversation-kind";
 import { personKeysOf } from "../chat/person-key";
 import { heldSends, persistHeldSends } from "../chat/held-send-queue";
 import { DIRECT_CHAT_STAND_IN } from "../chat/group-title";
-import { upsertAccepted as upsertAcceptedContact, type AcceptedContact as AcceptedContactRow } from "./local-store";
+import {
+  restoreRemovedContact,
+  upsertAccepted as upsertAcceptedContact,
+  type AcceptedContact as AcceptedContactRow,
+} from "./local-store";
+import { readIsActive } from "../chat/membership-ended";
 import {
   handOverPendingContact,
   loadPendingContacts,
@@ -711,6 +716,18 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
         const { ids, authors } = claimInputs(seen);
         return wasm.linkClaimAnsweredElsewhere(ids, authors, concatBytes(roster.roster));
       };
+      // The live one-to-one this device holds with a person, if any: a
+      // requester who has one is put back on the contact list with it
+      // rather than given a second conversation (amended 2026-10-24).
+      const liveOneToOneWith = (keyB64: string): string | null => {
+        for (const g of chats.groups()) {
+          if (conversationKindOf(g.group) !== "chat") continue;
+          if (!personKeysOf(g.group).includes(keyB64)) continue;
+          if (readIsActive(g.group) !== true) continue;
+          return g.groupIdB64;
+        }
+        return null;
+      };
       for (const req of target.undecidedLinkRequests()) {
         if (!current()) return;
         const answer = req.linkAnswer;
@@ -719,17 +736,46 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
           continue;
         }
         const key = linkRequestKeyHex(answer.linkId, req.fromPubkey);
+        const requesterKeyB64 = base64Encode(req.fromPubkey);
+        const liveGroupIdB64 = liveOneToOneWith(requesterKeyB64);
         // ADR-0079 amendment of 2026-10-19 - the moment the request was
         // written decides the link's expiry: the time the DS stamped on the
         // row, kept with the request across a restart.
+        const verdict = sync.linkAnswerVerdictAt(
+          answer.linkId,
+          answer.linkSecret,
+          req.fromPubkey,
+          Date.parse(req.createdAt),
+        );
         let step = linkRequestStep({
           own: claims.own(key),
           answeredElsewhere: answeredElsewhere(key),
-          verdict: sync.linkAnswerVerdictAt(answer.linkId, answer.linkSecret, req.fromPubkey, Date.parse(req.createdAt)),
+          verdict,
           noteHeld: claims.note(key) !== null,
+          liveOneToOne: liveGroupIdB64 !== null,
         });
         try {
           if (step === "wait") continue;
+          if (step === "restore" && liveGroupIdB64 !== null) {
+            // A person removed and invited again: back on the list with the
+            // conversation they already have. Nothing is founded or sent; a
+            // live link records its use, as the requester's consume did.
+            restoreRemovedContact(
+              {
+                signatureKey: requesterKeyB64,
+                accountIdHex: req.fromAccountId === null ? null : groupIdHex(req.fromAccountId),
+                groupIdB64: liveGroupIdB64,
+                nowMs: Date.now(),
+              },
+              accountIdB64,
+            );
+            if (verdict === "accept") await sync.recordLinkUse(answer.linkId, req.fromPubkey);
+            if (!current()) return;
+            setAcceptedVersion(acceptedVersion() + 1);
+            claims.forgetOwn(key);
+            target.remove(req.messageId);
+            continue;
+          }
           if (step === "drop") {
             claims.forgetOwn(key);
             target.remove(req.messageId);

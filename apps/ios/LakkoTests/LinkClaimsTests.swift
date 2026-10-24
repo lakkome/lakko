@@ -70,6 +70,38 @@ final class LinkClaimsTests: XCTestCase {
         XCTAssertEqual(LinkClaims.step(own: won, answeredElsewhere: true, verdict: .answered), .build)
     }
 
+    /// Amended 2026-10-24 — a requester this device already holds a live
+    /// one-to-one with is put back on the list with it: nothing is founded.
+    /// A dead link is refused and an unknown one waits as for anyone; a claim
+    /// this device already won keeps building.
+    func testARequesterWithALiveOneToOneIsRestoredNotGivenASecondConversation() {
+        let lost = LinkClaims.Own(ids: [9], settled: true)
+        for verdict: LinkClaims.LinkAnswerVerdictValue in [.accept, .answered] {
+            XCTAssertEqual(
+                LinkClaims.step(own: nil, answeredElsewhere: false, verdict: verdict, liveOneToOne: true),
+                .restore)
+            XCTAssertEqual(
+                LinkClaims.step(own: lost, answeredElsewhere: true, verdict: verdict, liveOneToOne: true),
+                .restore)
+            XCTAssertEqual(
+                LinkClaims.step(own: posted, answeredElsewhere: false, verdict: verdict, liveOneToOne: true),
+                .restore)
+        }
+        XCTAssertEqual(
+            LinkClaims.step(own: nil, answeredElsewhere: false, verdict: .dead, liveOneToOne: true), .refuse)
+        XCTAssertEqual(
+            LinkClaims.step(own: nil, answeredElsewhere: false, verdict: .unknown, liveOneToOne: true), .wait)
+        XCTAssertEqual(
+            LinkClaims.step(own: nil, answeredElsewhere: false, verdict: nil, liveOneToOne: true), .wait)
+        let won = LinkClaims.Own(ids: [9], won: 9)
+        XCTAssertEqual(
+            LinkClaims.step(own: won, answeredElsewhere: false, verdict: .accept, liveOneToOne: true), .build)
+        // No live one-to-one: the rule is unchanged.
+        XCTAssertEqual(
+            LinkClaims.step(own: nil, answeredElsewhere: false, verdict: .accept, liveOneToOne: false),
+            .postClaim)
+    }
+
     /// Through the core: expiry is judged at the request's DS stamp, a
     /// revocation now (Add then expiry then A online -> accepted; revoke
     /// before the answer -> refused).

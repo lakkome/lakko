@@ -103,6 +103,11 @@ pub enum InfoSection {
     /// group-only: a channel roster has no roles and no add. Appended last so
     /// the uniffi ordinals of every earlier block stay put.
     ChannelMembers,
+    /// Put a person back on this device's contact list: the one-to-one
+    /// outlived the contact, because removing a contact leaves the
+    /// conversation (`docs/ux/conversation-info.md` section 2.1). Local, sends
+    /// nothing. Appended last for the same reason as [`Self::ChannelMembers`].
+    AddContact,
 }
 
 impl InfoSection {
@@ -162,6 +167,7 @@ impl InfoSection {
             Self::ManageChannel => "manage-channel",
             Self::Unsubscribe => "unsubscribe",
             Self::ChannelMembers => "channel-members",
+            Self::AddContact => "add-contact",
         }
     }
 }
@@ -172,12 +178,16 @@ pub struct PersonInfoCapabilities {
     /// This device's membership in the conversation is over (ADR-0045 UX
     /// 6.2).
     ///
-    /// There is no `is_contact` any more: a person's card IS the contact
-    /// card. Every client derives the contact row from the one-to-one
-    /// conversation itself (`docs/ux/conversation-info.md` section 2.1), so
-    /// a person you can open a card for is a contact by construction, and the
-    /// "not one of your contacts" state the flag used to select is gone.
     pub membership_ended: bool,
+    /// The person is on this device's contact list.
+    ///
+    /// Every client adopts a one-to-one peer as a contact, except a person
+    /// the viewer removed: removing a contact leaves the conversation, and the
+    /// removal stays (`docs/ux/conversation-info.md` section 2.1). That
+    /// conversation is the one card a person can be opened from while not a
+    /// contact, and it offers [`InfoSection::AddContact`] in place of the
+    /// rename and remove blocks, which need a contact row to act on.
+    pub is_contact: bool,
 }
 
 /// What the viewer may do in a group.
@@ -275,8 +285,12 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<InfoSection> {
     // simply returns to it.
     sections.push(InfoSection::Message);
     sections.push(InfoSection::SafetyNumber);
-    sections.push(InfoSection::RenameContact);
-    sections.push(InfoSection::RemoveContact);
+    if caps.is_contact {
+        sections.push(InfoSection::RenameContact);
+        sections.push(InfoSection::RemoveContact);
+    } else {
+        sections.push(InfoSection::AddContact);
+    }
     sections
 }
 
@@ -359,6 +373,14 @@ mod tests {
     fn person(ended: bool) -> PersonInfoCapabilities {
         PersonInfoCapabilities {
             membership_ended: ended,
+            is_contact: true,
+        }
+    }
+
+    fn removed_person(ended: bool) -> PersonInfoCapabilities {
+        PersonInfoCapabilities {
+            membership_ended: ended,
+            is_contact: false,
         }
     }
 
@@ -385,8 +407,14 @@ mod tests {
     /// it is checked exhaustively.
     #[test]
     fn a_person_never_carries_anything_group_shaped() {
-        for &ended in &[false, true] {
-            let sections = person_info_sections(person(ended));
+        for caps in [
+            person(false),
+            person(true),
+            removed_person(false),
+            removed_person(true),
+        ] {
+            let ended = caps.membership_ended;
+            let sections = person_info_sections(caps);
             assert!(
                 !sections.iter().any(|s| s.group_only()),
                 "ended={ended} -> {sections:?}"
@@ -402,17 +430,33 @@ mod tests {
         assert!(sections.contains(&InfoSection::RemoveContact));
     }
 
-    /// A person's card is the contact card: the three contact blocks are
-    /// always there, live or ended. The "not a contact" state that withheld
-    /// them is gone (2026-09-26).
+    /// A contact's card holds the three contact blocks, live or ended.
     #[test]
-    fn a_person_always_gets_the_contact_blocks() {
+    fn a_contact_always_gets_the_contact_blocks() {
         for &ended in &[false, true] {
             let sections = person_info_sections(person(ended));
             assert!(sections.contains(&InfoSection::SafetyNumber));
             assert!(sections.contains(&InfoSection::RenameContact));
             assert!(sections.contains(&InfoSection::RemoveContact));
         }
+    }
+
+    /// A person the viewer removed keeps the conversation, and its card puts
+    /// them back: `Add to contacts` in place of rename and remove, which need
+    /// a contact row. The number, the conversation and the call are the
+    /// person's, not the contact row's, so they stay.
+    #[test]
+    fn a_removed_person_is_offered_add_to_contacts_and_nothing_that_needs_a_row() {
+        for &ended in &[false, true] {
+            let sections = person_info_sections(removed_person(ended));
+            assert!(sections.contains(&InfoSection::AddContact), "{sections:?}");
+            assert!(sections.contains(&InfoSection::SafetyNumber));
+            assert!(sections.contains(&InfoSection::Message));
+            assert!(!sections.contains(&InfoSection::RenameContact));
+            assert!(!sections.contains(&InfoSection::RemoveContact));
+        }
+        assert!(person_info_sections(removed_person(false)).contains(&InfoSection::Call));
+        assert!(!person_info_sections(person(false)).contains(&InfoSection::AddContact));
     }
 
     /// One card wherever it was opened from: `Message` is always there, and
@@ -700,6 +744,7 @@ mod tests {
             InfoSection::ManageChannel,
             InfoSection::Unsubscribe,
             InfoSection::ChannelMembers,
+            InfoSection::AddContact,
         ];
         let mut names: Vec<&str> = all.iter().map(|s| s.name()).collect();
         names.sort_unstable();
@@ -719,6 +764,7 @@ mod tests {
             InfoSection::SafetyNumber,
             InfoSection::RenameContact,
             InfoSection::RemoveContact,
+            InfoSection::AddContact,
             InfoSection::DeleteChat,
         ] {
             assert!(!s.group_only(), "{s:?}");

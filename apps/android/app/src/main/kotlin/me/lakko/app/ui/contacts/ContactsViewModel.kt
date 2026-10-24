@@ -130,6 +130,25 @@ public class ContactsViewModel(
         }
     }
 
+    /**
+     * `Add to contacts` on the card of a person the viewer removed
+     * (docs/ux/conversation-info.md section 2.1, amended 2026-10-24): back on
+     * the list with the one-to-one they have. Local; sends nothing.
+     */
+    public fun onAddContactBack(signatureKey: ByteArray, groupIdHex: String) {
+        val accountId = chatRepo?.let { chat ->
+            val keyB64 = java.util.Base64.getEncoder().encodeToString(signatureKey)
+            me.lakko.app.profile.ProfileDirectory.get(chat.context).accountIdsByKey()[keyB64]?.let(::hexToBytes)
+        }
+        repo.restoreRemovedContact(
+            signatureKey = signatureKey,
+            accountId = accountId,
+            groupIdHex = groupIdHex,
+            nowMs = System.currentTimeMillis().toULong(),
+            createdAt = java.time.Instant.now().toString(),
+        )
+    }
+
     private fun hexToBytes(hex: String): ByteArray? {
         if (hex.length % 2 != 0) return null
         return try {

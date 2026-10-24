@@ -150,7 +150,7 @@ public struct ChatScreen: View {
             kind: viewModel.conversationKind,
             contactMessageId: viewModel.presentsAsGroup
                 ? nil
-                : contacts.contact(forOneToOneChat: viewModel.groupIdHex)?.request.messageId
+                : contacts.personMessageId(forOneToOneChat: viewModel.groupIdHex)
         )
     }
 
@@ -433,10 +433,11 @@ public struct ChatScreen: View {
                 // ONLY way into this conversation's info, and what opens
                 // follows from what the conversation is.
                 Button {
-                    // A person opens the one contact card, pushed; a group
-                    // opens its layer. A one-to-one whose record cannot be
-                    // resolved (a roster that cannot be read) opens nothing:
-                    // that is not a state with a screen.
+                    // A person opens the one contact card, pushed - a person
+                    // the viewer removed too, whose card then offers `Add to
+                    // contacts` (amended 2026-10-24); a group opens its
+                    // layer. A one-to-one whose other person cannot be read
+                    // opens nothing: that is not a state with a screen.
                     switch infoDestination {
                     case .person(let contactMessageId?):
                         onOpenContact(contactMessageId)

@@ -8441,6 +8441,22 @@
     "chat.pending.call_disabled": {
       "text": "Disponível quando {name} se conectar.",
       "status": "machine"
+    },
+    "contacts.add_back.control": {
+      "text": "Adicionar aos contatos",
+      "status": "machine"
+    },
+    "contacts.add_back.sub": {
+      "text": "Coloca {name} de volta na sua lista de contatos desta conta.",
+      "status": "machine"
+    },
+    "contacts.add_back.action": {
+      "text": "Adicionar",
+      "status": "machine"
+    },
+    "invite.contact.page.answer_failed": {
+      "text": "Não foi possível falar com {name}. Verifique sua conexão e tente de novo.",
+      "status": "machine"
     }
   }
 }
