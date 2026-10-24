@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later
+  SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+  The one-to-one call fixture: two production CallSessions in one page, their
+  signaling handed across directly, each with the real SFrame transform
+  worker. No service is contacted (no TURN: host candidates on loopback).
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Lakko call fixture</title>
+  </head>
+  <body>
+    <video id="a-remote" autoplay playsinline muted></video>
+    <video id="b-remote" autoplay playsinline muted></video>
+    <script type="module" src="./call-main.ts"></script>
+  </body>
+</html>

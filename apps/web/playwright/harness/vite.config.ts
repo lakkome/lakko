@@ -44,6 +44,12 @@ export default defineConfig({
   // Settings, but a define that is missing is a runtime ReferenceError in any
   // module that transitively imports it.
   define: { __LAKKO_PKG_VERSION__: JSON.stringify("0.0.0-harness") },
+  // The call page runs the real SFrame transform worker, which imports the
+  // wasm core: the worker bundle needs the wasm plugin too, as in the app.
+  worker: {
+    format: "es",
+    plugins: () => [wasm()],
+  },
   server: {
     // Its own port, so a `npm run dev` already running on 5173 is untouched.
     port: 5174,
@@ -61,7 +67,7 @@ export default defineConfig({
     // exports the stub deliberately does not have. The app entry is not in
     // this project's graph at all, so naming the one entry is the fix rather
     // than widening the stub to satisfy a page nobody opens.
-    entries: ["playwright/harness/index.html"],
+    entries: ["playwright/harness/index.html", "playwright/harness/call.html"],
     exclude: ["@lakko/ffi-wasm"],
   },
 });
