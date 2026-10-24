@@ -101,10 +101,10 @@ export default defineConfig({
       use: { ...devices["Desktop Safari"] },
     },
     {
-      // The one-to-one call only: the other specs measure layout and
-      // recording against Chromium and WebKit, and were never run in Firefox.
+      // The calls only: the other specs measure layout and recording against
+      // Chromium and WebKit, and were never run in Firefox.
       name: "firefox",
-      testMatch: /one-to-one-call\.spec\.ts$/,
+      testMatch: /(one-to-one|group)-call\.spec\.ts$/,
       use: {
         ...devices["Desktop Firefox"],
         launchOptions: {

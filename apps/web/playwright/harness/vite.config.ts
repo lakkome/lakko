@@ -67,7 +67,11 @@ export default defineConfig({
     // exports the stub deliberately does not have. The app entry is not in
     // this project's graph at all, so naming the one entry is the fix rather
     // than widening the stub to satisfy a page nobody opens.
-    entries: ["playwright/harness/index.html", "playwright/harness/call.html"],
+    entries: [
+      "playwright/harness/index.html",
+      "playwright/harness/call.html",
+      "playwright/harness/group-call.html",
+    ],
     exclude: ["@lakko/ffi-wasm"],
   },
 });

@@ -291,7 +291,8 @@ test-sframe-bridge-all: test-sframe-bridge test-receiver-delay
 # `playwright/`, which the app's tsconfig does not cover), the unit tests and
 # the browser tests (Chromium and WebKit, and Firefox for the one-to-one
 # call). Needs `apps/web/wasm` (`npm run build:wasm:dev`) and the Playwright
-# browsers (`npx playwright install chromium webkit firefox`).
+# browsers (`npx playwright install chromium webkit firefox`); the group-call
+# spec builds and starts `lakko-svc-sfu` from this tree itself.
 web-check:
     cd apps/web && npm run typecheck && npm run typecheck:e2e && npm test && npm run test:e2e
 
