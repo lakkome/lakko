@@ -101,16 +101,25 @@ describe("resolveDisplay — a username is shown only when verified", () => {
     expect(r.usernameNotVerified).toBe(false);
   });
 
-  it("a failed or mismatched claim is noted for the contact detail", () => {
-    for (const verification of ["mismatch", "error"] as const) {
-      const r = resolveDisplay({
-        signatureKey: KEY,
-        profile: { displayName: "Pavel", username: "pavel" },
-        verification,
-      });
-      expect(r.usernameNotVerified).toBe(true);
-      expect(r.listLabel).toBe("Pavel");
-    }
+  it("a mismatched claim is noted for the contact detail", () => {
+    const r = resolveDisplay({
+      signatureKey: KEY,
+      profile: { displayName: "Pavel", username: "pavel" },
+      verification: "mismatch",
+    });
+    expect(r.usernameNotVerified).toBe(true);
+    expect(r.listLabel).toBe("Pavel");
+  });
+
+  it("a check that could not reach the directory is not noted: it reads as still running", () => {
+    const r = resolveDisplay({
+      signatureKey: KEY,
+      profile: { displayName: "Pavel", username: "pavel" },
+      verification: "error",
+    });
+    expect(r.usernameNotVerified).toBe(false);
+    expect(r.username).toBeNull();
+    expect(r.listLabel).toBe("Pavel");
   });
 
   it("no claim is no note", () => {

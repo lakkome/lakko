@@ -4869,6 +4869,11 @@ function decodeContactRequestBody(
         updatedAtMs: p.updatedAtMs,
         // Copied before `free()`: the getter's view dies with the handle.
         accountId: p.accountId === undefined ? null : p.accountId.slice(),
+        // ADR-0060 section 5 - the certificate that lets the username be
+        // shown. Dropped here until 2026-10-24, so the person who made the
+        // link saw "Username not verified" for anyone who added them by it.
+        usernameCertificate:
+          p.usernameCertificate === undefined ? null : p.usernameCertificate.slice(),
       };
       p.free();
     }

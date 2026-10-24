@@ -93,6 +93,7 @@ describe("contact request carries a profile", () => {
       username: "alice",
       updatedAtMs: 1_234n,
       accountId: null,
+      usernameCertificate: null,
     });
     expect(Array.from(request.fromPubkey)).toEqual(Array.from(aliceKey));
     expect(request.intro).toBe("hi bob");
@@ -105,6 +106,15 @@ describe("contact request carries a profile", () => {
     );
     expect(request.profile?.accountId).toEqual(id);
     expect(request.profile?.displayName).toBe("Alice Petrova");
+  });
+
+  it("carries the sender's username certificate, so the username can be verified (ADR-0060)", async () => {
+    const id = new Uint8Array(16).fill(0x5a);
+    const cert = new Uint8Array(wasm.usernameCertificateLen()).fill(0x33);
+    const { request } = await roundTrip(async () =>
+      wasm.composeProfileEnvelope("Alice Petrova", "alice", 1_234n, id, cert),
+    );
+    expect(request.profile?.usernameCertificate).toEqual(cert);
   });
 
   it("without a profile the request still arrives, with none", async () => {

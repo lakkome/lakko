@@ -294,6 +294,13 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     },
     now: () => Date.now(),
     decodeKey: base64Decode,
+    // A lookup that could not reach the directory tries again by itself; the
+    // screen shows the name without the username meanwhile.
+    scheduleRetry: (retry, delayMs) => {
+      setTimeout(() => {
+        void retry().then(bump);
+      }, delayMs);
+    },
   });
 
   function verifyIfClaimed(keyB64: string, username: string | null): void {

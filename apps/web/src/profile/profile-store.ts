@@ -78,17 +78,27 @@ export interface IncomingProfile {
 /** Length of an auth account id, in bytes. */
 export const ACCOUNT_ID_BYTES = 16;
 
-/** A not-newer re-send that carries an account id the held row lacks: the
- *  held row with that id filled in, when the two are the same profile (same
- *  stamp); `null` when nothing is to be learned. */
+/** A not-newer re-send that carries an account id or a username
+ *  certificate the held row lacks: the held row with those filled in, when
+ *  the two are the same profile (same stamp); `null` when nothing is to be
+ *  learned. */
 export function mergeAccountId(
   held: StoredProfile | undefined,
   incoming: StoredProfile,
 ): StoredProfile | null {
   if (held === undefined) return null;
-  if (held.accountIdHex !== null || incoming.accountIdHex === null) return null;
   if (held.updatedAtMs !== incoming.updatedAtMs) return null;
-  return { ...held, accountIdHex: incoming.accountIdHex };
+  const learnId = held.accountIdHex === null && incoming.accountIdHex !== null;
+  const heldCert = held.usernameCertificateB64 ?? null;
+  const incomingCert = incoming.usernameCertificateB64 ?? null;
+  // Only for the username the held row claims: a certificate binds one name.
+  const learnCert = heldCert === null && incomingCert !== null && incoming.username === held.username;
+  if (!learnId && !learnCert) return null;
+  return {
+    ...held,
+    accountIdHex: learnId ? incoming.accountIdHex : held.accountIdHex,
+    usernameCertificateB64: learnCert ? incomingCert : heldCert,
+  };
 }
 
 /** 32 lower-case hex characters — the only shape `accountIdHex` ever holds. */
@@ -248,15 +258,33 @@ export class ProfileStore {
       // never name a person whose profile predates the field.
       const learned = mergeAccountId(held, incoming);
       if (learned === null) return false;
+      this.forgetVerificationIfCertificateChanged(senderKeyB64, held, learned);
       this.profiles.set(senderKeyB64, learned);
       this.notify();
       this.persist(accountId);
       return true;
     }
+    this.forgetVerificationIfCertificateChanged(senderKeyB64, held, incoming);
     this.profiles.set(senderKeyB64, incoming);
     this.notify();
     this.persist(accountId);
     return true;
+  }
+
+  /** A verdict reached on a row without the certificate (or with another one)
+   *  says nothing about the row that has it: drop it, so the claim is checked
+   *  again. A profile that arrived without a certificate was cached as a
+   *  mismatch for a day, and its certificate, arriving later, never cleared
+   *  it. */
+  private forgetVerificationIfCertificateChanged(
+    senderKeyB64: string,
+    held: StoredProfile | undefined,
+    next: StoredProfile,
+  ): void {
+    const before = held?.usernameCertificateB64 ?? null;
+    const after = next.usernameCertificateB64 ?? null;
+    if (before === after || next.username === null) return;
+    this.verifications.delete(verificationKey(senderKeyB64, next.username));
   }
 
   /** The profile held for a key, or `undefined`. */

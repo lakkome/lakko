@@ -20,21 +20,19 @@ enum UsernameVerificationState: Equatable, Codable {
     /// Discovery resolves the username to a different key, or to nobody. The
     /// username is never shown for this key.
     case mismatch
-    /// The lookup could not complete (network, no anonymous token, a refused
-    /// identity gate). Not shown either; retried after
-    /// ``UsernameVerifier/retryAfterMs``.
+    /// The lookup could not complete (network, a 429, no anonymous token, a
+    /// refused identity gate). The username is not shown, and neither is the
+    /// "Username not verified" line: it reads as a check still running.
+    /// Retried by itself after ``UsernameVerifier/retryDelayMs(failures:cap:)``.
     case failed(atMs: Int64)
 
     var isVerified: Bool { self == .verified }
 
-    /// A result that says "do not show this username" rather than "not known
-    /// yet". Drives the quiet "Username not verified" line in contact detail.
-    var isRefusal: Bool {
-        switch self {
-        case .verified: return false
-        case .mismatch, .failed: return true
-        }
-    }
+    /// A result that says "this username is not theirs" rather than "not
+    /// known yet". Drives the quiet "Username not verified" line in contact
+    /// detail. A failed check is not one (2026-10-24, docs/ux/profile-names.md
+    /// section 6).
+    var isRefusal: Bool { self == .mismatch }
 }
 
 /// ADR-0048 §3 — username verification: `lookup -> account_id ->
@@ -56,18 +54,35 @@ enum UsernameVerificationState: Equatable, Codable {
 ///   cost.
 @MainActor
 final class UsernameVerifier {
-    /// How long a transient failure stands before the pair may be retried.
-    nonisolated static let defaultRetryAfterMs: Int64 = 15 * 60 * 1000
+    /// The longest a transient failure stands before the pair is retried.
+    nonisolated static let defaultRetryAfterMs: Int64 = 5 * 60 * 1000
+
+    /// The waits before a failed check is tried again: seconds at first, so a
+    /// rate limit or a dropped connection clears quickly. Chosen, not measured;
+    /// the same steps as the web and Android clients.
+    nonisolated static let retryStepsMs: [Int64] = [15_000, 30_000, 60_000, 120_000, 300_000]
+
+    /// The wait before retry number `failures` (1 for the first), never
+    /// longer than `cap`.
+    nonisolated static func retryDelayMs(failures: Int, cap: Int64) -> Int64 {
+        let index = min(max(failures, 1), retryStepsMs.count) - 1
+        return min(retryStepsMs[index], cap)
+    }
 
     private let resolve: (String) async throws -> UsernameResolution
     private let nowMs: () -> Int64
     let retryAfterMs: Int64
     private let defaults: UserDefaults?
     private let keyPrefix: String
+    /// Whether a failed check schedules its own retry (off in tests that drive
+    /// the clock themselves).
+    private let autoRetry: Bool
 
     private var accountIdB64: String?
     private var verdicts: [String: UsernameVerificationState] = [:]
     private var inFlight: [String: Task<UsernameVerificationState, Never>] = [:]
+    /// Failed checks in a row per pair, and when the next try is due.
+    private var failures: [String: (count: Int, retryAtMs: Int64)] = [:]
 
     /// Called on the main actor whenever a verdict changes, so observers can
     /// re-render names in place.
@@ -84,13 +99,15 @@ final class UsernameVerifier {
         nowMs: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) },
         retryAfterMs: Int64 = UsernameVerifier.defaultRetryAfterMs,
         defaults: UserDefaults? = .standard,
-        keyPrefix: String = "lakko.profiles.username-verdicts.v1."
+        keyPrefix: String = "lakko.profiles.username-verdicts.v1.",
+        autoRetry: Bool = true
     ) {
         self.resolve = resolve
         self.nowMs = nowMs
         self.retryAfterMs = retryAfterMs
         self.defaults = defaults
         self.keyPrefix = keyPrefix
+        self.autoRetry = autoRetry
     }
 
     /// Switch to `accountIdB64` and load its persisted verdicts.
@@ -98,6 +115,7 @@ final class UsernameVerifier {
         guard accountIdB64 != self.accountIdB64 else { return }
         self.accountIdB64 = accountIdB64
         verdicts = [:]
+        failures = [:]
         inFlight.values.forEach { $0.cancel() }
         inFlight = [:]
         guard let accountIdB64,
@@ -121,8 +139,13 @@ final class UsernameVerifier {
         switch verdicts[key] {
         case nil: return true
         case .verified?, .mismatch?: return false
-        case .failed(let atMs)?: return nowMs() - atMs >= retryAfterMs
+        case .failed(let atMs)?: return nowMs() >= retryAt(key, failedAtMs: atMs)
         }
+    }
+
+    /// When a pair that failed may be tried again.
+    private func retryAt(_ key: String, failedAtMs: Int64) -> Int64 {
+        failures[key]?.retryAtMs ?? (failedAtMs + Self.retryDelayMs(failures: 1, cap: retryAfterMs))
     }
 
     /// Verify the pair if it is not already decided. Returns the verdict.
@@ -138,7 +161,7 @@ final class UsernameVerifier {
             case .verified, .mismatch:
                 return held
             case .failed(let atMs):
-                if nowMs() - atMs < retryAfterMs { return held }
+                if nowMs() < retryAt(key, failedAtMs: atMs) { return held }
             }
         }
         if let running = inFlight[key] {
@@ -175,7 +198,26 @@ final class UsernameVerifier {
         // switch mid-lookup cancelled and forgot it.
         guard inFlight[key] == task else { return verdict }
         inFlight[key] = nil
+        if case .failed = verdict {
+            let count = (failures[key]?.count ?? 0) + 1
+            let delay = Self.retryDelayMs(failures: count, cap: retryAfterMs)
+            failures[key] = (count, nowMs() + delay)
+            scheduleRetry(signatureKeyB64: signatureKeyB64, username: username, delayMs: delay)
+        } else {
+            failures[key] = nil
+        }
         return record(verdict, key: key)
+    }
+
+    /// Try a failed pair again by itself once its wait is over; the screen
+    /// re-renders through ``onChange`` when the verdict changes.
+    private func scheduleRetry(signatureKeyB64: String, username: String, delayMs: Int64) {
+        guard autoRetry else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, delayMs)) * 1_000_000)
+            guard let self, !Task.isCancelled else { return }
+            await self.verify(signatureKeyB64: signatureKeyB64, username: username)
+        }
     }
 
     /// Drop the account's persisted verdicts.

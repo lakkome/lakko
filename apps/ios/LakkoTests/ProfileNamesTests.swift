@@ -258,7 +258,8 @@ final class ProfileNamesTests: XCTestCase {
         defaults: UserDefaults? = nil,
         resolve: @escaping (String) async throws -> UsernameResolution
     ) -> UsernameVerifier {
-        let verifier = UsernameVerifier(resolve: resolve, nowMs: now, retryAfterMs: 60_000, defaults: defaults)
+        let verifier = UsernameVerifier(
+            resolve: resolve, nowMs: now, retryAfterMs: 60_000, defaults: defaults, autoRetry: false)
         verifier.activate(accountIdB64: "acct")
         return verifier
     }
@@ -310,7 +311,7 @@ final class ProfileNamesTests: XCTestCase {
         XCTAssertEqual(log.calls.count, 1, "single-flight: one proof-of-work lookup for one pair")
     }
 
-    func testATransientFailureIsRetriedOnlyAfterItsWindow() async {
+    func testATransientFailureIsRetriedAfterAWaitThatStartsAtSecondsAndGrows() async {
         var now: Int64 = 1_000
         var fail = true
         let log = ResolveLog()
@@ -323,16 +324,39 @@ final class ProfileNamesTests: XCTestCase {
         let failed = await verifier.verify(signatureKeyB64: keyAB64, username: "alice")
         XCTAssertEqual(failed, .failed(atMs: 1_000))
         XCTAssertFalse(verifier.needsVerification(signatureKeyB64: keyAB64, username: "alice"))
-        now = 30_000
-        fail = false
+        // The first wait is 15 s.
+        now = 10_000
         let stillFailed = await verifier.verify(signatureKeyB64: keyAB64, username: "alice")
         XCTAssertEqual(stillFailed, .failed(atMs: 1_000))
         XCTAssertEqual(log.calls.count, 1)
-        now = 61_000
+        now = 16_000
         XCTAssertTrue(verifier.needsVerification(signatureKeyB64: keyAB64, username: "alice"))
+        let failedAgain = await verifier.verify(signatureKeyB64: keyAB64, username: "alice")
+        XCTAssertEqual(failedAgain, .failed(atMs: 16_000))
+        XCTAssertEqual(log.calls.count, 2)
+        // The second wait is 30 s.
+        now = 31_000
+        XCTAssertFalse(verifier.needsVerification(signatureKeyB64: keyAB64, username: "alice"))
+        now = 46_000
+        fail = false
         let retried = await verifier.verify(signatureKeyB64: keyAB64, username: "alice")
         XCTAssertEqual(retried, .verified)
-        XCTAssertEqual(log.calls.count, 2)
+        XCTAssertEqual(log.calls.count, 3)
+    }
+
+    func testTheRetryWaitsGrowToTheirCap() {
+        XCTAssertEqual(UsernameVerifier.retryDelayMs(failures: 1, cap: 300_000), 15_000)
+        XCTAssertEqual(UsernameVerifier.retryDelayMs(failures: 2, cap: 300_000), 30_000)
+        XCTAssertEqual(UsernameVerifier.retryDelayMs(failures: 50, cap: 300_000), 300_000)
+        XCTAssertEqual(UsernameVerifier.retryDelayMs(failures: 50, cap: 60_000), 60_000)
+    }
+
+    func testACheckThatCouldNotCompleteIsNotFlaggedAsNotVerified() {
+        XCTAssertNil(UsernameVerificationStateView(.failed(atMs: 1)))
+        XCTAssertNil(UsernameVerificationStateView(nil))
+        XCTAssertEqual(UsernameVerificationStateView(.mismatch), .refused)
+        XCTAssertFalse(UsernameVerificationState.failed(atMs: 1).isRefusal)
+        XCTAssertFalse(resolve(username: "pavel", verification: nil).usernameNotVerified)
     }
 
     func testDefinitiveVerdictsPersistAndFailuresDoNot() async throws {
