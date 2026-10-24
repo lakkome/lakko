@@ -847,8 +847,8 @@ class SfuCallSession(
     // ---- Peer connection + publish ----------------------------------
 
     /**
-     * TURN-credential client, injected by the call-UI layer; `null` means
-     * STUN-only ICE.
+     * TURN-credential client, injected by the call-UI layer; `null` means no
+     * ICE server at all (host candidates only).
      *
      * The SFU has a public address, so most clients reach it on a
      * server-reflexive candidate - but one behind a symmetric NAT has none,
@@ -861,13 +861,16 @@ class SfuCallSession(
     }
 
     /**
-     * STUN always, plus TURN when one can be minted. Fail-soft: a client that
-     * answers `null` leaves the call on STUN rather than refusing it.
+     * Lakko's own ICE servers only (`IceServers.kt`): the minted TURN entry
+     * and STUN on its host. Fail-soft: a client that answers `null` leaves the
+     * call on host candidates rather than refusing it; the SFU learns the
+     * person's outside address from their own packets, so no public STUN
+     * server is asked.
      */
     private suspend fun resolveIceServers(): List<PeerConnection.IceServer> {
-        val base = WebRtcPeerConnection.defaultIceServers()
-        val row = turnClient?.fetchOrNull() ?: return base
-        return base + row
+        val servers = IceServers.forTurn(turnClient?.fetchOrNull())
+        android.util.Log.i(MEDIA_LOG_TAG, "call ice servers: ${IceServers.logLine(servers)}")
+        return IceServers.toWebRtc(servers)
     }
 
     private suspend fun openPeerConnectionAndPublish() {

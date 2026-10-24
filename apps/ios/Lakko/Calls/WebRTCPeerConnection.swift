@@ -198,21 +198,15 @@ public final class WebRTCPeerConnection: NSObject {
 
     /// Construct a peer connection.
     ///
-    /// `iceServers` defaults to the STUN-only base list
-    /// (`defaultIceServers()`); the per-call TURN row is
-    /// appended by `CallSession.resolveIceServers()` before
-    /// it constructs this peer (G3-1-turn). The caller can
-    /// override for tests or for a region-pinned
-    /// deployment. The default is supplied as a `nil`
-    /// sentinel because Swift refuses to evaluate
-    /// `Self.defaultIceServers()` as a default expression
-    /// — covariant `Self` cannot appear there and the
-    /// static is `@MainActor` while the surrounding init
-    /// is `@MainActor` too but Swift's default-expression
-    /// evaluator runs in a non-isolated context.
-    public init(iceServers: [RTCIceServer]? = nil) {
+    /// `iceServers` is the call's list, built by
+    /// ``IceServers`` (Lakko's own servers only: the minted
+    /// TURN row and STUN on its host, or none) in
+    /// `CallSession` / `SfuCallSession` before they
+    /// construct this peer. It defaults to empty — host
+    /// candidates only, never a public STUN server.
+    public init(iceServers: [RTCIceServer] = []) {
         super.init()
-        let servers = iceServers ?? Self.defaultIceServers()
+        let servers = iceServers
 
         let config = RTCConfiguration()
         config.iceServers = servers
@@ -1460,31 +1454,6 @@ public final class WebRTCPeerConnection: NSObject {
             }
             }
         }
-    }
-
-    // MARK: - Defaults
-
-    /// STUN-only base ICE-server list. This is the floor every
-    /// call starts from; TURN is layered on top per-call by
-    /// `CallSession.resolveIceServers()`, which appends one
-    /// freshly-minted coturn row via `TurnCredentialClient`
-    /// (G3-1-turn, landed). Keeping the default STUN-only here
-    /// means a call with no `turnClient` injected still attempts
-    /// to connect over STUN (only symmetric-NAT peers fail, as
-    /// `.disconnected`).
-    public static func defaultIceServers() -> [RTCIceServer] {
-        [
-            RTCIceServer(urlStrings: [
-                "stun:stun.l.google.com:19302",
-                "stun:stun1.l.google.com:19302",
-            ]),
-            // TURN rows (Lakko's coturn cluster) are NOT added
-            // here — `CallSession.resolveIceServers()` mints one
-            // at call start via `TurnCredentialClient.fetchOrNil()`
-            // and appends it to this base list. See
-            // `services/auth/src/turn.rs` for the credential REST
-            // shape.
-        ]
     }
 }
 

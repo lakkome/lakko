@@ -107,7 +107,7 @@ final class CallHost: ObservableObject {
             session, audio, video in session.dial(audio: audio, video: video)
         }
         /// The TURN-credential client handed to each new session for its call
-        /// id, or `nil` for STUN-only ICE.
+        /// id, or `nil` for host candidates only.
         ///
         /// A port so a test can watch a call be placed without reaching the
         /// auth service. In production the credential is minted for the call's
@@ -548,10 +548,11 @@ final class CallHost: ObservableObject {
         } else {
             NSLog("CallHost: call-key derivation failed; the call will refuse per invariant #4")
         }
-        // Without this the session resolves STUN-only ICE, and two peers that
-        // cannot reach each other directly never connect. Fail-soft by
-        // contract: a `nil` client, or a credential the auth service declines
-        // to mint, leaves the call on STUN rather than refusing it.
+        // Without this the session has no ICE server at all (host candidates
+        // only), and two peers that cannot reach each other directly never
+        // connect. Fail-soft by contract: a `nil` client, or a credential the
+        // auth service declines to mint, leaves the call on host candidates
+        // rather than refusing it.
         session.setTurnClient(ports.turnClient(callId))
         activeCall = session
         activeGroupIdHex = groupIdHex

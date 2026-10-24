@@ -32,7 +32,23 @@ export type GroupStep =
   /** Participant `who` turns its camera on during the call. */
   | { readonly do: "camera"; readonly who: number }
   /** Every participant asks for this picture of every other one. */
-  | { readonly do: "want"; readonly quality: VideoQuality };
+  | { readonly do: "want"; readonly quality: VideoQuality }
+  /**
+   * Wait until participant `who` (every one when absent) has decoded at least
+   * `frames` video frames from each participant in `from` (every other one
+   * when absent), on `track` (any track when absent), or until `ms` passed.
+   * A condition rather than a fixed wait: under load (three engines at once)
+   * a renegotiation can take longer, and a fixed wait then fails a call that
+   * works.
+   */
+  | {
+      readonly do: "until";
+      readonly frames: number;
+      readonly ms: number;
+      readonly track?: string;
+      readonly who?: readonly number[];
+      readonly from?: readonly number[];
+    };
 
 export interface FromPeer {
   readonly videoFramesDecoded: number;
@@ -44,6 +60,8 @@ export interface FromPeer {
 
 export interface ParticipantReport {
   readonly state: string;
+  /** The ICE server URLs the session's peer connection was given. */
+  readonly iceServerUrls: readonly string[];
   readonly peerId: string;
   /** Keyed by the other participant's SFU peer id. */
   readonly from: Record<string, FromPeer>;
@@ -69,9 +87,6 @@ async function run(input: GroupCallInput): Promise<ParticipantReport[]> {
         seed: SEED,
         localLeaf: i,
         media: { audio: true, video: input.video[i] === true },
-        // No STUN or TURN: host candidates on loopback only. Firefox would
-        // otherwise ask its own default STUN server.
-        iceServers: [],
       },
       {
         onStateChange: (s) => {
@@ -103,7 +118,23 @@ async function run(input: GroupCallInput): Promise<ParticipantReport[]> {
   for (const step of input.steps) {
     if (step.do === "wait") await new Promise((r) => setTimeout(r, step.ms));
     else if (step.do === "camera") await sessions[step.who]?.publishVideo();
-    else {
+    else if (step.do === "until") {
+      const until = Date.now() + step.ms;
+      const who = step.who ?? sessions.map((_, i) => i);
+      for (;;) {
+        const reports = await collect();
+        const done = who.every((i) => {
+          const from = step.from ?? sessions.map((_, j) => j).filter((j) => j !== i);
+          return from.every((j) => {
+            const got = reports[i]?.from[selfIds[j] ?? ""];
+            const n = step.track === undefined ? got?.videoFramesDecoded : got?.videoFramesByTrack[step.track];
+            return (n ?? 0) >= step.frames;
+          });
+        });
+        if (done || Date.now() > until) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    } else {
       sessions.forEach((s, i) => {
         selfIds.forEach((peer, j) => {
           if (i === j || peer === "") return;
@@ -115,41 +146,49 @@ async function run(input: GroupCallInput): Promise<ParticipantReport[]> {
       });
     }
   }
-  const reports: ParticipantReport[] = [];
-  for (let i = 0; i < sessions.length; i += 1) {
-    const pc = (sessions[i] as unknown as { pc: RTCPeerConnection | null }).pc;
-    const from: Record<string, { v: number; byTrack: Record<string, number>; a: number; s: number; c: number }> = {};
-    if (pc !== null) {
-      (await pc.getStats()).forEach((s: Record<string, unknown>) => {
-        if (s["type"] !== "inbound-rtp") return;
-        const source = trackPeer[i]?.get(String(s["trackIdentifier"] ?? ""));
-        if (source === undefined) return;
-        const row = (from[source.peer] ??= { v: 0, byTrack: {}, a: 0, s: 0, c: 0 });
-        if (s["kind"] === "video") {
-          const n = Number(s["framesDecoded"] ?? 0);
-          row.v += n;
-          row.byTrack[source.role] = (row.byTrack[source.role] ?? 0) + n;
-        }
-        if (s["kind"] === "audio") {
-          row.a += Number(s["packetsReceived"] ?? 0);
-          row.s += Number(s["totalSamplesReceived"] ?? 0);
-          row.c += Number(s["concealedSamples"] ?? 0);
-        }
-      });
-    }
-    const out: Record<string, FromPeer> = {};
-    for (const [peer, r] of Object.entries(from)) {
-      out[peer] = {
-        videoFramesDecoded: r.v,
-        videoFramesByTrack: r.byTrack,
-        audioPackets: r.a,
-        audioConcealedRatio: r.s === 0 ? 1 : r.c / r.s,
-      };
-    }
-    reports.push({ state: states[i] as string, peerId: selfIds[i] as string, from: out });
-  }
+  const reports = await collect();
   for (const s of sessions) s.hangUp();
   return reports;
+
+  async function collect(): Promise<ParticipantReport[]> {
+    const reports: ParticipantReport[] = [];
+    for (let i = 0; i < sessions.length; i += 1) {
+      const pc = (sessions[i] as unknown as { pc: RTCPeerConnection | null }).pc;
+      const from: Record<string, { v: number; byTrack: Record<string, number>; a: number; s: number; c: number }> = {};
+      if (pc !== null) {
+        (await pc.getStats()).forEach((s: Record<string, unknown>) => {
+          if (s["type"] !== "inbound-rtp") return;
+          const source = trackPeer[i]?.get(String(s["trackIdentifier"] ?? ""));
+          if (source === undefined) return;
+          const row = (from[source.peer] ??= { v: 0, byTrack: {}, a: 0, s: 0, c: 0 });
+          if (s["kind"] === "video") {
+            const n = Number(s["framesDecoded"] ?? 0);
+            row.v += n;
+            row.byTrack[source.role] = (row.byTrack[source.role] ?? 0) + n;
+          }
+          if (s["kind"] === "audio") {
+            row.a += Number(s["packetsReceived"] ?? 0);
+            row.s += Number(s["totalSamplesReceived"] ?? 0);
+            row.c += Number(s["concealedSamples"] ?? 0);
+          }
+        });
+      }
+      const out: Record<string, FromPeer> = {};
+      for (const [peer, r] of Object.entries(from)) {
+        out[peer] = {
+          videoFramesDecoded: r.v,
+          videoFramesByTrack: r.byTrack,
+          audioPackets: r.a,
+          audioConcealedRatio: r.s === 0 ? 1 : r.c / r.s,
+        };
+      }
+      const iceServerUrls = (pc?.getConfiguration().iceServers ?? []).flatMap((s) =>
+        typeof s.urls === "string" ? [s.urls] : [...s.urls],
+      );
+      reports.push({ state: states[i] as string, iceServerUrls, peerId: selfIds[i] as string, from: out });
+    }
+    return reports;
+  }
 }
 
 async function waitFor(ok: () => boolean, what: string, ms = 20_000): Promise<void> {

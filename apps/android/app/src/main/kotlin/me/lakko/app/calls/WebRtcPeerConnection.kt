@@ -57,6 +57,9 @@ import org.webrtc.VideoTrack
  *   single source of truth. This wrapper surfaces the raw
  *   [PeerConnection.PeerConnectionState] transitions; the
  *   session translates them into the user-visible state.
+ * - The ICE servers — the caller passes them, Lakko's own only
+ *   (`IceServers.kt`: the minted TURN entry and STUN on its host,
+ *   or none). There is no public STUN default.
  * - The MLS-derived call key — SFrame integration arrives
  *   in a follow-up sub-sprint (`G3-2-sframe`), at which
  *   point the wrapper grows an `installCallKey(...)` hook
@@ -82,7 +85,7 @@ import org.webrtc.VideoTrack
  */
 public class WebRtcPeerConnection(
     private val applicationContext: Context,
-    private val iceServers: List<PeerConnection.IceServer> = defaultIceServers(),
+    private val iceServers: List<PeerConnection.IceServer>,
 ) {
 
     /**
@@ -2072,29 +2075,6 @@ public class WebRtcPeerConnection(
          */
         public fun sharedEglContext(): EglBase.Context? =
             sharedEglBase?.eglBaseContext
-
-        /**
-         * STUN + (placeholder) TURN config. Production wires
-         * these via the rendezvous bootstrap config; for now
-         * a single Google STUN server is enough to exercise
-         * the happy path on most networks.
-         */
-        public fun defaultIceServers(): List<PeerConnection.IceServer> = listOf(
-            PeerConnection.IceServer.builder(
-                listOf(
-                    "stun:stun.l.google.com:19302",
-                    "stun:stun1.l.google.com:19302",
-                )
-            ).createIceServer(),
-            // TURN servers (Lakko's coturn cluster) arrive via
-            // the rendezvous bootstrap config — see
-            // `crates/lakko-transport/src/rendezvous.rs`. For
-            // now we run STUN-only; on a NAT-symmetric
-            // network the call will fail to connect and
-            // surface as `DISCONNECTED`. The follow-up
-            // sub-sprint G3-2-turn wires the bootstrap config
-            // into here.
-        )
     }
 }
 

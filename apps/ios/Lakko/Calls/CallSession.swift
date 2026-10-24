@@ -274,15 +274,15 @@ public final class CallSession: ObservableObject {
 
     /// G3-1-turn — TURN-credential client. Injected by the
     /// call-UI layer via [`setTurnClient`] so tests can swap
-    /// a stub. When `nil` (or when its `fetchOrNil()`
-    /// returns `nil`) the call proceeds with STUN-only ICE —
-    /// fail-soft path per `TurnCredentialClient` docs.
+    /// a stub. When `nil` (or when it mints nothing) the
+    /// call proceeds on host candidates only — fail-soft
+    /// path per `TurnCredentialClient` docs.
     private var turnClient: TurnCredentialClient?
 
     /// Bind the TURN client used for ICE-server resolution at
     /// `dial` / `acceptCall` time. Idempotent; passing `nil`
-    /// disables TURN fetching for subsequent calls (STUN-only
-    /// fallback).
+    /// disables TURN fetching for subsequent calls (host
+    /// candidates only).
     public func setTurnClient(_ client: TurnCredentialClient?) {
         self.turnClient = client
     }
@@ -467,20 +467,16 @@ public final class CallSession: ObservableObject {
         }
     }
 
-    /// G3-1-turn — build the ICE-server list for this call:
-    /// `defaultIceServers()` (STUN-only) plus optionally one
-    /// TURN row freshly minted via the auth service. Fails
-    /// soft to STUN-only when `turnClient` is unset or
-    /// `fetchOrNil()` returns nil — the call still attempts
-    /// to connect (the SFU is reachable; only symmetric-NAT
-    /// peers will fail), and the failure surfaces as a normal
-    /// ICE-disconnected state rather than a refused call.
+    /// Build the ICE-server list for this call: Lakko's own
+    /// servers only (``IceServers``) — the TURN row minted via
+    /// the auth service and STUN on its host, or an empty list
+    /// (host candidates only) when `turnClient` is unset or
+    /// mints nothing. The call still attempts to connect then;
+    /// two peers behind NATs may not reach each other, and that
+    /// surfaces as a normal ICE-disconnected state rather than
+    /// a refused call.
     private func resolveIceServers() async -> [RTCIceServer] {
-        var servers = WebRTCPeerConnection.defaultIceServers()
-        if let turn = turnClient, let row = await turn.fetchOrNil() {
-            servers.append(row)
-        }
-        return servers
+        await IceServers.resolve(turnClient)
     }
 
     /// Resolve the seed + leaf and invoke

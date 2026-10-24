@@ -407,7 +407,7 @@ public struct MintCallJwtResult: Equatable, Sendable {
     public let expiresAtUnixSecs: UInt64
     public let claims: ParsedCallJwt
     /// The TURN credential minted beside the token, or `nil` when the
-    /// deployment has no relay (the call proceeds on STUN alone).
+    /// deployment has no relay (the call proceeds on host candidates alone).
     public let turn: TurnCredential?
 }
 

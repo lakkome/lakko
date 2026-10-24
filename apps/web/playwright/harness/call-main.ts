@@ -27,6 +27,8 @@ export type CallStep =
 
 export interface SideReport {
   readonly state: string;
+  /** The ICE server URLs the session's peer connection was given. */
+  readonly iceServerUrls: readonly string[];
   /** Video frames the remote video element has decoded. */
   readonly videoFrames: number;
   readonly videoWidth: number;
@@ -115,8 +117,12 @@ async function run(steps: readonly CallStep[]): Promise<CallReport> {
         }
       });
     }
+    const iceServerUrls = (pc?.getConfiguration().iceServers ?? []).flatMap((s) =>
+      typeof s.urls === "string" ? [s.urls] : [...s.urls],
+    );
     return {
       state: states[side],
+      iceServerUrls,
       videoFrames: quality.totalVideoFrames,
       videoWidth: video.videoWidth,
       audioPackets,

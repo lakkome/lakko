@@ -109,6 +109,7 @@ import {
   videoReceiveCapabilities,
   type CodecPreferenceTransceiver,
 } from "./video-codec-preference";
+import { iceServersFor, iceServersLine } from "./ice-servers";
 import { loadWasm } from "../wasm";
 import type { ParsedCallSignaling } from "../../wasm/lakko_ffi_wasm";
 
@@ -351,12 +352,6 @@ export const DEFAULT_CALL_SESSION_TIMING: Omit<CallSessionTiming, "ringTimeoutMs
 export type CallSessionTimingInput = Partial<Omit<CallSessionTiming, "ringTimeoutMs">> &
   Pick<CallSessionTiming, "ringTimeoutMs">;
 
-/** STUN-only base list. A TURN row from the auth service is appended to it
- *  per call when one can be minted; see `setTurnProvider`. */
-const PUBLIC_ICE_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-];
 
 /** Generate a fresh 16-byte call_id. */
 export function mintCallId(): Uint8Array {
@@ -583,15 +578,22 @@ export class CallSession {
   }
 
   /** Resolve the ICE servers for this call: STUN always, TURN when minted. */
+  /** Lakko's own servers only (`./ice-servers.ts`): the minted TURN entry
+   *  and STUN on its host, or none. */
   private async resolveIceServers(): Promise<RTCIceServer[]> {
     const provider = this.turnProvider;
-    if (provider === null) return PUBLIC_ICE_SERVERS;
-    try {
-      const turn = await provider();
-      return turn === null ? PUBLIC_ICE_SERVERS : [...PUBLIC_ICE_SERVERS, turn];
-    } catch {
-      return PUBLIC_ICE_SERVERS;
+    let turn: RTCIceServer | null = null;
+    if (provider !== null) {
+      try {
+        turn = await provider();
+      } catch {
+        turn = null;
+      }
     }
+    const servers = iceServersFor(turn);
+    // eslint-disable-next-line no-console
+    console.info(`call ice servers: ${iceServersLine(servers)}`);
+    return servers;
   }
 
   /**

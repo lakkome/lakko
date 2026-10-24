@@ -9,7 +9,6 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import org.webrtc.PeerConnection
 
 /**
  * The TURN credential a call's ICE configuration adds (G3-{1,2}-turn), from
@@ -25,9 +24,10 @@ import org.webrtc.PeerConnection
  *
  * **Fail-soft by contract.** No credential (a deployment without a relay, a
  * network failure, no token to be had) resolves to `null` and the call
- * proceeds on STUN alone: an availability choice about ICE candidates, never
- * an E2EE fallback (invariant #4 is untouched). A cancelled caller is not
- * answered: the cancellation is passed on.
+ * proceeds with no ICE server at all, host candidates only (`IceServers.kt`):
+ * an availability choice about ICE candidates, never an E2EE fallback
+ * (invariant #4 is untouched). A cancelled caller is not answered: the
+ * cancellation is passed on.
  */
 public class TurnCredentialClient private constructor(
     private val mint: suspend () -> TurnCredential?,
@@ -35,9 +35,10 @@ public class TurnCredentialClient private constructor(
     private val lock = Mutex()
     private var minted: CompletableDeferred<TurnCredential?>? = null
 
-    /** The ICE server to add, or `null` for STUN-only. Minted at most once. */
-    public suspend fun fetchOrNull(): PeerConnection.IceServer? {
-        val credential = try {
+    /** The TURN credential of this call, or `null` for none. Minted at most
+     *  once. [IceServers.forTurn] turns it into the call's ICE servers. */
+    public suspend fun fetchOrNull(): TurnCredential? {
+        return try {
             credential()
         } catch (cause: Throwable) {
             // A call that ended while the credential was being fetched has
@@ -45,13 +46,9 @@ public class TurnCredentialClient private constructor(
             // here let the cancelled start run on and open a peer connection
             // and the camera for a call that was already over.
             me.lakko.app.rethrowIfCancelled(cause)
-            Log.w(TAG, "mint failed, proceeding STUN-only")
+            Log.w(TAG, "mint failed, proceeding without TURN")
             null
-        } ?: return null
-        return PeerConnection.IceServer.builder(credential.urls)
-            .setUsername(credential.username)
-            .setPassword(credential.password)
-            .createIceServer()
+        }
     }
 
     private suspend fun credential(): TurnCredential? {

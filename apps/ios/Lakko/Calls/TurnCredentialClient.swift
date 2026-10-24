@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
-import WebRTC
 
 /// The TURN credential a call's ICE configuration adds (G3-1-turn), from the
 /// anonymous call-admission exchange (ADR-0078 section 2). Mirror of the web
@@ -17,8 +16,9 @@ import WebRTC
 ///
 /// **Fail-soft by contract.** No credential - a deployment without a relay, a
 /// network failure, no token to be had - resolves to `nil`, and the call
-/// proceeds on STUN alone. An availability choice about ICE candidates, never
-/// an E2EE fallback (invariant #4 is untouched).
+/// proceeds on host candidates alone (``IceServers``: Lakko uses no public
+/// STUN server). An availability choice about ICE candidates, never an E2EE
+/// fallback (invariant #4 is untouched).
 public final class TurnCredentialClient: @unchecked Sendable {
     private let mint: () async -> TurnCredential?
     private let lock = NSLock()
@@ -43,14 +43,15 @@ public final class TurnCredentialClient: @unchecked Sendable {
             do {
                 return try await jwtClient.mint(callId: callId, role: .participant).turn
             } catch {
-                NSLog("[lakko.turn] mint failed, proceeding STUN-only")
+                NSLog("[lakko.turn] mint failed, proceeding on host candidates only")
                 return nil
             }
         })
     }
 
-    /// The ICE server to add, or `nil` for STUN-only. Minted at most once.
-    public func fetchOrNil() async -> RTCIceServer? {
+    /// The TURN row to use, or `nil` when none could be minted. Minted at
+    /// most once. ``IceServers/entries(for:)`` turns it into the call's list.
+    func fetchEntryOrNil() async -> IceServers.Entry? {
         let task: Task<TurnCredential?, Never> = lock.withLock {
             if let minted { return minted }
             let t = Task { await self.mint() }
@@ -58,10 +59,6 @@ public final class TurnCredentialClient: @unchecked Sendable {
             return t
         }
         guard let credential = await task.value else { return nil }
-        return RTCIceServer(
-            urlStrings: credential.urls,
-            username: credential.username,
-            credential: credential.password
-        )
+        return IceServers.Entry(turn: credential)
     }
 }

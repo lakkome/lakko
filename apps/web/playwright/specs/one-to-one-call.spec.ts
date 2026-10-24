@@ -27,6 +27,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 interface SideReport {
   state: string;
+  iceServerUrls: string[];
   videoFrames: number;
   videoFramesDecoded: number;
   videoWidth: number;
@@ -120,6 +121,10 @@ test("an audio call where each side turns its camera on during the call", async 
 
 test("an audio call: each side hears the other", async ({ page }) => {
   const r = await call(page, [{ do: "dial", video: false }, { do: "accept" }, { do: "wait", ms: 3_000 }]);
+  // No TURN is minted here, so no ICE server at all: in particular no public
+  // STUN server (until 2026-10-24 the default was Google's).
+  expect(r.a.iceServerUrls).toEqual([]);
+  expect(r.b.iceServerUrls).toEqual([]);
   expectAudio(r.a, "the caller");
   expectAudio(r.b, "the answerer");
   expect(r.a.videoFramesDecoded).toBe(0);

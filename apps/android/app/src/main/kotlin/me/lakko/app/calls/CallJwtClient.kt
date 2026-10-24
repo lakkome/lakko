@@ -388,7 +388,8 @@ public data class MintCallJwtResult(
     val expiresAtUnixSecs: ULong,
     val claims: ParsedCallJwt,
     /** The TURN credential minted beside the token, or `null` when the
-     *  deployment has no relay (the call proceeds on STUN alone). */
+     *  deployment has no relay (the call proceeds on host candidates alone,
+     *  `IceServers.kt`). */
     val turn: TurnCredential? = null,
 )
 

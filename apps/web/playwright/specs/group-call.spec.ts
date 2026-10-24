@@ -43,13 +43,15 @@ interface FromPeer {
 }
 interface ParticipantReport {
   state: string;
+  iceServerUrls: string[];
   peerId: string;
   from: Record<string, FromPeer>;
 }
 type GroupStep =
   | { do: "wait"; ms: number }
   | { do: "camera"; who: number }
-  | { do: "want"; quality: "main" | "middle" | "light" };
+  | { do: "want"; quality: "main" | "middle" | "light" }
+  | { do: "until"; frames: number; ms: number; track?: string; who?: number[]; from?: number[] };
 
 /** Enough decoded frames that a picture was shown. */
 const SHOWN = 10;
@@ -199,8 +201,14 @@ function eachPair(r: ParticipantReport[], check: (got: FromPeer | undefined, who
 }
 
 test("three people with cameras: each sees and hears the other two", async ({ page }) => {
-  const r = await groupCall(page, [true, true, true], [{ do: "wait", ms: 6_000 }]);
+  const r = await groupCall(page, [true, true, true], [
+    { do: "until", frames: SHOWN + 20, ms: 20_000 },
+    { do: "wait", ms: 1_000 },
+  ]);
   expect(r.map((p) => p.state)).toEqual(["connected", "connected", "connected"]);
+  // No TURN is minted here, so no ICE server at all: in particular no public
+  // STUN server (until 2026-10-24 the default was Google's).
+  expect(r.map((p) => p.iceServerUrls)).toEqual([[], [], []]);
   eachPair(r, (got, who) => {
     expect(got?.videoFramesDecoded ?? 0, `${who}: no video`).toBeGreaterThan(SHOWN);
     expect(got?.audioPackets ?? 0, `${who}: no audio`).toBeGreaterThan(0);
@@ -210,9 +218,9 @@ test("three people with cameras: each sees and hears the other two", async ({ pa
 
 test("three people asking for the main picture of each other get it", async ({ page }) => {
   const r = await groupCall(page, [true, true, true], [
-    { do: "wait", ms: 2_000 },
+    { do: "until", frames: SHOWN, ms: 20_000 },
     { do: "want", quality: "main" },
-    { do: "wait", ms: 5_000 },
+    { do: "until", frames: SHOWN + 20, ms: 20_000, track: "main" },
   ]);
   eachPair(r, (got, who) => {
     expect(got?.videoFramesByTrack["main"] ?? 0, `${who}: no main picture`).toBeGreaterThan(SHOWN);
@@ -223,7 +231,8 @@ test("an audio call where one person turns the camera on: the other two see it",
   const r = await groupCall(page, [false, false, false], [
     { do: "wait", ms: 2_000 },
     { do: "camera", who: 0 },
-    { do: "wait", ms: 6_000 },
+    { do: "until", frames: SHOWN + 20, ms: 20_000, who: [1, 2], from: [0] },
+    { do: "wait", ms: 1_000 },
   ]);
   const camera = r[0]?.peerId ?? "";
   for (const i of [1, 2]) {

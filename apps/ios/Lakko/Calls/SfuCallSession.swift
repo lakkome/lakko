@@ -794,25 +794,23 @@ final class SfuCallSession {
     // MARK: - Peer connection + publish
 
     /// TURN-credential client, injected by the call-UI layer. `nil` means
-    /// STUN-only ICE.
+    /// host candidates only.
     ///
-    /// The SFU has a public address, so most clients reach it on a
-    /// server-reflexive candidate - but one behind a symmetric NAT has none,
-    /// and for it the relay is the only way into the room.
+    /// The SFU has a public address and learns a client's outside address from
+    /// its own packets, so most clients reach it without any server-reflexive
+    /// candidate - but for one whose network blocks that path the relay is the
+    /// only way into the room.
     private var turnClient: TurnCredentialClient?
 
     public func setTurnClient(_ client: TurnCredentialClient?) {
         self.turnClient = client
     }
 
-    /// STUN always, plus TURN when one can be minted. Fail-soft: a client that
-    /// answers `nil` leaves the call on STUN rather than refusing it.
+    /// Lakko's own servers only (``IceServers``): the minted TURN row and
+    /// STUN on its host, or none. Fail-soft: a client that answers `nil`
+    /// leaves the call on host candidates rather than refusing it.
     private func resolveIceServers() async -> [RTCIceServer] {
-        var servers = WebRTCPeerConnection.defaultIceServers()
-        if let turn = turnClient, let row = await turn.fetchOrNil() {
-            servers.append(row)
-        }
-        return servers
+        await IceServers.resolve(turnClient)
     }
 
     private func openPeerConnectionAndPublish() async throws {

@@ -85,6 +85,7 @@ import {
   type SfuWelcome,
 } from "./sfu-signaling-client";
 import { loadWasm } from "../wasm";
+import { iceServersFor, iceServersLine } from "./ice-servers";
 import { CallRelay, type PeerAnnouncer, type VerifiedPeerIdentity } from "./call-relay";
 import { describeLocalCamera } from "./local-preview";
 import {
@@ -366,10 +367,6 @@ export interface SfuCallCallbacks {
   onCaptureFallback?(fallback: CaptureFallback): void;
 }
 
-const DEFAULT_ICE_SERVERS: readonly RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-];
 
 /**
  * One instance per active SFU call. Construct, then `connect()`. Tear
@@ -1917,18 +1914,24 @@ export class SfuCallSession {
     this.turnProvider = provider;
   }
 
-  /** STUN always - explicit config wins over the default - plus TURN when
-   *  one can be minted. */
+  /** Lakko's own servers only (`./ice-servers.ts`): explicit config first,
+   *  then the minted TURN entry and STUN on its host. No public STUN server:
+   *  the SFU learns a person's outside address from their own packets. */
   private async resolveIceServers(): Promise<RTCIceServer[]> {
-    const base = [...(this.config.iceServers ?? DEFAULT_ICE_SERVERS)];
+    const base = [...(this.config.iceServers ?? [])];
     const provider = this.turnProvider;
-    if (provider === null) return base;
-    try {
-      const turn = await provider();
-      return turn === null ? base : [...base, turn];
-    } catch {
-      return base;
+    let turn: RTCIceServer | null = null;
+    if (provider !== null) {
+      try {
+        turn = await provider();
+      } catch {
+        turn = null;
+      }
     }
+    const servers = [...base, ...iceServersFor(turn)];
+    // eslint-disable-next-line no-console
+    console.info(`call ice servers: ${iceServersLine(servers)}`);
+    return servers;
   }
 
   private async openPeerConnectionAndPublish(): Promise<void> {

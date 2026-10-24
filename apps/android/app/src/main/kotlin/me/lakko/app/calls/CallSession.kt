@@ -329,7 +329,7 @@ public class CallSession(
      * G3-2-turn — TURN-credential client. Injected by the
      * call-UI layer via [setTurnClient]; nullable so dev
      * builds without a deployed coturn cluster still work
-     * (fail-soft STUN-only path).
+     * (fail-soft: no ICE server, host candidates only).
      */
     private var turnClient: TurnCredentialClient? = null
 
@@ -459,18 +459,15 @@ public class CallSession(
     }
 
     /**
-     * G3-2-turn — build the ICE-server list for this call:
-     * `defaultIceServers()` (STUN-only baseline) plus
-     * optionally one TURN row freshly minted via
-     * [TurnCredentialClient.fetchOrNull]. Fails soft to
-     * STUN-only when [turnClient] is unset or the fetch
-     * returns null.
+     * The ICE servers of this call, Lakko's own only (`IceServers.kt`): the
+     * TURN entry minted via [TurnCredentialClient.fetchOrNull] and STUN on
+     * its host, or none at all (host candidates only) when [turnClient] is
+     * unset or the fetch returns null.
      */
     private suspend fun resolveIceServers(): List<PeerConnection.IceServer> {
-        val base = WebRtcPeerConnection.defaultIceServers().toMutableList()
-        val row = turnClient?.fetchOrNull()
-        if (row != null) base.add(row)
-        return base
+        val servers = IceServers.forTurn(turnClient?.fetchOrNull())
+        android.util.Log.i("CallSession", "call ice servers: ${IceServers.logLine(servers)}")
+        return IceServers.toWebRtc(servers)
     }
 
     /** G3-2-call-controls — mute / unmute the local mic. Drives
