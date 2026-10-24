@@ -33,6 +33,12 @@ export interface SideReport {
   /** Inbound audio packets and how much of the played audio was concealed. */
   readonly audioPackets: number;
   readonly audioConcealedRatio: number;
+  /** Where video stops, when it does: frames this side encoded and packets it
+   *  sent, packets it received from the peer and frames it decoded. */
+  readonly videoFramesEncoded: number;
+  readonly videoPacketsSent: number;
+  readonly videoPacketsReceived: number;
+  readonly videoFramesDecoded: number;
 }
 
 export interface CallReport {
@@ -88,12 +94,24 @@ async function run(steps: readonly CallStep[]): Promise<CallReport> {
     let audioPackets = 0;
     let samples = 0;
     let concealed = 0;
+    let framesEncoded = 0;
+    let packetsSent = 0;
+    let packetsReceived = 0;
+    let framesDecoded = 0;
     if (pc !== null) {
       (await pc.getStats()).forEach((s: Record<string, unknown>) => {
         if (s["type"] === "inbound-rtp" && s["kind"] === "audio") {
           audioPackets += Number(s["packetsReceived"] ?? 0);
           samples += Number(s["totalSamplesReceived"] ?? 0);
           concealed += Number(s["concealedSamples"] ?? 0);
+        }
+        if (s["type"] === "outbound-rtp" && s["kind"] === "video") {
+          framesEncoded += Number(s["framesEncoded"] ?? 0);
+          packetsSent += Number(s["packetsSent"] ?? 0);
+        }
+        if (s["type"] === "inbound-rtp" && s["kind"] === "video") {
+          packetsReceived += Number(s["packetsReceived"] ?? 0);
+          framesDecoded += Number(s["framesDecoded"] ?? 0);
         }
       });
     }
@@ -103,6 +121,10 @@ async function run(steps: readonly CallStep[]): Promise<CallReport> {
       videoWidth: video.videoWidth,
       audioPackets,
       audioConcealedRatio: samples === 0 ? 1 : concealed / samples,
+      videoFramesEncoded: framesEncoded,
+      videoPacketsSent: packetsSent,
+      videoPacketsReceived: packetsReceived,
+      videoFramesDecoded: framesDecoded,
     };
   };
   const out = { a: await report("a"), b: await report("b") };

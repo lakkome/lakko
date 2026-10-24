@@ -104,6 +104,11 @@ export const DEFAULT_SFRAME_ATTACHERS: SFrameAttachers = {
     attachReceiverSFrame(receiver, opts);
   },
 };
+import {
+  preferVp8,
+  videoReceiveCapabilities,
+  type CodecPreferenceTransceiver,
+} from "./video-codec-preference";
 import { loadWasm } from "../wasm";
 import type { ParsedCallSignaling } from "../../wasm/lakko_ffi_wasm";
 
@@ -428,6 +433,8 @@ export class CallSession {
 
   /** Logged once per session; see {@link armFrameDescriptor}. */
   private frameDescriptorWarned = false;
+  /** Logged once per session; see {@link armFrameDescriptor}. */
+  private vp8Warned = false;
 
   /** Receivers that already carry this session's decrypt transform. */
   private readonly sealedReceivers = new WeakSet<RTCRtpReceiver>();
@@ -1368,6 +1375,19 @@ export class CallSession {
    * the descriptor puts on the wire in the clear.
    */
   private armFrameDescriptor(pc: RTCPeerConnection): void {
+    // The codec first: a sealed frame travels only as VP8
+    // (`./video-codec-preference.ts`), and this runs before every description.
+    const codecs = preferVp8(
+      pc.getTransceivers() as unknown as readonly CodecPreferenceTransceiver[],
+      videoReceiveCapabilities(),
+    );
+    if (codecs.unsupported > 0 && !this.vp8Warned) {
+      this.vp8Warned = true;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `CallSession: ${codecs.unsupported} video transceiver(s) could not be set to VP8; this browser's video may not reach the other person`,
+      );
+    }
     const outcome = armGenericFrameDescriptor(
       pc.getTransceivers() as unknown as readonly HeaderExtensionTransceiver[],
     );

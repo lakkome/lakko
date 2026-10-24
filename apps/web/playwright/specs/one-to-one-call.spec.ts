@@ -12,6 +12,10 @@
  * before the decoder, so "frames decoded" is also the proof that each sender
  * sealed and each receiver opened.
  *
+ * Runs in Chromium and WebKit. In WebKit it first found that no video
+ * crossed at all: WebKit negotiated H264, whose packetizer cannot carry a
+ * sealed frame (`src/calls/video-codec-preference.ts`).
+ *
  * Why it exists: on 2026-10-24 a video call answered with video showed the
  * answerer's camera to nobody in Chrome. The answerer adds its camera to the
  * video transceiver the caller's offer created, and Chromium does not run a
@@ -42,9 +46,12 @@ type CallStep =
 const SHOWN = 10;
 
 test.describe.configure({ timeout: 60_000 });
+// WebKit has mock capture devices but asks for them; Chromium's project grants
+// both already.
+test.use({ permissions: ["camera", "microphone"] });
 
 test.beforeEach(async ({ page, browserName }) => {
-  test.skip(browserName !== "chromium", "needs Chromium's fake camera and microphone");
+  test.skip(browserName !== "chromium" && browserName !== "webkit", "no fake camera configured for this engine");
   await page.goto("/playwright/harness/call.html");
   await page.waitForFunction(() => document.body.dataset["ready"] === "1");
 });
