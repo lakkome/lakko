@@ -44,6 +44,13 @@ public final class ContactsRepository: ObservableObject {
                 // mid-switch, see `bind`) the list belongs to nobody.
                 if let accountIdB64 = boundAccountIdB64 {
                     AcceptedContactsStore.save(state.accepted, accountIdB64: accountIdB64)
+                    // A removed person who is a contact again was added on
+                    // purpose (the adoption rule never adds a removed key).
+                    let readded = removedKeys.intersection(state.accepted.map(\.request.fromPubkey))
+                    if !readded.isEmpty {
+                        removedKeys.subtract(readded)
+                        AcceptedContactsStore.saveRemovedKeys(removedKeys, accountIdB64: accountIdB64)
+                    }
                 }
                 // ADR-0048 — a local rename is the first rung of the display
                 // name precedence everywhere, so the resolver must see it.
@@ -92,6 +99,9 @@ public final class ContactsRepository: ObservableObject {
     /// governs is loaded so the `didSet` above never files one account's
     /// rows under another.
     private var boundAccountIdB64: String?
+    /// Account keys the person removed from their contacts; the one-to-one
+    /// adoption rule skips them (``AcceptedContactsStore/loadRemovedKeys(accountIdB64:)``).
+    private var removedKeys: Set<Data> = []
     private var cancellables: Set<AnyCancellable> = []
 
     /// Advanced whenever the bound account changes (``bind(accountIdB64:)``,
@@ -243,10 +253,12 @@ public final class ContactsRepository: ObservableObject {
             state = state.with(
                 pending: [], accepted: [], sent: [], outstandingInvites: [], cursor: 0)
             invited = []
+            removedKeys = []
             return
         }
         let persisted = inboxStore.load(accountIdB64: accountIdB64)
         let accepted = AcceptedContactsStore.load(accountIdB64: accountIdB64)
+        removedKeys = AcceptedContactsStore.loadRemovedKeys(accountIdB64: accountIdB64)
         let sent = sentStore.load(accountIdB64: accountIdB64)
         boundAccountIdB64 = accountIdB64
         loadingBoundRows = true
@@ -856,6 +868,10 @@ public final class ContactsRepository: ObservableObject {
         nowMs: UInt64,
         createdAt: String
     ) -> Bool {
+        // A person removed from the list stays removed although the
+        // conversation remains (seen on web 2026-10-24: a removed contact
+        // came back on the next load).
+        guard !removedKeys.contains(signatureKey) else { return false }
         guard let next = Self.adopting(
             state.accepted, signatureKey: signatureKey, accountId: accountId,
             groupIdHex: groupIdHex, nowMs: nowMs, createdAt: createdAt)
@@ -1025,6 +1041,10 @@ public final class ContactsRepository: ObservableObject {
         let remaining = state.accepted.filter { $0.request.messageId != messageId }
         guard remaining.count != state.accepted.count else { return }
         state = state.with(accepted: remaining)
+        if let accountIdB64 = boundAccountIdB64 {
+            removedKeys.formUnion(removed.map(\.request.fromPubkey))
+            AcceptedContactsStore.saveRemovedKeys(removedKeys, accountIdB64: accountIdB64)
+        }
         // ADR-0060 sections 1 and 4 — the removed person held this account's
         // `contact` and `fof` keys: rotate both (the old keys are unregistered
         // at once), and forget what they offered and relayed.

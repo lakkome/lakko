@@ -104,6 +104,30 @@ final class ContactRemovalTests: XCTestCase {
         XCTAssertTrue(persisted().isEmpty)
     }
 
+    /// The person's one-to-one stays after the removal, and the adoption
+    /// rule ("a one-to-one peer is a contact") must not bring them back, not
+    /// now and not after a relaunch. Seen on web 2026-10-24.
+    func testARemovedContactIsNotBroughtBackByTheirOneToOne() {
+        seed([AcceptedContact(request: request(1, byte: 0xA1), groupIdHex: "beef", displayName: "Ada")])
+        let repository = makeRepository()
+        repository.removeContact(messageId: 1)
+
+        XCTAssertFalse(repository.adoptOneToOnePeer(
+            signatureKey: Data(repeating: 0xA1, count: 32), accountId: nil,
+            groupIdHex: "beef", nowMs: 1, createdAt: "2026-10-24T00:00:00Z"))
+        XCTAssertTrue(repository.state.accepted.isEmpty)
+
+        let relaunched = makeRepository()
+        XCTAssertFalse(relaunched.adoptOneToOnePeer(
+            signatureKey: Data(repeating: 0xA1, count: 32), accountId: nil,
+            groupIdHex: "beef", nowMs: 2, createdAt: "2026-10-24T00:00:00Z"))
+        XCTAssertTrue(persisted().isEmpty)
+        // Another person's one-to-one is still adopted.
+        XCTAssertTrue(relaunched.adoptOneToOnePeer(
+            signatureKey: Data(repeating: 0xB2, count: 32), accountId: nil,
+            groupIdHex: "cafe", nowMs: 3, createdAt: "2026-10-24T00:00:00Z"))
+    }
+
     // MARK: - Fixtures
 
     private func makeRepository() -> ContactsRepository {

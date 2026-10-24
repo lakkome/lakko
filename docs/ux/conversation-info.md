@@ -90,7 +90,11 @@ open from its header; it is not a state with a screen.
   ([`design-system.md`](design-system.md)).
 - Remove contact, with a confirmation. Local: it takes the person out of
   this device's list, tells them nothing, and leaves the conversation where
-  it is - leaving a conversation is the conversation's own action.
+  it is - leaving a conversation is the conversation's own action. The
+  removal stays (amended 2026-10-24): the rule that makes a one-to-one peer a
+  contact skips a removed person, so the remaining conversation never brings
+  them back; adding them again (Accept, an invite link, starting a chat from
+  their profile) does.
 
 Never: a group name, an invite link, roles, ownership, or `Leave group`.
 

@@ -220,6 +220,12 @@ interface PersistedV3 {
    *  A plain object, not a `Map`, so it survives `JSON.stringify`
    *  round-trips like the rest of the record. */
   pins: Record<string, AccountPubkeyPin>;
+  /** Account keys (base64) the person removed from their contacts
+   *  (`docs/ux/conversation-info.md`: removal is local and leaves the
+   *  conversation). The one-to-one adoption rule skips them; an explicit add
+   *  (Accept, an invite link, starting a chat, a rename) takes a key out
+   *  again. Absent on rows written before it existed. */
+  removed?: string[];
 }
 
 /** Narrowing guard for one persisted `AcceptedContact` — shared
@@ -362,10 +368,14 @@ function load(owner: string | null): PersistedV3 {
           }
         }
       }
+      const removed = Array.isArray(parsed.removed)
+        ? parsed.removed.filter((k): k is string => typeof k === "string")
+        : [];
       return {
         v: 3,
         accepted: parsed.accepted.filter(isAcceptedContact),
         pins,
+        removed,
       };
     }
   } catch {
@@ -466,7 +476,10 @@ export function upsertAccepted(contact: AcceptedContact, owner?: string): Accept
     existing === -1
       ? [...current.accepted, contact]
       : current.accepted.map((a, i) => (i === existing ? contact : a));
-  save(account, { ...current, accepted: next });
+  // An explicit add is the person's own act: a removal before it no longer
+  // keeps the adoption rule away.
+  const removed = (current.removed ?? []).filter((k) => k !== contact.signaturePubkeyB64);
+  save(account, { ...current, accepted: next, removed });
   notifyAcceptedChanged("edited");
   return next;
 }
@@ -479,6 +492,10 @@ export function adoptOneToOne(peer: OneToOnePeer, owner?: string): boolean {
   const account = ownerOf(owner);
   if (account === null) return false;
   const current = load(account);
+  // A person removed from the list stays removed although the conversation
+  // remains (seen on test.lakko.me 2026-10-24: a removed contact came back
+  // on the next page load).
+  if ((current.removed ?? []).includes(peer.signatureKey)) return false;
   const next = adoptOneToOnePeer(current.accepted, peer);
   if (next === null) return false;
   save(account, { ...current, accepted: next });
@@ -495,7 +512,12 @@ export function removeAccepted(signaturePubkeyB64: string, owner?: string): Acce
   const next = current.accepted.filter(
     (a) => a.signaturePubkeyB64 !== signaturePubkeyB64,
   );
-  save(account, { ...current, accepted: next });
+  const removed = current.removed ?? [];
+  save(account, {
+    ...current,
+    accepted: next,
+    removed: removed.includes(signaturePubkeyB64) ? removed : [...removed, signaturePubkeyB64],
+  });
   notifyAcceptedChanged("edited");
   return next;
 }

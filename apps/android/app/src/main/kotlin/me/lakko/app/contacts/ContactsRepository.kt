@@ -785,6 +785,7 @@ public class ContactsRepository(
             val switching = boundAccountB64 != null
             if (switching) sessionBinding.advance()
             val storedAccepted = appCtx?.let { AcceptedContactsStore.load(it, accountB64) }
+            removedContactKeys = appCtx?.let { AcceptedContactsStore.loadRemovedKeys(it, accountB64) } ?: emptySet()
             val snapshot = inboxStore?.load(accountB64) ?: ContactsInboxSnapshot()
             val storedSent = sentStore?.load(accountB64)
             mutableState.update { current ->
@@ -989,9 +990,24 @@ public class ContactsRepository(
         val accountB64 = boundAccountB64
         if (ctx != null && accountB64 != null) {
             AcceptedContactsStore.save(ctx, accountB64, mutableState.value.accepted)
+            // A removed person who is a contact again was added on purpose
+            // (the adoption rule never adds a removed key).
+            val present = mutableState.value.accepted.mapTo(HashSet()) { keyHex(it.request.fromPubkey) }
+            val still = removedContactKeys.filterNot { it in present }.toSet()
+            if (still.size != removedContactKeys.size) {
+                removedContactKeys = still
+                AcceptedContactsStore.saveRemovedKeys(ctx, accountB64, still)
+            }
         }
         pushRenamesToDirectory()
     }
+
+    /** Account keys (lower-case hex) the person removed from their contacts;
+     *  the one-to-one adoption rule skips them. */
+    @Volatile
+    private var removedContactKeys: Set<String> = emptySet()
+
+    private fun keyHex(key: ByteArray): String = key.joinToString("") { "%02x".format(it) }
 
     // -----------------------------------------------------------------
     // A one-to-one conversation IS a contact
@@ -1015,6 +1031,10 @@ public class ContactsRepository(
         bindAccountIfSignedIn()
         // No account, no list (see [mergeAccepted]).
         if (boundAccountB64 == null) return false
+        // A person removed from the list stays removed although the
+        // conversation remains (seen on web 2026-10-24: a removed contact
+        // came back on the next load).
+        if (removedContactKeys.contains(keyHex(signatureKey))) return false
         var changed = false
         mutableState.update { state ->
             // `update` may re-run the lambda on a lost CAS; the verdict is the
@@ -1878,7 +1898,15 @@ public class ContactsRepository(
             removedKey = removed?.request?.fromPubkey
             if (changed) state.copy(accepted = remaining) else state
         }
-        if (changed) persistAccepted()
+        if (changed) {
+            val ctx = appCtx
+            val accountB64 = boundAccountB64
+            removedKey?.let { removedContactKeys = removedContactKeys + keyHex(it) }
+            if (ctx != null && accountB64 != null) {
+                AcceptedContactsStore.saveRemovedKeys(ctx, accountB64, removedContactKeys)
+            }
+            persistAccepted()
+        }
         // ADR-0060 §1 — the removed person held this account's `contact` key
         // (and, through their contacts, its `fof` key): both rotate, the old
         // ones come off the mailbox at once, and the remaining one-to-ones get
@@ -2908,6 +2936,7 @@ public class ContactsRepository(
         synchronized(bindLock) {
             sessionBinding.advance()
             boundAccountB64 = null
+            removedContactKeys = emptySet()
             // Wipe any decrypted intro plaintext on the way out.
             // Best-effort: the `String` contents may still live in
             // heap if some collector cached them, but our reference

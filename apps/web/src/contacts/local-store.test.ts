@@ -73,6 +73,7 @@ import {
   clearAccountContacts,
   loadRenames,
   removeAccepted,
+  adoptOneToOne,
   subscribeAcceptedChanged,
   type AcceptedChange,
 } from "./local-store";
@@ -332,6 +333,23 @@ describe("the contact list belongs to the signed-in account", () => {
     expect(readPin(ACCT_A, ACCOUNT_CARA)?.pinnedSignaturePubkeyB64).toBe(PUB_OLD);
     removeAccepted(PUB_OLD, ACCOUNT_CARA);
     expect(loadAccepted(ACCOUNT_CARA)).toEqual([]);
+  });
+
+  it("a removed contact is not brought back by their one-to-one; an explicit add brings them back", () => {
+    bindContactsAccount(ACCOUNT_CARA);
+    upsertAccepted({ ...dan, groupIdB64: "Z3JvdXA=" });
+    removeAccepted(PUB_OLD);
+    expect(loadAccepted()).toEqual([]);
+    // The conversation is still there; the next load runs the adoption rule.
+    const peer = { signatureKey: PUB_OLD, groupIdB64: "Z3JvdXA=", nowMs: 10 };
+    expect(adoptOneToOne(peer)).toBe(false);
+    expect(loadAccepted()).toEqual([]);
+    // Adding them again (Accept, a link, starting a chat) is the person's own act.
+    upsertAccepted(dan);
+    expect(loadAccepted().map((c) => c.signaturePubkeyB64)).toEqual([PUB_OLD]);
+    // And the rule may complete that row again (its conversation).
+    expect(adoptOneToOne(peer)).toBe(true);
+    expect(loadAccepted()[0]?.groupIdB64).toBe("Z3JvdXA=");
   });
 
   it("with no account bound a read is empty and a write writes nothing", () => {

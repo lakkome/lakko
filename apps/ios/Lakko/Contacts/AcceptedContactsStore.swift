@@ -114,11 +114,37 @@ enum AcceptedContactsStore {
         defaults.set(data, forKey: storageKey(accountIdB64: accountIdB64))
     }
 
+    /// The account keys this account removed from its contacts
+    /// (`docs/ux/conversation-info.md`: removal is local and leaves the
+    /// conversation). The one-to-one adoption rule skips them; an explicit add
+    /// takes a key out again.
+    static func loadRemovedKeys(accountIdB64: String) -> Set<Data> {
+        guard let data = defaults.data(forKey: removedKey(accountIdB64: accountIdB64)),
+              let keys = try? JSONDecoder().decode([Data].self, from: data)
+        else { return [] }
+        return Set(keys)
+    }
+
+    /// Persist ``loadRemovedKeys(accountIdB64:)``. Not written once the
+    /// account's session has ended (``AccountStoreGate``).
+    static func saveRemovedKeys(_ keys: Set<Data>, accountIdB64: String) {
+        guard let gate = AccountStoreGate.enter(accountIdB64) else { return }
+        defer { gate.leave() }
+        guard let data = try? JSONEncoder().encode(keys.sorted { $0.lexicographicallyPrecedes($1) })
+        else { return }
+        defaults.set(data, forKey: removedKey(accountIdB64: accountIdB64))
+    }
+
+    static func removedKey(accountIdB64: String) -> String {
+        storageKey(accountIdB64: accountIdB64) + ".removed"
+    }
+
     /// Forget-device: drop one account's list (and the old device-wide row,
     /// which nothing reads any more). Other accounts' lists are untouched.
     static func clear(accountIdB64: String) {
         let store = defaults
         store.removeObject(forKey: storageKey(accountIdB64: accountIdB64))
+        store.removeObject(forKey: removedKey(accountIdB64: accountIdB64))
         store.removeObject(forKey: legacyGlobalKey)
     }
 }

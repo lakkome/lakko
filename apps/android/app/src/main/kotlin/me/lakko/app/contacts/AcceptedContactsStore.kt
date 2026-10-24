@@ -177,8 +177,37 @@ public object AcceptedContactsStore {
 
     internal fun deleteFor(backend: Backend, accountIdB64: String) {
         backend.remove(keyOf(accountIdB64))
+        backend.remove(removedKeyOf(accountIdB64))
         backend.remove(LEGACY_GLOBAL_KEY)
     }
+
+    // ---------------------------------------------------------------------
+    // Removed contacts
+    // ---------------------------------------------------------------------
+
+    /** The account keys (lower-case hex) [accountIdB64] removed from its
+     *  contacts (`docs/ux/conversation-info.md`: removal is local and leaves
+     *  the conversation). The one-to-one adoption rule skips them; an explicit
+     *  add takes a key out again. */
+    public fun loadRemovedKeys(context: Context, accountIdB64: String): Set<String> =
+        loadRemovedKeysFor(backendOf(context), accountIdB64)
+
+    internal fun loadRemovedKeysFor(backend: Backend, accountIdB64: String): Set<String> =
+        backend.get(removedKeyOf(accountIdB64))
+            ?.split(',')
+            ?.filter { it.isNotEmpty() && it.all { c -> c in '0'..'9' || c in 'a'..'f' } }
+            ?.toSet()
+            ?: emptySet()
+
+    public fun saveRemovedKeys(context: Context, accountIdB64: String, keys: Set<String>) {
+        saveRemovedKeysFor(backendOf(context), accountIdB64, keys)
+    }
+
+    internal fun saveRemovedKeysFor(backend: Backend, accountIdB64: String, keys: Set<String>) {
+        backend.put(removedKeyOf(accountIdB64), keys.sorted().joinToString(","))
+    }
+
+    internal fun removedKeyOf(accountIdB64: String): String = keyOf(accountIdB64) + ".removed"
 
     // ---------------------------------------------------------------------
     // Keys + codec
