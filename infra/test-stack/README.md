@@ -157,11 +157,6 @@ build it on a fresh host, as root, after the main one-time setup:
    `:5351` only; a STUN binding to UDP 3478 of edge2 over IPv4 and IPv6 answers; a call with
    only `turns:edge.lakko.me:443` connects in Firefox.
 
-Differences from the host as of 2026-10-25, none of which changes behaviour: its
-`nginx.conf` stream block still carries an unused `log_format`, its `haproxy.cfg` lists the
-backend before the last two frontends, and its `coturn.service` description reads
-"TCP/TLS-only for edge.lakko.me".
-
 ## App links (a tapped link opens the installed app)
 
 The web build ships `/.well-known/assetlinks.json` (Android; it names the
