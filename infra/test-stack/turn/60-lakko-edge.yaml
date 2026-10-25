@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+#
+# /etc/netplan/60-lakko-edge.yaml on the test host (mode 600): the coturn addresses
+# named by the edge.lakko.me (::ed6e) and edge2.lakko.me (::ed62) AAAA records and by
+# relay-ip / external-ip in the two turnserver configs. Merged with the cloud-init
+# eth0 definition in 50-cloud-init.yaml; check with `netplan generate` and the
+# Address= lines under /run/systemd/network/.
+
+network:
+    version: 2
+    ethernets:
+        eth0:
+            addresses:
+            - 2a01:4f8:c2c:354f::ed6e/64
+            - 2a01:4f8:c2c:354f::ed62/64
