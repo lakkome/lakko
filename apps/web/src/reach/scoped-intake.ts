@@ -113,6 +113,29 @@ async function saveIntroductions(accountIdB64: string, row: IntroductionsRow): P
   await saveReachRow(accountIdB64, "introductions", JSON.stringify({ v: 1, ...row }));
 }
 
+let introductionsChain: Promise<unknown> = Promise.resolve();
+
+/**
+ * Read, change and write the kept introductions one at a time. Intake runs
+ * fire-and-forget per envelope, and a contact sends its offer and its bundle
+ * back to back: two unserialized writes each started from the row as it was
+ * before the other, and the later one dropped what the earlier one kept.
+ * `change` returns the new row, or `null` to write nothing.
+ */
+async function updateIntroductions(
+  accountIdB64: string,
+  change: (row: IntroductionsRow) => IntroductionsRow | null,
+): Promise<boolean> {
+  const run = introductionsChain.then(async () => {
+    const next = change(await loadIntroductions(accountIdB64));
+    if (next === null) return false;
+    await saveIntroductions(accountIdB64, next);
+    return true;
+  });
+  introductionsChain = run.catch(() => undefined);
+  return run;
+}
+
 /**
  * Handle one envelope. `oneToOne` is whether the conversation holds exactly
  * two people. Never throws.
@@ -165,11 +188,10 @@ export async function intakeScopedEnvelope(args: {
       case "introduction-offer": {
         const record = wasm.decodeIntroductionOffer(args.payload);
         const recordB64 = base64Encode(record);
-        const row = await loadIntroductions(session.accountIdB64);
-        const changed = row.offers[sender]?.recordB64 !== recordB64;
-        await saveIntroductions(session.accountIdB64, {
-          ...row,
-          offers: { ...row.offers, [sender]: { recordB64, receivedAtMs: Date.now() } },
+        let changed = false;
+        await updateIntroductions(session.accountIdB64, (row) => {
+          changed = row.offers[sender]?.recordB64 !== recordB64;
+          return { ...row, offers: { ...row.offers, [sender]: { recordB64, receivedAtMs: Date.now() } } };
         });
         if (changed) setOffersTick((n) => n + 1);
         return;
@@ -178,15 +200,11 @@ export async function intakeScopedEnvelope(args: {
         const bundle = wasm.decodeIntroductionsBundle(args.payload);
         const updated = bundle.updatedAtMs;
         bundle.free();
-        const row = await loadIntroductions(session.accountIdB64);
-        const held = row.bundles[sender];
-        if (held !== undefined && !wasm.bundleIsNewer(updated, BigInt(held.updatedAtMs))) return;
-        await saveIntroductions(session.accountIdB64, {
-          ...row,
-          bundles: {
-            ...row.bundles,
-            [sender]: { bundleB64: base64Encode(args.payload), updatedAtMs: updated.toString() },
-          },
+        const bundleB64 = base64Encode(args.payload);
+        await updateIntroductions(session.accountIdB64, (row) => {
+          const held = row.bundles[sender];
+          if (held !== undefined && !wasm.bundleIsNewer(updated, BigInt(held.updatedAtMs))) return null;
+          return { ...row, bundles: { ...row.bundles, [sender]: { bundleB64, updatedAtMs: updated.toString() } } };
         });
         return;
       }

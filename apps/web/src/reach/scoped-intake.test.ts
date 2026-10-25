@@ -19,7 +19,12 @@ vi.mock("./reach-store", () => ({
   },
 }));
 vi.mock("../wasm", () => ({
-  loadWasm: () => Promise.resolve({ decodeIntroductionOffer: (payload: Uint8Array) => payload }),
+  loadWasm: () =>
+    Promise.resolve({
+      decodeIntroductionOffer: (payload: Uint8Array) => payload,
+      decodeIntroductionsBundle: () => ({ updatedAtMs: 1n, free: () => undefined }),
+      bundleIsNewer: () => true,
+    }),
 }));
 vi.mock("../contacts/address-resolver", () => ({
   resolveAccountKeyHex: () => "ab".repeat(32),
@@ -47,6 +52,22 @@ describe("introduction offer intake", () => {
     expect(introductionOffersTick()).toBe(start + 1);
     await offer([4, 5, 6]);
     expect(introductionOffersTick()).toBe(start + 2);
+  });
+
+  it("keeps both an offer and a bundle that arrive together", async () => {
+    // Intake is fire-and-forget per envelope and a contact sends its offer
+    // and its bundle back to back; neither write may drop the other.
+    const sender = "q83vq83vq83vq83vq83vq83vq83vq83vq83vq83vq80=";
+    await Promise.all([
+      intakeScopedEnvelope({ kind: "introduction-offer", payload: new Uint8Array([9, 9]), senderKeyB64: sender, oneToOne: true }),
+      intakeScopedEnvelope({ kind: "introductions", payload: new Uint8Array([8, 8]), senderKeyB64: sender, oneToOne: true }),
+    ]);
+    const saved = JSON.parse(rows.get("acct/introductions") ?? "{}") as {
+      offers?: Record<string, { recordB64: string }>;
+      bundles?: Record<string, { bundleB64: string }>;
+    };
+    expect(Object.values(saved.offers ?? {}).map((o) => o.recordB64)).toEqual(["CQk="]);
+    expect(Object.values(saved.bundles ?? {}).map((b) => b.bundleB64)).toEqual(["CAg="]);
   });
 
   it("does not bump for an offer outside a one-to-one", async () => {
