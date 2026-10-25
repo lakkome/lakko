@@ -97,6 +97,10 @@ use crate::AppState;
 ///   Writes under a reach key or a delegation spend none. 50 a day is chosen,
 ///   not measured: well above the requests a person sends, low enough that
 ///   one account is a poor source for flooding open mailboxes.
+/// - `discovery-lookup`: one search spends up to three (username, name term,
+///   channel handle), and the search field asks the network as the person
+///   types (`docs/ux/who-can-find-me.md` section 6.1, 2026-10-25). 300 a day
+///   is chosen, not measured; the earlier 100 covered about 33 searches.
 /// - `call-join` (ADR-0078 section 2): one token per call admission (a join,
 ///   a reconnect). 100 a day is chosen, not measured: far above the calls a
 ///   person joins, and the per-room cap bounds what one account can do to one
@@ -108,7 +112,7 @@ use crate::AppState;
 ///   device in about a hundred groups can re-send all of them a few times a
 ///   day; the earlier 100 assumed one registration per device.
 const DEFAULT_QUOTAS: [(TokenContext, u32); CONTEXT_COUNT] = [
-    (TokenContext::DiscoveryLookup, 100),
+    (TokenContext::DiscoveryLookup, 300),
     (TokenContext::DiscoveryRegister, 10),
     (TokenContext::InviteConsume, 30),
     (TokenContext::DsKnock, 200),

@@ -135,17 +135,38 @@ noise.
 
 ## 6. What other people see
 
-### 6.1 Searching
+### 6.1 Searching: one field
 
-The Chats search field keeps its two halves ([`navigation.md`](navigation.md)
-section 4): the local filter, and the one network row.
+**Decided 2026-10-25 by the maintainer:** a search is one input field and
+nothing else. No "Search people" row to press, no separate "Add by username"
+form, no second field for a message. The field finds people by `@username`
+and by name, among the person's own contacts and conversations, through
+contacts of contacts, and among people who chose Everyone. Before this, the
+network half sat behind a row the person had to press, and Contacts had an
+"Add by username" form that asked only the Everyone directory, so a person
+whose setting was **Contacts of my contacts** could not be found from the
+place most people looked.
 
-- Local results (contacts, members of the person's groups and channels)
-  appear as the person types, from the first letter.
-- Text of at least 2 characters also offers **Search people** under them,
-  which asks the network for both the username and the name and shows one
-  result list. A username returns at most one person; a name can return
-  several.
+**Where.** The same field at the top of **Chats** and at the top of
+**Contacts**, with the same behaviour. In Chats it also matches
+conversations; in Contacts only people. **Per platform:** pinned above the
+list on the web, `.searchable` on iOS, a search bar above the list on
+Android.
+
+**When it asks the network.** Nothing to press:
+
+- Local results (contacts, members of the person's groups and channels,
+  conversations in Chats) appear as the person types, from the first letter.
+- From **3 characters**, after the person stops typing for **500 ms**, the
+  field also asks the network for the username and the name at once, and
+  shows the network results under the local ones under the heading
+  **People**. Both numbers are chosen, not measured.
+- A text asked once is not asked again in the same session; a result
+  already shown stays while the person keeps typing, until the new answer
+  arrives.
+- A text that cannot be a username and has no word of 3 letters asks
+  nothing (`lakko_ui_rules::lookup::looks_like_a_name` and the name-term
+  rule); a leading `@` is ignored.
 
 **Matching a name** (decided 2026-09-28: whole-name matching was rejected as
 poor UX). Letter case, accents and repeated spaces never matter.
@@ -161,25 +182,41 @@ poor UX). Letter case, accents and repeated spaces never matter.
 - Whoever can find a person by name finds them by the name in their profile
   at the moment it was last published.
 
-A result row: avatar, name, `@username`, and the action **Add contact**,
-which opens the existing contact-request flow with its introduction. The row
-never says *why* the person was found ("contact of Anna", "in Hiking club"):
-saying so would tell the searcher who knows whom.
+**A result row:** avatar, name, `@username`, and **Add contact**. Tapping
+Add contact sends the contact request at once, with no introduction text;
+the row then reads **Request sent** and the button goes away. A person who
+is already a contact shows **Open** instead and opens the conversation. The
+row never says *why* the person was found ("contact of Anna", "in Hiking
+club"): saying so would tell the searcher who knows whom. A channel found by
+its `@handle` shows as a channel row that opens its subscribe page.
 
-States:
+States of the People part:
 
 | State | What it shows |
 |---|---|
-| Searching | The row shows a spinner in place of its chevron; the local results stay. |
-| Found | The result list. |
+| Fewer than 3 characters | Nothing under **People**; the heading is hidden. |
+| Searching | The heading with a spinner after it; the local results and any earlier network results stay. |
+| Found | The result rows. |
 | Not found | "No one found. Check the spelling, or ask them for an invite link." The same whether the person does not exist or does not let you find them - the searcher is never told which. |
-| Network failure | "Couldn't search. Check your connection and try again." Never "not found": telling someone their friend does not exist because the connection dropped is the worst thing this can do. |
-| Request refused | The person changed their setting after you found them: "Couldn't send the request. They may have changed who can find them." |
+| Network failure | "Couldn't search. Check your connection and try again." Never "not found": telling someone their friend does not exist because the connection dropped is the worst thing this can do. Typing again retries. |
+| Out of searches | "Too many searches for now. Try again later." Searching spends anonymous tokens and they ran out; the local results stay. |
+| Request refused | On the row, after Add contact: "Couldn't send the request. They may have changed who can find them." |
+| Request failed | On the row: "Couldn't send the request. Try again." with the button back. |
 
-The same Not found sentence answers **Add by username** in Contacts when the
-name does not resolve (2026-09-30: it said "No account is registered as
-@name", which claims a fact the searcher must not learn - the account may
-exist and not let them find it).
+**What goes away:** the "Search people" row of the Chats search, the "Add by
+username" form in Contacts (its username field, its message field and its
+Send button), and the introduction step after Add contact. The Contacts
+**Add** menu keeps **Share invite link** (and scanning a code where the
+platform has it). An introduction text is no longer sent from search; the
+contact request carries the sender's profile as before.
+
+**Token budget.** One network search spends up to three anonymous
+lookup tokens (username, name, channel handle), and a device keeps a pool of
+them that a scheduled refill tops up (ADR-0078 section 8). With this change
+the pool keeps 32 lookup tokens instead of 16 (32 is the most a pool holds,
+since one refill is one issuance of at most 32) and the daily lookup quota is
+300 instead of 100 (both chosen, not measured), so searching as one types
+does not run dry after a handful of searches.
 
 ### 6.2 In a group or a channel
 

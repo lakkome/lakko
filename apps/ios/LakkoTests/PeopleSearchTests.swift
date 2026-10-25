@@ -330,8 +330,6 @@ final class PeopleSearchTests: XCTestCase {
         XCTAssertFalse(PeopleSearch.localMatches("Anna Weber", query: "annaweber"),
                        "a query word matches within one name word, not across a space")
         XCTAssertTrue(PeopleSearch.localMatches("Zoë Müller", query: "zoe"))
-        XCTAssertFalse(PeopleSearch.offersNetworkSearch("a"))
-        XCTAssertTrue(PeopleSearch.offersNetworkSearch("an"))
     }
 
     /// Contacts and known members are listed even without a grant: a known

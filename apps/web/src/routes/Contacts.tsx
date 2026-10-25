@@ -3,16 +3,21 @@
 
 /**
  * Contacts (docs/ux/client-redesign.md section 5.3): a two-pane screen. The
- * list pane (`contacts/ContactListPane.tsx`) holds requests, sent requests
- * and the alphabetical contacts; the main pane shows the selected contact
- * (`contacts/ContactDetailView.tsx`) or what the add menu opened: add by
- * username, the invite links (`contacts/InviteLinksPanel.tsx`) or a call
- * link. A narrow screen shows one pane at a time.
+ * list pane (`contacts/ContactListPane.tsx`) holds the search field,
+ * requests, sent requests and the alphabetical contacts; the main pane shows
+ * the selected contact (`contacts/ContactDetailView.tsx`) or what the add
+ * menu opened: the invite links (`contacts/InviteLinksPanel.tsx`). A narrow
+ * screen shows one pane at a time.
+ *
+ * Finding someone new is the search field itself (`search/PeopleSearch.tsx`,
+ * `docs/ux/who-can-find-me.md` section 6.1): it asks the network as the
+ * person types and Add contact on a result sends the request at once. There
+ * is no "Add by username" form any more.
  *
  * This file owns the state and every mutation:
  *
- *   - **send** a request by username (`ContactsClient.sendContactRequest`)
- *     and remember it under Sent until the acceptance lands;
+ *   - the **Sent** list: requests sent from search, remembered until the
+ *     acceptance lands;
  *   - **accept / decline** incoming requests, held in memory by the
  *     session-wide `<MailboxProvider>` whose long-poll fills them (no
  *     refresh anywhere); Accept also acks and founds the 1x1 chat;
@@ -58,11 +63,11 @@ import {
   readIsActive,
 } from "../chat/membership-ended";
 import { ContactsClient } from "../contacts/client";
-import type { IncomingContactRequest, SendResult } from "../contacts/client";
+import type { IncomingContactRequest } from "../contacts/client";
 import { ContactDetailView } from "../contacts/ContactDetailView";
 import { ContactListPane, type AddMode } from "../contacts/ContactListPane";
 import { waitingSentRequests, type SentRequestRecord } from "../contacts/contact-list-model";
-import { atLabel, contactsErrorText } from "../contacts/errors";
+import { contactsErrorText } from "../contacts/errors";
 import { InviteLinksPanel } from "../contacts/InviteLinksPanel";
 import {
   loadAccepted,
@@ -73,18 +78,12 @@ import {
   type AcceptedContact,
 } from "../contacts/local-store";
 import { useMailbox } from "../contacts/MailboxContext";
-import {
-  forgetSentRequest,
-  loadSentRequests,
-  recordSentRequest,
-} from "../contacts/sent-requests";
-import { forgetSentIntro, rememberSentIntro } from "../contacts/sent-request-intros";
+import { forgetSentRequest, loadSentRequests } from "../contacts/sent-requests";
+import { forgetSentIntro } from "../contacts/sent-request-intros";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { onContactRemoved } from "../reach/reach-service";
-import { mayLookUp, usernameReason, type UsernameCheck } from "../profile/rules";
-import { createUsernameCheck } from "../profile/username-field";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
 import { t } from "../l10n";
@@ -102,6 +101,7 @@ import {
 import { createLiveText } from "../l10n/live-text";
 import { paths } from "./paths";
 import { screenAnchor } from "../ui/screen-anchor";
+import { PeopleSearch } from "../search/PeopleSearch";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 
 export default function Contacts(): JSX.Element {
@@ -200,51 +200,6 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     setSentVersion((v) => v + 1);
   }
 
-  // ---- send -----------------------------------------------------
-  const [searchInput, setSearchInput] = createSignal("");
-  const [introInput, setIntroInput] = createSignal("");
-  const [sendBusy, setSendBusy] = createSignal(false);
-  const [sendError, setSendError] = createLiveText();
-  const [sendNotice, setSendNotice] = createLiveText();
-  // ADR-0048 §4 — no lookup leaves the device for a name that fails the rule.
-  const searchCheck = createUsernameCheck(searchInput);
-
-  async function onSend(e: SubmitEvent): Promise<void> {
-    e.preventDefault();
-    setSendError(null);
-    setSendNotice(null);
-    if (!mayLookUp(searchCheck())) return;
-    setSendBusy(true);
-    try {
-      const introBytes = new TextEncoder().encode(introInput());
-      const result: SendResult = await props.client.sendContactRequest(
-        requireIdentity(),
-        searchInput(),
-        introBytes,
-      );
-      const account = accountIdB64();
-      if (account !== null) {
-        recordSentRequest(account, {
-          recipientUsername: result.recipientUsername,
-          recipientAccountIdHex: syncGroupIdHex(result.recipientAccountId),
-          sentAtMs: Date.now(),
-        });
-        // Kept under the device key, so a re-send after a rotation of the
-        // account keys carries the same words (ADR-0074 section 3.5a rule 5).
-        void rememberSentIntro(account, syncGroupIdHex(result.recipientAccountId), introInput());
-        setSentVersion((v) => v + 1);
-      }
-      const recipient = `@${result.recipientUsername}`;
-      setSendNotice(() => t("contacts.send.done", { name: recipient }));
-      setSearchInput("");
-      setIntroInput("");
-    } catch (err) {
-      setSendError(contactsErrorText(err, "contacts.error.send", atLabel(searchInput())));
-    } finally {
-      setSendBusy(false);
-    }
-  }
-
   // ---- incoming requests ----------------------------------------
   // Owned by the session-wide `<MailboxProvider>`: its long-poll loop
   // dispatches requests into this list, acks into the address book and
@@ -339,7 +294,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
 
   // ---- layout: the list pane + the detail / add pane ----------------
   const [selectedKey, setSelectedKey] = createSignal<string | null>(null);
-  // The add menu's pick: add by username, or the invite links.
+  // The add menu's pick: the invite links.
   // `null` = nothing open.
   const location = useLocation();
   // `docs/ux/conversation-info.md` section 3, "Except a person" - a
@@ -368,21 +323,14 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   }
   const [adding, setAdding] = createSignal<AddMode | null>(null);
 
-  // `docs/ux/navigation.md` section 4 - the Chats search looks a name up in
-  // both namespaces; a person lands here, because sending a contact request
-  // is this screen's flow and asks for an introduction the search field has
-  // no room for. The name travels rather than being typed twice.
-  const handedOver = (): string | undefined => {
-    const state = location.state as { readonly username?: string } | null;
-    return typeof state?.username === "string" ? state.username : undefined;
-  };
-  createEffect(() => {
-    const username = handedOver();
-    if (username === undefined) return;
-    setAdding("username");
-    setSearchInput(username);
-  });
   const [filter, setFilter] = createSignal("");
+  /** The people in this device's groups (base64 account keys): what the
+   *  people half of the search field matches locally beside the contacts. */
+  const groupPeopleKeys = createMemo((): readonly string[] => {
+    const out = new Set<string>();
+    for (const g of chats.groups()) for (const k of personKeysOf(g.group)) out.add(k);
+    return [...out];
+  });
   const selectedContact = (): AcceptedContact | undefined =>
     accepted().find((c) => c.signaturePubkeyB64 === selectedKey()) ??
     // ADR-0073 R.2 — a contact re-keyed by an accepted reset while its page
@@ -616,6 +564,16 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       <ContactListPane
         filter={filter}
         onFilter={setFilter}
+        people={() => (
+          // `docs/ux/who-can-find-me.md` section 6.1 - the same field as in
+          // Chats; here it matches only people.
+          <PeopleSearch
+            scope="contacts"
+            query={filter}
+            groupPeopleKeys={groupPeopleKeys}
+            onSent={() => setSentVersion((v) => v + 1)}
+          />
+        )}
         onAdd={(mode) => {
           clearSelection();
           setAdding(mode);
@@ -640,43 +598,28 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         <Show
           when={selected()}
           fallback={
-            <article>
-              <div class="lk-page lk-stack" style={{ "max-width": "560px" }}>
-                <button
-                  type="button"
-                  class="ghost small lk-narrow-only"
-                  style={{ "align-self": "flex-start" }}
-                  onClick={() => setAdding(null)}
-                >
-                  <Icon name="back" size={16} />
-                  {t("nav.contacts")}
-                </button>
-                <Show when={adding() === "username" || adding() === null}>
-                  <div class="lk-page-head">
-                    <h1>{t("contacts.add.title")}</h1>
-                    <p>{t("contacts.add.subtitle")}</p>
-                  </div>
-                  <SendPanel
-                    searchCheck={searchCheck}
-                    searchInput={searchInput}
-                    setSearchInput={setSearchInput}
-                    introInput={introInput}
-                    setIntroInput={setIntroInput}
-                    busy={sendBusy}
-                    error={sendError}
-                    notice={sendNotice}
-                    onSubmit={(e) => void onSend(e)}
-                  />
-                </Show>
-                <Show when={adding() === "invite"}>
+            // Nothing selected and nothing opened from the add menu: an
+            // empty main pane (the narrow layout shows the list alone).
+            <Show when={adding() === "invite"} fallback={<div class="lk-main-center" />}>
+              <article>
+                <div class="lk-page lk-stack" style={{ "max-width": "560px" }}>
+                  <button
+                    type="button"
+                    class="ghost small lk-narrow-only"
+                    style={{ "align-self": "flex-start" }}
+                    onClick={() => setAdding(null)}
+                  >
+                    <Icon name="back" size={16} />
+                    {t("nav.contacts")}
+                  </button>
                   <div class="lk-page-head">
                     <h1>{t("contacts.invite_links.title")}</h1>
                     <p>{t("contacts.invite_links.subtitle")}</p>
                   </div>
                   <InviteLinksPanel />
-                </Show>
-              </div>
-            </article>
+                </div>
+              </article>
+            </Show>
           }
         >
           {(c) => (
@@ -717,81 +660,6 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         </Show>
       </div>
     </div>
-  );
-}
-
-// ----------------------------------------------------------------------
-// Add by username
-// ----------------------------------------------------------------------
-
-interface SendPanelProps {
-  readonly searchCheck: () => UsernameCheck;
-  readonly searchInput: () => string;
-  readonly setSearchInput: (v: string) => void;
-  readonly introInput: () => string;
-  readonly setIntroInput: (v: string) => void;
-  readonly busy: () => boolean;
-  readonly error: () => string | null;
-  readonly notice: () => string | null;
-  readonly onSubmit: (e: SubmitEvent) => void;
-}
-
-function SendPanel(props: SendPanelProps): JSX.Element {
-  return (
-    <section class="lk-card">
-      <h2>{t("contacts.add.by_username")}</h2>
-      <form onSubmit={props.onSubmit} class="lk-stack" style={{ gap: "12px" }}>
-        <label>
-          {t("contacts.add.username_label")}
-          <input
-            type="text"
-            placeholder={t("contacts.add.username_placeholder")}
-            autocomplete="off"
-            spellcheck={false}
-            required
-            value={props.searchInput()}
-            onInput={(e) => props.setSearchInput(e.currentTarget.value)}
-            disabled={props.busy()}
-            aria-invalid={props.searchCheck().kind === "invalid"}
-          />
-        </label>
-        <Show when={usernameReason(props.searchCheck())}>
-          {(reason) => (
-            <div class="form-error" role="status">
-              {reason()}
-            </div>
-          )}
-        </Show>
-        <label>
-          {t("contacts.add.intro_label")}
-          <textarea
-            rows={2}
-            placeholder={t("contacts.add.intro_placeholder")}
-            value={props.introInput()}
-            onInput={(e) => props.setIntroInput(e.currentTarget.value)}
-            disabled={props.busy()}
-          />
-        </label>
-        <Show when={props.error()}>
-          {(m) => (
-            <div class="form-error">
-              {m()}
-            </div>
-          )}
-        </Show>
-        <Show when={props.notice()}>{(m) => <div class="form-info">{m()}</div>}</Show>
-        <div class="lk-actions">
-          <button
-            class="primary"
-            type="submit"
-            disabled={props.busy() || !mayLookUp(props.searchCheck())}
-          >
-            <Icon name="send" size={18} />
-            {props.busy() ? t("common.sending") : t("contacts.add.send")}
-          </button>
-        </div>
-      </form>
-    </section>
   );
 }
 

@@ -206,6 +206,12 @@ one field presents two different kinds of reach without lying about either.
 
 ### 4.3 There is ONE network lookup, not one per kind
 
+**Amended 2026-10-25:** there is no row to press and no hand-over to a
+Contacts form. The field asks the network by itself as the person types, by
+username and by name, and Add contact on a result sends the request; see
+[`who-can-find-me.md`](who-can-find-me.md) section 6.1, which supersedes the
+row, the "Add by username" form and the introduction step described below.
+
 Looking up `@username` and looking up a channel's `@handle` are the same
 mechanism over two namespaces - blind the name, ask, get an exact answer or
 nothing - and a group handle would be a third namespace and the same

@@ -13,7 +13,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import me.lakko.app.chat.AllowanceKind
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.ContactsError
 import me.lakko.app.contacts.ContactsRepository
@@ -28,11 +27,11 @@ import me.lakko.app.l10n.UiText
  * Three responsibilities:
  *
  *   1. Surface the [ContactsRepository.state] flow + a small
- *      slice of ephemeral UI state (the search bar's current
- *      input, the intro message draft, busy / error flags
- *      around the send action) as [ContactsUiState].
- *   2. Dispatch UI actions to the repository: send a request,
- *      refresh the inbox, accept / decline a pending row.
+ *      slice of ephemeral UI state (invite links, busy / error
+ *      flags) as [ContactsUiState].
+ *   2. Dispatch UI actions to the repository: refresh the
+ *      inbox, accept / decline a pending row. A contact request
+ *      is sent from the people search (`search/`), not here.
  *   3. Map [ContactsError]'s discriminated variants into
  *      user-facing copy.
  */
@@ -47,9 +46,6 @@ public class ContactsViewModel(
      *  (tests / future contacts-only configs), Accept stays a
      *  pure local marker. */
     private val chatRepo: ChatRepository? = null,
-    /** ADR-0048 §4 — the core's username rule (`validateUsername`). */
-    private val validateUsername: (String) -> String =
-        { uniffi.lakko_ffi_uniffi.validateUsername(it) },
 ) : ViewModel() {
 
     private val mutableUi: MutableStateFlow<UiSlice> = MutableStateFlow(UiSlice())
@@ -160,12 +156,6 @@ public class ContactsViewModel(
 
     private fun buildUi(repoState: ContactsState, ui: UiSlice): ContactsUiState =
         ContactsUiState(
-            usernameInput = ui.usernameInput,
-            usernameError = ui.usernameError,
-            introInput = ui.introInput,
-            sending = ui.sending,
-            sendError = ui.sendError,
-            sendSucceeded = ui.sendSucceeded,
             pending = repoState.pending,
             accepted = repoState.accepted,
             sent = repoState.sent,
@@ -182,104 +172,6 @@ public class ContactsViewModel(
             refreshError = repoState.lastError,
             requiresReauth = repoState.requiresReauth,
         )
-
-    /** ADR-0048 §4 — the search field applies the username rule as the user
-     *  types and shows the reason. */
-    public fun onUsernameChange(value: String) {
-        val check = me.lakko.app.profile.checkUsername(value, validateUsername)
-        mutableUi.update {
-            it.copy(
-                usernameInput = value,
-                usernameError = me.lakko.app.profile.usernameFieldErrorText(check, value),
-            )
-        }
-    }
-
-    public fun onIntroChange(value: String) {
-        mutableUi.update { it.copy(introInput = value) }
-    }
-
-    /** Send a contact request. Surfaces success by clearing the
-     *  form; failures land in [ContactsUiState.sendError]. */
-    public fun onSendClicked() {
-        val snapshot = mutableUi.value
-        if (snapshot.sending) return
-        if (snapshot.usernameInput.isBlank()) {
-            mutableUi.update { it.copy(sendError = UiText("username.error.empty")) }
-            return
-        }
-        // ADR-0048 §4 — never send a lookup for a name that fails the rule.
-        val username = when (
-            val decision = me.lakko.app.profile.searchDecision(snapshot.usernameInput, validateUsername)
-        ) {
-            is me.lakko.app.profile.SearchDecision.Refuse -> {
-                mutableUi.update { it.copy(sendError = decision.text) }
-                return
-            }
-            is me.lakko.app.profile.SearchDecision.Lookup -> decision.normalized
-        }
-
-        mutableUi.update { it.copy(sending = true, sendError = null) }
-        viewModelScope.launch {
-            try {
-                repo.sendContactRequest(
-                    recipientUsername = username,
-                    introMessage = snapshot.introInput,
-                )
-                // Success — clear the form so the user can
-                // queue another one; the sheet reads the flag to close.
-                mutableUi.update {
-                    it.copy(
-                        sending = false,
-                        sendError = null,
-                        sendSucceeded = true,
-                        usernameInput = "",
-                        introInput = "",
-                    )
-                }
-            } catch (refused: SupersessionRefused) {
-                // KT-log S4 — a fail-closed supersession refusal (an
-                // unproven CHANGED key) is the moment the reset-vs-
-                // compromise distinction matters most. Surface a reset-
-                // AWARE message driven by the best-effort log marker the
-                // client attached (`loggedReset`). The refusal itself is
-                // unchanged — gate 1 threw regardless of the log; this only
-                // colours the prompt.
-                mutableUi.update {
-                    it.copy(
-                        sending = false,
-                        sendError = supersessionRefusedMessage(
-                            refused.loggedReset,
-                            atLabel(username),
-                        ),
-                    )
-                }
-            } catch (err: Throwable) {
-                me.lakko.app.rethrowIfCancelled(err) {
-                    mutableUi.update { it.copy(sending = false) }
-                }
-                // ADR-0054 - the username lookup spends an anonymous token.
-                logFailure("send contact request", err)
-                mutableUi.update {
-                    it.copy(
-                        sending = false,
-                        sendError = contactsErrorText(err, "contacts.error.send", AllowanceKind.LOOKUP),
-                    )
-                }
-            }
-        }
-    }
-
-    /** The add-by-username sheet acknowledged the success (it closed). */
-    public fun consumeSendSuccess() {
-        mutableUi.update { if (it.sendSucceeded) it.copy(sendSucceeded = false) else it }
-    }
-
-    /** The add-by-username sheet was dismissed: drop a stale error so the
-     *  next opening starts clean; the typed values are kept. */
-    public fun onDismissAddSheet() {
-        mutableUi.update { it.copy(sendError = null, sendSucceeded = false) }
-    }
 
     /** Remove an accepted contact from this device (UX 5.3). Local only. */
     public fun onRemoveContactClicked(messageId: Long) {
@@ -557,18 +449,10 @@ public class ContactsViewModel(
         android.util.Log.w("LakkoContacts", "WARN $action failed: ${err.javaClass.simpleName}: ${err.message}")
     }
 
-    /** VM-internal slice carrying ephemeral form + send +
-     *  invite-generation state. Persistent contacts data lives
+    /** VM-internal slice carrying ephemeral invite-generation
+     *  state. Persistent contacts data lives
      *  in the repository. */
     private data class UiSlice(
-        val usernameInput: String = "",
-        val usernameError: me.lakko.app.l10n.UiText? = null,
-        val introInput: String = "",
-        val sending: Boolean = false,
-        val sendError: UiText? = null,
-        /** Set once a request was sent; the sheet closes on it and calls
-         *  [consumeSendSuccess]. */
-        val sendSucceeded: Boolean = false,
         val generatingInvite: Boolean = false,
         val inviteError: UiText? = null,
         /** Phase 1.18d2b-list — server-authoritative active-
@@ -592,16 +476,6 @@ public class ContactsViewModel(
 
 /** Combined snapshot the [ContactsScreen] renders. */
 public data class ContactsUiState(
-    val usernameInput: String,
-    /** ADR-0048 §4 — the reason the typed username fails, or `null`
-     *  (ADR-0061: a catalog message the screen renders). */
-    val usernameError: me.lakko.app.l10n.UiText? = null,
-    val introInput: String,
-    val sending: Boolean,
-    /** ADR-0061 — rendered from the failure's kind, never from core prose. */
-    val sendError: UiText?,
-    /** A request was just sent; consumed by the add sheet. */
-    val sendSucceeded: Boolean = false,
     val pending: List<me.lakko.app.contacts.IncomingContactRequest>,
     val accepted: List<me.lakko.app.contacts.AcceptedContact>,
     val sent: List<me.lakko.app.contacts.SentContactRequest>,

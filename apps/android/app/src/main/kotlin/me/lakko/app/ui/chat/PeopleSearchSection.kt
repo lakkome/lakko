@@ -15,65 +15,62 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Groups
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.launch
-import me.lakko.app.l10n.UiText
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
-import me.lakko.app.search.PeopleSearchOutcome
 import me.lakko.app.search.PeopleSearchService
+import me.lakko.app.search.PeopleSearchSession
 import me.lakko.app.search.PeopleSearchState
-import me.lakko.app.search.PersonReach
 import me.lakko.app.search.PersonResult
-import me.lakko.app.search.REQUEST_REFUSED
-import me.lakko.app.search.SendOutcome
-import me.lakko.app.search.canAddContact
+import me.lakko.app.search.RowAction
+import me.lakko.app.search.RowSendState
 import me.lakko.app.search.mergePeople
+import me.lakko.app.search.personRowView
 import me.lakko.app.search.searchStateMessage
 import me.lakko.app.ui.components.LakkoAvatar
 
 /**
- * People in the Chats search field (`docs/ux/who-can-find-me.md` section 6.1,
+ * People under a search field (`docs/ux/who-can-find-me.md` section 6.1,
  * `docs/ux/navigation.md` section 4): the people this device already knows,
- * matched as the person types, then one **Search people** row that asks the
- * network and adds what it finds to the same list. The Android twin of web
- * `PeopleSearch.tsx`.
+ * matched from the first letter, and what the network found for the text
+ * under the heading **People**. Nothing to press: the [session] asks the
+ * network on its own (3 characters, 500 ms after the last keystroke). The
+ * same section sits under the Chats field and under the Contacts field.
  *
  * A row shows avatar, name and a verified `@username`, and never WHY the
- * person was found. Its action: a contact opens their chat; someone who lets
- * this account find them offers **Add contact**, which asks for an optional
- * introduction and sends the request with the key that found them; anyone
- * else shows their name only.
+ * person was found. Its control: a contact shows **Open**; someone who lets
+ * this account find them shows **Add contact**, which sends the request at
+ * once, with no introduction; anyone else shows their name only.
  */
 @Composable
 internal fun PeopleSearchSection(
     query: String,
     service: PeopleSearchService,
-    /** How many conversations the local filter matched. */
+    session: PeopleSearchSession,
+    /** How many rows the local filter above matched (conversations in Chats,
+     *  contacts in Contacts). */
     conversationMatches: Int,
     onOpenChannel: (channelIdHex: String, handle: String) -> Unit,
     /** Open a contact's page (their chat). */
     onOpenContact: (keyB64: String) -> Unit,
+    /** The line when nothing local matches; `null` for none. */
+    noLocalMatchKey: String? = "chats.search.no_results",
+    /** People already listed above (standard base64 account keys), left out. */
+    excludeKeysB64: Set<String> = emptySet(),
 ) {
     val context = LocalContext.current
     val profileVersion by me.lakko.app.profile.ProfileDirectory.get(context).version.collectAsState()
@@ -81,61 +78,40 @@ internal fun PeopleSearchSection(
     val local = remember(query, profileVersion) {
         if (query.isBlank()) emptyList() else runCatching { service.local(query) }.getOrDefault(emptyList())
     }
-    // The network half belongs to the query it was asked for.
-    var network by remember { mutableStateOf<Pair<String, PeopleSearchOutcome?>?>(null) }
-    val scope = rememberCoroutineScope()
-    val state = network?.takeIf { it.first == query }?.let { it.second?.state ?: PeopleSearchState.SEARCHING }
-        ?: PeopleSearchState.IDLE
-    val found = network?.takeIf { it.first == query }?.second
-    val people = remember(local, found, ownKeyHex) {
-        mergePeople(listOf(local, found?.people.orEmpty()), ownKeyHex)
+    val view by session.view.collectAsState()
+    val sends by session.sendStates.collectAsState()
+    val shown = view.shown.takeIf { view.asks }
+    val people = remember(local, shown, ownKeyHex, excludeKeysB64) {
+        mergePeople(listOf(local, shown?.people.orEmpty()), ownKeyHex).filter { it.keyB64 !in excludeKeysB64 }
     }
-    val channel = found?.channel
-    val offersSearch = remember(query) { service.offersNetworkSearch(query) }
-    val nothingLocal = conversationMatches == 0 && local.isEmpty() && channel == null
+    val channel = shown?.channel
+    val state = view.state
+    val nothingLocal = conversationMatches == 0 && local.none { it.keyB64 !in excludeKeysB64 } && channel == null
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        if (nothingLocal && state != PeopleSearchState.FOUND) {
+        if (noLocalMatchKey != null && nothingLocal && state != PeopleSearchState.FOUND) {
             Text(
-                t("chats.search.no_results"),
+                t(noLocalMatchKey),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             )
         }
-        if (people.isNotEmpty()) {
-            Text(
-                t("search.people.heading"),
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        if (people.isNotEmpty() || channel != null || view.asks) {
+            Heading(searching = view.searching)
+        }
+        for (person in people) {
+            PersonRow(
+                person = person,
+                send = sends[person.keyHex],
+                onAdd = { session.add(person) },
+                onOpenContact = onOpenContact,
             )
-            for (person in people) {
-                PersonRow(person = person, service = service, onOpenContact = onOpenContact)
-            }
         }
         if (channel != null) {
-            LookupRow(
+            ChannelRow(
                 label = t("search.people.channel_result", mapOf("handle" to "@${channel.handle}")),
-                icon = { Icon(Icons.Filled.Campaign, contentDescription = null) },
-                busy = false,
                 onClick = { onOpenChannel(channel.idHex, channel.handle) },
-            )
-        }
-        if (offersSearch) {
-            LookupRow(
-                label = t("search.people.search"),
-                icon = { Icon(Icons.Filled.Groups, contentDescription = null) },
-                busy = state == PeopleSearchState.SEARCHING,
-                onClick = {
-                    if (state == PeopleSearchState.SEARCHING) return@LookupRow
-                    val q = query
-                    network = q to null
-                    scope.launch {
-                        val outcome = service.search(q)
-                        if (network?.first == q) network = q to outcome
-                    }
-                },
             )
         }
         searchStateMessage(state)?.let {
@@ -150,40 +126,57 @@ internal fun PeopleSearchSection(
 }
 
 @Composable
-private fun LookupRow(label: String, icon: @Composable () -> Unit, busy: Boolean, onClick: () -> Unit) {
+private fun Heading(searching: Boolean) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(enabled = !busy, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        icon()
-        Spacer(Modifier.width(12.dp))
-        Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-        if (busy) {
-            val searching = t("search.people.searching_a11y")
+        Text(
+            t("search.people.heading"),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (searching) {
+            Spacer(Modifier.width(8.dp))
+            val label = t("search.people.searching_a11y")
             CircularProgressIndicator(
-                modifier = Modifier.size(18.dp).semantics { contentDescription = searching },
+                modifier = Modifier.size(14.dp).semantics { contentDescription = label },
                 strokeWidth = 2.dp,
             )
-        } else {
-            Icon(Icons.Filled.ChevronRight, contentDescription = null)
         }
     }
 }
 
 @Composable
-private fun PersonRow(person: PersonResult, service: PeopleSearchService, onOpenContact: (String) -> Unit) {
-    var adding by remember(person.keyHex) { mutableStateOf(false) }
-    var note by remember(person.keyHex) { mutableStateOf<UiText?>(null) }
-    var sent by remember(person.keyHex) { mutableStateOf(false) }
+private fun ChannelRow(label: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.Campaign, contentDescription = null)
+        Spacer(Modifier.width(12.dp))
+        Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Icon(Icons.Filled.ChevronRight, contentDescription = null)
+    }
+}
+
+@Composable
+private fun PersonRow(
+    person: PersonResult,
+    send: RowSendState?,
+    onAdd: () -> Unit,
+    onOpenContact: (String) -> Unit,
+) {
+    val row = personRowView(person, send)
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .then(
-                    if (person.reach == PersonReach.CONTACT) {
+                    if (row.action == RowAction.OPEN) {
                         Modifier.clickable { onOpenContact(person.keyB64) }
                     } else {
                         Modifier
@@ -205,93 +198,23 @@ private fun PersonRow(person: PersonResult, service: PeopleSearchService, onOpen
                     )
                 }
             }
-            if (canAddContact(person) && !sent) {
-                TextButton(onClick = { adding = true }) { Text(t("search.people.add_contact")) }
+            when (row.action) {
+                RowAction.OPEN ->
+                    TextButton(onClick = { onOpenContact(person.keyB64) }) { Text(t("common.open")) }
+                RowAction.ADD ->
+                    TextButton(onClick = onAdd) { Text(t("search.people.add_contact")) }
+                RowAction.ADDING ->
+                    TextButton(onClick = {}, enabled = false) { Text(t("search.people.add_contact")) }
+                RowAction.NONE -> Unit
             }
         }
-        note?.let {
+        row.note?.let {
             Text(
                 it.text(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                modifier = Modifier.padding(start = 68.dp, end = 16.dp, bottom = 4.dp),
             )
         }
     }
-    if (adding) {
-        AddContactDialog(
-            person = person,
-            service = service,
-            onDone = { outcome ->
-                when (outcome) {
-                    SendOutcome.Sent -> {
-                        sent = true
-                        adding = false
-                        note = UiText("contacts.send.done", texts = mapOf("name" to person.name))
-                    }
-                    SendOutcome.Refused -> note = REQUEST_REFUSED
-                    is SendOutcome.Failed -> note = outcome.message
-                }
-            },
-            onDismiss = { adding = false },
-        )
-    }
-}
-
-@Composable
-private fun AddContactDialog(
-    person: PersonResult,
-    service: PeopleSearchService,
-    onDone: (SendOutcome) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    var intro by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<UiText?>(null) }
-    val scope = rememberCoroutineScope()
-    AlertDialog(
-        onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text(t("search.people.add_contact_title", mapOf("name" to person.name))) },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = intro,
-                    onValueChange = { intro = it },
-                    label = { Text(t("contacts.add.intro_label")) },
-                    minLines = 3,
-                    maxLines = 6,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                error?.let {
-                    Text(
-                        it.text(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = !busy,
-                onClick = {
-                    busy = true
-                    error = null
-                    scope.launch {
-                        val outcome = service.send(person, intro)
-                        busy = false
-                        when (outcome) {
-                            SendOutcome.Sent -> onDone(outcome)
-                            SendOutcome.Refused -> error = REQUEST_REFUSED
-                            is SendOutcome.Failed -> error = outcome.message
-                        }
-                    }
-                },
-            ) { Text(if (busy) t("common.sending") else t("search.people.send_request")) }
-        },
-        dismissButton = {
-            TextButton(enabled = !busy, onClick = onDismiss) { Text(t("common.cancel")) }
-        },
-    )
 }

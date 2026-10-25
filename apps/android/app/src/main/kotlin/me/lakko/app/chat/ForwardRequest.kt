@@ -58,10 +58,8 @@ public data class ForwardBatch(
 /**
  * The one-shot slot between a chat and the picker route.
  *
- * A slot rather than a navigation argument, the way
- * [me.lakko.app.contacts.PendingContactLookup] is one: the request carries a
- * whole message and a free-text name, neither of which belongs in a route
- * string. The chat publishes, the picker route takes it once into its own
+ * A slot rather than a navigation argument: the request carries a whole
+ * message and a free-text name, neither of which belongs in a route string. The chat publishes, the picker route takes it once into its own
  * view model (which survives rotation), and an empty slot on arrival — a
  * process restored onto the picker — means the picker simply closes.
  *

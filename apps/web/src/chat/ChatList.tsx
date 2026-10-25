@@ -764,11 +764,12 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           </For>
           {/* `docs/ux/who-can-find-me.md` section 6.1 - the people half of
               the field: the people this device knows, matched as the person
-              types, and one Search people row that asks the network for the
-              username, the name and the channel handle, and adds what it
-              finds to the same list. `docs/ux/navigation.md` section 4. */}
+              types, and, from three characters with nothing to press, what
+              the network finds by username, name and channel handle, in the
+              same list under People. */}
           <Show when={query().trim().length > 0}>
             <PeopleSearch
+              scope="chats"
               query={query}
               conversationMatches={() => visibleRows().length}
               groupPeopleKeys={groupPeopleKeys}

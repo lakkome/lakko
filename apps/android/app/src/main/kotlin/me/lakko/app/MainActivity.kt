@@ -1985,13 +1985,10 @@ private fun SessionRoot(
                         onSubscribeToChannel = { id, handle ->
                             navController.navigate(Routes.channelSubscribe(id, handle))
                         },
-                        // Section 4.3 — a found person goes to Contacts, which
-                        // owns the request flow because it asks for an
-                        // introduction the search field has no room for.
-                        onFoundPerson = { username ->
-                            me.lakko.app.contacts.PendingContactLookup.publish(username)
-                            navController.navigateToTab(Routes.CONTACTS)
-                        },
+                        // Only the plain lookup row (no people search wired)
+                        // reaches this; the people search sends the request
+                        // from its own row (who-can-find-me.md section 6.1).
+                        onFoundPerson = { _ -> navController.navigateToTab(Routes.CONTACTS) },
                         channels = channelsState,
                         deviceGroupSync = deviceGroupSync,
                         // ADR-0079 — the people added through their invite
@@ -2183,21 +2180,14 @@ private fun SessionRoot(
                             )
                         },
                     )
-                    // docs/ux/navigation.md section 4.3 — a username the
-                    // conversation list's one lookup row resolved. The add
-                    // sheet opens with it filled in, and the slot is consumed
-                    // so a later visit does not re-open it.
-                    val foundUsername by me.lakko.app.contacts.PendingContactLookup
-                        .pendingUsername.collectAsStateWithLifecycle()
                     ContactsScreen(
                         viewModel = contactsVm,
                         onOpenContact = { key -> navController.navigate(Routes.contact(key)) },
                         onOpenChat = { hex -> navController.navigate(Routes.chat(hex)) },
                         onOpenPendingChat = { hex -> navController.navigate(Routes.pendingChat(hex)) },
-                        prefillUsername = foundUsername,
-                        onPrefillConsumed = {
-                            me.lakko.app.contacts.PendingContactLookup.consume()
-                        },
+                        // docs/ux/who-can-find-me.md section 6.1 — the same
+                        // people search as the Chats field, people only.
+                        peopleSearch = peopleSearch,
                     )
                 }
                 // docs/ux/navigation.md section 5 — Calls: recent calls across

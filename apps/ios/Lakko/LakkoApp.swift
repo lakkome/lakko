@@ -1160,6 +1160,13 @@ private final class SessionModels: ObservableObject {
     /// ADR-0059 — Discover's model (owned here so the Feed's model and the
     /// shared-channels wiring below read one instance).
     let discoverModel: DiscoverModel
+    /// `docs/ux/who-can-find-me.md` section 6.1 — one search session for the
+    /// field at the top of Chats and the one at the top of Contacts: a text
+    /// asked in one is not asked again in the other, and "Request sent"
+    /// reads the same in both.
+    let peopleSearchSession: PeopleSearchSession
+    let chatsPeopleSearch: PeopleSearchModel
+    let contactsPeopleSearch: PeopleSearchModel
     private var chatModels: [String: ChatViewModel] = [:]
     private var sharedChannelsWatch: AnyCancellable?
 
@@ -1206,6 +1213,11 @@ private final class SessionModels: ObservableObject {
         let channels = channelsState
         let chatList = chatListVM
         let contacts = services.contactsRepository
+        let searchSession = PeopleSearchSession(ports: Self.peopleSearchPorts(
+            contacts: contacts, chatRepository: chatRepository))
+        peopleSearchSession = searchSession
+        chatsPeopleSearch = PeopleSearchModel(session: searchSession)
+        contactsPeopleSearch = PeopleSearchModel(session: searchSession)
         let hub = chatRepository.sharedChannels
         // ADR-0059 section 6 — the listed channels this device follows, as the
         // share rule reads them: subscribed (a subscriber key is held), listed
@@ -1259,6 +1271,52 @@ private final class SessionModels: ObservableObject {
         sharedChannelsWatch = channels.objectWillChange
             .debounce(for: .seconds(3), scheduler: RunLoop.main)
             .sink { _ in Task { @MainActor in await hub.resendChanged() } }
+    }
+
+    /// The search field's ports (web `search/wiring.ts`): no rule of its own
+    /// lives here.
+    private static func peopleSearchPorts(
+        contacts: ContactsRepository, chatRepository: ChatRepository
+    ) -> PeopleSearchSession.Ports {
+        func contactPairs() -> [(accountKey: Data, accountId: Data?)] {
+            contacts.state.accepted.map {
+                (accountKey: $0.request.fromPubkey, accountId: $0.request.fromAccountId)
+            }
+        }
+        return PeopleSearchSession.Ports(
+            local: { query in
+                // Contacts and the members of this device's groups and
+                // channels, with or without a grant (web `localPeople`).
+                PeopleSearch.local(
+                    query: query,
+                    candidates: PeopleSearchWiring.localCandidates(
+                        contacts: contactPairs(),
+                        groupPeopleKeys: chatRepository.allMemberAccountKeys(),
+                        profiles: ProfileDirectory.shared.receivedProfiles()),
+                    ownAccountKey: ReachCenter.shared.ownAccountKey)
+            },
+            network: { query in
+                let contactKeys = Set(contactPairs().map { $0.accountKey.base64EncodedString() })
+                return await PeopleSearch.answer(
+                    query: query,
+                    records: IntroductionBook.shared.relayedRecords()
+                        + IntroductionBook.shared.offeredRecords(),
+                    known: {
+                        PeopleSearchWiring.known(
+                            keyB64: $0.base64EncodedString(), contactKeys: contactKeys)
+                    },
+                    ownAccountKey: ReachCenter.shared.ownAccountKey,
+                    ports: contacts.peopleSearchPorts(),
+                    lookupChannel: { try await DiscoveryClient().lookupChannel(handle: $0) })
+            },
+            sendRequest: { person in
+                _ = try await contacts.sendContactRequest(to: person)
+            },
+            alreadyRequested: { person in
+                guard let accountId = person.accountId else { return false }
+                let idB64 = base64Encode(accountId)
+                return contacts.state.sent.contains { $0.recipientAccountIdB64 == idB64 }
+            })
     }
 
     func chatViewModel(for groupIdHex: String, make: () -> ChatViewModel) -> ChatViewModel {
@@ -1341,7 +1399,7 @@ private struct SessionRoot: View, Equatable {
                     onFoundChannel: { channelId, handle in
                         push(.channelFound(channelId: channelId, handle: handle), on: .chats)
                     },
-                    onFoundPerson: { handOffToContacts(username: $0) },
+                    onOpenPerson: { openFoundPerson($0, on: .chats) },
                     onOpenFolderSettings: { reorder in
                         push(.chatFolders(reorder: reorder), on: .chats)
                     },
@@ -1357,42 +1415,7 @@ private struct SessionRoot: View, Equatable {
                             settingsPath = [.recoveryFactors]
                         }),
                     keysUpdatingLabel: KeysUpdatingLabel(authRepository: authRepository),
-                    peopleSearch: PeopleSearchActions(
-                        search: { [contactsRepository, chatRepository] query in
-                            // Local first (web `localPeople`): contacts and
-                            // the members of this device's groups and
-                            // channels, with or without a grant.
-                            let own = ReachCenter.shared.ownAccountKey
-                            let contacts = contactsRepository.state.accepted.map {
-                                (accountKey: $0.request.fromPubkey, accountId: $0.request.fromAccountId)
-                            }
-                            let contactKeys = Set(contacts.map { $0.accountKey.base64EncodedString() })
-                            let local = PeopleSearch.local(
-                                query: query,
-                                candidates: PeopleSearchWiring.localCandidates(
-                                    contacts: contacts,
-                                    groupPeopleKeys: chatRepository.allMemberAccountKeys(),
-                                    profiles: ProfileDirectory.shared.receivedProfiles()),
-                                ownAccountKey: own)
-                            let network = await PeopleSearch.network(
-                                query: query,
-                                records: IntroductionBook.shared.relayedRecords()
-                                    + IntroductionBook.shared.offeredRecords(),
-                                known: {
-                                    PeopleSearchWiring.known(
-                                        keyB64: $0.base64EncodedString(), contactKeys: contactKeys)
-                                },
-                                ownAccountKey: own,
-                                ports: contactsRepository.peopleSearchPorts())
-                            if case .found(let people) = network {
-                                return .found(PeopleSearch.merge([local, people], ownAccountKey: own))
-                            }
-                            return local.isEmpty ? network : .found(local)
-                        },
-                        sendRequest: { [contactsRepository] person, intro in
-                            _ = try await contactsRepository.sendContactRequest(
-                                to: person, introMessage: intro)
-                        })
+                    peopleSearch: models.chatsPeopleSearch
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .chats) }
             }
@@ -1425,7 +1448,10 @@ private struct SessionRoot: View, Equatable {
             .tag(SessionTab.feed)
 
             NavigationStack(path: $contactsPath) {
-                ContactsScreen(viewModel: contactsVM)
+                ContactsScreen(
+                    viewModel: contactsVM,
+                    peopleSearch: models.contactsPeopleSearch,
+                    onOpenPerson: { openFoundPerson($0, on: .contacts) })
                     .navigationDestination(for: TabRoute.self) { routeView($0, tab: .contacts) }
             }
             .tabItem { Label(l10n.t("nav.contacts"), systemImage: "person.crop.circle") }
@@ -1723,12 +1749,20 @@ private struct SessionRoot: View, Equatable {
         }
     }
 
-    /// Section 4.3 — a person the lookup found hands their name to Contacts,
-    /// which is where the contact request lives, because that flow asks for an
-    /// introduction the search field has no room for.
-    private func handOffToContacts(username: String) {
-        contactsVM.prefillAddByUsername(username)
-        selectedTab = .contacts
+    /// `docs/ux/who-can-find-me.md` section 6.1 — **Open** on a found person
+    /// who is already a contact: the conversation with them, else their
+    /// contact page when this device holds no conversation yet.
+    private func openFoundPerson(_ person: FoundPerson, on tab: SessionTab) {
+        let resolver = ReachCenter.shared
+        guard let contact = contactsRepository.state.accepted.first(where: {
+            $0.request.fromPubkey == person.accountKey
+                || resolver.currentAccountKey(of: $0.request.fromPubkey) == person.accountKey
+        }) else { return }
+        if let groupIdHex = contactsVM.chatGroupIdHex(for: contact) {
+            push(.chat(groupIdHex: groupIdHex), on: tab)
+        } else {
+            push(.contactDetail(messageId: contact.request.messageId), on: tab)
+        }
     }
 
     /// Section 5.1 — call back in the SAME mode the row records, through the

@@ -7715,7 +7715,7 @@
     },
     "search.people.add_contact": {
       "text": "Add contact",
-      "comment": "Button on a person found by search: opens a short form to send them a contact request."
+      "comment": "Button on a person found by search: sends them a contact request at once."
     },
     "search.people.add_contact_title": {
       "text": "Add {name}",
@@ -7740,6 +7740,18 @@
     "search.people.request_refused": {
       "text": "Couldn't send the request. They may have changed who can find them.",
       "comment": "Shown when a contact request to a person found by search was refused because they changed who can find them since."
+    },
+    "search.people.out_of_searches": {
+      "text": "Too many searches for now. Try again later.",
+      "comment": "Shown under People in the search field when the device has no search allowance left for now. Local results stay."
+    },
+    "search.people.request_failed": {
+      "text": "Couldn't send the request. Try again.",
+      "comment": "Shown on a found person's row when sending the contact request failed for a reason other than their setting."
+    },
+    "search.people.request_sent": {
+      "text": "Request sent",
+      "comment": "Shown on a found person's row in place of Add contact after the contact request was sent."
     },
     "search.people.search": {
       "text": "Search people",

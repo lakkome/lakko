@@ -4,86 +4,93 @@
 import LakkoCore
 import SwiftUI
 
-/// What "Search people" does, supplied by the app shell.
-public struct PeopleSearchActions {
-    /// Local then network search for the typed text.
-    public var search: @MainActor (String) async -> PeopleSearchOutcome
-    /// Send a contact request to a result, with its introduction.
-    public var sendRequest: @MainActor (FoundPerson, String) async throws -> Void
-
-    public init(
-        search: @escaping @MainActor (String) async -> PeopleSearchOutcome,
-        sendRequest: @escaping @MainActor (FoundPerson, String) async throws -> Void
-    ) {
-        self.search = search
-        self.sendRequest = sendRequest
-    }
-}
-
-/// `docs/ux/who-can-find-me.md` section 6.1 — the "Search people" row and its
-/// results: avatar, name, `@username` when verified, and Add contact. A row
-/// never says why the person was found.
+/// `docs/ux/who-can-find-me.md` section 6.1 — what one search field shows
+/// beside its own list: the people this device knows, then, under the heading
+/// **People**, what the network found. Nothing to press: the field asks the
+/// network by itself (``PeopleSearchModel``). A row is an avatar, the name,
+/// the `@username` when verified and **Add contact**, which sends the request
+/// at once. A row never says why the person was found.
+///
+/// The same view under the Chats field (`includesChannels`, which also shows
+/// a channel found by its handle) and under the Contacts field (people only,
+/// and no local contact rows: the Contacts list already shows them).
 struct PeopleSearchSection: View {
-    let query: String
-    let actions: PeopleSearchActions
-
-    @State private var busy = false
-    @State private var outcome: PeopleSearchOutcome?
-    @State private var searchedFor = ""
-    @State private var requesting: FoundPerson?
+    @ObservedObject var model: PeopleSearchModel
+    @ObservedObject var session: PeopleSearchSession
+    let includesChannels: Bool
+    let showsLocalContacts: Bool
+    /// The line shown when the field shows nothing of its own and does not
+    /// ask the network, whose People part answers by itself (Chats: "No
+    /// results" when no conversation matched either); `nil` shows nothing.
+    let emptyText: String?
+    let onOpenPerson: (FoundPerson) -> Void
+    let onOpenChannel: (_ channelIdHex: String, _ handle: String) -> Void
     @ObservedObject private var l10n = Localization.shared
 
+    init(
+        model: PeopleSearchModel,
+        includesChannels: Bool,
+        showsLocalContacts: Bool,
+        emptyText: String? = nil,
+        onOpenPerson: @escaping (FoundPerson) -> Void,
+        onOpenChannel: @escaping (String, String) -> Void = { _, _ in }
+    ) {
+        self.model = model
+        self.session = model.session
+        self.includesChannels = includesChannels
+        self.showsLocalContacts = showsLocalContacts
+        self.emptyText = emptyText
+        self.onOpenPerson = onOpenPerson
+        self.onOpenChannel = onOpenChannel
+    }
+
     var body: some View {
+        let rows = model.rows(showsLocalContacts: showsLocalContacts)
+        let channel = includesChannels ? model.answer?.channel : nil
+        let state = model.networkState(includesChannels: includesChannels)
+        let message = state?.message
+        let showsHeading = model.searching || !rows.network.isEmpty || channel != nil || message != nil
         VStack(alignment: .leading, spacing: 10) {
-            if PeopleSearch.offersNetworkSearch(query) {
-                Button { Task { await run() } } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "person.2")
-                            .foregroundStyle(Color.lakkoAccent)
-                        Text(l10n.t("search.people.search"))
-                            .foregroundStyle(Color.lakkoText)
-                        Spacer()
-                        if busy {
-                            ProgressView().controlSize(.small)
-                                .accessibilityLabel(l10n.t("search.people.searching_a11y"))
-                        } else {
-                            Image(systemName: "chevron.right")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(Color.lakkoTextMuted)
-                        }
+            if let emptyText, !model.asksNetwork,
+               !model.showsAnything(includesChannels: includesChannels, showsLocalContacts: showsLocalContacts) {
+                Text(emptyText)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .frame(maxWidth: .infinity)
+            }
+            ForEach(rows.local) { person in
+                personRow(person)
+            }
+            if showsHeading {
+                HStack(spacing: 8) {
+                    Text(l10n.t("search.people.heading"))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.lakkoTextMuted)
+                    if model.searching {
+                        ProgressView().controlSize(.small)
+                            .accessibilityLabel(l10n.t("search.people.searching_a11y"))
                     }
                 }
-                .buttonStyle(.plain)
-                .disabled(busy)
-            }
-            if searchedFor == query, let outcome {
-                if case .found(let people) = outcome {
-                    ForEach(people) { person in
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isHeader)
+                .padding(.top, rows.local.isEmpty ? 0 : 6)
+                if let channel {
+                    Button { onOpenChannel(channel.idHex, channel.handle) } label: {
                         HStack(spacing: 12) {
-                            InitialsAvatar(
-                                name: person.displayName ?? person.username ?? "?",
-                                identity: person.accountKey.base64EncodedString(),
-                                size: 40)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(person.displayName ?? l10n.t("contacts.request.someone"))
-                                    .foregroundStyle(Color.lakkoText)
-                                if let username = person.username {
-                                    Text("@\(username)")
-                                        .font(.subheadline)
-                                        .foregroundStyle(Color.lakkoTextMuted)
-                                }
-                            }
+                            Image(systemName: "megaphone")
+                                .frame(width: 40, height: 40)
+                                .foregroundStyle(Color.lakkoAccent)
+                            Text(l10n.t("search.people.channel_result", texts: ["handle": "@\(channel.handle)"]))
+                                .foregroundStyle(Color.lakkoText)
                             Spacer()
-                            // A contact has nothing to add; someone who does
-                            // not let this account find them is shown by
-                            // name only (UX section 6.1, web `canAddContact`).
-                            if person.canAddContact {
-                                Button(l10n.t("search.people.add_contact")) { requesting = person }
-                                    .buttonStyle(.borderless)
-                            }
                         }
+                        .contentShape(Rectangle())
                     }
-                } else if let message = PeopleSearch.message(for: outcome) {
+                    .buttonStyle(.plain)
+                }
+                ForEach(rows.network) { person in
+                    personRow(person)
+                }
+                if let message {
                     Text(message)
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoTextMuted)
@@ -91,74 +98,73 @@ struct PeopleSearchSection: View {
                 }
             }
         }
-        .sheet(item: $requesting) { person in
-            ContactRequestSheet(person: person, send: actions.sendRequest)
-        }
     }
 
-    private func run() async {
-        busy = true
-        defer { busy = false }
-        let typed = query
-        let result = await actions.search(typed)
-        searchedFor = typed
-        outcome = result
+    private func personRow(_ person: FoundPerson) -> some View {
+        FoundPersonRow(
+            person: person,
+            state: session.requestState(for: person),
+            onAdd: { Task { await session.addContact(person) } },
+            onOpen: { onOpenPerson(person) })
     }
 }
 
-/// The contact request to a search result, with its introduction.
-private struct ContactRequestSheet: View {
+/// One found person: avatar, name, `@username`, and Open (a contact), Add
+/// contact, or the request's outcome.
+private struct FoundPersonRow: View {
     let person: FoundPerson
-    let send: @MainActor (FoundPerson, String) async throws -> Void
-    @Environment(\.dismiss) private var dismiss
-    @State private var intro = ""
-    @State private var sending = false
-    @State private var error: UiText?
+    let state: PersonRequestState
+    let onAdd: () -> Void
+    let onOpen: () -> Void
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    TextField(l10n.t("contacts.add.intro_label"), text: $intro, axis: .vertical)
-                        .lineLimit(3...6)
-                } header: {
-                    Text(person.displayName ?? person.username.map { "@\($0)" } ?? l10n.t("contacts.request.someone"))
-                        .textCase(nil)
+        HStack(spacing: 12) {
+            InitialsAvatar(
+                name: person.displayName ?? person.username ?? "?",
+                identity: person.accountKey.base64EncodedString(),
+                size: 40)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(person.displayName ?? l10n.t("contacts.request.someone"))
+                    .foregroundStyle(Color.lakkoText)
+                if let username = person.username {
+                    Text("@\(username)")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.lakkoTextMuted)
                 }
-                if let error {
-                    Text(error.text).foregroundStyle(Color.lakkoDanger)
-                }
-            }
-            .navigationTitle(l10n.t("search.people.add_contact"))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(l10n.t("common.cancel")) { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    if sending {
-                        ProgressView()
-                    } else {
-                        Button(l10n.t("search.people.send_request")) { Task { await submit() } }
-                    }
+                if person.canAddContact, let message = state.message {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(state == .refused ? Color.lakkoTextMuted : Color.lakkoDanger)
+                        .accessibilityAddTraits(.updatesFrequently)
                 }
             }
+            Spacer()
+            trailing
         }
     }
 
-    private func submit() async {
-        sending = true
-        defer { sending = false }
-        do {
-            try await send(person, intro)
-            dismiss()
-        } catch {
-            // Rendered from the error's kind, never its English description:
-            // a refused request reads `search.people.request_refused`, a
-            // network failure the offline line, anything else the generic
-            // send failure (web `contactsErrorText(err, "contacts.error.send")`).
-            self.error = ContactsViewModel.contactsErrorText(for: error, fallbackKey: "contacts.error.send")
+    /// A contact opens the conversation; someone who does not let this
+    /// account find them is shown by name only (web `canAddContact`).
+    @ViewBuilder
+    private var trailing: some View {
+        if person.reach == .contact {
+            Button(l10n.t("common.open"), action: onOpen)
+                .buttonStyle(.borderless)
+        } else if person.canAddContact {
+            switch state {
+            case .idle, .failed:
+                Button(l10n.t("search.people.add_contact"), action: onAdd)
+                    .buttonStyle(.borderless)
+            case .sending:
+                ProgressView().controlSize(.small)
+            case .sent:
+                Text(l10n.t("search.people.request_sent"))
+                    .font(.subheadline)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            case .refused:
+                EmptyView()
+            }
         }
     }
 }

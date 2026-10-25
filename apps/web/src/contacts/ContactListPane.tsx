@@ -3,11 +3,16 @@
 
 /**
  * The Contacts list pane (docs/ux/client-redesign.md section 5.3): the pane
- * head with search and the add menu, then Requests (incoming rows with
+ * head with the add menu and the search field, then Requests (incoming rows with
  * Accept and Decline; sent requests under a collapsed "Sent" group), then
  * the alphabetical contacts under letter headers. Names come from the one
  * profile resolver and never show a key fingerprint; the rules for grouping,
  * matching and ordering live in `contact-list-model.ts`.
+ *
+ * The search field is the one of `docs/ux/who-can-find-me.md` section 6.1:
+ * it filters the contacts below and, through the route's `people` slot
+ * (`search/PeopleSearch.tsx`), finds people this device does not hold as
+ * contacts, asking the network by itself as the person types.
  *
  * Markup only: the route owns the state and every mutation.
  */
@@ -30,8 +35,9 @@ import type { AcceptedContact } from "./local-store";
 import { pendingNameOf, type PendingContact } from "./pending-contacts";
 
 /** What the add menu offers. Web has no contact QR flow, so there is no
- *  "Show my QR code" / "Scan QR code" here. */
-export type AddMode = "username" | "invite";
+ *  "Show my QR code" / "Scan QR code" here, and "Add by username" is gone:
+ *  the search field finds people (`docs/ux/who-can-find-me.md` section 6.1). */
+export type AddMode = "invite";
 
 /**
  * Contacts is about people. Finding a channel is not here, and neither is
@@ -44,13 +50,15 @@ export type AddMode = "username" | "invite";
  * inside a call that is already happening.
  */
 const ADD_ITEMS: ReadonlyArray<{ mode: AddMode; labelKey: string; icon: IconName }> = [
-  { mode: "username", labelKey: "contacts.add.by_username", icon: "user" },
   { mode: "invite", labelKey: "contacts.add.share_invite", icon: "link" },
 ];
 
 export interface ContactListPaneProps {
   readonly filter: () => string;
   readonly onFilter: (value: string) => void;
+  /** The people half of the search field, rendered under the contacts while
+   *  something is typed. */
+  readonly people: () => JSX.Element;
   readonly onAdd: (mode: AddMode) => void;
   readonly pending: () => readonly IncomingContactRequest[];
   readonly pendingBusy: () => boolean;
@@ -110,6 +118,9 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
     props.pending().length === 0 &&
     props.sent().length === 0;
 
+  const searching = (): boolean => props.filter().trim().length > 0;
+  let searchInput: HTMLInputElement | undefined;
+
   function select(key: string): void {
     props.onSelect(key);
   }
@@ -155,6 +166,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
       <div class="lk-search">
         <Icon name="search" size={18} />
         <input
+          ref={searchInput}
           type="search"
           placeholder={t("chats.search.placeholder")}
           aria-label={t("contacts.list.search")}
@@ -239,13 +251,15 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
         </Show>
 
         <Show
-          when={!nothingAtAll()}
+          when={!nothingAtAll() || searching()}
           fallback={
             <div class="lk-empty">
               <Icon name="contacts" size={40} strokeWidth={1.4} />
               <strong>{t("contacts.list.empty.title")}</strong>
               <span>{t("contacts.list.empty.body")}</span>
-              <button type="button" class="primary" onClick={() => props.onAdd("username")}>
+              {/* Adding someone is searching for them: the button takes the
+                  person to the field (UX 6.1). */}
+              <button type="button" class="primary" onClick={() => searchInput?.focus()}>
                 {t("contacts.list.empty.action")}
               </button>
             </div>
@@ -302,6 +316,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
             </For>
           </Show>
         </Show>
+        <Show when={searching()}>{props.people()}</Show>
       </div>
     </aside>
   );

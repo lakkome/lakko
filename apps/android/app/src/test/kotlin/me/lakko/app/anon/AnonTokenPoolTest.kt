@@ -170,6 +170,7 @@ class AnonTokenPoolTest {
     }
 
     private val lookup = AnonTokenContext.DISCOVERY_LOOKUP
+    private val lookupTarget = anonPoolTargetFor(AnonTokenContext.DISCOVERY_LOOKUP)
     private val push = AnonTokenContext.PUSH_REGISTER
 
     // ------------------------------------------------------------ the schedule (ADR-0078 section 8)
@@ -183,7 +184,7 @@ class AnonTokenPoolTest {
         val firstBatch = AnonTokenContext.entries.associateWith { core.issuesFor(it).single().third }
         assertEquals(
             mapOf(
-                AnonTokenContext.DISCOVERY_LOOKUP to 16,
+                AnonTokenContext.DISCOVERY_LOOKUP to 32,
                 AnonTokenContext.DISCOVERY_REGISTER to 2,
                 AnonTokenContext.INVITE_CONSUME to 4,
                 AnonTokenContext.DS_KNOCK to 8,
@@ -211,7 +212,7 @@ class AnonTokenPoolTest {
         settle()
         val afterFirst = core.begun.size
         // Spend every lookup token: not one issuance follows.
-        repeat(16) { pool.take(lookup) }
+        repeat(lookupTarget) { pool.take(lookup) }
         advanceUntilIdle()
         assertEquals("no spend starts an issuance", afterFirst, core.begun.size)
         val empty = runCatching { pool.take(lookup) }.exceptionOrNull()
@@ -222,8 +223,8 @@ class AnonTokenPoolTest {
         pool.runScheduledRefills()
         advanceUntilIdle()
         assertEquals(afterFirst + 1, core.begun.size)
-        assertEquals(Triple(lookup, 10L, 16), core.begun.last())
-        assertEquals(16, pool.held(lookup))
+        assertEquals(Triple(lookup, 10L, lookupTarget), core.begun.last())
+        assertEquals(lookupTarget, pool.held(lookup))
     }
 
     @Test
@@ -314,7 +315,7 @@ class AnonTokenPoolTest {
         val first = pool(core, api, { alice }, store = store)
         val spent = first.take(lookup)
         advanceUntilIdle()
-        assertEquals(15, store.held("alice", lookup))
+        assertEquals(lookupTarget - 1, store.held("alice", lookup))
         assertTrue(store.pools["alice"]!!.tokens.none { it.headerValue == spent.headerValue })
         val persisted = store.pools["alice"]!!.tokens.filter { it.context == lookup }.map { it.headerValue }.toSet()
 
@@ -348,12 +349,12 @@ class AnonTokenPoolTest {
         val pool = pool(FakeCore(), FakeApi(), { who }, store = store)
         pool.take(lookup)
         advanceUntilIdle()
-        assertEquals(15, store.held("alice", lookup))
+        assertEquals(lookupTarget - 1, store.held("alice", lookup))
         // Log out: the memory goes, the disk does not.
         pool.releaseSession()
         who = null
         assertEquals(0, pool.held(lookup))
-        assertEquals(15, store.held("alice", lookup))
+        assertEquals(lookupTarget - 1, store.held("alice", lookup))
         assertTrue(store.deletes.isEmpty())
         val persisted = store.pools["alice"]!!.tokens.map { it.headerValue }.toSet()
         // The same account signs in again: its tokens load.
@@ -393,8 +394,8 @@ class AnonTokenPoolTest {
         // Bob is held in memory; wiping Alice leaves Bob's memory and disk.
         pool.forgetAccount("alice")
         assertNull(store.pools["alice"])
-        assertEquals(15, store.held("bob", lookup))
-        assertEquals(15, pool.held(lookup))
+        assertEquals(lookupTarget - 1, store.held("bob", lookup))
+        assertEquals(lookupTarget - 1, pool.held(lookup))
         // Wiping Bob (held) drops his memory and his file.
         pool.forgetAccount("bob")
         assertEquals(0, pool.held(lookup))
@@ -453,7 +454,7 @@ class AnonTokenPoolTest {
         pool.accountLanded("alice")
         pool.take(lookup)
         advanceUntilIdle()
-        assertEquals(15, store.held("alice", lookup))
+        assertEquals(lookupTarget - 1, store.held("alice", lookup))
     }
 
     @Test
@@ -466,7 +467,7 @@ class AnonTokenPoolTest {
         val bobPool = pool(FakeCore(), FakeApi(), { bob }, store = store, forgotten = setOf("alice"))
         bobPool.take(lookup)
         advanceUntilIdle()
-        assertEquals(15, store.held("bob", lookup))
+        assertEquals(lookupTarget - 1, store.held("bob", lookup))
     }
 
     @Test
@@ -545,7 +546,7 @@ class AnonTokenPoolTest {
         val pool = pool(core, FakeApi(), { alice })
         pool.bindSession()
         settle()
-        assertEquals(16, pool.held(lookup))
+        assertEquals(lookupTarget, pool.held(lookup))
         pool.releaseSession()
         assertEquals(0, pool.held(lookup))
         val issued = core.begun.size
@@ -663,7 +664,7 @@ class AnonTokenPoolTest {
         api.gate!!.complete(Unit)
         advanceUntilIdle()
         // The refill still lands for the next action.
-        assertEquals(16, pool.held(lookup))
+        assertEquals(lookupTarget, pool.held(lookup))
     }
 
     // ------------------------------------------------------------ retry once

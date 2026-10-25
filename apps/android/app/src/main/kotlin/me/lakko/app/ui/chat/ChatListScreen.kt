@@ -180,9 +180,10 @@ public fun ChatListScreen(
     onOpenFolderSettings: () -> Unit = {},
     /**
      * `docs/ux/who-can-find-me.md` section 6.1 — people in the search field:
-     * the people this device knows as the person types, and the one **Search
-     * people** row (username, name, contacts of contacts, and the channel
-     * namespace). `null` keeps the plain lookup row (tests, previews).
+     * the people this device knows as the person types, and what the network
+     * finds on its own from 3 characters (username, name, contacts of
+     * contacts, and the channel namespace). `null` keeps the plain lookup row
+     * (tests, previews).
      */
     peopleSearch: me.lakko.app.search.PeopleSearchService? = null,
     /** A contact row of the people results: open their chat. */
@@ -200,6 +201,10 @@ public fun ChatListScreen(
     var refreshing by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     var createMenuOpen by remember { mutableStateOf(false) }
+    // docs/ux/who-can-find-me.md section 6.1 — the field asks the network on
+    // its own (3 characters, 500 ms after the last keystroke).
+    val peopleSession = remember(peopleSearch, scope) { peopleSearch?.session(scope) }
+    LaunchedEffect(query, peopleSession) { peopleSession?.onQuery(query) }
 
     // docs/ux/calls.md section 2.1.1 — the muted conversation whose call is
     // ringing right now, or `null`. Read straight from the one call slot: this
@@ -408,7 +413,7 @@ public fun ChatListScreen(
                         EmptyPanel(onStart = { createMenuOpen = true })
                     // UX who-can-find-me 6.1 — the people half of the search
                     // field replaces the plain lookup row when it is wired.
-                    searching && visible.isEmpty() && peopleSearch != null -> Column(
+                    searching && visible.isEmpty() && peopleSearch != null && peopleSession != null -> Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .verticalScroll(rememberScrollState()),
@@ -416,6 +421,7 @@ public fun ChatListScreen(
                         PeopleSearchSection(
                             query = query,
                             service = peopleSearch,
+                            session = peopleSession,
                             conversationMatches = 0,
                             onOpenChannel = { id, handle ->
                                 query = ""
@@ -467,11 +473,12 @@ public fun ChatListScreen(
                         onOpenPendingChat = onOpenPendingChat,
                         // UX who-can-find-me 6.1 — people under the matching
                         // conversations.
-                        footer = if (searching && peopleSearch != null) {
+                        footer = if (searching && peopleSearch != null && peopleSession != null) {
                             {
                                 PeopleSearchSection(
                                     query = query,
                                     service = peopleSearch,
+                                    session = peopleSession,
                                     conversationMatches = visible.size,
                                     onOpenChannel = { id, handle ->
                                         query = ""

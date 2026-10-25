@@ -321,7 +321,12 @@ public final class ContactsRepository: ObservableObject {
     /// identity bundle through the pin gate (it must name the key the search
     /// found), then the request, written with the key the search found them
     /// under (`nil` for a person in Everyone, whose mailbox is open).
-    public func sendContactRequest(to person: FoundPerson, introMessage: String) async throws -> SendResult {
+    ///
+    /// `docs/ux/who-can-find-me.md` section 6.1 — sent at once from the
+    /// search row, with no introduction text; the request still carries the
+    /// own profile and a reply key.
+    public func sendContactRequest(to person: FoundPerson) async throws -> SendResult {
+        let introMessage = ""
         guard let secrets = authRepository.identitySecrets else {
             throw ContactsError.wrap(
                 ContactsError.simple("no identity secrets — please re-enter your password"))

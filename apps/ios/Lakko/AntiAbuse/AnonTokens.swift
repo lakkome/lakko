@@ -50,7 +50,7 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
     /// issuance. Chosen, not measured; the same numbers on web and Android.
     public var poolTarget: Int {
         switch self {
-        case .discoveryLookup: return 16
+        case .discoveryLookup: return 32
         case .pushRegister: return 8
         case .inviteConsume: return 4
         case .dsKnock: return 8

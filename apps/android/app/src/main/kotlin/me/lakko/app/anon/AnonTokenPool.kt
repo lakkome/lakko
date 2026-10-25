@@ -78,7 +78,7 @@ public enum class AnonTokenContext(public val wire: String) {
  * (`AnonTokenContext.poolTarget`); chosen, not measured.
  */
 public fun anonPoolTargetFor(context: AnonTokenContext): Int = when (context) {
-    AnonTokenContext.DISCOVERY_LOOKUP -> 16
+    AnonTokenContext.DISCOVERY_LOOKUP -> 32
     AnonTokenContext.PUSH_REGISTER -> 8
     AnonTokenContext.INVITE_CONSUME -> 4
     AnonTokenContext.DS_KNOCK -> 8

@@ -6,9 +6,11 @@ import SwiftUI
 /// The Contacts tab (docs/ux/client-redesign.md section 5.3): a searchable
 /// list with the incoming requests on top (Accept / Decline on the row), the
 /// sent requests under a collapsed "Sent" header, then the contacts in
-/// alphabetical sections with an index on the right. The add menu holds
-/// "Add by username" and "Share invite link"; a row pushes
-/// ``ContactDetailScreen``.
+/// alphabetical sections with an index on the right. The search field is the
+/// one field of `docs/ux/who-can-find-me.md` section 6.1: it filters the
+/// contacts and, from three characters, finds people on the network under
+/// People, with Add contact on each row. The add menu holds "Share invite
+/// link"; a row pushes ``ContactDetailScreen``.
 ///
 /// Mirror of `apps/web/src/contacts/ContactsRoute.tsx` and
 /// `apps/android/.../ui/contacts/ContactsScreen.kt`.
@@ -20,6 +22,11 @@ import SwiftUI
 public struct ContactsScreen: View {
 
     @ObservedObject public var viewModel: ContactsViewModel
+    /// ADR-0060 — the people half of the search field (people only: no
+    /// channel row). `nil` filters the contact list only.
+    let peopleSearch: PeopleSearchModel?
+    /// **Open** on a found person who is already a contact.
+    let onOpenPerson: (FoundPerson) -> Void
 
     /// ADR-0048 — names resolve through the directory; observing it here
     /// regroups the list in place when a profile or a verdict arrives.
@@ -28,12 +35,17 @@ public struct ContactsScreen: View {
     @ObservedObject private var l10n = Localization.shared
 
     @State private var query = ""
-    @State private var addContactPresented = false
     @State private var inviteLinksPresented = false
     @State private var sentExpanded = false
 
-    public init(viewModel: ContactsViewModel) {
+    public init(
+        viewModel: ContactsViewModel,
+        peopleSearch: PeopleSearchModel? = nil,
+        onOpenPerson: @escaping (FoundPerson) -> Void = { _ in }
+    ) {
         self.viewModel = viewModel
+        self.peopleSearch = peopleSearch
+        self.onOpenPerson = onOpenPerson
     }
 
     // MARK: - Derived
@@ -117,6 +129,14 @@ public struct ContactsScreen: View {
                         sentSection
                     }
                     contactSections
+                    if isSearching, let peopleSearch {
+                        Section {
+                            PeopleSearchSection(
+                                model: peopleSearch, includesChannels: false, showsLocalContacts: false,
+                                onOpenPerson: onOpenPerson)
+                        }
+                        .listRowSeparator(.hidden)
+                    }
                 }
             }
             .listStyle(.plain)
@@ -134,11 +154,15 @@ public struct ContactsScreen: View {
                     } description: {
                         Text(l10n.t("contacts.list.empty.body"))
                     } actions: {
-                        Button(l10n.t("contacts.list.empty.action")) { addContactPresented = true }
+                        Button(l10n.t("contacts.list.empty.action")) { inviteLinksPresented = true }
                             .buttonStyle(.borderedProminent)
                     }
                 } else if isSearching && items.isEmpty {
-                    ContentUnavailableView.search(text: query)
+                    if let peopleSearch {
+                        ContactsSearchEmpty(model: peopleSearch, query: query)
+                    } else {
+                        ContentUnavailableView.search(text: query)
+                    }
                 }
             }
         }
@@ -146,6 +170,7 @@ public struct ContactsScreen: View {
         // mirroring it was built with (see SettingsScreen).
         .id(l10n.layoutDirection)
         .searchable(text: $query, prompt: Text(l10n.t("contacts.list.search")))
+        .onChange(of: query) { _, text in peopleSearch?.update(query: text) }
         .refreshable { await viewModel.pullToRefresh() }
         .navigationTitle(l10n.t("nav.contacts"))
         .navigationBarTitleDisplayMode(.large)
@@ -153,18 +178,6 @@ public struct ContactsScreen: View {
             ToolbarItem(placement: .topBarTrailing) {
                 addMenu
             }
-        }
-        // `docs/ux/navigation.md` section 4.3 — the conversation list's one
-        // network lookup found a person and handed the name here, because the
-        // contact request asks for an introduction a search field has no room
-        // for.
-        .onChange(of: viewModel.addByUsernameRequests) { _, _ in
-            addContactPresented = true
-        }
-        .sheet(isPresented: $addContactPresented) {
-            AddContactSheet(
-                viewModel: viewModel,
-                onDismiss: { addContactPresented = false })
         }
         .sheet(isPresented: $inviteLinksPresented) {
             InviteLinksSheet(viewModel: viewModel, onDismiss: { inviteLinksPresented = false })
@@ -183,6 +196,10 @@ public struct ContactsScreen: View {
 
     // MARK: - Toolbar
 
+    /// There is no "Add by username" form (`docs/ux/who-can-find-me.md`
+    /// section 6.1): a person is found through the search field, which sends
+    /// the request from its row.
+    ///
     /// Show / scan a contact QR code are not offered: no contact-QR flow
     /// exists in the repository (the QR renderer and scanner serve device
     /// pairing only).
@@ -194,9 +211,6 @@ public struct ContactsScreen: View {
     /// (`docs/ux/call-links.md` section 3), not in a menu about contacts.
     private var addMenu: some View {
         Menu {
-            Button { addContactPresented = true } label: {
-                Label(l10n.t("contacts.add.by_username"), systemImage: "at")
-            }
             Button { inviteLinksPresented = true } label: {
                 Label(l10n.t("contacts.add.share_invite"), systemImage: "link")
             }
@@ -286,6 +300,21 @@ public struct ContactsScreen: View {
 
     private static func sectionAnchor(_ letter: String) -> String {
         "contacts-section-\(letter)"
+    }
+}
+
+/// The search's empty overlay: "No results" only while the field has nothing
+/// of its own to show. A text that asks the network never gets it, because
+/// the People part answers (found, not found, or why it could not search).
+private struct ContactsSearchEmpty: View {
+    @ObservedObject var model: PeopleSearchModel
+    let query: String
+
+    var body: some View {
+        if !PeopleSearch.asksNetwork(query),
+           !model.showsAnything(includesChannels: false, showsLocalContacts: false) {
+            ContentUnavailableView.search(text: query)
+        }
     }
 }
 

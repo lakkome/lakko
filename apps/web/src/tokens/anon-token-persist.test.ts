@@ -204,7 +204,7 @@ describe("the stored tokens belong to the account", () => {
 
 describe("each context keeps about a day of use on hand", () => {
   const expected: Array<[AnonTokenContext, number]> = [
-    ["discovery-lookup", 16],
+    ["discovery-lookup", 32],
     ["push-register", 8],
     ["invite-consume", 4],
     ["ds-knock", 8],

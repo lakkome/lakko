@@ -209,7 +209,7 @@ fn default_quota(context: TokenContext) -> u32 {
 
 #[test]
 fn the_default_quotas_are_the_documented_ones() {
-    assert_eq!(default_quota(TokenContext::DiscoveryLookup), 100);
+    assert_eq!(default_quota(TokenContext::DiscoveryLookup), 300);
     assert_eq!(default_quota(TokenContext::DiscoveryRegister), 10);
     assert_eq!(default_quota(TokenContext::InviteConsume), 30);
     assert_eq!(default_quota(TokenContext::DsKnock), 200);

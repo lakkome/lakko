@@ -252,7 +252,7 @@ final class ContactsPresentationTests: XCTestCase {
         XCTAssertEqual(plain(DeviceRowPresentation.title(isSelf: false, position: 3)), "Device 3")
     }
 
-    // MARK: - Add by username
+    // MARK: - Not found copy
 
     /// `docs/ux/who-can-find-me.md` section 6.1, "Not found": a name that does
     /// not resolve never tells the searcher whether the account exists

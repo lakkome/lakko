@@ -52,12 +52,12 @@ public struct ChatListScreen: View {
     public var onOpen: (ConversationListRow) -> Void
     /// One of the three create-menu items.
     public var onCreate: (CreateChoice) -> Void
-    /// A channel the network lookup found, which this device may not hold yet.
+    /// A channel the search found by its handle, which this device may not
+    /// hold yet: its subscribe page.
     public var onFoundChannel: (_ channelIdHex: String, _ handle: String) -> Void
-    /// A person the network lookup found. The contact request asks for an
-    /// introduction this field has no room for, so the name travels to
-    /// Contacts rather than being half-answered here.
-    public var onFoundPerson: (_ username: String) -> Void
+    /// **Open** on a found person who is already a contact: the conversation
+    /// with them (`docs/ux/who-can-find-me.md` section 6.1).
+    public var onOpenPerson: (FoundPerson) -> Void
     /// `docs/ux/chat-folders.md` 2.2 — Reorder folders / Edit folders open
     /// Settings > Chat folders (`true` = in its reorder state).
     public var onOpenFolderSettings: (_ reorder: Bool) -> Void
@@ -72,10 +72,11 @@ public struct ChatListScreen: View {
     /// UX 18.3 — `Updating keys...` in the header while a kept device adopts
     /// the account's new keys (``KeysUpdatingLabel``); `nil` draws nothing.
     var keysUpdatingLabel: KeysUpdatingLabel?
-    /// ADR-0060 — "Search people" (`docs/ux/who-can-find-me.md` section 6.1):
-    /// the network search for a username or a name, and the request to one of
-    /// its results. `nil` hides the row.
-    public var peopleSearch: PeopleSearchActions?
+    /// ADR-0060 — the search field's people (`docs/ux/who-can-find-me.md`
+    /// section 6.1): the people this device knows, and from three characters
+    /// the network search under People, asked without a button. `nil` shows
+    /// conversations only.
+    public var peopleSearch: PeopleSearchModel?
 
     /// Phase 2a3e2c-iOS — cross-device per-thread flags (pinned / muted /
     /// archived). The Combine subscription inside ``DeviceGroupSyncRepository``
@@ -99,13 +100,13 @@ public struct ChatListScreen: View {
         onOpen: @escaping (ConversationListRow) -> Void,
         onCreate: @escaping (CreateChoice) -> Void,
         onFoundChannel: @escaping (String, String) -> Void,
-        onFoundPerson: @escaping (String) -> Void,
+        onOpenPerson: @escaping (FoundPerson) -> Void = { _ in },
         onOpenFolderSettings: @escaping (Bool) -> Void = { _ in },
         onOpenDevices: @escaping () -> Void = {},
         accountNotice: AccountNoticeBanner? = nil,
         recalledNotice: RecalledNoticeBanner? = nil,
         keysUpdatingLabel: KeysUpdatingLabel? = nil,
-        peopleSearch: PeopleSearchActions? = nil
+        peopleSearch: PeopleSearchModel? = nil
     ) {
         self.viewModel = viewModel
         self.channels = channels
@@ -113,7 +114,7 @@ public struct ChatListScreen: View {
         self.onOpen = onOpen
         self.onCreate = onCreate
         self.onFoundChannel = onFoundChannel
-        self.onFoundPerson = onFoundPerson
+        self.onOpenPerson = onOpenPerson
         self.onOpenFolderSettings = onOpenFolderSettings
         self.onOpenDevices = onOpenDevices
         self.recalledNotice = recalledNotice
@@ -123,11 +124,9 @@ public struct ChatListScreen: View {
     }
 
     /// Spec section 4 — the field covers users, groups and channels. The local
-    /// half filters what this device holds; the network half is the single
-    /// lookup row below the list.
+    /// half filters what this device holds; the network half asks by itself
+    /// (`docs/ux/who-can-find-me.md` section 6.1, ``PeopleSearchModel``).
     @State private var searchText: String = ""
-    @State private var lookupBusy = false
-    @State private var lookupNote: String?
 
     // MARK: Chat folders (`docs/ux/chat-folders.md`)
 
@@ -192,7 +191,7 @@ public struct ChatListScreen: View {
             .navigationTitle(l10n.t("nav.chats"))
             .navigationBarTitleDisplayMode(.large)
             .searchable(text: $searchText, prompt: Text(l10n.t("chats.search.placeholder")))
-            .onChange(of: searchText) { _, _ in lookupNote = nil }
+            .onChange(of: searchText) { _, text in peopleSearch?.update(query: text) }
             // Receiving is automatic; the pull gesture runs the same poll
             // once more, on demand (UX spec section 2, principle 3).
             .refreshable { await viewModel.pollNow() }
@@ -395,11 +394,14 @@ public struct ChatListScreen: View {
                     emptyState
                 } else {
                     VStack(spacing: 12) {
-                        Text(l10n.t("chats.search.no_results"))
-                            .foregroundStyle(Color.lakkoTextMuted)
-                        lookupSection
                         if let peopleSearch {
-                            PeopleSearchSection(query: query, actions: peopleSearch)
+                            PeopleSearchSection(
+                                model: peopleSearch, includesChannels: true, showsLocalContacts: true,
+                                emptyText: l10n.t("chats.search.no_results"),
+                                onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel)
+                        } else {
+                            Text(l10n.t("chats.search.no_results"))
+                                .foregroundStyle(Color.lakkoTextMuted)
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -453,10 +455,12 @@ public struct ChatListScreen: View {
                         folderActions(row: row, folder: folder)
                     }
                 }
-                // ADR-0060 — the network search stays offered under the local
-                // results (UX section 6.1).
+                // ADR-0060 — the people this device knows, then the network
+                // results under People (UX section 6.1).
                 if !query.isEmpty, let peopleSearch {
-                    PeopleSearchSection(query: query, actions: peopleSearch)
+                    PeopleSearchSection(
+                        model: peopleSearch, includesChannels: true, showsLocalContacts: true,
+                        onOpenPerson: onOpenPerson, onOpenChannel: openFoundChannel)
                         .listRowSeparator(.hidden)
                 }
             }
@@ -644,65 +648,13 @@ public struct ChatListScreen: View {
         }
     }
 
-    // MARK: - The one network lookup
+    // MARK: - A channel the search found
 
-    /// Spec section 4.3 — ONE row, for the whole name, offered only when
-    /// nothing local matched and the text could be a name.
-    ///
-    /// Never a list of partial matches: the server evaluates the blinded name
-    /// it was given and can answer "does this exact name exist" and nothing
-    /// about prefixes, because a prefix search is the server learning the
-    /// prefix.
-    @ViewBuilder
-    private var lookupSection: some View {
-        if NameLookup.looksLikeAName(query) {
-            Button { Task { await lookUp() } } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(Color.lakkoAccent)
-                    Text(lookupBusy ? l10n.t("common.looking_up") : NameLookup.rowLabel(for: query))
-                        .foregroundStyle(Color.lakkoText)
-                }
-            }
-            .disabled(lookupBusy)
-        }
-        if let lookupNote {
-            Text(lookupNote)
-                .font(.footnote)
-                .foregroundStyle(Color.lakkoTextMuted)
-                .multilineTextAlignment(.center)
-                .accessibilityAddTraits(.updatesFrequently)
-        }
-    }
-
-    private func lookUp() async {
-        if lookupBusy { return }
-        lookupBusy = true
-        lookupNote = nil
-        defer { lookupBusy = false }
-        let typed = query
-        // A client per namespace rather than one captured across both: the two
-        // lookups are sequential, a `DiscoveryClient` is a thin wrapper over a
-        // session, and the alternative is a shared reference crossing a
-        // concurrency boundary for no gain.
-        let found = await NameLookup.find(
-            typed: typed,
-            lookups: NameLookups(
-                channel: { try await DiscoveryClient().lookupChannel(handle: $0) },
-                person: { handle in
-                    let result = try await DiscoveryClient().lookup(username: handle)
-                    return result.account == nil ? nil : result.normalisedUsername
-                }))
-        switch found {
-        case .channel(let channelIdHex, let handle):
-            searchText = ""
-            onFoundChannel(channelIdHex, handle)
-        case .person(let username):
-            searchText = ""
-            onFoundPerson(username)
-        case .nothing, .unreachable, .allowanceUsed:
-            lookupNote = NameLookup.message(for: found, typed: typed)
-        }
+    /// A channel row under People: its subscribe page. The field is cleared,
+    /// as it was for the lookup row this replaced.
+    private func openFoundChannel(_ channelIdHex: String, _ handle: String) {
+        searchText = ""
+        onFoundChannel(channelIdHex, handle)
     }
 
     // MARK: - Channel refresh

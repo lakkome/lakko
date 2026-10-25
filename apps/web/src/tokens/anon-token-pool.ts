@@ -126,7 +126,7 @@ export type AnonTokenContext = (typeof ANON_TOKEN_CONTEXTS)[number];
  *  A scheduled refill tops the bucket up to this. Chosen, not measured; each
  *  stays well under the issuer's daily quota for its context. */
 export const POOL_TARGET: Readonly<Record<AnonTokenContext, number>> = {
-  "discovery-lookup": 16,
+  "discovery-lookup": 32,
   "push-register": 8,
   "invite-consume": 4,
   "ds-knock": 8,
@@ -236,6 +236,19 @@ function findInChain<T>(err: unknown, name: string): T | null {
 /** The quota refusal, if `err` is or wraps one. */
 export function anonTokenQuotaExhausted(err: unknown): AnonTokenQuotaExhaustedError | null {
   return findInChain<AnonTokenQuotaExhaustedError>(err, "AnonTokenQuotaExhaustedError");
+}
+
+/** The reason a take gives when the context holds no token and no refill is
+ *  running: the device used the tokens it had, and a take never starts an
+ *  issuance (ADR-0078 section 8). */
+export const POOL_EMPTY_REASON = "pool empty until the next scheduled refill";
+
+/** `true` when `err` is or wraps a take that found the context's pool empty
+ *  with no refill running ({@link POOL_EMPTY_REASON}). The search field reads
+ *  it as "out of searches" (`docs/ux/who-can-find-me.md` section 6.1). */
+export function anonTokenPoolEmpty(err: unknown): boolean {
+  const e = findInChain<AnonTokenUnavailableError>(err, "AnonTokenUnavailableError");
+  return e !== null && e.reason === POOL_EMPTY_REASON;
 }
 
 /** `true` when `err` is or wraps a failure the UI shows as the generic
@@ -649,7 +662,7 @@ export class AnonTokenPool {
     // context, or a scheduled refill in flight.
     const pending = bucket.refill ?? bucket.initial;
     if (pending === null) {
-      throw new AnonTokenUnavailableError(context, "pool empty until the next scheduled refill");
+      throw new AnonTokenUnavailableError(context, POOL_EMPTY_REASON);
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<"timeout">((resolve) => {

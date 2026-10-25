@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -25,7 +24,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ExpandLess
@@ -45,7 +43,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -57,14 +54,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.contacts.GeneratedInvite
@@ -79,6 +75,7 @@ import me.lakko.app.discovery.ActiveInvite
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.profile.ResolvedName
 import me.lakko.app.profile.requestSenderLabel
+import me.lakko.app.ui.chat.PeopleSearchSection
 import me.lakko.app.ui.components.LakkoAvatar
 import java.text.DateFormat
 import java.util.Date
@@ -87,15 +84,18 @@ import java.util.Date
  * The Contacts tab — docs/ux/client-redesign.md section 5.3.
  *
  * Top bar with the title, a search field and one add action whose menu holds
- * Add by username and Share invite link (the QR entries of the spec are
- * omitted: this client has no contact-QR payload, only the device-pairing one).
+ * Share invite link (the QR entries of the spec are omitted: this client has
+ * no contact-QR payload, only the device-pairing one). The search field is
+ * the one people search of `docs/ux/who-can-find-me.md` section 6.1: it
+ * filters the contacts and, from 3 characters, asks the network for people
+ * on its own, listed under **People** with **Add contact** on each row.
  * Below: a Requests section (incoming rows with Accept and Decline; sent
  * requests collapsed under "Sent"), then the alphabetical contact list with
  * sticky letter headers. Pull-to-refresh runs the same inbox poll the screen
  * already runs continuously.
  *
- * Add by username lives in a bottom sheet; invite links are managed in an
- * "Invite links" sheet (copy, share, revoke, create).
+ * Invite links are managed in an "Invite links" sheet (copy, share, revoke,
+ * create).
  *
  * Call links are not here at all. They were, briefly, and the create-a-link
  * form that held them is gone from every screen: a link now belongs to a call
@@ -115,14 +115,9 @@ public fun ContactsScreen(
     /** ADR-0079 — open the chat with a person added through their invite
      *  link whose app has not answered yet (by account id hex). */
     onOpenPendingChat: ((accountIdHex: String) -> Unit)? = null,
-    /** docs/ux/navigation.md section 4.3 — a username the conversation list's
-     *  one lookup row resolved. The add sheet opens with it already filled in,
-     *  because the person has typed it once and the request flow is the only
-     *  thing here they have not done yet. */
-    prefillUsername: String? = null,
-    /** Called once [prefillUsername] has been taken, so the slot can be
-     *  emptied and a later visit does not re-open the sheet. */
-    onPrefillConsumed: (() -> Unit)? = null,
+    /** `docs/ux/who-can-find-me.md` section 6.1 — people under the search
+     *  field, local and network; `null` filters the contacts only (tests). */
+    peopleSearch: me.lakko.app.search.PeopleSearchService? = null,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -146,37 +141,14 @@ public fun ContactsScreen(
 
     var query by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
-    var addSheetOpen by remember { mutableStateOf(false) }
     var inviteSheetOpen by remember { mutableStateOf(false) }
     var sentExpanded by remember { mutableStateOf(false) }
 
-    // docs/ux/navigation.md section 4.3 — a name found by the conversation
-    // list's lookup row opens the add sheet already filled in. Consumed as soon
-    // as it is taken, so returning to this tab later does not re-open it.
-    LaunchedEffect(prefillUsername) {
-        val username = prefillUsername ?: return@LaunchedEffect
-        viewModel.onUsernameChange(username)
-        addSheetOpen = true
-        onPrefillConsumed?.invoke()
-    }
-
-    if (addSheetOpen) {
-        AddByUsernameSheet(
-            state = state,
-            onUsernameChange = viewModel::onUsernameChange,
-            onIntroChange = viewModel::onIntroChange,
-            onSend = viewModel::onSendClicked,
-            onSent = {
-                viewModel.consumeSendSuccess()
-                addSheetOpen = false
-                sentExpanded = true
-            },
-            onDismiss = {
-                viewModel.onDismissAddSheet()
-                addSheetOpen = false
-            },
-        )
-    }
+    // docs/ux/who-can-find-me.md section 6.1 — the field asks the network on
+    // its own (3 characters, 500 ms after the last keystroke).
+    val scope = rememberCoroutineScope()
+    val peopleSession = remember(peopleSearch, scope) { peopleSearch?.session(scope) }
+    LaunchedEffect(query, peopleSession) { peopleSession?.onQuery(query) }
 
     if (inviteSheetOpen) {
         InviteLinksSheet(
@@ -228,6 +200,22 @@ public fun ContactsScreen(
         contactSections(filterContacts(rows, query))
     }
     val byKey = remember(accepted) { accepted.associateBy { contactRouteKey(it.request.fromPubkey) } }
+    // UX who-can-find-me 6.1 — **Open** on a people row opens the conversation
+    // (the contact's page when there is none yet).
+    val openPerson: (String) -> Unit = { keyB64 ->
+        val key = runCatching { java.util.Base64.getDecoder().decode(keyB64) }.getOrNull()
+        val contact = key?.let { k -> accepted.firstOrNull { it.request.fromPubkey.contentEquals(k) } }
+        when {
+            contact?.groupIdHex != null && onOpenChat != null -> onOpenChat(contact.groupIdHex)
+            key != null && onOpenContact != null -> onOpenContact(contactRouteKey(key))
+        }
+    }
+    // The contacts the filter lists above the People part, which leaves them out.
+    val listedKeys = remember(sections, byKey) {
+        sections.flatMap { it.rows }.mapNotNullTo(HashSet()) { row ->
+            byKey[row.key]?.let { base64Encode(it.request.fromPubkey) }
+        }
+    }
     val pending = remember(state.pending) { sortRequestsNewestFirst(state.pending) { it.messageId } }
 
     Scaffold(
@@ -241,11 +229,6 @@ public fun ContactsScreen(
                             Icon(Icons.Filled.PersonAdd, contentDescription = t("contacts.list.empty.action"))
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            DropdownMenuItem(
-                                text = { Text(t("contacts.add.by_username")) },
-                                leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
-                                onClick = { menuOpen = false; addSheetOpen = true },
-                            )
                             DropdownMenuItem(
                                 text = { Text(t("contacts.add.share_invite")) },
                                 leadingIcon = { Icon(Icons.Filled.Link, contentDescription = null) },
@@ -317,16 +300,29 @@ public fun ContactsScreen(
 
                 if (nothingAtAll && query.isBlank()) {
                     item(key = "empty") {
-                        EmptyState(onAdd = { addSheetOpen = true })
+                        EmptyState(onAdd = { inviteSheetOpen = true })
                     }
                 } else if (sections.isEmpty() && query.isNotBlank()) {
                     item(key = "no-match") {
-                        Text(
-                            t("contacts.list.no_match"),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(16.dp),
-                        )
+                        if (peopleSearch != null && peopleSession != null) {
+                            PeopleSearchSection(
+                                query = query,
+                                service = peopleSearch,
+                                session = peopleSession,
+                                conversationMatches = 0,
+                                onOpenChannel = { _, _ -> },
+                                onOpenContact = openPerson,
+                                noLocalMatchKey = "contacts.list.no_match",
+                                excludeKeysB64 = listedKeys,
+                            )
+                        } else {
+                            Text(
+                                t("contacts.list.no_match"),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(16.dp),
+                            )
+                        }
                     }
                 } else {
                     if (pending.isNotEmpty() || state.sent.isNotEmpty()) {
@@ -347,6 +343,20 @@ public fun ContactsScreen(
                                             onOpenChat(contact.groupIdHex)
                                     }
                                 },
+                            )
+                        }
+                    }
+                    if (query.isNotBlank() && peopleSearch != null && peopleSession != null) {
+                        item(key = "people") {
+                            PeopleSearchSection(
+                                query = query,
+                                service = peopleSearch,
+                                session = peopleSession,
+                                conversationMatches = sections.sumOf { it.rows.size },
+                                onOpenChannel = { _, _ -> },
+                                onOpenContact = openPerson,
+                                noLocalMatchKey = null,
+                                excludeKeysB64 = listedKeys,
                             )
                         }
                     }
@@ -598,87 +608,6 @@ private fun ReauthPanel() {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-    }
-}
-
-// =============================================================================
-// Add by username — bottom sheet
-// =============================================================================
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun AddByUsernameSheet(
-    state: ContactsUiState,
-    onUsernameChange: (String) -> Unit,
-    onIntroChange: (String) -> Unit,
-    onSend: () -> Unit,
-    onSent: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    LaunchedEffect(state.sendSucceeded) {
-        if (state.sendSucceeded) onSent()
-    }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .imePadding()
-                .navigationBarsPadding()
-                .padding(horizontal = 24.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text(t("contacts.add.title"), style = MaterialTheme.typography.titleLarge)
-            OutlinedTextField(
-                value = state.usernameInput,
-                onValueChange = onUsernameChange,
-                label = { Text(t("contacts.add.username_label")) },
-                prefix = { Text("@") },
-                singleLine = true,
-                enabled = !state.sending,
-                isError = state.usernameError != null,
-                supportingText = state.usernameError?.let { reason -> { Text(reason.text()) } },
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false,
-                    keyboardType = KeyboardType.Text,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = state.introInput,
-                onValueChange = onIntroChange,
-                label = { Text(t("contacts.add.intro_label")) },
-                enabled = !state.sending,
-                minLines = 2,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            state.sendError?.let { error ->
-                Text(
-                    text = error.text(),
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            Button(
-                onClick = onSend,
-                enabled = !state.sending && state.usernameInput.isNotBlank(),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                if (state.sending) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(t("common.sending"))
-                } else {
-                    Text(t("contacts.add.send"))
-                }
-            }
-        }
     }
 }
 

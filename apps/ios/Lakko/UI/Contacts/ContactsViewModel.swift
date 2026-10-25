@@ -12,7 +12,7 @@ import Foundation
 ///   * `apps/android/.../ui/contacts/ContactsViewModel.kt`
 ///     (1.15e6 + 1.15e7's `pollOnceLongPoll`)
 ///
-/// **Scope**: search/send + pull-to-refresh + accept/decline +
+/// **Scope**: pull-to-refresh + accept/decline +
 /// requires-reauth panel (1.14e4), the invite generate/revoke
 /// surface (1.14e7; 1.15e10 on Android), and continuous
 /// `pollOnceLongPoll` (1.14e5) — all wired.
@@ -20,21 +20,16 @@ import Foundation
 /// `@MainActor` because every mutation writes to a `@Published`
 /// slot that SwiftUI reads on the main runloop. The repository's
 /// own `@Published var state` is mirrored here through a Combine
-/// subscription so the view can observe one ObservableObject; the
-/// VM-owned form fields (`usernameInput`, `introInput`) round out
-/// the picture.
+/// subscription so the view can observe one ObservableObject.
+///
+/// There is no add-by-username form any more (`docs/ux/who-can-find-me.md`
+/// section 6.1): a person is found through the search field
+/// (``PeopleSearchModel``), which sends the request from its row.
 @MainActor
 public final class ContactsViewModel: ObservableObject {
 
-    // MARK: - Form fields
-
-    @Published public var usernameInput: String = ""
-    @Published public var introInput: String = ""
-
     // MARK: - Ephemeral status
 
-    @Published public private(set) var sending: Bool = false
-    @Published public private(set) var sendError: UiText?
     @Published public private(set) var generatingInvite: Bool = false
     @Published public private(set) var inviteError: UiText?
     /// The last invite link the user generated this session.
@@ -42,19 +37,6 @@ public final class ContactsViewModel: ObservableObject {
     /// Contacts screen; cleared once the user dismisses or
     /// generates another one.
     @Published public var lastGeneratedInvite: GeneratedInvite?
-    /// Bumped once per successful ``onSendClicked()``; the add-by-username
-    /// sheet dismisses on it (UX spec section 5.3).
-    @Published public private(set) var sendSucceededCount: Int = 0
-
-    /// `docs/ux/navigation.md` section 4.3 — bumped when the conversation
-    /// list's ONE network lookup found a person and handed their name here.
-    /// The Contacts screen watches it and opens the add-contact sheet with the
-    /// name already filled.
-    ///
-    /// A counter rather than a flag, because the same name looked up twice has
-    /// to reopen the sheet the second time, and a flag that is already `true`
-    /// changes nothing.
-    @Published public private(set) var addByUsernameRequests: Int = 0
 
     // MARK: - Mirror of the repository's state
 
@@ -146,81 +128,6 @@ public final class ContactsViewModel: ObservableObject {
     }
 
     // MARK: - Actions
-
-    /// Send a contact request. Surfaces success by clearing the
-    /// form; failures land in ``sendError``.
-    public func onSendClicked() {
-        guard !sending else { return }
-        // ADR-0048 §4 — no lookup is sent for a name that fails the rule.
-        let username: String
-        switch checkUsername(usernameInput) {
-        case .empty:
-            sendError = .key("username.error.empty")
-            return
-        case .invalid(let reason):
-            sendError = UiText { reason.message }
-            return
-        case .valid(let canonical):
-            username = canonical
-        }
-
-        sending = true
-        sendError = nil
-        let intro = introInput
-
-        // The handle the user typed, prefixed with `@`, as the subject
-        // of a reset-aware ``SupersessionRefused`` message (KT-log S4).
-        let peerLabel = "@\(username)"
-
-        Task {
-            do {
-                _ = try await repository.sendContactRequest(
-                    recipientUsername: username,
-                    introMessage: intro
-                )
-                sending = false
-                sendError = nil
-                usernameInput = ""
-                introInput = ""
-                sendSucceededCount += 1
-            } catch let refused as SupersessionRefused {
-                // The peer's AccountIdentity key changed and the change is
-                // neither a proven rotation (ADR-0016) nor an attested reset
-                // (ADR-0073 R.2, accepted silently before this point is ever
-                // reached): the fail-closed refusal, with the copy the
-                // verdict names.
-                sending = false
-                let loggedReset = refused.loggedReset
-                sendError = UiText {
-                    Self.supersessionRefusedMessage(loggedReset: loggedReset, peerLabel: peerLabel)
-                }
-            } catch {
-                sending = false
-                sendError = Self.contactsErrorText(
-                    for: error, fallbackKey: "contacts.error.send",
-                    quotaKey: "tokens.lookup_allowance_used")
-            }
-        }
-    }
-
-    /// ADR-0048 §4 — the inline reason under the add-contact field, or `nil`.
-    public var usernameHint: String? {
-        checkUsername(usernameInput).inlineMessage
-    }
-
-    /// Fill the add-contact form with a name the lookup resolved and ask the
-    /// Contacts screen to open it.
-    ///
-    /// The lookup only ever hands over a name the discovery service confirmed
-    /// exists, so the form opens ready to send rather than ready to be
-    /// re-typed — but it stays a form, because the contact request asks for an
-    /// introduction and sending one silently on the person's behalf is not
-    /// what they asked for by typing a name into a search field.
-    public func prefillAddByUsername(_ username: String) {
-        usernameInput = username
-        sendError = nil
-        addByUsernameRequests += 1
-    }
 
     /// Pull-to-refresh: one immediate inbox fetch plus the live-invites
     /// list. The long-poll loop keeps running regardless.

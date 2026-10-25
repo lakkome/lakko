@@ -186,10 +186,10 @@ final class AnonTokenPoolTests: XCTestCase {
 
         XCTAssertEqual(token.context, "discovery-lookup")
         let call = try XCTUnwrap(issuer.calls(for: .discoveryLookup).first)
-        XCTAssertEqual(call.count, 16)
+        XCTAssertEqual(Int(call.count), AnonTokenContext.discoveryLookup.poolTarget)
         XCTAssertEqual(call.sessionToken, "s1")
         XCTAssertEqual(call.epoch, pool.currentEpoch())
-        XCTAssertEqual(pool.count(.discoveryLookup), 15, "the token taken leaves the pool")
+        XCTAssertEqual(pool.count(.discoveryLookup), AnonTokenContext.discoveryLookup.poolTarget - 1, "the token taken leaves the pool")
     }
 
     /// ADR-0078 section 8: the token pool refills on a timer, not on spend.
@@ -216,7 +216,7 @@ final class AnonTokenPoolTests: XCTestCase {
 
     func testEachContextHasItsPoolTarget() async throws {
         let expected: [AnonTokenContext: UInt32] = [
-            .discoveryLookup: 16, .pushRegister: 8, .inviteConsume: 4, .dsKnock: 8, .discoveryRegister: 2,
+            .discoveryLookup: 32, .pushRegister: 8, .inviteConsume: 4, .dsKnock: 8, .discoveryRegister: 2,
             .channelSubscribe: 4, .directorySearch: 4,
             .vaultClaim: 8, .blobUpload: 4, .blobRead: 4,
             .mailboxWrite: 4,
@@ -408,13 +408,13 @@ final class AnonTokenPersistenceTests: XCTestCase {
         first.configure(accountKey: "A", sessionToken: "s1")
         await first.runScheduledRefills()
         let spent = try await first.take(.discoveryLookup)
-        XCTAssertEqual(store.snapshot["A"]?[.discoveryLookup]?.count, 15, "every change is written")
+        XCTAssertEqual(store.snapshot["A"]?[.discoveryLookup]?.count, AnonTokenContext.discoveryLookup.poolTarget - 1, "every change is written")
         first.clear()
 
         // A relaunch: a fresh pool over the same storage, bound to the same account.
         let second = makeQuietPool(issuer, store: store)
         second.configure(accountKey: "A", sessionToken: "s2")
-        XCTAssertEqual(second.count(.discoveryLookup), 15)
+        XCTAssertEqual(second.count(.discoveryLookup), AnonTokenContext.discoveryLookup.poolTarget - 1)
         let next = try await second.take(.discoveryLookup)
         XCTAssertNotEqual(next.headerValue, spent.headerValue, "a spent token never comes back")
     }
