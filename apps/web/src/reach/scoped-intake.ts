@@ -18,6 +18,7 @@
  * Every sender is the account key resolved from the MLS sender leaf at
  * receipt (C-68); an unresolvable sender is dropped.
  */
+import { createSignal } from "solid-js";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { registerAccountMemory } from "../auth/account-memory";
 import { journalHex } from "../ds/access";
@@ -76,6 +77,15 @@ export function decodeIntroductionsRow(json: string | null): IntroductionsRow {
 }
 
 let introductionsCache: { account: string; row: IntroductionsRow } | null = null;
+
+const [offersTick, setOffersTick] = createSignal(0);
+
+/**
+ * Bumped when a contact's offered record is new or changed. The publication
+ * runtime re-runs on it, so the record is relayed to this account's other
+ * contacts at once rather than at the next periodic check.
+ */
+export const introductionOffersTick = offersTick;
 
 // The cache is what the next save starts from: a row cached before Forget
 // device would be saved back over the wiped store at the account's next
@@ -154,11 +164,14 @@ export async function intakeScopedEnvelope(args: {
       }
       case "introduction-offer": {
         const record = wasm.decodeIntroductionOffer(args.payload);
+        const recordB64 = base64Encode(record);
         const row = await loadIntroductions(session.accountIdB64);
+        const changed = row.offers[sender]?.recordB64 !== recordB64;
         await saveIntroductions(session.accountIdB64, {
           ...row,
-          offers: { ...row.offers, [sender]: { recordB64: base64Encode(record), receivedAtMs: Date.now() } },
+          offers: { ...row.offers, [sender]: { recordB64, receivedAtMs: Date.now() } },
         });
+        if (changed) setOffersTick((n) => n + 1);
         return;
       }
       case "introductions": {

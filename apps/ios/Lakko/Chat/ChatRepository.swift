@@ -7989,7 +7989,12 @@ public final class ChatRepository: ObservableObject {
             ReachCenter.shared.keepDelegation(delegation, fromAccountKeyB64: senderKey)
         case .introductionOffer(let record):
             guard isOneToOneWithOther(groupIdHex: groupIdHex, senderKey: senderKey) else { return }
-            IntroductionBook.shared.keepOffer(record, fromAccountKeyB64: senderKey)
+            // A new or changed offer is relayed to this account's other
+            // contacts now, not at the next profile change: until it is,
+            // they cannot find this contact as a contact of a contact.
+            if IntroductionBook.shared.keepOffer(record, fromAccountKeyB64: senderKey) {
+                requestIntroductions()
+            }
         case .introductions(let bundle):
             guard isOneToOneWithOther(groupIdHex: groupIdHex, senderKey: senderKey) else { return }
             IntroductionBook.shared.keepBundle(bundle, fromAccountKeyB64: senderKey)
@@ -8255,6 +8260,29 @@ public final class ChatRepository: ObservableObject {
                     NSLog("ADR-0060: introductions bundle not sent: \(error)")
                 }
             }
+        }
+    }
+
+    /// Whether a ``sendIntroductions()`` run started by
+    /// ``requestIntroductions()`` is in progress, and whether another was
+    /// asked for meanwhile.
+    private var introductionsRunning = false
+    private var introductionsAgain = false
+
+    /// Run ``sendIntroductions()`` once now; a request during a run asks for
+    /// one more after it, so two runs never overlap and none is lost.
+    func requestIntroductions() {
+        if introductionsRunning {
+            introductionsAgain = true
+            return
+        }
+        introductionsRunning = true
+        Task { @MainActor in
+            repeat {
+                introductionsAgain = false
+                await sendIntroductions()
+            } while introductionsAgain
+            introductionsRunning = false
         }
     }
 

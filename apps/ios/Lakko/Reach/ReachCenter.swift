@@ -1310,15 +1310,19 @@ public final class ReachCenter: ObservableObject {
 
     // MARK: - Introductions storage (ADR-0060 section 4)
 
-    func storeOffer(_ record: Data, fromAccountKeyB64 key: String) {
-        guard isActive else { return }
-        storeOfferValue(key, record.base64EncodedString())
+    /// Keep a contact's offered record; returns whether the held set changed.
+    @discardableResult
+    func storeOffer(_ record: Data, fromAccountKeyB64 key: String) -> Bool {
+        guard isActive else { return false }
+        return storeOfferValue(key, record.base64EncodedString())
     }
 
-    private func storeOfferValue(_ key: String, _ value: String) {
-        guard record.offers[key] != value else { return }
+    @discardableResult
+    private func storeOfferValue(_ key: String, _ value: String) -> Bool {
+        guard record.offers[key] != value else { return false }
         record.offers[key] = value
         persist()
+        return true
     }
 
     func storeBundle(_ bundle: FfiIntroductionsBundle, fromAccountKeyB64 key: String) {

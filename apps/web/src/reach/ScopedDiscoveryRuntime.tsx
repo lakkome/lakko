@@ -40,7 +40,7 @@ import { reachSession, reachSessionSignal, reachVersionsTick } from "./reach-ser
 import { loadReachRow, saveReachRow } from "./reach-store";
 import { ScopedDiscoveryClient } from "./scoped-discovery";
 import type { OprfPair } from "../discovery/oprf-pair";
-import { loadIntroductions } from "./scoped-intake";
+import { introductionOffersTick, loadIntroductions } from "./scoped-intake";
 import { visibilitySetting } from "./visibility-store";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
 
@@ -243,6 +243,7 @@ export function ScopedDiscoveryRuntime(): JSX.Element {
     // Re-run on what the steps depend on.
     reachSessionSignal();
     reachVersionsTick();
+    introductionOffersTick();
     visibilitySetting();
     profiles.ownProfile();
     profiles.ownUsername();

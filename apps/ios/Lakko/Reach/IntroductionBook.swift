@@ -15,9 +15,12 @@ public final class IntroductionBook {
     /// Keep a contact's own introduction record — offered in the one-to-one
     /// conversation, from its other participant (checked by the caller). The
     /// newest per contact wins; a malformed record is dropped.
-    public func keepOffer(_ record: Data, fromAccountKeyB64 key: String) {
-        guard (try? introductionTags(record: record)) != nil else { return }
-        ReachCenter.shared.storeOffer(record, fromAccountKeyB64: key)
+    /// Returns whether the held offers changed, so the caller relays the new
+    /// record to this account's other contacts at once.
+    @discardableResult
+    public func keepOffer(_ record: Data, fromAccountKeyB64 key: String) -> Bool {
+        guard (try? introductionTags(record: record)) != nil else { return false }
+        return ReachCenter.shared.storeOffer(record, fromAccountKeyB64: key)
     }
 
     /// Keep a contact's relayed bundle when it is newer than the one held

@@ -1558,6 +1558,25 @@ public class ContactsRepository(
                     val fetchedRequests = result.events.filterIsInstance<
                         IncomingMailboxEvent.ContactRequest>(
                     ).map { it.request }
+                    // ADR-0048 §3 — a request's profile is bound to its
+                    // signature-verified `from_pubkey`; store it (strictly newer
+                    // only) for EVERY fetched request, before any is set aside.
+                    // A request through one of this account's invite links is
+                    // kept off the request list and accepted with no card
+                    // (ADR-0079), so a store limited to the listed requests
+                    // dropped its name, and the new contact read "Member" until
+                    // the person's profile arrived in the one-to-one. Web and
+                    // iOS store it at this point too.
+                    profileDirectory?.let { directory ->
+                        for (req in fetchedRequests) {
+                            val profile = req.profile ?: continue
+                            directory.onProfileReceived(
+                                signatureKeyB64 = java.util.Base64.getEncoder()
+                                    .encodeToString(req.fromPubkey),
+                                profile = profile,
+                            )
+                        }
+                    }
                     // ADR-0073 R.7 case 1 / UX 16.6 — a request from an
                     // account that is ALREADY a contact is never a request
                     // row: the R.2 check runs on the sender's account and the
@@ -1641,19 +1660,6 @@ public class ContactsRepository(
                                     joinFailure = InboxError.WELCOME_JOIN_FAILED
                                 }
                             }
-                        }
-                    }
-                    // ADR-0048 §3 — a request's profile is bound to its
-                    // signature-verified `from_pubkey`; store it (strictly newer
-                    // only) so the request card can say who is asking.
-                    profileDirectory?.let { directory ->
-                        for (req in newIncoming) {
-                            val profile = req.profile ?: continue
-                            directory.onProfileReceived(
-                                signatureKeyB64 = java.util.Base64.getEncoder()
-                                    .encodeToString(req.fromPubkey),
-                                profile = profile,
-                            )
                         }
                     }
                     // The session ended (or switched) during the poll: this batch
