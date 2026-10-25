@@ -1498,6 +1498,7 @@ public class CallSession(
         mutableDownBps.value = null
         mutableUpBps.value = null
         prevStatsBytes = null
+        callPathLog = CallPathLog()
         // ADR-0032 piece B2b — reset perfect-negotiation state so a late
         // callback after teardown starts clean.
         makingOffer = false
@@ -1519,6 +1520,10 @@ public class CallSession(
      *  (teardown) or the peer goes away. */
     /** How long inbound media has been silent ([MediaWatchdog]). */
     private var inboundActivity: MediaWatchdog.InboundActivity? = null
+
+    /** Which network path the media takes, logged when it is first known and
+     *  when it changes (`CallPath.kt`). */
+    private var callPathLog = CallPathLog()
 
     /** The ICE-DISCONNECTED grace, armed on the transition and cancelled by a
      *  recovery. See [handleConnectionState]. */
@@ -1606,6 +1611,7 @@ public class CallSession(
                     for (line in inboundCounters.interval(snap.stats)) {
                         android.util.Log.i("CallSession", line)
                     }
+                    callPathLog.note(snap.stats)?.let { android.util.Log.i("CallSession", it) }
                     endIfMediaHasGoneSilent(nowMs)
                 }
                 delay(2_000)

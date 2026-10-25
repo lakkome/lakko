@@ -1292,6 +1292,9 @@ class SfuCallSession(
     // Read and written on [scope] only.
     private var mediaCountersJob: Job? = null
     private var mediaCountersLast: MediaReading? = null
+    /** Which network path the media takes to the SFU, logged when it is first
+     *  known and when it changes (`CallPath.kt`). */
+    private var callPathLog = CallPathLog()
     private var mediaCountersLastAtMs: Long = 0L
     private var senderCountersLast: SenderReading? = null
 
@@ -1325,6 +1328,7 @@ class SfuCallSession(
     private fun startMediaCounters(connection: WebRtcPeerConnection) {
         mediaCountersJob?.cancel()
         mediaCountersLast = null
+        callPathLog = CallPathLog()
         mediaCountersLastAtMs = nowMs()
         senderCountersLast = null
         // The tiles of this call start from nothing.
@@ -1367,6 +1371,7 @@ class SfuCallSession(
         if (pc !== connection) return
         val sample = connection.sampleMediaStats() ?: return
         if (pc !== connection || avAlign !== align) return
+        callPathLog.note(sample.stats)?.let { android.util.Log.i(MEDIA_LOG_TAG, it) }
         // One reading of the audio/video rule for every remote person: who is
         // in the call, which track is whose, what the receivers report and
         // what the tiles draw now. A person who joined gets a rule here; one

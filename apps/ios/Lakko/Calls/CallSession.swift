@@ -245,6 +245,9 @@ public final class CallSession: ObservableObject {
     }
     /// How long inbound media has been silent (`MediaWatchdog`).
     private var inboundActivity: MediaWatchdog.InboundActivity?
+    /// Which network path the media takes, logged when it is first known
+    /// and when it changes (``CallPath``).
+    private var callPathLog = CallPathLog()
     /// The ICE-`disconnected` grace, armed on the transition and cancelled by
     /// a recovery. See `handleConnectionState`.
     private var iceGraceTask: Task<Void, Never>?
@@ -1137,6 +1140,7 @@ public final class CallSession: ObservableObject {
         self.upBps = nil
         self.prevStatsBytes = nil
         self.inboundActivity = nil
+        self.callPathLog = CallPathLog()
         // Reset perfect-negotiation state (B2b) so a late
         // renegotiation tick after teardown no-ops.
         self.negotiationReady = false
@@ -1214,6 +1218,11 @@ public final class CallSession: ObservableObject {
                         for line in self.inboundCounters.interval(entries) {
                             NSLog("%@", line)
                         }
+                    }
+                    if let entries = await rtc.samplePathStatEntries(),
+                        !Task.isCancelled, self.rtc === rtc,
+                        let line = self.callPathLog.note(entries) {
+                        NSLog("%@", line)
                     }
                     await MainActor.run { self.endIfMediaHasGoneSilent(atSec: nowSec) }
                     await MainActor.run {

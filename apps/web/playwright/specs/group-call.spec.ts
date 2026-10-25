@@ -201,6 +201,10 @@ function eachPair(r: ParticipantReport[], check: (got: FromPeer | undefined, who
 }
 
 test("three people with cameras: each sees and hears the other two", async ({ page }) => {
+  const paths: string[] = [];
+  page.on("console", (m) => {
+    if (m.text().startsWith("call path: ")) paths.push(m.text());
+  });
   const r = await groupCall(page, [true, true, true], [
     { do: "until", frames: SHOWN + 20, ms: 20_000 },
     { do: "wait", ms: 1_000 },
@@ -209,6 +213,10 @@ test("three people with cameras: each sees and hears the other two", async ({ pa
   // No TURN is minted here, so no ICE server at all: in particular no public
   // STUN server (until 2026-10-24 the default was Google's).
   expect(r.map((p) => p.iceServerUrls)).toEqual([[], [], []]);
+  // Each participant logs its path to the SFU once, with no address: a
+  // direct one, never a relay, since no TURN is given here.
+  expect(paths.length, paths.join("\n")).toBeGreaterThanOrEqual(3);
+  for (const line of paths) expect(line).toMatch(/^call path: local=(host|srflx|prflx)\/udp remote=(host|srflx|prflx)\/udp rtt=(\d+ms|-)$/);
   eachPair(r, (got, who) => {
     expect(got?.videoFramesDecoded ?? 0, `${who}: no video`).toBeGreaterThan(SHOWN);
     expect(got?.audioPackets ?? 0, `${who}: no audio`).toBeGreaterThan(0);

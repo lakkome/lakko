@@ -109,6 +109,7 @@ import {
   videoReceiveCapabilities,
   type CodecPreferenceTransceiver,
 } from "./video-codec-preference";
+import { CallPathLog } from "./call-path";
 import { iceServersFor, iceServersLine } from "./ice-servers";
 import { loadWasm } from "../wasm";
 import type { ParsedCallSignaling } from "../../wasm/lakko_ffi_wasm";
@@ -538,6 +539,9 @@ export class CallSession {
   } | null = null;
   /** How long inbound media has been silent (`media-watchdog.ts`). */
   private inboundActivity: InboundActivity | null = null;
+  /** Which network path the media takes, logged when it is first known and
+   *  when it changes (`call-path.ts`). */
+  private callPathLog = new CallPathLog();
 
   /** The inbound offer this callee is ringing for. Held, not applied: the
    *  answerer captures media and builds its `RTCPeerConnection` only when the
@@ -1137,6 +1141,7 @@ export class CallSession {
     }
     this.prevStatsBytes = null;
     this.inboundActivity = null;
+    this.callPathLog = new CallPathLog();
     for (const line of this.inboundCounters.total()) {
       // eslint-disable-next-line no-console
       console.info(line);
@@ -1774,6 +1779,11 @@ export class CallSession {
     for (const line of this.inboundCounters.interval(entries)) {
       // eslint-disable-next-line no-console
       console.info(line);
+    }
+    const pathLine = this.callPathLog.note(entries);
+    if (pathLine !== null) {
+      // eslint-disable-next-line no-console
+      console.info(pathLine);
     }
     const succeeded = (s: unknown): boolean =>
       statString(s, "state") === "succeeded";

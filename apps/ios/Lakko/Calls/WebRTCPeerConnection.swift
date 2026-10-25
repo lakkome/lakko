@@ -582,6 +582,20 @@ public final class WebRTCPeerConnection: NSObject {
             .map { CallMediaStatEntry(id: $0.key, type: $0.value.type, values: $0.value.values) }
     }
 
+    /// The ICE entries of the statistics report (`transport`,
+    /// `candidate-pair`, `local-candidate`, `remote-candidate`), with their
+    /// ids, for the call's path line (``CallPath``). `nil` when there is no
+    /// peer connection.
+    func samplePathStatEntries() async -> [CallMediaStatEntry]? {
+        guard let peer = peer else { return nil }
+        let report: RTCStatisticsReport = await withCheckedContinuation { cont in
+            peer.statistics { cont.resume(returning: $0) }
+        }
+        return report.statistics
+            .filter { CallPath.entryTypes.contains($0.value.type) }
+            .map { CallMediaStatEntry(id: $0.key, type: $0.value.type, values: $0.value.values) }
+    }
+
     /// Factory entry point for a fresh `RTCVideoSource`
     /// bound to this process's shared `RTCPeerConnectionFactory`.
     /// `LocalCameraCapture` (G3-1-video) drives frames into the

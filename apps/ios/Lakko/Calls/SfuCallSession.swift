@@ -319,6 +319,9 @@ final class SfuCallSession {
     /// The last reading, for the next interval's difference and for the
     /// total at the end.
     private var mediaLogLast: CallMediaReading?
+    /// Which network path the media takes to the SFU, logged when it is
+    /// first known and when it changes (``CallPath``).
+    private var callPathLog = CallPathLog()
     /// Local camera capturer — held for the call's lifetime so it
     /// outlives `openPeerConnectionAndPublish` and is torn down in
     /// `hangUp`. `nil` for an audio-only call (or when no camera exists).
@@ -1378,8 +1381,12 @@ final class SfuCallSession {
         // What each sender's encoding holds, read behind every write queued
         // so far.
         let ceilings = await connection.cameraSenderCeilings()
+        let pathEntries = await connection.samplePathStatEntries()
         // The call may have ended while the report was read.
         guard pc === connection, mediaLogTask != nil else { return }
+        if let pathEntries, let line = callPathLog.note(pathEntries) {
+            NSLog("%@", line)
+        }
         // A sender the binding refused to start is asked again, and a flag a
         // renegotiation reset is put back.
         syncSenderActivity()
@@ -1508,6 +1515,7 @@ final class SfuCallSession {
         for line in lines { NSLog("%@", line) }
         mediaLogLast = nil
         mediaLogLastAtMs = nil
+        callPathLog = CallPathLog()
         LayerDisplayLedger.shared.reset()
     }
 

@@ -120,7 +120,16 @@ test("an audio call where each side turns its camera on during the call", async 
 });
 
 test("an audio call: each side hears the other", async ({ page }) => {
+  const paths: string[] = [];
+  page.on("console", (m) => {
+    if (m.text().startsWith("call path: ")) paths.push(m.text());
+  });
   const r = await call(page, [{ do: "dial", video: false }, { do: "accept" }, { do: "wait", ms: 3_000 }]);
+  // Each side logs the path its media takes once, with no address: here two
+  // sessions on one machine, so a direct path (Firefox names the remote end
+  // prflx, learned from a connectivity check before the candidate arrived).
+  expect(paths.length, paths.join("\n")).toBeGreaterThanOrEqual(2);
+  for (const line of paths) expect(line).toMatch(/^call path: local=(host|srflx|prflx)\/udp remote=(host|srflx|prflx)\/udp rtt=(\d+ms|-)$/);
   // No TURN is minted here, so no ICE server at all: in particular no public
   // STUN server (until 2026-10-24 the default was Google's).
   expect(r.a.iceServerUrls).toEqual([]);

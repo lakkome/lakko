@@ -167,6 +167,7 @@ import {
   type InboundSample,
 } from "./av-align";
 import { splitStreamId } from "./light-stream";
+import { CallPathLog } from "./call-path";
 import { registerVideoFrameSource } from "./video-frame-watch";
 import { VideoGivenBook, videoGivenChanges, type VideoGivenEntry } from "./video-given";
 import {
@@ -543,6 +544,9 @@ export class SfuCallSession {
    *  base of the next interval's line and of the total at the end). */
   private mediaCountersTimer: ReturnType<typeof setInterval> | null = null;
   private mediaCountersLast: MediaReading | null = null;
+  /** Which network path the media takes to the SFU, logged when it is first
+   *  known and when it changes (`call-path.ts`). */
+  private callPathLog = new CallPathLog();
   /** The media timer runs at the alignment rule's reading interval
    *  (`av-align.ts`); the counters are logged every this many ticks, which
    *  is every {@link MEDIA_COUNTERS_INTERVAL_MS}. */
@@ -1722,6 +1726,11 @@ export class SfuCallSession {
       const report = await pc.getStats();
       const entries = [...(report.values() as Iterable<Record<string, unknown>>)];
       await this.readAvAlign(pc, entries);
+      const pathLine = this.callPathLog.note(entries);
+      if (pathLine !== null) {
+        // eslint-disable-next-line no-console
+        console.info(pathLine);
+      }
       if (!logCounters) return;
       reading = readMedia(
         entries,
@@ -1791,6 +1800,7 @@ export class SfuCallSession {
     this.avAlign = null;
     const last = this.mediaCountersLast;
     this.mediaCountersLast = null;
+    this.callPathLog = new CallPathLog();
     this.senderCountersLast = null;
     if (last === null) return;
     // Counted from zero: the counters are cumulative from the stream's start.
