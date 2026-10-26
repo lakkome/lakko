@@ -33,6 +33,27 @@ import { all, initWasm, installStylesheet, one, pointer, present, settle } from 
 import { TILE_CONTROLS_REVEAL_MS } from "../calls/tile-controls-reveal";
 import { VideoWantsBook, type VideoQuality } from "../calls/video-wants";
 
+// Who is speaking comes from a monitor that reads the browser's audio on a
+// real 100 ms timer. jsdom has no audio, so the monitor kept reporting
+// "nobody speaks" and, whenever a tick fell between a test's own
+// `setSpeech` and its assertion, put the stage back on the first person
+// with a picture. Tests that drive speech themselves get a monitor that
+// does nothing; the one test that measures a peer's audio turns the real
+// monitor on for itself (`realSpeakingMonitor`).
+const speakingSwitch = vi.hoisted(() => ({ real: false }));
+vi.mock("../calls/speaking-monitor", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../calls/speaking-monitor")>();
+  class SpeakingMonitor {
+    constructor(...args: ConstructorParameters<typeof actual.SpeakingMonitor>) {
+      if (speakingSwitch.real) return new actual.SpeakingMonitor(...args) as unknown as SpeakingMonitor;
+    }
+    sync(): void {}
+    userGesture(): void {}
+    dispose(): void {}
+  }
+  return { ...actual, SpeakingMonitor };
+});
+
 type CallComponent = typeof import("./Call")["default"];
 let Call: CallComponent;
 
@@ -468,6 +489,14 @@ describe("the store's pin", () => {
  * the monitor, the store, the ring on the tile and the large tile.
  */
 describe("a peer whose audio arrives after their video, in a later track event", () => {
+  // This test measures a peer's audio: the real monitor (see the top).
+  beforeEach(() => {
+    speakingSwitch.real = true;
+  });
+  afterEach(() => {
+    speakingSwitch.real = false;
+  });
+
   it("is measured, gets the ring and comes to the large tile", async () => {
     const stream = fakeStream();
     // What `sfu-call-ui.ts` does on every track event: a new map holding the

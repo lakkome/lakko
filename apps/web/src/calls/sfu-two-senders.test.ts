@@ -479,6 +479,18 @@ async function connected(over: Partial<SfuCallConfig> = {}): Promise<{ session: 
 
 let warn: ReturnType<typeof vi.spyOn>;
 
+// Every session a test connects is hung up after it. The fakes (`hooks`,
+// `pcs`, `sockets`) are shared by the whole file, and a session left running
+// finished its own connect on the real event loop after its test was over:
+// on a loaded machine that landed inside the next test as one more offer or
+// wants frame, and a different test failed each run.
+const liveSessions: SfuCallSession[] = [];
+const realConnect = SfuCallSession.prototype.connect;
+SfuCallSession.prototype.connect = function (this: SfuCallSession, ...args: Parameters<typeof realConnect>) {
+  liveSessions.push(this);
+  return realConnect.apply(this, args);
+};
+
 beforeEach(() => {
   hooks.offers = [];
   hooks.wants = [];
@@ -517,6 +529,13 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const session of liveSessions.splice(0)) {
+    try {
+      session.hangUp();
+    } catch {
+      // A session a test already hung up, or one that never got going.
+    }
+  }
   warn.mockRestore();
   vi.unstubAllGlobals();
   vi.useRealTimers();

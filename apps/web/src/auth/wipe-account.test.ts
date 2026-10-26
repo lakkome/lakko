@@ -441,6 +441,10 @@ describe("wipeAccountLocalData", () => {
     expect(session.entries().filter(([k]) => namesA(k))).toEqual([]);
   });
 
+  // One full wipe per step left out, each on freshly seeded stores: about a
+  // hundred wipes. It took most of the suite's 20 s timeout on a quiet
+  // machine and ran past it on a loaded one, and the run it left behind then
+  // failed the next tests on the shared stores. Its own budget is generous.
   it("needs every step: leaving any one out leaves the account behind", async () => {
     await createSchemas();
     const steps = accountWipeSteps(A);
@@ -460,7 +464,7 @@ describe("wipeAccountLocalData", () => {
       if (!left) notLoadBearing.push(skipped);
     }
     expect(notLoadBearing).toEqual([]);
-  });
+  }, 180_000);
 
   // ADR-0074 section 1.1 (UX 18.4): the staged wipe of a device whose
   // account keys were reset on another device.
