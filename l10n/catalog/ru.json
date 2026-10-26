@@ -1122,6 +1122,86 @@
       "text": "Исходящий",
       "status": "machine"
     },
+    "call.screen_share.bar_status": {
+      "text": "Показ экрана",
+      "status": "machine"
+    },
+    "call.screen_share.button": {
+      "text": "Показать экран",
+      "status": "machine"
+    },
+    "call.screen_share.button_stop": {
+      "text": "Остановить показ",
+      "status": "machine"
+    },
+    "call.screen_share.not_sealed": {
+      "text": "Сейчас не удаётся безопасно показать экран. Попробуйте ещё раз.",
+      "status": "machine"
+    },
+    "call.screen_share.own_strip": {
+      "text": "Вы показываете свой экран",
+      "status": "machine"
+    },
+    "call.screen_share.own_strip_sound": {
+      "text": "Вы показываете свой экран со звуком",
+      "status": "machine"
+    },
+    "call.screen_share.own_tile": {
+      "text": "Вы показываете свой экран",
+      "status": "machine"
+    },
+    "call.screen_share.pinned_chip": {
+      "text": "{name} показывает экран",
+      "status": "machine"
+    },
+    "call.screen_share.refused": {
+      "text": "Не удалось показать экран. Разрешите показ экрана для этого сайта в настройках браузера.",
+      "status": "machine"
+    },
+    "call.screen_share.refused_macos": {
+      "text": "Не удалось показать экран. Разрешите браузеру запись экрана в Системных настройках.",
+      "status": "machine"
+    },
+    "call.screen_share.started": {
+      "text": "{name} начинает показ экрана",
+      "status": "machine"
+    },
+    "call.screen_share.stop": {
+      "text": "Остановить",
+      "status": "machine"
+    },
+    "call.screen_share.stopped": {
+      "text": "{name} завершает показ экрана",
+      "status": "machine"
+    },
+    "call.screen_share.superseded": {
+      "text": "{name} теперь показывает экран, поэтому ваш показ остановлен.",
+      "status": "machine"
+    },
+    "call.screen_share.tile": {
+      "text": "Экран: {name}",
+      "status": "machine"
+    },
+    "call.screen_share.view": {
+      "text": "Смотреть",
+      "status": "machine"
+    },
+    "call.screen_share.waiting": {
+      "text": "Ждём экран: {name}",
+      "status": "machine"
+    },
+    "call.screen_share.zoom_in": {
+      "text": "Увеличить",
+      "status": "machine"
+    },
+    "call.screen_share.zoom_out": {
+      "text": "Уменьшить",
+      "status": "machine"
+    },
+    "call.screen_share.zoom_reset": {
+      "text": "Показать целиком",
+      "status": "machine"
+    },
     "call.self.camera_a11y": {
       "text": "Ваша камера",
       "status": "machine"

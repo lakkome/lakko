@@ -129,6 +129,7 @@ final class SfuCallUi {
         // Per-participant video probes — what makes a two-person group call
         // able to reach the video layout at all (see `RemotePictureTracker`).
         let pictureTracker = RemotePictureTracker()
+        let screenTracker = ScreenShareTracks()
         let audio = config.audio
         let video = config.video
         // Canonical call safety number derived from the shared seed — the
@@ -155,6 +156,8 @@ final class SfuCallUi {
                 case .failed, .closed:
                     speaking.stop()
                     ui.clearRemoteVideoCopies()
+                    screenTracker.detachAll(ui: ui)
+                    ui.setScreenShare(nil)
                     ui.setPhase(.ended(endedAt: Date()))
                 case .idle:
                     break
@@ -196,6 +199,9 @@ final class SfuCallUi {
                 // stops rendering a stale last frame before the roster
                 // removes the tile.
                 ui.setRemoteVideoTrack(nil, forParticipant: id)
+                // Their screen's picture goes with them; the share itself
+                // ends through the fold (``onScreenShareChanged``).
+                screenTracker.attach(nil, sharer: id, ui: ui)
                 ui.participantLeft(id)
                 Self.refreshSolePicture(ui: ui, tracker: pictureTracker)
             },
@@ -327,6 +333,15 @@ final class SfuCallUi {
                 // What the SFU gives of each person (ADR-0070 step 6): a tile
                 // shows the lower of that and what it wants.
                 ui.setRemoteVideoGiven(byPeerId: given)
+            },
+            onScreenShareChanged: { current in
+                // The fold's current share (ADR-0083, C-87): the share tile,
+                // and the layout it switches to and back.
+                ui.setScreenShare(
+                    ScreenShareShown.of(current, sharerParticipantId: Self.participantId(forPeer:)))
+            },
+            onRemoteScreenVideoTrack: { track, peerId in
+                screenTracker.attach(track, sharer: Self.participantId(forPeer: peerId), ui: ui)
             }
         )
         let session = SfuCallSession(config: config, callbacks: callbacks)

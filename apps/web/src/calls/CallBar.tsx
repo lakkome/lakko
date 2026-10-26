@@ -58,6 +58,7 @@ import { joinList, t } from "../l10n";
 import { callActions, callState, type Participant } from "../state/call-state";
 import { uiRules } from "../chat/ui-rules";
 import { showsEncryptionChip } from "./encryption-chip";
+import { screenShareState } from "./screen-share-store";
 import { callPeerLabel, callSurfaceKind } from "./call-screen-model";
 import {
   callBarMuteControl,
@@ -147,6 +148,7 @@ export function CallBar(props: CallBarProps): JSX.Element {
       phase: p,
       connectedAtMs: callState.connectedAt(),
       nowMs: now(),
+      sharingScreen: screenShareState.current()?.isOwn === true,
     });
   });
 

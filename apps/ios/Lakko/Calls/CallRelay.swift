@@ -25,6 +25,9 @@ final class CallRelay {
     enum Opened: Equatable {
         case announcement(Data)
         case mediaState(cameraOn: Bool)
+        /// A signed screen-share state (ADR-0083), still to be verified with
+        /// ``CallPeerAnnouncer/verifyScreenShare``.
+        case screenShare(Data)
         case unknown
     }
 
@@ -57,6 +60,7 @@ final class CallRelay {
             switch classifyCallRelayPlaintext(plaintext: plaintext) {
             case .peerAnnouncement(let announcement): return .announcement(announcement)
             case .mediaState(let cameraOn): return .mediaState(cameraOn: cameraOn)
+            case .screenShare(let state): return .screenShare(state)
             case .unknown: return .unknown
             }
         }
@@ -77,6 +81,10 @@ struct VerifiedPeerIdentity: Equatable {
     /// The signer's MLS leaf signature key, lower-case hex: the handle the
     /// link call's committer election keys members on.
     let memberKeyHex: String
+    /// The same leaf signature key, as bytes: what a screen-share state from
+    /// this peer must be signed by (ADR-0083 section 1). Empty when built by a
+    /// caller that did not have it.
+    var signatureKey: Data = Data()
 }
 
 /// Composes this device's announcement and verifies everyone else's. The
@@ -88,6 +96,15 @@ struct CallPeerAnnouncer {
     let compose: @MainActor (_ selfPeerId: String) -> Data?
     /// Who a verified announcement from `from` names, or `nil`.
     let verify: @MainActor (_ from: String, _ announcement: Data) -> VerifiedPeerIdentity?
+    /// A screen-share state from `from`, verified against the call's group
+    /// (ADR-0083 section 1): the call id, `from` as the stamped peer id,
+    /// `signerKey` (the leaf key `from`'s verified announcement named), the
+    /// signature. `nil` on any refusal, and when there is no group.
+    var verifyScreenShare: @MainActor (
+        _ from: String, _ signerKey: Data, _ state: Data
+    ) -> VerifiedCallScreenShare? = { _, _, _ in nil }
+    /// This device's own leaf signature key: the fold's own key.
+    var ownSignatureKey: Data = Data()
 
     /// The announcer for a call whose roster is `group()`.
     static func forGroup(
@@ -104,7 +121,13 @@ struct CallPeerAnnouncer {
             verify: { from, announcement in
                 guard let g = group() else { return nil }
                 return verifiedIdentity(group: g, callId: callId, from: from, announcement: announcement)
-            }
+            },
+            verifyScreenShare: { from, signerKey, state in
+                guard let g = group() else { return nil }
+                return try? verifyCallScreenShare(
+                    group: g, callId: callId, peerId: from, peerSignerKey: signerKey, state: state)
+            },
+            ownSignatureKey: identity.signaturePublicKey()
         )
     }
 
@@ -122,6 +145,7 @@ struct CallPeerAnnouncer {
         else { return nil }
         return VerifiedPeerIdentity(
             personKeyB64: verified.accountKey.base64EncodedString(),
-            memberKeyHex: verified.signatureKey.map { String(format: "%02x", $0) }.joined())
+            memberKeyHex: verified.signatureKey.map { String(format: "%02x", $0) }.joined(),
+            signatureKey: verified.signatureKey)
     }
 }

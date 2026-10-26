@@ -92,6 +92,9 @@ import type { IncomingProfile } from "../profile/profile-store";
 import { callTileName, EarlyRelays, boundProfileClaim } from "./tile-name";
 import { ENDED_FOR_ALL } from "./end-for-everyone";
 import { splitStreamId, withLightStream, withoutLightStream } from "./light-stream";
+import { GroupScreenShare } from "./group-screen-share";
+import { screenShareActions } from "./screen-share-store";
+import { SCREEN_SHARE_NOTICE_MS } from "./screen-share-capability";
 import type { VideoQuality } from "./video-wants";
 
 /** A profile a member sealed into the call, as the profile store takes it. */
@@ -213,6 +216,8 @@ export class LinkCallAbandonedError extends Error {
 /** The orchestrator instance IS the caller's handle. */
 export class MultiJoinerCall {
   private readonly session: SfuCallSession;
+  /** The screen share of this call (ADR-0083). */
+  private readonly share: GroupScreenShare;
   private readonly presence: CallPresence;
 
   /** Remote MSID stream id → live `MediaStream` (for the Call.tsx tiles). */
@@ -358,6 +363,39 @@ export class MultiJoinerCall {
 
     this.presence = new CallPresence(hexKey(opts.identity.signaturePublicKey), this.ownerKeyHex);
 
+    const announcer = groupPeerAnnouncer(wasm, opts.identity, opts.callId, () => this.group);
+    // The screen share (ADR-0083). Its store writes are this attempt's only
+    // while it is the current one, like every other write to the call store.
+    const ifCurrent = <A extends unknown[]>(write: (...args: A) => void) =>
+      (...args: A): void => {
+        if (this.current()) write(...args);
+      };
+    this.share = new GroupScreenShare({
+      announcer,
+      session: {
+        sendSealedRelay: (plaintext) => this.session.sendSealedRelay(plaintext),
+        attachScreenShare: (capture) => this.session.attachScreenShare(capture),
+        detachScreenShare: () => this.session.detachScreenShare(),
+        getSelfPeerId: () => this.session.getSelfPeerId(),
+      },
+      nameOf: (personKeyB64) => {
+        for (const [peerId, person] of this.peerPersons) {
+          if (person === personKeyB64) return this.nameOf(peerId);
+        }
+        return "";
+      },
+      notice: (text) => {
+        if (this.current()) callActions.showNotice(text, SCREEN_SHARE_NOTICE_MS);
+      },
+      store: {
+        setCurrent: ifCurrent(screenShareActions.setCurrent),
+        setControl: ifCurrent(screenShareActions.setControl),
+        setBusy: ifCurrent(screenShareActions.setBusy),
+        setStream: ifCurrent(screenShareActions.setStream),
+      },
+    });
+    this.share.init(wasm);
+
     this.session = new SfuCallSession(
       {
         sfuBaseUrl: opts.sfuBaseUrl,
@@ -370,7 +408,7 @@ export class MultiJoinerCall {
         // ADR-0078 section 2: who each peer is comes from its own sealed,
         // signed announcement, verified against the call group's roster
         // (none before this client holds the group).
-        peerAnnouncer: groupPeerAnnouncer(wasm, opts.identity, opts.callId, () => this.group),
+        peerAnnouncer: announcer,
         // Omit undefined optionals (exactOptionalPropertyTypes).
         ...(initialSeed !== undefined ? { seed: initialSeed } : {}),
         ...(initialLeaf !== undefined ? { localLeaf: initialLeaf } : {}),
@@ -397,6 +435,7 @@ export class MultiJoinerCall {
           if (this.current()) callActions.setParticipantCamera(id, cameraOn);
         },
         onSignalRelay: (from, payload): void => this.onRelay(from, payload),
+        onRemoteScreenShareState: (peerId, state): void => this.share.onState(peerId, state),
         onLocalStream: (stream): void => this.setLocalStream(stream),
         onVideoPublishState: (state): void => this.setVideoPublishState(state),
         onCaptureFallback: (fallback): void => this.onCaptureFallback(fallback),
@@ -645,6 +684,8 @@ export class MultiJoinerCall {
     this.clearRebroadcast();
     this.clearOwnerProbe();
     this.lastKnownCameraOn.clear();
+    this.share.dispose();
+    if (this.current()) screenShareActions.reset();
     this.session.hangUp();
     this.setRemoteStreams(() => new Map());
     this.setRemoteLightStreams(() => new Map());
@@ -732,6 +773,7 @@ export class MultiJoinerCall {
             shortFingerprint: this.safetyNumber ?? null,
           });
         }
+        this.share.onConnected();
         if (!this.firedLive) {
           this.firedLive = true;
           this.opts.onLive?.();
@@ -739,6 +781,8 @@ export class MultiJoinerCall {
         break;
       case "failed":
       case "closed":
+        this.share.dispose();
+        if (current) screenShareActions.reset();
         if (current) callActions.setPhase({ kind: "ended", endedAt: Date.now() });
         this.opts.onEnded?.();
         break;
@@ -775,6 +819,7 @@ export class MultiJoinerCall {
     // A newly-present peer may be a freshly-elected committer (owner
     // reclaim / a successor); re-broadcast so it sees a still-pending join.
     this.broadcastKeyPackage();
+    this.share.onPeerJoined();
   }
 
   /** ADR-0078 section 2: a peer's sealed announcement verified against a
@@ -783,6 +828,7 @@ export class MultiJoinerCall {
    *  tile's name). */
   private onPeerIdentified(peerId: string, identity: VerifiedPeerIdentity): void {
     this.presence.bindPeerToMember(peerId, identity.memberKeyHex);
+    this.share.onPeerIdentified(peerId, identity.memberKeyHex);
     if (this.peerPersons.get(peerId) === identity.personKeyB64) return;
     this.peerPersons.set(peerId, identity.personKeyB64);
     this.renameTile(peerId);
@@ -799,6 +845,7 @@ export class MultiJoinerCall {
     this.peerUsernames.delete(peerId);
     this.peerPersons.delete(peerId);
     this.namingInputs.delete(peerId);
+    this.share.onPeerLeft(peerId);
     // The companion and the middle track go with their peer.
     this.setRemoteLightStreams((prev) => withoutLightStream(prev, peerId));
     this.setRemoteMiddleStreams((prev) => withoutLightStream(prev, peerId));
@@ -846,6 +893,8 @@ export class MultiJoinerCall {
     // A light companion or a middle track (`light-stream.ts`) goes into its
     // own map and touches nothing else: no roster entry, no camera flag, no
     // entry in `remoteStreams`. Mirrors `sfu-call-ui.ts` `addCopyStream`.
+    // A shared screen (ADR-0083) goes to the share's store, likewise.
+    if (this.share.onRemoteTrack(rt.streamId, rt.track, rt.stream)) return;
     const id = splitStreamId(rt.streamId);
     if (id.role !== "main") {
       if (rt.track.kind !== "video") return;
@@ -1213,6 +1262,7 @@ export class MultiJoinerCall {
    *  the profile store changes: a username verified, a contact renamed. */
   refreshNames(): void {
     for (const peerId of this.namingInputs) this.renameTile(peerId);
+    this.share.refreshNames();
   }
 
   private renameTile(peerId: string): void {

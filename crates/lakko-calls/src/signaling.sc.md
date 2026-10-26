@@ -15,7 +15,7 @@ The codec is deliberately **plaintext-only** — it performs no encryption of it
 
 ## Public contract
 
-- `SignalingBody` — the seven-variant typed event: `Offer`, `Answer`, `IceCandidate`, `End` (1×1 lifecycle) and `GroupStart`, `GroupJoin`, `GroupLeave` (SFU group-call lifecycle). Mirrors the `CallSignalingPayload.body` oneof in `schemas/mls-app/call_signaling_v1.proto`.
+- `SignalingBody` — the eight-variant typed event: `Offer`, `Answer`, `IceCandidate`, `End` (1×1 lifecycle), `GroupStart`, `GroupJoin`, `GroupLeave` (SFU group-call lifecycle), and `ScreenShare` (the signed one-to-one share state of ADR-0083, carried opaquely; the receiver verifies it with `screen_share::verify_screen_share` against the MLS sender's leaf; proto field 17, `ScreenShareSignal`). Mirrors the `CallSignalingPayload.body` oneof in `schemas/mls-app/call_signaling_v1.proto`.
 - `SignalingBody::call_id() -> &CallId` — every variant carries a 16-byte per-call id, minted by the offer/initiator side. This accessor is the primitive the receiver uses to match an incoming body to the active call.
 - `SignalingBody::is_group_control() -> bool` — `true` for exactly `GroupStart` / `GroupJoin` / `GroupLeave`. This is the **canonical client-side dispatcher gate** that routes a body to the 1×1 (`CallSession`) vs. group (`GroupCallSession`) state machine (C-11). The routing/drop logic itself lives in those consumers, not here — this module only supplies the discriminator and the id.
 - `compose_signaling_payload(&SignalingBody) -> Result<Vec<u8>>` — encodes to plaintext proto bytes. Practically infallible: every field is fixed-shape, so the prost encode error is unreachable in normal use (returned as `Error::Crypto` if it ever fired).
@@ -62,4 +62,4 @@ Fuzzed by `crates/lakko-calls/fuzz/fuzz_targets/signaling_payload_decode.rs` (as
 
 - ADR-0001 (MLS-only — calls reuse the chat group's epoch + DS journal)
 - Invariants C-11 (1×1 dispatcher does not cross-feed group-control bodies — gate provided here), C-12 (wrong-`call_id` dropped — id accessor provided here), C-13 (`EndReason` unknown → `HungUp`), C-14 (`call_id` length enforced), in `docs/security/calls.md`
-- Tests (in-module `#[cfg(test)]`): `unknown_end_reason_folds_to_hung_up`, `wrong_call_id_length_rejected`, `is_group_control_false_for_one_on_one_bodies`, `group_start_round_trips` / `group_join_round_trips` / `group_leave_round_trips_each_reason`, the 1×1 `*_round_trips` cases, `media_flags_round_trip_bits`
+- Tests (in-module `#[cfg(test)]`): `screen_share_round_trips_and_is_not_group_control`, `unknown_end_reason_folds_to_hung_up`, `wrong_call_id_length_rejected`, `is_group_control_false_for_one_on_one_bodies`, `group_start_round_trips` / `group_join_round_trips` / `group_leave_round_trips_each_reason`, the 1×1 `*_round_trips` cases, `media_flags_round_trip_bits`

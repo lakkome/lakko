@@ -235,6 +235,9 @@ import {
 } from "./sfu-call-state";
 import { callEndedAtMs } from "./sfu-keepalive";
 import { createSfuCallUi, type SfuCallUiHandle } from "./sfu-call-ui";
+import { OneToOneScreenShare } from "./one-to-one-screen-share";
+import { currentShareStream, screenShareActions } from "./screen-share-store";
+import { SCREEN_SHARE_NOTICE_MS } from "./screen-share-capability";
 import { groupCallTileSources } from "./group-call-tile-sources";
 import { sfuBaseUrl } from "./sfu-config";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
@@ -828,6 +831,73 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   let oneToOneSafety: string | null = null;
 
   /**
+   * The screen share of the live 1x1 call (ADR-0083 section 4), built once
+   * the call connects, with the session it belongs to. A share stream that
+   * arrives first is held until it is built.
+   */
+  let oneToOneShare: { readonly session: CallSession; readonly share: OneToOneScreenShare } | null =
+    null;
+  let heldOneToOneScreen: {
+    readonly session: CallSession;
+    readonly stream: MediaStream;
+    readonly track: MediaStreamTrack;
+  } | null = null;
+
+  function startOneToOneShare(session: CallSession, groupIdB64: string, callId: Uint8Array): void {
+    if (oneToOneShare?.session === session) {
+      oneToOneShare.share.onConnected();
+      return;
+    }
+    void loadWasm()
+      .then((wasm) => {
+        // Ended, or replaced, while the module resolved.
+        if (activeCall !== session || slotSession !== session) return;
+        if (oneToOneShare?.session === session) return;
+        const identity = chats.identity();
+        if (identity === null) return;
+        let share: OneToOneScreenShare;
+        try {
+          share = new OneToOneScreenShare({
+            wasm,
+            identity,
+            callId,
+            group: () => groupEntry(groupIdB64)?.group ?? null,
+            session: {
+              attachScreenShare: (capture) => session.attachScreenShare(capture),
+              detachScreenShare: () => session.detachScreenShare(),
+            },
+            publish: (signal) => {
+              void publisherFor(groupIdB64)(signal);
+            },
+            nameOf: (personKeyB64) => callNameOfPerson(personKeyB64) ?? "",
+            notice: (text) => callActions.showNotice(text, SCREEN_SHARE_NOTICE_MS),
+            store: screenShareActions,
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("1x1 screen share unavailable", err);
+          return;
+        }
+        oneToOneShare = { session, share };
+        const held = heldOneToOneScreen;
+        heldOneToOneScreen = null;
+        if (held !== null && held.session === session) share.onRemoteStream(held.stream, held.track);
+        if (session.getState() === "connected") share.onConnected();
+      })
+      .catch(() => {
+        // Without the core nothing is shared; the call goes on.
+      });
+  }
+
+  function endOneToOneShare(session: CallSession): void {
+    if (heldOneToOneScreen?.session === session) heldOneToOneScreen = null;
+    if (oneToOneShare?.session !== session) return;
+    oneToOneShare.share.dispose();
+    oneToOneShare = null;
+    screenShareActions.reset();
+  }
+
+  /**
    * Say whether this 1x1 call's media is sealed, and show its safety number
    * when it is.
    *
@@ -931,6 +1001,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         if (slotSession !== session) return;
         setLocalStream(s);
       },
+      onRemoteScreenStream: (stream, track) => {
+        if (slotSession !== session) return;
+        if (oneToOneShare?.session === session) oneToOneShare.share.onRemoteStream(stream, track);
+        else heldOneToOneScreen = { session, stream, track };
+      },
       onVideoPublishState: (s) => {
         if (slotSession !== session) return;
         setVideoPublishState(s);
@@ -947,7 +1022,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         if (s === "connected" && callJournal?.session === session) {
           callJournal.connectedAtMs ??= Date.now();
         }
+        if (s === "connected") startOneToOneShare(session, groupIdB64, callId);
         if (s === "done") {
+          endOneToOneShare(session);
           if (callJournal?.session === session) recordOneToOneCall(reason);
           endedCallIds.add(callIdHex(callId));
           activeCall = null;
@@ -1108,6 +1185,23 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           // The ended-phase effect leaves the call.
           callActions.endCall();
         }
+      }
+
+      // The other person's screen-share state (ADR-0083 section 4): for the
+      // call in the slot only, verified against the MLS sender's own leaf.
+      if (parsed.kind === "screenShare") {
+        const live = oneToOneShare;
+        if (decision.oneToOne === "apply" && live !== null && activeCall === live.session) {
+          let senderKey: Uint8Array | null = null;
+          try {
+            senderKey =
+              item.row.senderMemberKey === undefined ? null : base64Decode(item.row.senderMemberKey);
+          } catch {
+            senderKey = null;
+          }
+          live.share.receive(parsed.screenShareState, senderKey);
+        }
+        return;
       }
 
       switch (decision.oneToOne) {
@@ -1836,6 +1930,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     // A link call too: a member's username verified, a contact renamed.
     const link = linkHandle();
     if (link !== null) untrack(() => link.refreshNames());
+    const oneToOne = oneToOneShare;
+    if (oneToOne !== null) untrack(() => oneToOne.share.refreshNames());
   });
 
   /** SFU session lifecycle -> the group journal. */
@@ -3281,6 +3377,12 @@ export function CallHostView(): JSX.Element {
       <For each={[...(internals.linkHandle()?.remoteStreams().values() ?? [])]}>
         {(stream) => <RemoteAudio stream={stream} />}
       </For>
+      {/* The sound of the share on screen (ADR-0083: it plays with the call,
+          with no control of its own). The share's picture is drawn muted by
+          the call screen, so this is its one sink. */}
+      <Show when={host.inCall() ? currentShareStream() : undefined} keyed>
+        {(stream) => <RemoteAudio stream={stream} />}
+      </Show>
 
       {/* `Invite a contact` (`docs/ux/call-links.md` section 3): the same list
           of conversations a forward offers, under its own title. */}

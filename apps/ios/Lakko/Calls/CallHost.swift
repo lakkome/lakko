@@ -289,7 +289,11 @@ final class CallHost: ObservableObject {
         case .drop:
             return
         case .apply:
-            activeCall?.applyIncomingSignaling(row.body)
+            if case .screenShare(let callId, _) = row.body, let verified = row.verifiedScreenShare {
+                activeCall?.applyScreenShare(verified, callId: callId)
+            } else {
+                activeCall?.applyIncomingSignaling(row.body)
+            }
         case .busy:
             // Not recorded as ended: the caller is still ringing this device,
             // and a later offer row for the same call is answered busy again.

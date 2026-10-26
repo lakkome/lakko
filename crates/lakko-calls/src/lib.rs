@@ -65,6 +65,7 @@ pub mod media_frame;
 pub mod quality;
 pub mod relay;
 pub mod safety_number;
+pub mod screen_share;
 pub mod session;
 pub mod sframe;
 pub mod signaling;

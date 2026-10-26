@@ -350,11 +350,21 @@ export class SfuSignalingClient {
    * of this client's camera (ADR-0070 step 1), so the SFU forwards it as the
    * camera's light companion; `middleMids` those that carry its middle sender
    * (step 5), which the SFU forwards only to a viewer that asks for it. Each
-   * is empty when there is none.
+   * is empty when there is none. `screenMids` names the m-lines of this
+   * client's screen share, picture and sound (ADR-0083), which the SFU
+   * forwards to everyone under `<peer>~screen`.
    */
-  sendSdpOffer(sdp: string, lightMids: readonly string[], middleMids: readonly string[] = []): void {
+  sendSdpOffer(
+    sdp: string,
+    lightMids: readonly string[],
+    middleMids: readonly string[] = [],
+    screenMids: readonly string[] = [],
+  ): void {
+    const wasm = this.requireWasm();
     this.sendRaw(
-      this.requireWasm().composeSfuSdpOfferWithMiddle(sdp, [...lightMids], [...middleMids]),
+      screenMids.length === 0
+        ? wasm.composeSfuSdpOfferWithMiddle(sdp, [...lightMids], [...middleMids])
+        : wasm.composeSfuSdpOfferWithScreen(sdp, [...lightMids], [...middleMids], [...screenMids]),
     );
   }
 

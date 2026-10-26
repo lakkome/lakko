@@ -190,6 +190,8 @@ final class MultiJoinerCall {
     /// a track arrival only defers to it. `@MainActor`-confined like the
     /// rest of this class — no new concurrency.
     private var lastKnownCameraOn: [String: Bool] = [:]
+    /// The sharers' screen tracks and their first-frame probes (ADR-0083).
+    private let screenTracks = ScreenShareTracks()
     /// Who is speaking, read on this device from the call's own audio
     /// (`docs/ux/group-call-grid.md` section 7.3).
     private let speaking: GroupSpeakingMonitor
@@ -317,6 +319,17 @@ final class MultiJoinerCall {
             onVideoGiven: { [weak self] given in
                 // What the SFU gives of each person (ADR-0070 step 6).
                 self?.ui.setRemoteVideoGiven(byPeerId: given)
+            },
+            onScreenShareChanged: { [weak self] current in
+                // The fold's current share (ADR-0083, C-87). Mirrors `SfuCallUi`.
+                guard let self else { return }
+                let prefix = peerPrefix
+                self.ui.setScreenShare(
+                    ScreenShareShown.of(current, sharerParticipantId: { prefix + $0 }))
+            },
+            onRemoteScreenVideoTrack: { [weak self] track, peerId in
+                guard let self else { return }
+                self.screenTracks.attach(track, sharer: peerPrefix + peerId, ui: self.ui)
             }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
@@ -607,6 +620,8 @@ final class MultiJoinerCall {
         case .failed, .closed:
             speaking.stop()
             ui.clearRemoteVideoCopies()
+            screenTracks.detachAll(ui: ui)
+            ui.setScreenShare(nil)
             ui.setPhase(.ended(endedAt: Date()))
             cbs.onEnded?()
         case .idle:
@@ -665,6 +680,8 @@ final class MultiJoinerCall {
         // Forget the departed peer's sticky camera state so a later rejoin
         // under the same id starts from a clean slate (join-race guard).
         lastKnownCameraOn.removeValue(forKey: id)
+        // Their screen's picture goes with them; the share ends in the fold.
+        screenTracks.attach(nil, sharer: id, ui: ui)
         names.peerLeft(peerId)
         ui.participantLeft(id)
         // The committer may have left → the next inbound KP is evaluated against

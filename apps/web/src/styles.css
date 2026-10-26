@@ -6913,3 +6913,184 @@ button.lk-folder-new {
   align-items: center;
   color: var(--surface-muted);
 }
+
+/* ---------------------------------------------------------------------------
+   The screen share (docs/ux/screen-share.md). The picture is always whole,
+   uncropped, on black; a share is read, so it is never `cover`.
+--------------------------------------------------------------------------- */
+.lk-call-share {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  border-radius: var(--radius-md);
+  color: var(--call-ctl-on-fg);
+  touch-action: none;
+}
+.lk-call-share:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.lk-call-share.zoomed {
+  cursor: grab;
+}
+.lk-call-share.zoomed:active {
+  cursor: grabbing;
+}
+.lk-call-share-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  transform-origin: center center;
+}
+.lk-call-share-waiting,
+.lk-call-share.own {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  text-align: center;
+  font-size: 13px;
+}
+.lk-call-share-waiting {
+  position: absolute;
+  inset: 0;
+  background: #000;
+}
+.lk-call-share-own-text {
+  max-width: 24em;
+}
+.lk-call-share-glyph {
+  display: inline-flex;
+}
+.lk-call-share-zoom {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  display: flex;
+  gap: 6px;
+}
+.lk-call-share-zoom-btn {
+  width: 32px;
+  height: 32px;
+  min-height: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--call-bar-bg);
+  color: var(--call-ctl-on-fg);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.lk-call-share-zoom-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.lk-call-share-zoom-btn:focus-visible {
+  outline: 2px solid var(--call-ctl-on-fg);
+  outline-offset: 2px;
+}
+/* One-to-one: the share is the large picture, edge to edge (5.1). */
+.lk-call-share.lk-call-share-fill {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: 0;
+}
+/* ...and the other person moves to a small tile, in the corner opposite the
+   self-view. */
+.lk-call-peer-mini {
+  position: absolute;
+  z-index: 5;
+  left: 16px;
+  bottom: calc(150px + env(safe-area-inset-bottom));
+  width: min(22%, 160px);
+  aspect-ratio: 3 / 4;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--surface-elevated);
+  border: 1px solid var(--call-bar-border);
+  box-shadow: var(--shadow-2);
+  container-type: size;
+}
+.lk-call-peer-mini .lk-call-tile-avatar,
+.lk-call-peer-mini .lk-call-tile-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+/* This device's own share on a one-to-one call: small, no picture, beside the
+   self-view (section 3). */
+.lk-call-share.own.lk-call-own-share-mini {
+  position: absolute;
+  z-index: 5;
+  left: 16px;
+  bottom: calc(150px + env(safe-area-inset-bottom));
+  width: min(30%, 200px);
+  height: auto;
+  min-height: 72px;
+  border: 1px solid var(--call-bar-border);
+  box-shadow: var(--shadow-2);
+}
+/* The sender's strip across the top (section 3). */
+.lk-call-share-strip {
+  position: absolute;
+  top: calc(64px + env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 32px);
+  padding: 8px 8px 8px 14px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-fg, #ffffff);
+  font-size: 14px;
+  box-shadow: var(--shadow-2);
+}
+.lk-call-share-strip span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lk-call-share-strip-stop,
+.lk-call-share-chip-btn {
+  min-height: 0;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 999px;
+  background: var(--call-ctl-on-fg);
+  color: #000;
+  font-weight: 600;
+  cursor: pointer;
+}
+/* A share offered while a pin holds the stage (section 5.2). */
+.lk-call-share-chip {
+  align-self: center;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 6px 6px 6px 12px;
+  border-radius: 999px;
+  background: var(--call-bar-bg);
+  color: var(--call-ctl-on-fg);
+  font-size: 13px;
+}

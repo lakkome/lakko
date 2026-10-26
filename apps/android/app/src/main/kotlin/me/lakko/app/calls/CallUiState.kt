@@ -73,6 +73,10 @@ public class CallUiState(
         /** The speaking ring, from [setSpeech]: heard on this device, never
          *  told by a server (`docs/ux/group-call-grid.md` section 7.3). */
         val speaking: Boolean,
+        /** A shared screen's tile (ADR-0083), beside its sharer's own tile.
+         *  Never in [participants]: the screen adds it where tiles are laid
+         *  out ([withShareTile]). */
+        val isScreen: Boolean = false,
     )
 
     public sealed class CallPhase {
@@ -172,6 +176,47 @@ public class CallUiState(
 
     public fun setLayoutChoice(choice: GroupLayoutKind?) {
         _layoutChoice.value = choice
+    }
+
+    /**
+     * The call's current screen share (ADR-0083), or `null`. Written by the
+     * call adapters from the shared fold; on a one-to-one by [driveFrom].
+     */
+    private val _screenShare = MutableStateFlow<ScreenShareView?>(null)
+    public val screenShare: StateFlow<ScreenShareView?> = _screenShare.asStateFlow()
+
+    /** The layout choice from before the first share began, held while a
+     *  share is live ([shareLayoutTransition]). */
+    private var choiceBeforeShare: SavedChoice? = null
+
+    /** One announcement of a share starting or stopping, numbered so the
+     *  screen reads each exactly once (section 5.3). */
+    public data class ShareAnnouncementEvent(val serial: Long, val announcement: ScreenShareAnnouncement)
+
+    private val _shareAnnouncement = MutableStateFlow<ShareAnnouncementEvent?>(null)
+    public val shareAnnouncement: StateFlow<ShareAnnouncementEvent?> = _shareAnnouncement.asStateFlow()
+
+    /**
+     * The current share changed. A first share switches a group call to Focus
+     * and the end of the last one puts the layout back as it was before
+     * (`docs/ux/screen-share.md` section 5.2); a pin on a share tile that is
+     * no longer the share is cleared.
+     */
+    public fun setScreenShare(share: ScreenShareView?) {
+        val before = _screenShare.value
+        if (before == share) return
+        val layout = shareLayoutTransition(before, share, _layoutChoice.value, choiceBeforeShare)
+        choiceBeforeShare = layout.saved
+        _layoutChoice.value = layout.choice
+        val pinned = _pinnedId.value
+        if (pinned != null && isScreenShareTileId(pinned) && (share == null || pinned != screenShareTileId(share.peerId))) {
+            _pinnedId.value = null
+        }
+        _screenShare.value = share
+        screenShareAnnouncement(before, share)?.let { a ->
+            val serial = (_shareAnnouncement.value?.serial ?: 0L) + 1L
+            _shareAnnouncement.value = ShareAnnouncementEvent(serial, a)
+        }
     }
 
     /**
@@ -297,6 +342,24 @@ public class CallUiState(
      *  (`VideoGiven.kt`, ADR-0070 step 6), by roster participant id. A peer
      *  with no entry is given what is asked for. Empty with downlink control
      *  off, and when the call ends. */
+    /** The picture of a remote shared screen (ADR-0083), keyed on its
+     *  sharer's roster participant id. The share tile comes from
+     *  [screenShare]; this is only its picture, which may arrive before or
+     *  after the state that announces it. */
+    private val _remoteScreenVideoTracks = MutableStateFlow<Map<String, VideoTrack>>(emptyMap())
+    public val remoteScreenVideoTracks: StateFlow<Map<String, VideoTrack>> =
+        _remoteScreenVideoTracks.asStateFlow()
+
+    /** Set / remove the shared screen's picture of [participantId]. */
+    public fun setRemoteScreenVideoTrack(track: VideoTrack?, participantId: String) {
+        _remoteScreenVideoTracks.value =
+            if (track == null) {
+                _remoteScreenVideoTracks.value - participantId
+            } else {
+                _remoteScreenVideoTracks.value + (participantId to track)
+            }
+    }
+
     private val _remoteVideoGiven = MutableStateFlow<Map<String, TileVideoQuality>>(emptyMap())
     public val remoteVideoGiven: StateFlow<Map<String, TileVideoQuality>> =
         _remoteVideoGiven.asStateFlow()
@@ -396,6 +459,9 @@ public class CallUiState(
         }
         if (id in _remoteMiddleVideoTracks.value) {
             _remoteMiddleVideoTracks.value = _remoteMiddleVideoTracks.value - id
+        }
+        if (id in _remoteScreenVideoTracks.value) {
+            _remoteScreenVideoTracks.value = _remoteScreenVideoTracks.value - id
         }
         if (id in _remoteVideoGiven.value) {
             _remoteVideoGiven.value = _remoteVideoGiven.value - id
@@ -546,6 +612,7 @@ public class CallUiState(
     public fun clearRemoteCopyVideoTracks() {
         _remoteLightVideoTracks.value = emptyMap()
         _remoteMiddleVideoTracks.value = emptyMap()
+        _remoteScreenVideoTracks.value = emptyMap()
         _remoteVideoGiven.value = emptyMap()
         tileVideoQualityReporter = null
     }
@@ -639,6 +706,8 @@ public class CallUiState(
             launch { session.upBps.collect { rebuildFromSession(session) } }
             launch { session.videoPublishState.collect { rebuildFromSession(session) } }
             launch { session.cameraIsFrontFacing.collect { rebuildFromSession(session) } }
+            launch { session.screenShare.collect { rebuildFromSession(session) } }
+            launch { session.remoteScreenTrack.collect { rebuildFromSession(session) } }
         }
     }
 
@@ -683,7 +752,7 @@ public class CallUiState(
         if (connected || remoteTrack != null) {
             roster.add(
                 Participant(
-                    id = "remote",
+                    id = ONE_TO_ONE_REMOTE_ID,
                     displayName = remoteName,
                     isLocal = false,
                     micOn = true,
@@ -697,6 +766,10 @@ public class CallUiState(
         _cameraFrontFacing.value = session.cameraIsFrontFacing.value
         _localVideoTrack.value = session.localVideoTrack.value
         _remoteVideoTrack.value = remoteTrack
+        // ADR-0083 section 4 — the other person's share, its picture keyed on
+        // their roster id.
+        setRemoteScreenVideoTrack(session.remoteScreenTrack.value, ONE_TO_ONE_REMOTE_ID)
+        setScreenShare(session.screenShare.value)
         // G3-2-e2ee-active — pill reflects real SFrame keying; the
         // safety number (canonical hash of the same seed, set alongside
         // e2eeActive in setCallKey) is the out-of-band MITM code.
@@ -798,13 +871,23 @@ public class CallUiState(
         _remoteVideoTracks.value = emptyMap()
         _remoteLightVideoTracks.value = emptyMap()
         _remoteMiddleVideoTracks.value = emptyMap()
+        _remoteScreenVideoTracks.value = emptyMap()
         _remoteVideoGiven.value = emptyMap()
         tileVideoQualityReporter = null
         tileVideoQualityReports.clear()
+        // A share is per call.
+        _screenShare.value = null
+        choiceBeforeShare = null
+        _shareAnnouncement.value = null
         // ADR-0032 piece B2a — no camera-on in flight for a fresh call.
         _videoPublishState.value = VideoPublishState.Off
         // Every call starts on the front camera, so the self-view starts mirrored.
         _cameraFrontFacing.value = true
+    }
+
+    public companion object {
+        /** The roster id of the other person on a one-to-one ([driveFrom]). */
+        public const val ONE_TO_ONE_REMOTE_ID: String = "remote"
     }
 
     private fun patch(id: String, mutate: (Participant) -> Participant) {

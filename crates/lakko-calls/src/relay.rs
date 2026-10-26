@@ -15,7 +15,8 @@
 //! The roster leaf is account-bound (ADR-0050), so the binding
 //! `peer id -> person` stays spoof-proof, and the SFU never sees it: the
 //! announcement, and every other relay payload the clients agree on (today
-//! the camera on/off media state), is sealed under a key only members hold.
+//! the camera on/off media state and the ADR-0083 screen-share state), is
+//! sealed under a key only members hold.
 //!
 //! # The relay key
 //!
@@ -263,6 +264,9 @@ pub enum RelayPayload {
         /// Whether the sender's camera is on.
         camera_on: bool,
     },
+    /// A screen-share state (the whole plaintext; verify it with
+    /// [`crate::screen_share::verify_screen_share`], ADR-0083).
+    ScreenShare(Vec<u8>),
     /// Anything else: dropped by the caller.
     Unknown,
 }
@@ -274,6 +278,9 @@ pub enum RelayPayload {
 pub fn classify_relay_plaintext(plaintext: &[u8]) -> RelayPayload {
     if plaintext.starts_with(PEER_ANNOUNCEMENT_DOMAIN) {
         return RelayPayload::PeerAnnouncement(plaintext.to_vec());
+    }
+    if plaintext.starts_with(crate::screen_share::SCREEN_SHARE_DOMAIN) {
+        return RelayPayload::ScreenShare(plaintext.to_vec());
     }
     match lakko_contacts::media_state::try_unwrap_media_state(plaintext) {
         Ok(Some(state)) => RelayPayload::MediaState {
@@ -516,6 +523,19 @@ mod tests {
         assert_eq!(
             classify_relay_plaintext(&on),
             RelayPayload::MediaState { camera_on: true }
+        );
+        let share = crate::screen_share::compose_screen_share(
+            &alice,
+            &CALL,
+            "00ff",
+            1,
+            crate::screen_share::ShareStatus::Sharing,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            classify_relay_plaintext(&share),
+            RelayPayload::ScreenShare(share.clone())
         );
         assert_eq!(classify_relay_plaintext(b"junk"), RelayPayload::Unknown);
     }

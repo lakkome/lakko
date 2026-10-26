@@ -242,3 +242,43 @@ describe("callControls — Participants on a call that can invite (docs/ux/call-
     expect(control({ ...group, phase: "calling" }, "participants").disabled).toBe(false);
   });
 });
+
+describe("callControls — Share screen (docs/ux/screen-share.md section 1)", () => {
+  const can = { sharing: false, busy: false };
+
+  it("comes after Camera in a connected call, one-to-one and group", () => {
+    expect(ids({ screenShare: can })).toEqual(["mic", "camera", "screen", "settings", "end"]);
+    expect(ids({ surface: "group", othersPresent: true, screenShare: can })).toEqual([
+      "mic",
+      "camera",
+      "screen",
+      "participants",
+      "settings",
+      "end",
+    ]);
+  });
+
+  it("is absent where this device cannot send, and before the call connects", () => {
+    expect(ids({})).not.toContain("screen");
+    for (const phase of ["calling", "connecting", "reconnecting", "ended"] as const) {
+      expect(ids({ phase, screenShare: can })).not.toContain("screen");
+    }
+  });
+
+  it("is the loud state while sharing, and says Stop sharing", () => {
+    const off = control({ screenShare: can }, "screen");
+    expect(off.tone).toBe("outline");
+    expect(off.pressed).toBe(false);
+    expect(off.accessibleName).toBe("Share screen");
+    const on = control({ screenShare: { sharing: true, busy: false } }, "screen");
+    expect(on.tone).toBe("solid");
+    expect(on.pressed).toBe(true);
+    expect(on.accessibleName).toBe("Stop sharing");
+    // The word under the circle names the thing, never the state.
+    expect(on.label).toBe(off.label);
+  });
+
+  it("refuses a second press while the picker is open", () => {
+    expect(control({ screenShare: { sharing: false, busy: true } }, "screen").disabled).toBe(true);
+  });
+});

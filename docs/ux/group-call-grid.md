@@ -345,8 +345,8 @@ layout stays as it is.
 
 ### 6.3 Screen share (receiving)
 
-Sending a screen is still out of scope (section 12). What a receiver sees is
-designed here so the grid does not have to change again when sending lands.
+Sending is specified in [`screen-share.md`](screen-share.md), which also fixes
+one share at a time per call (2026-10-25). What a receiver sees:
 
 - A shared screen is **its own tile**, separate from the person's camera tile.
   The person stays in the grid or strip with their camera; the share is labelled
@@ -355,7 +355,8 @@ designed here so the grid does not have to change again when sending lands.
   person has pinned someone. A pin is an explicit choice and wins; in that case a
   chip on the stage says `Anna is sharing their screen` with a `View` button.
 - When the share stops, the layout goes back to what it was before it started.
-- Two shares at once: the newest on the stage, the other first in the strip.
+- One share at a time: a new share stops the one before it and takes its
+  place on the stage (`screen-share.md` section 4).
 - On the stage a share can be zoomed (pinch on touch, `+` / `-` on web) and
   panned; the zoom resets when it leaves the stage.
 
@@ -704,7 +705,7 @@ Platform idiom, and only this:
 
 ## 14. Out of scope
 
-Sending a screen share; a floating picture-in-picture window; muting someone
+A floating picture-in-picture window; muting someone
 else for everyone (a group-admin action, not a layout one); reactions and raised
 hands on tiles; captions; audio rooms with hundreds of listeners (a different
 product shape, ADR-0010 territory); virtual backgrounds.
@@ -718,9 +719,8 @@ product shape, ADR-0010 territory); virtual backgrounds.
    camera turns on. Worth it?
 3. **Hide self-view.** Should the person be able to take their own tile out of
    the grid (it is still sent)? Many people ask for it on long calls.
-4. **Share versus pin.** The spec lets a pin win over a new screen share, with a
-   `View` chip. The opposite (the share always takes the stage) is simpler and is
-   what the brief suggested.
+4. **Share versus pin.** Closed 2026-10-25: the pin wins and the share is offered
+   by a `View` chip (`screen-share.md`).
 5. **Maximum call size.** Is there a product cap on participants? The 50-person
    case is designed, but nothing states what the call server is meant to carry.
 6. **The stability numbers** (1.5 s onset, 10 s stay, 3 s between swaps, 3 s

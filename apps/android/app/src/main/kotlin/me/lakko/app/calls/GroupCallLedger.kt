@@ -191,6 +191,8 @@ internal fun callSignalingRoute(body: FfiCallSignalingBody): CallSignalingRoute 
     is FfiCallSignalingBody.Offer,
     is FfiCallSignalingBody.Answer,
     is FfiCallSignalingBody.IceCandidate,
+    // ADR-0083 section 4 — a one-to-one call's share state.
+    is FfiCallSignalingBody.ScreenShare,
     -> CallSignalingRoute.ONE_TO_ONE_ONLY
     is FfiCallSignalingBody.End -> CallSignalingRoute.BOTH
 }
@@ -207,6 +209,7 @@ internal fun callSignalingBodyKindName(body: FfiCallSignalingBody): String = whe
     is FfiCallSignalingBody.Answer -> "answer"
     is FfiCallSignalingBody.IceCandidate -> "ice"
     is FfiCallSignalingBody.End -> "end"
+    is FfiCallSignalingBody.ScreenShare -> "screen-share"
     is FfiCallSignalingBody.GroupStart -> "group-start"
     is FfiCallSignalingBody.GroupJoin -> "group-join"
     is FfiCallSignalingBody.GroupLeave -> "group-leave"
@@ -233,6 +236,7 @@ internal fun groupCallSignalOf(body: FfiCallSignalingBody): GroupCallSignal? = w
     is FfiCallSignalingBody.Offer,
     is FfiCallSignalingBody.Answer,
     is FfiCallSignalingBody.IceCandidate,
+    is FfiCallSignalingBody.ScreenShare,
     -> null
 }
 

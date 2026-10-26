@@ -66,6 +66,7 @@ enum CallSignalingWake {
         case groupStart
         case groupJoin
         case groupLeave
+        case screenShare
     }
 
     /// Leading wire tag of an embedded `CallSignalingPayload.body` oneof field
@@ -78,6 +79,7 @@ enum CallSignalingWake {
     ///   * field 14 (group_start) -> 0x72
     ///   * field 15 (group_join)  -> 0x7A
     ///   * field 16 (group_leave) -> 0x82 0x01 (tag 130, a two-byte varint)
+    ///   * field 17 (screen_share) -> 0x8A 0x01 (tag 138, ADR-0083)
     ///
     /// A chat envelope is JSON and starts with `{` (0x7B); every `lakko/...`
     /// service envelope starts with `l` (0x6C). Neither overlaps this set.
@@ -103,6 +105,10 @@ enum CallSignalingWake {
             guard bytes.count >= 2, bytes[bytes.startIndex + 1] == 0x01,
                   ChatClient.isFramedGroupCallBody(bytes, tagLength: 2) else { return nil }
             return .groupLeave
+        case 0x8A:
+            guard bytes.count >= 2, bytes[bytes.startIndex + 1] == 0x01,
+                  ChatClient.isFramedGroupCallBody(bytes, tagLength: 2) else { return nil }
+            return .screenShare
         default: return nil
         }
     }

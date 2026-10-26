@@ -5714,3 +5714,46 @@ runs these checks out of such a group, and refuses any membership operation
 on one if it were reached. It changes nothing for a PublisherGroup or a
 DeviceGroup. Invariants **#3** (a join condition; external review under G-39)
 and **#4** (refuse, never fall back); **#2** and **#5** untouched.
+
+
+## One screen share per call, named alike on every device (C-87)
+
+### C-87: every device that received the same share states names the same current share, and a device whose share is superseded stops it
+
+[ADR-0083](../adr/0083-screen-share.md).
+
+**The rule.** A call shows at most one screen share. A share is announced by a
+share state the sharer signs with its MLS leaf key (call id, peer id, `seq`,
+sharing or stopped, a sound flag). A start takes `seq` one above the highest it
+has seen; a stop carries the `seq` of the share it stops. Every device folds
+the states it accepted into the current share: the greatest `(seq,
+signer_key)` it has seen, unless that one was stopped; a state for a lower id
+changes nothing, so a superseded share is over for good. A device whose own
+share is superseded stops its capture and sends `stopped`.
+
+**Why it is indexed.** Each device hears two starts in its own order, so a rule
+that keeps the start heard last leaves two shares alive, or none, depending on
+who looks. The fold depends only on the set of states received, so two devices
+that received the same states agree whatever the order. The state is signed
+because it makes another device act: the SFU stamps the relay sender and could
+otherwise re-attribute one participant's sealed state to another.
+
+**Where it is enforced.** `crates/lakko-calls/src/screen_share.rs`:
+`compose_screen_share`, `decode_screen_share` (bounded, exact),
+`verify_screen_share` (call id, the peer id and leaf key the caller bound to
+the sender, roster membership, signature), and the fold `ScreenShareState`.
+Carried sealed on the SFU relay (`relay::classify_relay_plaintext` ->
+`RelayPayload::ScreenShare`) in a group call and as
+`CallSignalingPayload.screen_share = 17` in a one-to-one call. On UniFFI and
+wasm as `composeCallScreenShare`, `verifyCallScreenShare` and
+`CallScreenShareState`. Pinned by the proptest
+`the_current_share_does_not_depend_on_arrival_order`, the tie and
+supersede tests in `screen_share.rs`, and the fuzz target
+`screen_share_decode`. Host-tested 2026-10-25; not walked live, not deployed.
+
+**What this does NOT do.** It does not stop anyone from starting a share; there
+is no moderation. It does not hide that a share exists from the SFU, which
+sees one more opaque track. In a group call the share media is sealed with
+SFrame under stream indices 2 (picture) and 5 (sound); in a one-to-one call it
+travels as the camera does there. Invariants **#4** (a group share that cannot
+be sealed is not sent); **#2**, **#3** and **#5** untouched.

@@ -20,6 +20,7 @@ import uniffi.lakko_ffi_uniffi.SfuVideoGiven
 import uniffi.lakko_ffi_uniffi.SfuVideoWant
 import uniffi.lakko_ffi_uniffi.TileVideoQuality
 import uniffi.lakko_ffi_uniffi.composeMediaState
+import uniffi.lakko_ffi_uniffi.screenStreamSuffix
 import uniffi.lakko_ffi_uniffi.sfuDecodePayload
 
 /**
@@ -193,6 +194,10 @@ class SfuCallSession(
          *  asked for. Empty with downlink control off, and at teardown. */
         val onVideoGiven: (given: Map<String, TileVideoQuality>) -> Unit = {},
         val onServerError: (code: SfuErrorCode, detail: String) -> Unit = { _, _ -> },
+        /** The call's current screen share changed (ADR-0083): the share the
+         *  shared fold names now, or `null` when nobody shares. Only states
+         *  verified against the call's roster reach the fold. */
+        val onScreenShare: (share: ScreenShareView?) -> Unit = {},
     )
 
     class SfuCallException(message: String) : Exception(message)
@@ -247,6 +252,50 @@ class SfuCallSession(
 
     /** The periodic peer re-announcement. */
     private var announceJob: Job? = null
+
+    /**
+     * Each peer's leaf signature key, from its verified announcement (ADR-0078
+     * section 2): what a screen-share state from that peer must be signed by
+     * (ADR-0083), and what its share ends under when it leaves. Used on
+     * [scope] only.
+     */
+    private val peerSignerKeys = HashMap<String, ByteArray>()
+
+    /** The newest screen-share state of a peer not yet identified, verified
+     *  once its announcement is. One per peer; gone when the peer leaves. */
+    private val pendingShareStates = HashMap<String, ByteArray>()
+
+    /** The call's one screen-share fold (ADR-0083), made on the first state
+     *  that verifies. `null` without an announcer or an own key. Used on
+     *  [scope] only. */
+    private var screenShare: ScreenShareReceiver? = null
+
+    private fun screenShareReceiver(): ScreenShareReceiver? {
+        screenShare?.let { return it }
+        val ownKey = config.peerAnnouncer?.ownSignatureKey?.invoke() ?: return null
+        val fold = try {
+            NativeScreenShareFold(ownKey)
+        } catch (_: Throwable) {
+            return null
+        }
+        return ScreenShareReceiver(fold) { share -> callbacks.onScreenShare(share) }.also { screenShare = it }
+    }
+
+    /** A screen-share state relayed by [from]: verified against the roster
+     *  for the signer key [from]'s announcement named, then folded. Dropped
+     *  when [from] has not been identified or the state does not verify. */
+    private fun onScreenShareState(from: String, state: ByteArray) {
+        val announcer = config.peerAnnouncer ?: return
+        val signerKey = peerSignerKeys[from] ?: run {
+            // The sharer re-sends its state and its announcement to a newcomer
+            // together; the state may arrive first. The newest one per peer
+            // waits for the announcement ([pendingShareStates]).
+            pendingShareStates[from] = state
+            return
+        }
+        val verified = announcer.verifyScreenShare(from, signerKey, state) ?: return
+        screenShareReceiver()?.receive(verified)
+    }
 
     /**
      * This client's SFrame KID (MLS leaf). From [Config.localLeaf], or set by
@@ -619,6 +668,12 @@ class SfuCallSession(
             throw SfuCallException("SFrame native shim unavailable — refusing call (invariant #4)")
         }
         setState(State.CONNECTING)
+        // The share's stream id is read with a constant the host tests can
+        // reach; it must be the core's.
+        val coreScreenSuffix = runCatching { screenStreamSuffix() }.getOrNull()
+        if (coreScreenSuffix != null && coreScreenSuffix != SCREEN_STREAM_SUFFIX) {
+            android.util.Log.w(MEDIA_LOG_TAG, "screen stream suffix differs from the core's; shares will not render")
+        }
 
         val sig = SfuSignalingClient(
             baseUrl = config.sfuBaseUrl,
@@ -815,6 +870,11 @@ class SfuCallSession(
         announceJob?.cancel()
         announceJob = null
         relay.dispose()
+        // The share goes with the call.
+        screenShare?.close()
+        screenShare = null
+        peerSignerKeys.clear()
+        pendingShareStates.clear()
         stopMediaCounters()
         // What was asked of the SFU and what it said go with the call.
         wantsSender.reset()
@@ -1527,6 +1587,9 @@ class SfuCallSession(
                     // What the SFU gave of them goes with them: someone who
                     // later joins under the same id starts with nothing said.
                     if (givenBook.removePeer(peerId)) callbacks.onVideoGiven(givenBook.snapshot())
+                    // A peer that leaves ends its share (ADR-0083 section 2).
+                    pendingShareStates.remove(peerId)
+                    peerSignerKeys.remove(peerId)?.let { key -> screenShare?.participantLeft(key) }
                     onRosterChanged(joined = false)
                 }
                 callbacks.onPeerLeft(peerId)
@@ -1557,9 +1620,12 @@ class SfuCallSession(
                         is CallRelay.Opened.MediaState -> callbacks.onRemoteMediaState(from, opened.cameraOn)
                         is CallRelay.Opened.Announcement -> {
                             config.peerAnnouncer?.verify?.invoke(from, opened.bytes)?.let { identity ->
+                                bytesOfHex(identity.memberKeyHex)?.let { peerSignerKeys[from] = it }
                                 callbacks.onPeerIdentified(from, identity)
+                                pendingShareStates.remove(from)?.let { onScreenShareState(from, it) }
                             }
                         }
+                        is CallRelay.Opened.ScreenShare -> onScreenShareState(from, opened.state)
                         CallRelay.Opened.Unknown -> Unit
                         null -> callbacks.onSignalRelay(from, bytes)
                     }

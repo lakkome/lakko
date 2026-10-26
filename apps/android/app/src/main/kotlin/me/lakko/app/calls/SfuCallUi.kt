@@ -229,6 +229,9 @@ class SfuCallUi(
             // What the SFU says it gives of each person (`VideoGiven.kt`):
             // a tile shows the lower of that and what it asked for.
             onVideoGiven = { given -> applyVideoGiven(ui, given) },
+            // The call's current screen share (ADR-0083): its tile, the
+            // layout across it and the announcements follow it.
+            onScreenShare = { share -> ui.setScreenShare(share) },
             onServerError = { _, _ -> },
         )
         session = SfuCallSession(

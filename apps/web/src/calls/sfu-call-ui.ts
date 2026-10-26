@@ -48,6 +48,9 @@ import type { SfuPeerSnapshot } from "./sfu-signaling-client";
 import type { VideoQuality } from "./video-wants";
 import { splitStreamId, withLightStream, withoutLightStream } from "./light-stream";
 import { t } from "../l10n";
+import { GroupScreenShare } from "./group-screen-share";
+import { screenShareActions } from "./screen-share-store";
+import { SCREEN_SHARE_NOTICE_MS } from "./screen-share-capability";
 
 /** Options that shape the roster presentation. */
 export interface SfuCallUiOptions {
@@ -293,6 +296,28 @@ export function createSfuCallUi(
     });
   };
 
+  // The screen share (ADR-0083): its fold, the button, the received share's
+  // stream. Built before the session so every callback below can reach it;
+  // the session is read only when the share calls it.
+  const share = new GroupScreenShare({
+    announcer: config.peerAnnouncer,
+    session: {
+      sendSealedRelay: (plaintext) => session.sendSealedRelay(plaintext),
+      attachScreenShare: (capture) => session.attachScreenShare(capture),
+      detachScreenShare: () => session.detachScreenShare(),
+      getSelfPeerId: () => session.getSelfPeerId(),
+    },
+    nameOf: (personKeyB64) => nameOf(personKeyB64),
+    notice: (text) => callActions.showNotice(text, SCREEN_SHARE_NOTICE_MS),
+    store: screenShareActions,
+  });
+  // The fold is built from the core the session loaded at connect: by the
+  // Welcome it is there. Without it nothing is shared or folded.
+  const initShare = (): void => {
+    const wasm = session.loadedWasm?.();
+    if (wasm !== null && wasm !== undefined) share.init(wasm);
+  };
+
   const session = new SfuCallSession(config, {
     onStateChange: (state): void => {
       switch (state) {
@@ -309,9 +334,13 @@ export function createSfuCallUi(
             active: true,
             shortFingerprint: options.safetyNumber ?? null,
           });
+          initShare();
+          share.onConnected();
           break;
         case "failed":
         case "closed":
+          share.dispose();
+          screenShareActions.reset();
           callActions.setPhase({ kind: "ended", endedAt: Date.now() });
           break;
         case "idle":
@@ -320,6 +349,7 @@ export function createSfuCallUi(
       options.onSessionStateChange?.(state);
     },
     onWelcome: (selfPeerId, roster): void => {
+      initShare();
       peerPersons.clear();
       const remotes = roster
         .filter((p: SfuPeerSnapshot) => p.peer_id !== selfPeerId)
@@ -330,12 +360,14 @@ export function createSfuCallUi(
       callActions.setParticipants([localParticipant(), ...remotes]);
     },
     onPeerJoined: (peerId): void => {
+      share.onPeerJoined();
       peerPersons.set(peerParticipantId(peerId), null);
       callActions.participantJoined(remoteParticipant(nameOf(null), peerId));
     },
     onPeerIdentified: (peerId, identity): void => {
       // ADR-0078 section 2: the peer's sealed announcement verified against
       // a leaf of the call's group, so the tile names that person.
+      share.onPeerIdentified(peerId, identity.memberKeyHex);
       const id = peerParticipantId(peerId);
       if (!peerPersons.has(id)) return;
       if (peerPersons.get(id) === identity.personKeyB64) return;
@@ -348,13 +380,19 @@ export function createSfuCallUi(
       // the same id starts from a clean slate (join-race guard).
       lastKnownCameraOn.delete(id);
       peerPersons.delete(id);
+      share.onPeerLeft(peerId);
       // The companion and the middle track go with their peer.
       setRemoteLightStreams((prev) => withoutLightStream(prev, peerId));
       setRemoteMiddleStreams((prev) => withoutLightStream(prev, peerId));
       callActions.participantLeft(id);
     },
     onRemoteTrack: (rt): void => {
+      // A shared screen is not a participant (ADR-0083).
+      if (share.onRemoteTrack(rt.streamId, rt.track, rt.stream)) return;
       addStream(rt);
+    },
+    onRemoteScreenShareState: (peerId, state): void => {
+      share.onState(peerId, state);
     },
     onVideoGiven: (given): void => {
       setRemoteVideoGiven(given);
@@ -402,6 +440,8 @@ export function createSfuCallUi(
     videoPublishState,
     connect: (): Promise<void> => session.connect(),
     hangUp: (): void => {
+      share.dispose();
+      screenShareActions.reset();
       session.hangUp();
       peerPersons.clear();
       setRemoteStreams(new Map());
@@ -428,6 +468,7 @@ export function createSfuCallUi(
       for (const [id, person] of peerPersons) {
         callActions.setParticipantName(id, nameOf(person));
       }
+      share.refreshNames();
     },
   };
 }

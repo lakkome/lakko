@@ -145,6 +145,7 @@ public object AppCallHost {
         IncomingCallRinger.attach(applicationContext)
         instance.attachRinger(IncomingCallRinger)
         repository.oneToOneCallInbound = instance::deliver
+        repository.oneToOneScreenShareInbound = instance::deliverScreenShare
         repository.oneToOneMovedSink = instance::conversationMoved
         instance.callTarget = repository::oneToOneCallTargetFor
         // docs/ux/calls.md section 4.1.2 — the starter of the group call this
@@ -292,6 +293,10 @@ public class ChatRepositoryCallPort(
         applicationContext = applicationContext,
         callId = callId,
         onOutboundSignaling = outbound,
+        // ADR-0083 — the share fold's own key: this device's leaf key.
+        ownSignatureKey = repository.ownGroupCallMemberKey()?.let { b64 ->
+            runCatching { java.util.Base64.getDecoder().decode(b64) }.getOrNull()
+        },
     ).also { session ->
         // Without this the session resolves STUN-only ICE, and two peers that
         // cannot reach each other directly never connect. The credential is

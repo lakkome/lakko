@@ -224,8 +224,12 @@ round icon button that toggles on press.
 
 | Call kind | The row, left to right |
 |---|---|
-| One-to-one, voice or video | Microphone · Camera · Settings · End |
-| Group | Microphone · Camera · Participants · Settings · End |
+| One-to-one, voice or video | Microphone · Camera · Share screen · Settings · End |
+| Group | Microphone · Camera · Share screen · Participants · Settings · End |
+
+`Share screen` exists only where the device can send a screen: the web client
+in a desktop browser and the desktop client; never on iOS, Android or a phone
+browser ([`screen-share.md`](screen-share.md), 2026-10-25).
 
 The row was rebuilt on 2026-10-02 after a live group call showed seven circles
 wrapped into two rows on a phone. Speaker left the row (it is a setting, not
@@ -698,4 +702,4 @@ Group call redesign beyond the shared call screen and the tile rule of section
 picture of the other person is a separate decision, including the system one
 each platform offers), call recording, call links
 (they keep the behaviour of [ADR-0032](../adr/0032-multi-joiner-call-links.md)),
-screen sharing, and call history sync between devices.
+and call history sync between devices.

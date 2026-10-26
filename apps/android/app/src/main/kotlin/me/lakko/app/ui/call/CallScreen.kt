@@ -574,6 +574,9 @@ private fun InCallView(
     val videoPublishState by state.videoPublishState.collectAsState()
     val hasMultipleCameras by state.hasMultipleCameras.collectAsState()
     val frontFacing by state.cameraFrontFacing.collectAsState()
+    // ADR-0083 — the call's current screen share and the pictures of shares.
+    val screenShare by state.screenShare.collectAsState()
+    val screenTracks by state.remoteScreenVideoTracks.collectAsState()
     // docs/ux/calls.md section 5 — the digits are behind the chip, never on the
     // call. Closed on every new call because the state object is reset with the
     // screen, so a sheet can never open over a call it does not belong to.
@@ -618,6 +621,9 @@ private fun InCallView(
         remoteVideoPresent = soleRemote?.camOn == true && remoteVideoTrack != null,
         localVideoPresent = localVideoPresent,
         groupCall = groupCall,
+        // docs/ux/screen-share.md section 5.1 — the other person's share is
+        // the large picture, from its announcement on.
+        screenSharePresent = screenShare?.isOwn == false,
     )
     val group = stage == CallStage.GRID
     // docs/ux/calls.md section 4 — a group call is titled by the group, never
@@ -749,6 +755,38 @@ private fun InCallView(
                         scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
                     )
                 }
+                FloatingStatusHeader(
+                    state = state,
+                    phase = phase,
+                    name = displayName,
+                    e2ee = e2ee,
+                    onEncryptionChip = { encryptionSheetOpen = true },
+                    visible = controlsVisible,
+                    clockOrigin = clockOrigin,
+                    startInset = headerStartInset,
+                    modifier = Modifier.align(Alignment.TopCenter),
+                )
+            }
+            CallStage.SCREEN_SHARE -> {
+                // docs/ux/screen-share.md section 5.1: the share is the large
+                // picture, whole and zoomable; the other person's camera, or
+                // their initials, is the small tile in the other corner.
+                ScreenSharePicture(
+                    track = screenTracks[CallUiState.ONE_TO_ONE_REMOTE_ID],
+                    sharerName = displayName,
+                    zoomable = true,
+                    onTap = { controlsVisible = true },
+                    modifier = Modifier.fillMaxSize(),
+                )
+                OtherPersonPip(
+                    track = remoteVideoTrack.takeIf { soleRemote?.camOn == true },
+                    name = displayName,
+                    seed = seed,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .windowInsetsPadding(WindowInsets.safeDrawing)
+                        .padding(top = 110.dp, start = 16.dp),
+                )
                 FloatingStatusHeader(
                     state = state,
                     phase = phase,
@@ -935,6 +973,18 @@ private fun InCallView(
                     }
                 },
             )
+        }
+
+        // docs/ux/screen-share.md section 5.3 — `Anna started sharing their
+        // screen` and `Anna stopped sharing`, polite, once each.
+        val unnamed = LocalStrings.current["call.participant.unnamed"]
+        ScreenShareAnnouncer(state) { peerId ->
+            if (groupCall) {
+                participants.firstOrNull { it.id == me.lakko.app.calls.remoteParticipantId(peerId) }
+                    ?.displayName?.takeIf { it.isNotEmpty() } ?: unnamed
+            } else {
+                displayName
+            }
         }
 
         // Right-edge drawer (group calls).
@@ -1201,6 +1251,42 @@ private fun FloatingStatusHeader(
  * corner, draggable, about a quarter of the width, carrying the flip-camera
  * button of section 4.1 "where the thing it changes is visible".
  */
+/**
+ * The other person's small tile while their share is the large picture
+ * (`docs/ux/screen-share.md` section 5.1): their camera, never mirrored, or
+ * their initials when it is off.
+ */
+@Composable
+private fun OtherPersonPip(
+    track: VideoTrack?,
+    name: String,
+    seed: String,
+    modifier: Modifier = Modifier,
+) {
+    val egl = remember { WebRtcPeerConnection.sharedEglContext() }
+    val tint = remember(seed) { avatarTintFor(seed, dark = true) }
+    Box(
+        modifier = modifier
+            .size(width = 104.dp, height = 152.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(tint.background)
+            .clearAndSetSemantics { contentDescription = name },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (track != null && egl != null) {
+            LocalVideoPreviewView(
+                track = track,
+                eglContext = egl,
+                modifier = Modifier.fillMaxSize(),
+                mirrored = false,
+                scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
+            )
+        } else {
+            LakkoAvatar(name = name, seed = seed, size = 56.dp)
+        }
+    }
+}
+
 @Composable
 private fun SelfViewPip(
     track: VideoTrack?,

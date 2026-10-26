@@ -94,6 +94,9 @@ enum AvSlot: String, Equatable, Hashable, CaseIterable {
             case .main: return .main
             case .middle: return .middle
             case .light: return .light
+            // A shared screen is not a picture of the person: the rule that
+            // keeps their sound and their camera together leaves it alone.
+            case .screen: return nil
             }
         default:
             return nil

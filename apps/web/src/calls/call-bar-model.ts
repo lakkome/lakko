@@ -157,6 +157,9 @@ export interface CallBarStatusInput {
   /** When media started flowing, or `null` before it has. */
   readonly connectedAtMs: number | null;
   readonly nowMs: number;
+  /** This device is sharing its screen (`docs/ux/screen-share.md` section
+   *  3): the share outranks the running time, never `Reconnecting...`. */
+  readonly sharingScreen?: boolean;
 }
 
 /** One line, and what a screen reader reads instead of it. */
@@ -197,6 +200,10 @@ export function callBarStatus(
     case "reconnecting":
       return { text: t("call.status.reconnecting"), spoken: t("call.status.reconnecting_spoken") };
     case "elapsed": {
+      if (input.sharingScreen === true) {
+        const sharing = t("call.screen_share.bar_status");
+        return { text: sharing, spoken: sharing };
+      }
       const since = input.connectedAtMs;
       const ms = rules.callBarElapsedMs(
         input.phase,

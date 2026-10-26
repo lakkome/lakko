@@ -93,6 +93,11 @@ struct CallSignalingRoute: Equatable {
                 groupSignal: .leave(callId: callId, leafIndex: leafIndex),
                 forwardToOneToOne: false
             )
+        case .screenShare:
+            // ADR-0083 section 4: a one-to-one share state. It reaches the 1x1
+            // side only after `ChatRepository.routeCallSignaling` verified it
+            // against the row's MLS sender.
+            return CallSignalingRoute(groupSignal: nil, forwardToOneToOne: true)
         }
     }
 }

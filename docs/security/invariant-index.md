@@ -13,10 +13,10 @@ section that describes it.
 | Class | Count | Range | Source file |
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 85  | C-1..C-80, C-82..C-86  | [`calls.md`](./calls.md) |
+| **C-** | 86  | C-1..C-80, C-82..C-87  | [`calls.md`](./calls.md) |
 | **T-** | 16  | T-1..T-16  | [`transport.md`](./transport.md) |
 | **G-** | 52  | G-1..G-52 | [`known-gaps.md`](./known-gaps.md) â open / deferred |
-| Total invariants  | 107 | (I + C + T) | live properties |
+| Total invariants  | 108 | (I + C + T) | live properties |
 | Total open gaps   | 23  | (G)         | tracked + scoped |
 
 **Note on the `G-` counts.** These two rows had drifted badly and were corrected
@@ -106,7 +106,7 @@ in `crates/lakko-mls/`.
 | I-7 | Opening a `SealedBundle` with an unknown `algorithm` discriminator is rejected before AEAD-open is attempted | Forward-compat ratchet |
 | I-8 | `create_devicegroup_message` round-trips through `parse_devicegroup_payload` losslessly for every typed body variant | Wire-format byte-stability |
 
-## Call-side invariants (C-1..C-86)
+## Call-side invariants (C-1..C-87)
 
 Source: [`calls.md`](./calls.md). The `C-` class is the
 catch-all for "everything the SFU / channels / storage /
@@ -360,6 +360,12 @@ store gate and persist-before-publish rules).
 | ID   | Title |
 |---|---|
 | C-85 | **Under the ADR-0015 attested-removal policy a DeviceGroup removal merges only when an attestation covers it or when the removed leaf's own key signed a proof naming the epoch the commit leaves and a KeyPackage the same commit adds** ([ADR-0081](../adr/0081-devicegroup-commits-cannot-strand.md) "Amendment (2026-10-19)", amending [ADR-0015](../adr/0015-device-removal-authorization.md); built 2026-10-19 in `lakko-mls`, the pairing proto, both FFI surfaces and web / iOS / Android; host-tested, not walked live, not deployed). The proof (`lakko-mls` `self_removal.rs`, 137 bytes) signs `"lakko/devicegroup/self-removal/v1\0" ‖ group_id_len ‖ group_id ‖ epoch ‖ removed_pubkey ‖ key_package_ref`; `process_incoming_verifying_removals` tries every entry of the envelope's removal-authorisation slot as an attestation and as a proof (different lengths and domains), and a proof covers only its own leaf, its own group, its own epoch (so a used or stale proof covers nothing: the replacement keeps the leaf key, and without the epoch a member could later remove the rejoined device by re-adding the stale KeyPackage) and a KeyPackage the commit adds; the device reads the epoch with a knock probe. The rejoin knock carries it (`PairingQr` field 16), the sibling verifies it before building (`deviceGroupSelfRemovalCovers`) and commits one remove-and-add (`DeviceGroup::replace_device_at`) through the DeviceGroup outbox. Pinned by the self-removal tests in `crates/lakko-mls/src/device_group.rs` (only with the named add; never a plain removal; another KeyPackage, epoch, leaf, group or signer refused; a used proof replayed with the same KeyPackage refused; an attestation still works; policy off unchanged; a tampered proof covers nothing) and fuzz `self_removal_proof_decode`. C-81 is free but unused in every document and the history; this takes C-85 to avoid a number another branch may hold. **Does NOT** let anyone remove another device, nor readmit a device that no longer holds its old leaf key (it is only added; the old leaf waits for the passkey flow). Invariants **#3** / **#4**. Full entry: [`calls.md` C-85](./calls.md). |
+
+### C-87 — One screen share per call, named alike on every device (ADR-0083)
+
+| ID   | Title |
+|---|---|
+| C-87 | **Every device in a call that received the same signed share states names the same current share, and a device whose share is superseded stops it** ([ADR-0083](../adr/0083-screen-share.md); built 2026-10-25 in `lakko-calls` and both FFI surfaces; host-tested, not walked live, not deployed). A share state is signed by the sharer's MLS leaf key over call id, peer id, `seq`, status and a sound flag; a start takes `seq = max seen + 1`, a stop names its share's `seq`, and the fold `ScreenShareState` keeps the greatest `(seq, signer_key)` seen unless it was stopped, ignoring every lower id. Carried sealed on the SFU relay in a group call and as `CallSignalingPayload.screen_share = 17` in a one-to-one call. Pinned by the proptest `the_current_share_does_not_depend_on_arrival_order`, the tie and supersede tests in `screen_share.rs` and fuzz `screen_share_decode`. **Does NOT** moderate who may share, nor hide a share's existence from the SFU. Invariants **#4**. Full entry: [`calls.md` C-87](./calls.md). |
 
 ### C-86 — A conversation is joined only from a Welcome with a role table and a kind (ADR-0081 second amendment)
 

@@ -489,6 +489,7 @@ version = "0.0.0"
 dependencies = [
  "icu_locale_core",
  "icu_plurals",
+ "icu_provider",
  "lakko-crypto",
  "serde",
  "serde_json",

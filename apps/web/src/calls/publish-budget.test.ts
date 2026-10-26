@@ -20,6 +20,7 @@ import {
   readEncodingCeiling,
   readPublishBudgetFrame,
   sameBudget,
+  screenSenderCeiling,
   SenderCeiling,
   senderCeiling,
   type CeilingSender,
@@ -49,10 +50,32 @@ describe("reading a publish-budget frame", () => {
     expect(readPublishBudgetFrame(parser(new Error("not a publish-budget frame")), "x")).toBeNull();
   });
 
-  it("is null for anything but exactly two ceilings within the protocol's bounds", () => {
+  it("reads a third ceiling as the screen sender's (ADR-0083)", () => {
+    expect(readPublishBudgetFrame(parser([900, 500, 1500]), "")).toEqual({
+      mainKbps: 900,
+      middleKbps: 500,
+      screenKbps: 1500,
+    });
+    expect(readPublishBudgetFrame(parser([900, 500, 0]), "")).toBeNull();
+    expect(readPublishBudgetFrame(parser([900, 500, MAX_PUBLISH_BUDGET_KBPS + 1]), "")).toBeNull();
+  });
+
+  it("gives the screen sender its ceiling only while the frame names one", () => {
+    expect(screenSenderCeiling(null)).toBeNull();
+    expect(screenSenderCeiling({ mainKbps: 900, middleKbps: 500 })).toBeNull();
+    expect(screenSenderCeiling({ mainKbps: 900, middleKbps: 500, screenKbps: 1500 })).toBe(1_500_000);
+    expect(
+      describePublishBudgetChange(
+        { mainKbps: 900, middleKbps: 500 },
+        { mainKbps: 900, middleKbps: 500, screenKbps: 1500 },
+      ),
+    ).toBe("call publish budget main=900 middle=500 screen=1500");
+  });
+
+  it("is null for anything but two or three ceilings within the protocol's bounds", () => {
     expect(readPublishBudgetFrame(parser([]), "")).toBeNull();
     expect(readPublishBudgetFrame(parser([900]), "")).toBeNull();
-    expect(readPublishBudgetFrame(parser([900, 500, 150]), "")).toBeNull();
+    expect(readPublishBudgetFrame(parser([900, 500, 150, 100]), "")).toBeNull();
     expect(readPublishBudgetFrame(parser([0, 500]), "")).toBeNull();
     expect(readPublishBudgetFrame(parser([900, 0]), "")).toBeNull();
     expect(readPublishBudgetFrame(parser([MAX_PUBLISH_BUDGET_KBPS + 1, 500]), "")).toBeNull();
