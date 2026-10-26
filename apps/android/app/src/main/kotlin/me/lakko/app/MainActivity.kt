@@ -1988,7 +1988,6 @@ private fun SessionRoot(
                         // Only the plain lookup row (no people search wired)
                         // reaches this; the people search sends the request
                         // from its own row (who-can-find-me.md section 6.1).
-                        onFoundPerson = { _ -> navController.navigateToTab(Routes.CONTACTS) },
                         channels = channelsState,
                         deviceGroupSync = deviceGroupSync,
                         // ADR-0079 — the people added through their invite

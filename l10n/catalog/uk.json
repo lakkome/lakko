@@ -3430,14 +3430,6 @@
       "text": "Розмов поки немає",
       "status": "machine"
     },
-    "chats.lookup.action": {
-      "text": "Знайти {name}",
-      "status": "machine"
-    },
-    "chats.lookup.nothing": {
-      "text": "За запитом {name} нічого не знайдено.",
-      "status": "machine"
-    },
     "chats.lookup.unreachable": {
       "text": "Не вдалося виконати пошук. Перевірте з’єднання та спробуйте ще раз.",
       "status": "machine"

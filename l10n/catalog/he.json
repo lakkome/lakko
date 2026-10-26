@@ -3430,14 +3430,6 @@
       "text": "אין עדיין צ׳אטים",
       "status": "machine"
     },
-    "chats.lookup.action": {
-      "text": "חיפוש {name}",
-      "status": "machine"
-    },
-    "chats.lookup.nothing": {
-      "text": "לא נמצאו תוצאות עבור {name}.",
-      "status": "machine"
-    },
     "chats.lookup.unreachable": {
       "text": "לא ניתן היה לחפש. בדקו את החיבור ונסו שוב.",
       "status": "machine"

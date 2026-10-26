@@ -96,19 +96,13 @@ import me.lakko.app.chat.ChatThread
 import me.lakko.app.chat.ConversationListRow
 import me.lakko.app.chat.ConversationRowKind
 import me.lakko.app.chat.Direction
-import me.lakko.app.chat.FoundByName
-import me.lakko.app.chat.NameLookups
 import me.lakko.app.chat.conversationRowMatchesQuery
-import me.lakko.app.chat.findByName
-import me.lakko.app.chat.findByNameMessage
-import me.lakko.app.chat.findByNameRowLabel
 import me.lakko.app.chat.orderConversationRows
 import me.lakko.app.chat.showsEmptyConversationState
 import me.lakko.app.chat.toRowKind
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.devices.sync.FlagsState
 import me.lakko.app.devices.sync.ReadCursorState
-import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.Localization
 import me.lakko.app.l10n.Strings
@@ -155,8 +149,6 @@ public fun ChatListScreen(
     onCreateChannel: () -> Unit,
     /** A looked-up channel handle: its subscribe page. */
     onSubscribeToChannel: (channelId: String, handle: String) -> Unit,
-    /** A looked-up username: Contacts, which owns the request flow. */
-    onFoundPerson: (username: String) -> Unit,
     modifier: Modifier = Modifier,
     channels: ChannelsUiState? = null,
     deviceGroupSync: DeviceGroupSyncRepository? = null,
@@ -279,16 +271,6 @@ public fun ChatListScreen(
         }
     }
 
-    // `docs/ux/navigation.md` section 4.3 — ONE network lookup row, offered
-    // when nothing local matched and the text could be a name. It asks both
-    // namespaces because the person typing does not know which one holds the
-    // name they were given.
-    var lookupBusy by remember { mutableStateOf(false) }
-    var lookupNote by remember { mutableStateOf<UiText?>(null) }
-    val lookupOffered = remember(visible, query) {
-        visible.isEmpty() && query.isNotBlank() && looksLikeANameSafely(query)
-    }
-
     var deletingFolder by remember { mutableStateOf<ChatFolder?>(null) }
 
     // One set of row handlers for every tab; [folder] is the tab the row sits
@@ -363,10 +345,7 @@ public fun ChatListScreen(
             Column(modifier = Modifier.fillMaxSize()) {
                 SearchField(
                     query = query,
-                    onQueryChange = {
-                        query = it
-                        lookupNote = null
-                    },
+                    onQueryChange = { query = it },
                 )
                 // ADR-0050 / docs/ux/second-device.md section 2: one label while
                 // this device is still being admitted to the account's chats.
@@ -433,38 +412,7 @@ public fun ChatListScreen(
                             },
                         )
                     }
-                    searching && visible.isEmpty() -> NoMatchPanel(
-                        offerLookup = lookupOffered,
-                        label = findByNameRowLabelSafely(query),
-                        busy = lookupBusy,
-                        note = lookupNote,
-                        onLookUp = {
-                            if (!lookupBusy) {
-                                lookupBusy = true
-                                lookupNote = null
-                                val typed = query
-                                scope.launch {
-                                    val found = lookUpName(typed)
-                                    lookupBusy = false
-                                    when (found) {
-                                        is FoundByName.Channel -> {
-                                            query = ""
-                                            onSubscribeToChannel(
-                                                found.channelIdHex,
-                                                found.handle,
-                                            )
-                                        }
-                                        is FoundByName.Person -> {
-                                            query = ""
-                                            onFoundPerson(found.username)
-                                        }
-                                        else -> lookupNote =
-                                            findByNameMessageSafely(found, typed)
-                                    }
-                                }
-                            }
-                        },
-                    )
+                    searching && visible.isEmpty() -> NoMatchPanel()
                     searching || !showBar -> ConversationList(
                         rows = visible,
                         folder = null,
@@ -860,63 +808,6 @@ private fun toggleFlag(
             android.util.Log.w("ChatListScreen", "setFlags failed", cause)
         }
     }
-}
-
-/**
- * Ask both discovery namespaces for one typed name.
- *
- * The client is built and closed per lookup because a lookup is a rare,
- * user-initiated act, not a hot path. The decision itself is
- * [me.lakko.app.chat.findByName], which is pure and tested; this only supplies
- * the two network calls it takes as an argument.
- */
-private suspend fun lookUpName(typed: String): FoundByName = try {
-    DiscoveryClient().use { client ->
-        findByName(
-            typed = typed,
-            lookups = object : NameLookups {
-                override suspend fun channel(handle: String): String? =
-                    client.lookupChannel(handle)
-
-                override suspend fun person(username: String): String? {
-                    val found = client.lookup(username)
-                    return if (found.account == null) null else found.normalisedUsername
-                }
-            },
-        )
-    }
-} catch (cancelled: kotlinx.coroutines.CancellationException) {
-    throw cancelled
-} catch (cause: Throwable) {
-    android.util.Log.w("ChatListScreen", "the name lookup could not be started", cause)
-    FoundByName.Unreachable
-}
-
-/**
- * The shared name gate, degrading to "not a name" when the native library is
- * not there.
- *
- * Failing shut is the honest direction: the gate exists so a name the blinder
- * would refuse never costs a lookup token, and offering a lookup we cannot
- * even check the shape of would spend one to be told no.
- */
-private fun looksLikeANameSafely(typed: String): Boolean = try {
-    uniffi.lakko_ffi_uniffi.looksLikeAName(typed)
-} catch (cause: Throwable) {
-    android.util.Log.w("ChatListScreen", "the name rule could not be read", cause)
-    false
-}
-
-private fun findByNameRowLabelSafely(typed: String): UiText = try {
-    findByNameRowLabel(typed)
-} catch (_: Throwable) {
-    UiText("chats.lookup.action", texts = mapOf("name" to typed.trim()))
-}
-
-private fun findByNameMessageSafely(found: FoundByName, typed: String): UiText? = try {
-    findByNameMessage(found, typed)
-} catch (_: Throwable) {
-    UiText("chats.lookup.unreachable")
 }
 
 /**
@@ -1519,49 +1410,19 @@ private fun EmptyPanel(onStart: () -> Unit) {
     }
 }
 
-/**
- * Nothing on this device matched, plus the ONE network lookup row when the text
- * could be a name.
- *
- * One row for the whole name, never a list of partial matches: discovery
- * evaluates a blinded name and answers only "does this exact name exist", so a
- * prefix search would be the server learning the prefix.
- */
+/** Nothing local matched and no people search is wired: say so. */
 @Composable
-private fun NoMatchPanel(
-    offerLookup: Boolean,
-    label: UiText,
-    busy: Boolean,
-    note: UiText?,
-    onLookUp: () -> Unit,
-) {
+private fun NoMatchPanel() {
     Box(
         modifier = Modifier
             .fillMaxSize()
             .padding(24.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text(
-                text = t("chats.search.no_results"),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (offerLookup) {
-                Button(onClick = onLookUp, enabled = !busy) {
-                    Text(if (busy) t("common.looking_up") else label.text())
-                }
-            }
-            if (note != null) {
-                Text(
-                    text = note.text(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
+        Text(
+            text = t("chats.search.no_results"),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }

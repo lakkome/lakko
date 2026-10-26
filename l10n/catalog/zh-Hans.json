@@ -3430,14 +3430,6 @@
       "text": "还没有对话",
       "status": "machine"
     },
-    "chats.lookup.action": {
-      "text": "查找 {name}",
-      "status": "machine"
-    },
-    "chats.lookup.nothing": {
-      "text": "未找到 {name}。",
-      "status": "machine"
-    },
     "chats.lookup.unreachable": {
       "text": "无法查找。请检查网络连接后重试。",
       "status": "machine"

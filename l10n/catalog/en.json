@@ -3501,14 +3501,6 @@
       "text": "No conversations yet",
       "comment": "Conversation list with nothing in it."
     },
-    "chats.lookup.action": {
-      "text": "Look up {name}",
-      "comment": "Button under a search with no local match: look the exact name up on the server. {name} is the typed name with an @ in front."
-    },
-    "chats.lookup.nothing": {
-      "text": "Nothing found for {name}.",
-      "comment": "Search in the chat list found no person or channel with this exact name; {name} is the name as typed, with an @ in front."
-    },
     "chats.lookup.unreachable": {
       "text": "Could not look that up. Check your connection and try again.",
       "comment": "Search in the chat list could not reach the server."

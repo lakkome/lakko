@@ -3430,14 +3430,6 @@
       "text": "अभी कोई बातचीत नहीं है",
       "status": "machine"
     },
-    "chats.lookup.action": {
-      "text": "{name} खोजें",
-      "status": "machine"
-    },
-    "chats.lookup.nothing": {
-      "text": "{name} के लिए कुछ नहीं मिला।",
-      "status": "machine"
-    },
     "chats.lookup.unreachable": {
       "text": "खोज नहीं हो सकी। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
       "status": "machine"

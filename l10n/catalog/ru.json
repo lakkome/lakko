@@ -3442,14 +3442,6 @@
       "text": "Разговоров пока нет",
       "status": "machine"
     },
-    "chats.lookup.action": {
-      "text": "Найти {name}",
-      "status": "machine"
-    },
-    "chats.lookup.nothing": {
-      "text": "По запросу {name} ничего не найдено.",
-      "status": "machine"
-    },
     "chats.lookup.unreachable": {
       "text": "Не удалось выполнить поиск. Проверьте подключение и попробуйте ещё раз.",
       "status": "machine"

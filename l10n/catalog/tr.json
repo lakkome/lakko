@@ -3430,14 +3430,6 @@
       "text": "Henüz sohbet yok",
       "status": "machine"
     },
-    "chats.lookup.action": {
-      "text": "Ara: {name}",
-      "status": "machine"
-    },
-    "chats.lookup.nothing": {
-      "text": "Bulunamadı: {name}.",
-      "status": "machine"
-    },
     "chats.lookup.unreachable": {
       "text": "Arama yapılamadı. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"

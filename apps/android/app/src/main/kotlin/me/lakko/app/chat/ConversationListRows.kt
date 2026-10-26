@@ -121,8 +121,8 @@ public fun orderConversationRows(
  *
  * Local and loose, over titles and previews this device already holds — which
  * is the half of `docs/ux/navigation.md` section 4 that may be fuzzy at all.
- * The network lookup next to it can only ever be exact, and lives in
- * [findByName].
+ * The network half is the people search (`docs/ux/who-can-find-me.md`
+ * section 6.1).
  */
 public fun conversationRowMatchesQuery(
     query: String,

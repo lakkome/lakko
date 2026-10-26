@@ -3430,14 +3430,6 @@
       "text": "Aún no hay conversaciones",
       "status": "machine"
     },
-    "chats.lookup.action": {
-      "text": "Buscar {name}",
-      "status": "machine"
-    },
-    "chats.lookup.nothing": {
-      "text": "No se encontró nada para {name}.",
-      "status": "machine"
-    },
     "chats.lookup.unreachable": {
       "text": "No se pudo buscar. Revisa tu conexión e inténtalo de nuevo.",
       "status": "machine"
