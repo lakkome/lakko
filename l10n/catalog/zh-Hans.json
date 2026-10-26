@@ -3842,40 +3842,8 @@
       "text": "此请求来自旧版 Lakko。请让对方更新后重新发送。",
       "status": "machine"
     },
-    "contacts.add.by_username": {
-      "text": "按用户名添加",
-      "status": "machine"
-    },
-    "contacts.add.intro_label": {
-      "text": "留言（可选）",
-      "status": "machine"
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "你好，我是会议上认识的 Alice。",
-      "status": "machine"
-    },
-    "contacts.add.send": {
-      "text": "发送",
-      "status": "machine"
-    },
     "contacts.add.share_invite": {
       "text": "分享邀请链接",
-      "status": "machine"
-    },
-    "contacts.add.subtitle": {
-      "text": "请求均为端到端加密。Lakko 的服务器无法读取。",
-      "status": "machine"
-    },
-    "contacts.add.title": {
-      "text": "添加联系人",
-      "status": "machine"
-    },
-    "contacts.add.username_label": {
-      "text": "用户名",
-      "status": "machine"
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
       "status": "machine"
     },
     "contacts.detail.actions": {
@@ -3946,12 +3914,8 @@
       "text": "添加",
       "status": "machine"
     },
-    "contacts.list.empty.action": {
-      "text": "添加联系人",
-      "status": "machine"
-    },
     "contacts.list.empty.body": {
-      "text": "通过用户名添加联系人，或分享你的邀请链接。",
+      "text": "在上方的搜索框中按名字或用户名查找某人，或分享你的邀请链接。",
       "status": "machine"
     },
     "contacts.list.empty.title": {
@@ -4096,10 +4060,6 @@
     },
     "contacts.safety.title": {
       "text": "核对安全码",
-      "status": "machine"
-    },
-    "contacts.send.done": {
-      "text": "已向 {name} 发送请求。对方接受前，它会显示在“已发送”中。",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -7318,10 +7278,6 @@
       "text": "添加联系人",
       "status": "machine"
     },
-    "search.people.add_contact_title": {
-      "text": "添加 {name}",
-      "status": "machine"
-    },
     "search.people.channel_result": {
       "text": "频道 {handle}",
       "status": "machine"
@@ -7342,16 +7298,8 @@
       "text": "无法发送请求。对方可能已更改谁可以找到他们。",
       "status": "machine"
     },
-    "search.people.search": {
-      "text": "搜索用户",
-      "status": "machine"
-    },
     "search.people.searching_a11y": {
       "text": "正在搜索",
-      "status": "machine"
-    },
-    "search.people.send_request": {
-      "text": "发送请求",
       "status": "machine"
     },
     "settings.about.lede_web": {

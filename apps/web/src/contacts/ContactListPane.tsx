@@ -257,10 +257,10 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
               <Icon name="contacts" size={40} strokeWidth={1.4} />
               <strong>{t("contacts.list.empty.title")}</strong>
               <span>{t("contacts.list.empty.body")}</span>
-              {/* Adding someone is searching for them: the button takes the
-                  person to the field (UX 6.1). */}
-              <button type="button" class="primary" onClick={() => searchInput?.focus()}>
-                {t("contacts.list.empty.action")}
+              {/* Finding someone is the search field above (UX who-can-find-me
+                  6.1); the button is the other way in, the invite link. */}
+              <button type="button" class="primary" onClick={() => props.onAdd("invite")}>
+                {t("contacts.add.share_invite")}
               </button>
             </div>
           }

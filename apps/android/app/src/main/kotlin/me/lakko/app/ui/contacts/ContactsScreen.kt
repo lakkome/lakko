@@ -226,7 +226,7 @@ public fun ContactsScreen(
                 actions = {
                     Box {
                         IconButton(onClick = { menuOpen = true }) {
-                            Icon(Icons.Filled.PersonAdd, contentDescription = t("contacts.list.empty.action"))
+                            Icon(Icons.Filled.PersonAdd, contentDescription = t("contacts.list.add"))
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                             DropdownMenuItem(
@@ -585,7 +585,7 @@ private fun EmptyState(onAdd: () -> Unit) {
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
         )
         Spacer(Modifier.height(12.dp))
-        Button(onClick = onAdd) { Text(t("contacts.list.empty.action")) }
+        Button(onClick = onAdd) { Text(t("contacts.add.share_invite")) }
     }
 }
 

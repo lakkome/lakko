@@ -3842,40 +3842,8 @@
       "text": "यह अनुरोध Lakko के पुराने वर्ज़न से आया है। उनसे ऐप अपडेट करके फिर से भेजने को कहें।",
       "status": "machine"
     },
-    "contacts.add.by_username": {
-      "text": "यूज़रनेम से जोड़ें",
-      "status": "machine"
-    },
-    "contacts.add.intro_label": {
-      "text": "मैसेज (वैकल्पिक)",
-      "status": "machine"
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "नमस्ते, मैं कॉन्फ़्रेंस वाली प्रिया हूँ।",
-      "status": "machine"
-    },
-    "contacts.add.send": {
-      "text": "भेजें",
-      "status": "machine"
-    },
     "contacts.add.share_invite": {
       "text": "इनवाइट लिंक शेयर करें",
-      "status": "machine"
-    },
-    "contacts.add.subtitle": {
-      "text": "अनुरोध एंड-टू-एंड एन्क्रिप्टेड होते हैं। Lakko के सर्वर इन्हें नहीं पढ़ सकते।",
-      "status": "machine"
-    },
-    "contacts.add.title": {
-      "text": "संपर्क जोड़ें",
-      "status": "machine"
-    },
-    "contacts.add.username_label": {
-      "text": "यूज़रनेम",
-      "status": "machine"
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
       "status": "machine"
     },
     "contacts.detail.actions": {
@@ -3946,12 +3914,8 @@
       "text": "जोड़ें",
       "status": "machine"
     },
-    "contacts.list.empty.action": {
-      "text": "संपर्क जोड़ें",
-      "status": "machine"
-    },
     "contacts.list.empty.body": {
-      "text": "किसी को यूज़रनेम से जोड़ें, या अपना इनवाइट लिंक शेयर करें।",
+      "text": "ऊपर दिए खोज बॉक्स में नाम या उपयोगकर्ता नाम से किसी को खोजें, या अपना आमंत्रण लिंक साझा करें।",
       "status": "machine"
     },
     "contacts.list.empty.title": {
@@ -4096,10 +4060,6 @@
     },
     "contacts.safety.title": {
       "text": "सुरक्षा नंबर की पुष्टि करें",
-      "status": "machine"
-    },
-    "contacts.send.done": {
-      "text": "{name} को अनुरोध भेजा गया। उनके स्वीकार करने तक यह \"भेजे गए\" में रहेगा।",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -7318,10 +7278,6 @@
       "text": "संपर्क जोड़ें",
       "status": "machine"
     },
-    "search.people.add_contact_title": {
-      "text": "{name} को जोड़ें",
-      "status": "machine"
-    },
     "search.people.channel_result": {
       "text": "चैनल {handle}",
       "status": "machine"
@@ -7342,16 +7298,8 @@
       "text": "अनुरोध नहीं भेजा जा सका। हो सकता है उन्होंने बदल दिया हो कि उन्हें कौन ढूँढ सकता है।",
       "status": "machine"
     },
-    "search.people.search": {
-      "text": "लोगों को खोजें",
-      "status": "machine"
-    },
     "search.people.searching_a11y": {
       "text": "खोज जारी है",
-      "status": "machine"
-    },
-    "search.people.send_request": {
-      "text": "अनुरोध भेजें",
       "status": "machine"
     },
     "settings.about.lede_web": {

@@ -3842,40 +3842,8 @@
       "text": "הבקשה הזו הגיעה מגרסה ישנה יותר של Lakko. בקשו מהשולח לעדכן ולשלוח אותה שוב.",
       "status": "machine"
     },
-    "contacts.add.by_username": {
-      "text": "הוספה לפי שם משתמש",
-      "status": "machine"
-    },
-    "contacts.add.intro_label": {
-      "text": "הודעה (לא חובה)",
-      "status": "machine"
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "היי, זו נועה מהכנס.",
-      "status": "machine"
-    },
-    "contacts.add.send": {
-      "text": "שליחה",
-      "status": "machine"
-    },
     "contacts.add.share_invite": {
       "text": "שיתוף קישור הזמנה",
-      "status": "machine"
-    },
-    "contacts.add.subtitle": {
-      "text": "הבקשות מוצפנות מקצה לקצה. השרתים של Lakko לא יכולים לקרוא אותן.",
-      "status": "machine"
-    },
-    "contacts.add.title": {
-      "text": "הוספת איש קשר",
-      "status": "machine"
-    },
-    "contacts.add.username_label": {
-      "text": "שם משתמש",
-      "status": "machine"
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
       "status": "machine"
     },
     "contacts.detail.actions": {
@@ -3946,12 +3914,8 @@
       "text": "הוספה",
       "status": "machine"
     },
-    "contacts.list.empty.action": {
-      "text": "הוספת איש קשר",
-      "status": "machine"
-    },
     "contacts.list.empty.body": {
-      "text": "הוסיפו מישהו לפי שם משתמש, או שתפו את קישור ההזמנה שלכם.",
+      "text": "מצאו מישהו לפי שם או שם משתמש בשדה החיפוש למעלה, או שתפו את קישור ההזמנה שלכם.",
       "status": "machine"
     },
     "contacts.list.empty.title": {
@@ -4096,10 +4060,6 @@
     },
     "contacts.safety.title": {
       "text": "אימות מספר הבטיחות",
-      "status": "machine"
-    },
-    "contacts.send.done": {
-      "text": "הבקשה נשלחה אל {name}. היא ממתינה ב„נשלחו” עד שתאושר.",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -7318,10 +7278,6 @@
       "text": "הוספת איש קשר",
       "status": "machine"
     },
-    "search.people.add_contact_title": {
-      "text": "הוספת {name}",
-      "status": "machine"
-    },
     "search.people.channel_result": {
       "text": "ערוץ {handle}",
       "status": "machine"
@@ -7342,16 +7298,8 @@
       "text": "לא ניתן היה לשלוח את הבקשה. ייתכן שהם שינו את ההגדרה של מי יכול למצוא אותם.",
       "status": "machine"
     },
-    "search.people.search": {
-      "text": "חיפוש אנשים",
-      "status": "machine"
-    },
     "search.people.searching_a11y": {
       "text": "מחפשים",
-      "status": "machine"
-    },
-    "search.people.send_request": {
-      "text": "שליחת בקשה",
       "status": "machine"
     },
     "settings.about.lede_web": {

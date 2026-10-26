@@ -55,18 +55,17 @@ describe("Contacts list pane: one search field (UX 6.1)", () => {
     one<HTMLButtonElement>(`button[aria-label="${t("contacts.list.add")}"]`).click();
     const items = all<HTMLButtonElement>('[role="menuitem"]').map((b) => b.textContent?.trim());
     expect(items).toEqual([t("contacts.add.share_invite")]);
-    expect(items).not.toContain(t("contacts.add.by_username"));
+    expect(items).toHaveLength(1);
   });
 
-  it("the empty list's Add contact goes to the search field", () => {
+  it("the empty list's button opens the invite links", () => {
     const { onAdd } = mount();
     const button = all<HTMLButtonElement>("button.primary").find(
-      (b) => b.textContent?.trim() === t("contacts.list.empty.action"),
+      (b) => b.textContent?.trim() === t("contacts.add.share_invite"),
     );
     expect(button).toBeDefined();
     button!.click();
-    expect(document.activeElement).toBe(one('input[type="search"]'));
-    expect(onAdd).not.toHaveBeenCalled();
+    expect(onAdd).toHaveBeenCalledWith("invite");
   });
 
   it("typing shows the people half of the field, on an empty list too", () => {

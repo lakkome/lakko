@@ -3913,42 +3913,9 @@
       "text": "This request came from an older version of Lakko. Ask them to update and send it again.",
       "comment": "An accepted contact request cannot open a chat because the sender's app is too old."
     },
-    "contacts.add.by_username": {
-      "text": "Add by username",
-      "comment": "Card heading and add-menu item: send a contact request to a username."
-    },
-    "contacts.add.intro_label": {
-      "text": "Message (optional)",
-      "comment": "Label of the optional introduction sent with a contact request."
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "Hi, this is Alice from the conference.",
-      "comment": "Example text in the empty introduction field."
-    },
-    "contacts.add.send": {
-      "text": "Send",
-      "comment": "Button that sends the contact request."
-    },
     "contacts.add.share_invite": {
       "text": "Share invite link",
       "comment": "Add-menu item on the contacts list: open the invite links."
-    },
-    "contacts.add.subtitle": {
-      "text": "Requests are end-to-end encrypted. Lakko's servers cannot read them.",
-      "comment": "Line under \"Add a contact\". A claim about encryption; must stay accurate.",
-      "security_critical": true
-    },
-    "contacts.add.title": {
-      "text": "Add a contact",
-      "comment": "Heading of the pane for sending a contact request."
-    },
-    "contacts.add.username_label": {
-      "text": "Username",
-      "comment": "Label of the username field when adding a contact."
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
-      "comment": "Example in the empty username field. Keep the @ and a short Latin-letter name (usernames are Latin letters, digits and _)."
     },
     "contacts.add_back.action": {
       "text": "Add",
@@ -4035,12 +4002,8 @@
       "text": "Add",
       "comment": "Tooltip and accessible name of the + button on the contacts list that opens the add menu."
     },
-    "contacts.list.empty.action": {
-      "text": "Add contact",
-      "comment": "Button on the empty contacts list."
-    },
     "contacts.list.empty.body": {
-      "text": "Add someone by username, or share your invite link.",
+      "text": "Find someone by name or username in the search field above, or share your invite link.",
       "comment": "Empty contacts list, line under the heading."
     },
     "contacts.list.empty.title": {
@@ -4194,10 +4157,6 @@
       "text": "Verify safety number",
       "comment": "Title of the card on a contact's page that shows the safety number to compare.",
       "security_critical": true
-    },
-    "contacts.send.done": {
-      "text": "Request sent to {name}. It waits under Sent until they accept.",
-      "comment": "Shown after a contact request was sent. {name} is the recipient's @username, with the @. \"Sent\" is the name of the section in the contacts list (contacts.list.sent)."
     },
     "device_link.code.enter_six_digits": {
       "text": "Enter the six digits your other device shows.",
@@ -7717,10 +7676,6 @@
       "text": "Add contact",
       "comment": "Button on a person found by search: sends them a contact request at once."
     },
-    "search.people.add_contact_title": {
-      "text": "Add {name}",
-      "comment": "Title of the dialog that sends a contact request to a person found by Search people (Android). {name} is the person's display name."
-    },
     "search.people.channel_result": {
       "text": "Channel {handle}",
       "comment": "A channel found by the Chats search. {handle} is the channel's public handle, starting with @."
@@ -7753,17 +7708,9 @@
       "text": "Request sent",
       "comment": "Shown on a found person's row in place of Add contact after the contact request was sent."
     },
-    "search.people.search": {
-      "text": "Search people",
-      "comment": "Row at the end of the Chats search results that asks Lakko's servers for people by username or name."
-    },
     "search.people.searching_a11y": {
       "text": "Searching",
       "comment": "Accessible name of the spinner on the Search people row while the search runs."
-    },
-    "search.people.send_request": {
-      "text": "Send request",
-      "comment": "Button that sends a contact request to a person found by search."
     },
     "settings.about.city_data": {
       "text": "City data: DB-IP.com, CC BY 4.0",

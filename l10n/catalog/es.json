@@ -3842,40 +3842,8 @@
       "text": "Esta solicitud llegó desde una versión anterior de Lakko. Pídele a esa persona que actualice y la vuelva a enviar.",
       "status": "machine"
     },
-    "contacts.add.by_username": {
-      "text": "Añadir por nombre de usuario",
-      "status": "machine"
-    },
-    "contacts.add.intro_label": {
-      "text": "Mensaje (opcional)",
-      "status": "machine"
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "Hola, soy Alicia, de la conferencia.",
-      "status": "machine"
-    },
-    "contacts.add.send": {
-      "text": "Enviar",
-      "status": "machine"
-    },
     "contacts.add.share_invite": {
       "text": "Compartir enlace de invitación",
-      "status": "machine"
-    },
-    "contacts.add.subtitle": {
-      "text": "Las solicitudes están cifradas de extremo a extremo. Los servidores de Lakko no pueden leerlas.",
-      "status": "machine"
-    },
-    "contacts.add.title": {
-      "text": "Añadir un contacto",
-      "status": "machine"
-    },
-    "contacts.add.username_label": {
-      "text": "Nombre de usuario",
-      "status": "machine"
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
       "status": "machine"
     },
     "contacts.detail.actions": {
@@ -3946,12 +3914,8 @@
       "text": "Añadir",
       "status": "machine"
     },
-    "contacts.list.empty.action": {
-      "text": "Añadir contacto",
-      "status": "machine"
-    },
     "contacts.list.empty.body": {
-      "text": "Añade a alguien por su nombre de usuario o comparte tu enlace de invitación.",
+      "text": "Busca a alguien por su nombre o nombre de usuario en el campo de búsqueda de arriba, o comparte tu enlace de invitación.",
       "status": "machine"
     },
     "contacts.list.empty.title": {
@@ -4096,10 +4060,6 @@
     },
     "contacts.safety.title": {
       "text": "Verificar número de seguridad",
-      "status": "machine"
-    },
-    "contacts.send.done": {
-      "text": "Solicitud enviada a {name}. Queda en Enviadas hasta que la acepte.",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -7318,10 +7278,6 @@
       "text": "Añadir contacto",
       "status": "machine"
     },
-    "search.people.add_contact_title": {
-      "text": "Añadir a {name}",
-      "status": "machine"
-    },
     "search.people.channel_result": {
       "text": "Canal {handle}",
       "status": "machine"
@@ -7342,16 +7298,8 @@
       "text": "No se pudo enviar la solicitud. Es posible que esa persona haya cambiado quién puede encontrarla.",
       "status": "machine"
     },
-    "search.people.search": {
-      "text": "Buscar personas",
-      "status": "machine"
-    },
     "search.people.searching_a11y": {
       "text": "Buscando",
-      "status": "machine"
-    },
-    "search.people.send_request": {
-      "text": "Enviar solicitud",
       "status": "machine"
     },
     "settings.about.lede_web": {

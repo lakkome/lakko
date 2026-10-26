@@ -3842,40 +3842,8 @@
       "text": "Este pedido veio de uma versão antiga do Lakko. Peça à pessoa para atualizar e enviar de novo.",
       "status": "machine"
     },
-    "contacts.add.by_username": {
-      "text": "Adicionar pelo nome de usuário",
-      "status": "machine"
-    },
-    "contacts.add.intro_label": {
-      "text": "Mensagem (opcional)",
-      "status": "machine"
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "Oi, aqui é a Alice, da conferência.",
-      "status": "machine"
-    },
-    "contacts.add.send": {
-      "text": "Enviar",
-      "status": "machine"
-    },
     "contacts.add.share_invite": {
       "text": "Compartilhar link de convite",
-      "status": "machine"
-    },
-    "contacts.add.subtitle": {
-      "text": "Os pedidos têm criptografia de ponta a ponta. Os servidores do Lakko não conseguem lê-los.",
-      "status": "machine"
-    },
-    "contacts.add.title": {
-      "text": "Adicionar contato",
-      "status": "machine"
-    },
-    "contacts.add.username_label": {
-      "text": "Nome de usuário",
-      "status": "machine"
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
       "status": "machine"
     },
     "contacts.detail.actions": {
@@ -3946,12 +3914,8 @@
       "text": "Adicionar",
       "status": "machine"
     },
-    "contacts.list.empty.action": {
-      "text": "Adicionar contato",
-      "status": "machine"
-    },
     "contacts.list.empty.body": {
-      "text": "Adicione alguém pelo nome de usuário ou compartilhe seu link de convite.",
+      "text": "Encontre alguém pelo nome ou nome de usuário no campo de busca acima, ou compartilhe seu link de convite.",
       "status": "machine"
     },
     "contacts.list.empty.title": {
@@ -4096,10 +4060,6 @@
     },
     "contacts.safety.title": {
       "text": "Verificar número de segurança",
-      "status": "machine"
-    },
-    "contacts.send.done": {
-      "text": "Pedido enviado para {name}. Ele fica em Enviados até ser aceito.",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -7318,10 +7278,6 @@
       "text": "Adicionar contato",
       "status": "machine"
     },
-    "search.people.add_contact_title": {
-      "text": "Adicionar {name}",
-      "status": "machine"
-    },
     "search.people.channel_result": {
       "text": "Canal {handle}",
       "status": "machine"
@@ -7342,16 +7298,8 @@
       "text": "Não foi possível enviar o pedido. Talvez a pessoa tenha mudado quem pode encontrá-la.",
       "status": "machine"
     },
-    "search.people.search": {
-      "text": "Pesquisar pessoas",
-      "status": "machine"
-    },
     "search.people.searching_a11y": {
       "text": "Pesquisando",
-      "status": "machine"
-    },
-    "search.people.send_request": {
-      "text": "Enviar pedido",
       "status": "machine"
     },
     "settings.about.lede_web": {

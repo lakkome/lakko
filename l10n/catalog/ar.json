@@ -3842,40 +3842,8 @@
       "text": "جاء هذا الطلب من إصدار أقدم من Lakko. اطلب من المرسل التحديث وإرساله مجددًا.",
       "status": "machine"
     },
-    "contacts.add.by_username": {
-      "text": "إضافة باسم المستخدم",
-      "status": "machine"
-    },
-    "contacts.add.intro_label": {
-      "text": "رسالة (اختياري)",
-      "status": "machine"
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "مرحبًا، أنا ليلى من المؤتمر.",
-      "status": "machine"
-    },
-    "contacts.add.send": {
-      "text": "إرسال",
-      "status": "machine"
-    },
     "contacts.add.share_invite": {
       "text": "مشاركة رابط الدعوة",
-      "status": "machine"
-    },
-    "contacts.add.subtitle": {
-      "text": "الطلبات مشفّرة تشفيرًا تامًا بين الطرفين. لا تستطيع خوادم Lakko قراءتها.",
-      "status": "machine"
-    },
-    "contacts.add.title": {
-      "text": "إضافة جهة اتصال",
-      "status": "machine"
-    },
-    "contacts.add.username_label": {
-      "text": "اسم المستخدم",
-      "status": "machine"
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
       "status": "machine"
     },
     "contacts.detail.actions": {
@@ -3946,12 +3914,8 @@
       "text": "إضافة",
       "status": "machine"
     },
-    "contacts.list.empty.action": {
-      "text": "إضافة جهة اتصال",
-      "status": "machine"
-    },
     "contacts.list.empty.body": {
-      "text": "أضف شخصًا باسم المستخدم، أو شارك رابط الدعوة الخاص بك.",
+      "text": "ابحث عن شخص بالاسم أو باسم المستخدم في حقل البحث أعلاه، أو شارك رابط الدعوة الخاص بك.",
       "status": "machine"
     },
     "contacts.list.empty.title": {
@@ -4096,10 +4060,6 @@
     },
     "contacts.safety.title": {
       "text": "التحقق من رقم الأمان",
-      "status": "machine"
-    },
-    "contacts.send.done": {
-      "text": "أُرسل الطلب إلى {name}. يبقى ضمن «المُرسلة» إلى أن يقبله.",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -7318,10 +7278,6 @@
       "text": "إضافة جهة اتصال",
       "status": "machine"
     },
-    "search.people.add_contact_title": {
-      "text": "إضافة {name}",
-      "status": "machine"
-    },
     "search.people.channel_result": {
       "text": "القناة {handle}",
       "status": "machine"
@@ -7342,16 +7298,8 @@
       "text": "تعذّر إرسال الطلب. ربما غيّر من يمكنه العثور عليه.",
       "status": "machine"
     },
-    "search.people.search": {
-      "text": "البحث عن أشخاص",
-      "status": "machine"
-    },
     "search.people.searching_a11y": {
       "text": "جارٍ البحث",
-      "status": "machine"
-    },
-    "search.people.send_request": {
-      "text": "إرسال الطلب",
       "status": "machine"
     },
     "settings.about.lede_web": {

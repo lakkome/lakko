@@ -3842,40 +3842,8 @@
       "text": "این درخواست از نسخه قدیمی‌تری از Lakko آمده است. از فرستنده بخواهید برنامه را به‌روز کند و دوباره آن را بفرستد.",
       "status": "machine"
     },
-    "contacts.add.by_username": {
-      "text": "افزودن با نام کاربری",
-      "status": "machine"
-    },
-    "contacts.add.intro_label": {
-      "text": "پیام (اختیاری)",
-      "status": "machine"
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "سلام، سارا هستم، از همایش.",
-      "status": "machine"
-    },
-    "contacts.add.send": {
-      "text": "ارسال",
-      "status": "machine"
-    },
     "contacts.add.share_invite": {
       "text": "اشتراک‌گذاری پیوند دعوت",
-      "status": "machine"
-    },
-    "contacts.add.subtitle": {
-      "text": "درخواست‌ها با رمزگذاری سرتاسری فرستاده می‌شوند. سرورهای Lakko نمی‌توانند آن‌ها را بخوانند.",
-      "status": "machine"
-    },
-    "contacts.add.title": {
-      "text": "افزودن مخاطب",
-      "status": "machine"
-    },
-    "contacts.add.username_label": {
-      "text": "نام کاربری",
-      "status": "machine"
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
       "status": "machine"
     },
     "contacts.detail.actions": {
@@ -3946,12 +3914,8 @@
       "text": "افزودن",
       "status": "machine"
     },
-    "contacts.list.empty.action": {
-      "text": "افزودن مخاطب",
-      "status": "machine"
-    },
     "contacts.list.empty.body": {
-      "text": "کسی را با نام کاربری اضافه کنید یا پیوند دعوت خود را به اشتراک بگذارید.",
+      "text": "کسی را با نام یا نام کاربری در کادر جستجوی بالا پیدا کنید یا پیوند دعوت خود را به اشتراک بگذارید.",
       "status": "machine"
     },
     "contacts.list.empty.title": {
@@ -4096,10 +4060,6 @@
     },
     "contacts.safety.title": {
       "text": "تأیید شماره امنیتی",
-      "status": "machine"
-    },
-    "contacts.send.done": {
-      "text": "درخواست به {name} فرستاده شد. تا وقتی آن را بپذیرد، در «ارسال‌شده» می‌ماند.",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -7318,10 +7278,6 @@
       "text": "افزودن مخاطب",
       "status": "machine"
     },
-    "search.people.add_contact_title": {
-      "text": "افزودن {name}",
-      "status": "machine"
-    },
     "search.people.channel_result": {
       "text": "کانال {handle}",
       "status": "machine"
@@ -7342,16 +7298,8 @@
       "text": "درخواست فرستاده نشد. شاید تغییر داده باشد چه کسانی می‌توانند او را پیدا کنند.",
       "status": "machine"
     },
-    "search.people.search": {
-      "text": "جستجوی افراد",
-      "status": "machine"
-    },
     "search.people.searching_a11y": {
       "text": "در حال جستجو",
-      "status": "machine"
-    },
-    "search.people.send_request": {
-      "text": "فرستادن درخواست",
       "status": "machine"
     },
     "settings.about.lede_web": {

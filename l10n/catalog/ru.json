@@ -3854,40 +3854,8 @@
       "text": "Этот запрос пришёл из старой версии Lakko. Попросите человека обновить приложение и отправить запрос снова.",
       "status": "machine"
     },
-    "contacts.add.by_username": {
-      "text": "Добавить по имени пользователя",
-      "status": "machine"
-    },
-    "contacts.add.intro_label": {
-      "text": "Сообщение (необязательно)",
-      "status": "machine"
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "Привет, это Алиса с конференции.",
-      "status": "machine"
-    },
-    "contacts.add.send": {
-      "text": "Отправить",
-      "status": "machine"
-    },
     "contacts.add.share_invite": {
       "text": "Поделиться ссылкой-приглашением",
-      "status": "machine"
-    },
-    "contacts.add.subtitle": {
-      "text": "Запросы защищены сквозным шифрованием. Серверы Lakko не могут их прочитать.",
-      "status": "machine"
-    },
-    "contacts.add.title": {
-      "text": "Добавить контакт",
-      "status": "machine"
-    },
-    "contacts.add.username_label": {
-      "text": "Имя пользователя",
-      "status": "machine"
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
       "status": "machine"
     },
     "contacts.add_back.action": {
@@ -3970,12 +3938,8 @@
       "text": "Добавить",
       "status": "machine"
     },
-    "contacts.list.empty.action": {
-      "text": "Добавить контакт",
-      "status": "machine"
-    },
     "contacts.list.empty.body": {
-      "text": "Добавьте кого-нибудь по имени пользователя или поделитесь ссылкой-приглашением.",
+      "text": "Найдите человека по имени или имени пользователя в поле поиска выше или поделитесь ссылкой-приглашением.",
       "status": "machine"
     },
     "contacts.list.empty.title": {
@@ -4120,10 +4084,6 @@
     },
     "contacts.safety.title": {
       "text": "Сверить код безопасности",
-      "status": "machine"
-    },
-    "contacts.send.done": {
-      "text": "Запрос отправлен: {name}. Он будет в разделе «Отправленные», пока его не примут.",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -7386,10 +7346,6 @@
       "text": "Добавить в контакты",
       "status": "machine"
     },
-    "search.people.add_contact_title": {
-      "text": "Добавить: {name}",
-      "status": "machine"
-    },
     "search.people.channel_result": {
       "text": "Канал {handle}",
       "status": "machine"
@@ -7410,16 +7366,8 @@
       "text": "Не удалось отправить запрос. Возможно, этот человек изменил, кто может его найти.",
       "status": "machine"
     },
-    "search.people.search": {
-      "text": "Найти людей",
-      "status": "machine"
-    },
     "search.people.searching_a11y": {
       "text": "Идёт поиск",
-      "status": "machine"
-    },
-    "search.people.send_request": {
-      "text": "Отправить запрос",
       "status": "machine"
     },
     "settings.about.lede_web": {

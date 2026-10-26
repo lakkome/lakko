@@ -3842,40 +3842,8 @@
       "text": "Bu istek Lakko'nun eski bir sürümünden geldi. Kişiden güncelleyip yeniden göndermesini isteyin.",
       "status": "machine"
     },
-    "contacts.add.by_username": {
-      "text": "Kullanıcı adıyla ekle",
-      "status": "machine"
-    },
-    "contacts.add.intro_label": {
-      "text": "Mesaj (isteğe bağlı)",
-      "status": "machine"
-    },
-    "contacts.add.intro_placeholder": {
-      "text": "Merhaba, ben konferanstan Alice.",
-      "status": "machine"
-    },
-    "contacts.add.send": {
-      "text": "Gönder",
-      "status": "machine"
-    },
     "contacts.add.share_invite": {
       "text": "Davet bağlantısını paylaş",
-      "status": "machine"
-    },
-    "contacts.add.subtitle": {
-      "text": "İstekler uçtan uca şifrelidir. Lakko'nun sunucuları bunları okuyamaz.",
-      "status": "machine"
-    },
-    "contacts.add.title": {
-      "text": "Kişi ekle",
-      "status": "machine"
-    },
-    "contacts.add.username_label": {
-      "text": "Kullanıcı adı",
-      "status": "machine"
-    },
-    "contacts.add.username_placeholder": {
-      "text": "@alice",
       "status": "machine"
     },
     "contacts.detail.actions": {
@@ -3946,12 +3914,8 @@
       "text": "Ekle",
       "status": "machine"
     },
-    "contacts.list.empty.action": {
-      "text": "Kişi ekle",
-      "status": "machine"
-    },
     "contacts.list.empty.body": {
-      "text": "Birini kullanıcı adıyla ekleyin veya davet bağlantınızı paylaşın.",
+      "text": "Yukarıdaki arama alanında birini adıyla veya kullanıcı adıyla bulun ya da davet bağlantınızı paylaşın.",
       "status": "machine"
     },
     "contacts.list.empty.title": {
@@ -4096,10 +4060,6 @@
     },
     "contacts.safety.title": {
       "text": "Güvenlik numarasını doğrula",
-      "status": "machine"
-    },
-    "contacts.send.done": {
-      "text": "İstek gönderildi: {name}. Kabul edilene kadar Gönderilenler bölümünde bekler.",
       "status": "machine"
     },
     "device_link.code.enter_six_digits": {
@@ -7318,10 +7278,6 @@
       "text": "Kişi ekle",
       "status": "machine"
     },
-    "search.people.add_contact_title": {
-      "text": "{name} ekle",
-      "status": "machine"
-    },
     "search.people.channel_result": {
       "text": "Kanal {handle}",
       "status": "machine"
@@ -7342,16 +7298,8 @@
       "text": "İstek gönderilemedi. Kişi, kimlerin kendisini bulabileceğini değiştirmiş olabilir.",
       "status": "machine"
     },
-    "search.people.search": {
-      "text": "Kişi ara",
-      "status": "machine"
-    },
     "search.people.searching_a11y": {
       "text": "Aranıyor",
-      "status": "machine"
-    },
-    "search.people.send_request": {
-      "text": "İstek gönder",
       "status": "machine"
     },
     "settings.about.lede_web": {

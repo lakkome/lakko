@@ -154,7 +154,7 @@ public struct ContactsScreen: View {
                     } description: {
                         Text(l10n.t("contacts.list.empty.body"))
                     } actions: {
-                        Button(l10n.t("contacts.list.empty.action")) { inviteLinksPresented = true }
+                        Button(l10n.t("contacts.add.share_invite")) { inviteLinksPresented = true }
                             .buttonStyle(.borderedProminent)
                     }
                 } else if isSearching && items.isEmpty {

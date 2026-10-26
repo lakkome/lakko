@@ -116,7 +116,7 @@ describe("PeopleSearch (UX 6.1)", () => {
     await flush();
     type("ann");
     await flush();
-    expect(buttonsLabelled(t("search.people.search"))).toHaveLength(0);
+    expect(buttonsLabelled("Search people")).toHaveLength(0);
     vi.advanceTimersByTime(499);
     expect(searchPeople).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
