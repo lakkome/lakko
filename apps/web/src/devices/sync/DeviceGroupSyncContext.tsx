@@ -1378,7 +1378,10 @@ export function DeviceGroupSyncProvider(props: {
     if (written) {
       refresh();
       await persistSyncedNow();
-      await afterLinkRecordWrite(linkId);
+      // The send goes on in the background, so Copy does not wait on the
+      // network (as iOS and Android); the unsent mark is set before the
+      // first await, so a failed send is retried like any other.
+      void afterLinkRecordWrite(linkId);
     }
     return written;
   }

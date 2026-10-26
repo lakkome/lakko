@@ -229,8 +229,10 @@ first, on every device of the account.
   terms first, then deletes the old one, so a failure leaves the old link
   working and says **Could not save the link. Check your connection and try
   again.**; **Cancel** changes nothing.
-- **Copy** marks the link copied in the account's synced state before the
-  text reaches the clipboard; from then on no device shows the pencil.
+- **Copy** marks the link copied in this device's synced state before the
+  text reaches the clipboard; the mark goes to the account's other devices in
+  the background (Copy never waits on the network; a failed send is retried),
+  and from then on no device shows the pencil.
 - **Delete link** removes the link from the list on every device and makes
   it stop working (the old Revoke). A link that was never copied and never
   used is deleted at once; a link that was copied or used asks first, in a

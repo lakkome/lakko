@@ -867,6 +867,7 @@ public class DeviceGroupSyncRepository(
     private suspend fun writeLinkRecord(
         linkId: ByteArray,
         mustPersist: Boolean = false,
+        sendInBackground: Boolean = false,
         write: (SyncedState) -> Boolean,
     ): Boolean {
         val envelope = synchronized(stateLock) {
@@ -885,14 +886,20 @@ public class DeviceGroupSyncRepository(
         // could not be written is not handed out (the caller revokes it).
         if (!syncStatePersistence.writeNow() && mustPersist) return false
         if (envelope != null) {
-            try {
-                sendServiceEnvelope(envelope)
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (cause: Throwable) {
-                Log.w(LOG_TAG, "link record not published (${cause.javaClass.simpleName})")
-                pendingFlag?.recordFailure()
+            val send: suspend () -> Unit = {
+                try {
+                    sendServiceEnvelope(envelope)
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (cause: Throwable) {
+                    Log.w(LOG_TAG, "link record not published (${cause.javaClass.simpleName})")
+                    pendingFlag?.recordFailure()
+                }
             }
+            // A copy mark goes out in the background, so Copy does not wait
+            // on the network (as iOS and web); a failed send is retried like
+            // any other unsent link record.
+            if (sendInBackground) scope.launchBound(sessionBinding) { send() } else send()
         }
         return true
     }
@@ -910,7 +917,7 @@ public class DeviceGroupSyncRepository(
      *  on no device of the account offers to edit it. `false` when nothing
      *  changed (already copied) or the state is not open. */
     public suspend fun markLinkShared(linkId: ByteArray): Boolean =
-        writeLinkRecord(linkId) { it.markLinkShared(Hlc.mint(), linkId) }
+        writeLinkRecord(linkId, sendInBackground = true) { it.markLinkShared(Hlc.mint(), linkId) }
 
     /** Count one request accepted through a link, remembering the requester. */
     public suspend fun recordLinkUse(linkId: ByteArray, requesterKey: ByteArray): Boolean =
