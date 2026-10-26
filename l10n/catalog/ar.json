@@ -8437,6 +8437,30 @@
     "invite.links.error.custom_uses": {
       "text": "أدخل عدد أشخاص من 1 إلى {max}.",
       "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "يدعوك {name} إلى Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko تطبيق مراسلة تُشفَّر فيه كل محادثة ومكالمة تشفيرًا تامًا بين الطرفين.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "إنشاء حساب",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "لدي حساب بالفعل",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "رابط الدعوة هذا لم يعد يعمل",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "اطلب من المرسل رابطًا جديدًا.",
+      "status": "machine"
     }
   }
 }

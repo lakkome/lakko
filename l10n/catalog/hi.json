@@ -8437,6 +8437,30 @@
     "invite.links.error.custom_uses": {
       "text": "1 से {max} तक लोगों की संख्या डालें।",
       "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} आपको Lakko पर आमंत्रित कर रहे हैं",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko एक मैसेंजर है जिसमें हर चैट और कॉल एंड-टू-एंड एन्क्रिप्टेड होती है।",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "खाता बनाएँ",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "मेरे पास पहले से खाता है",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "यह आमंत्रण लिंक अब काम नहीं करता",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "भेजने वाले से नया लिंक माँगें।",
+      "status": "machine"
     }
   }
 }

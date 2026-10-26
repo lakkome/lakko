@@ -1986,6 +1986,46 @@ public class ContactsRepository(
     // ---- ADR-0079: the invite page (B) and the pending contact --------------
 
     /**
+     * The signed-out invite page (`docs/ux/contact-invite-link.md` section 3,
+     * "Signed out", amended 2026-10-26; ADR-0079 amendment of 2026-10-26):
+     * open the link with no session, only to say who invites. The ledger
+     * serves the sealed blob without a session and the name is sealed under
+     * the link's secret, so the card is built on the device. Nothing is
+     * consumed and nothing is sent; signing in or creating an account then
+     * opens the parked link again through [openInviteLink].
+     */
+    public suspend fun previewInviteLink(slug: String): InvitePreviewResult {
+        val link = me.lakko.app.discovery.InviteLinkArgument.decode(slug.trim())
+        val secret = me.lakko.app.discovery.inviteLinkSecretOf(link.fragment) ?: return InvitePreviewResult.Dead
+        // Every link is a ledger pointer; any other slug is a dead link.
+        val blobId = me.lakko.app.discovery.decodeInviteBlobId(link.slug) ?: return InvitePreviewResult.Dead
+        val sealed: ByteArray = try {
+            // Deliberately the bare client: no session token is attached.
+            discoveryClientFactory().use { discovery -> discovery.fetchInvite(blobId) }
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return InvitePreviewResult.RateLimited
+            return InvitePreviewResult.Failed
+        } ?: return InvitePreviewResult.Dead
+        val cap = try {
+            me.lakko.app.discovery.openSealedInviteLink(sealed, secret) { bytes, key ->
+                InviteCapability.openLink(bytes, key)
+            }
+        } catch (_: me.lakko.app.discovery.InviteLinkDamaged) {
+            return InvitePreviewResult.Dead
+        }
+        return cap.use { capability ->
+            if (!capability.isValidNow(System.currentTimeMillis().toULong())) return@use InvitePreviewResult.Dead
+            InvitePreviewResult.Preview(
+                displayName = capability.inviterDisplayName(),
+                username = capability.inviterUsername(),
+                label = capability.label(),
+                ownerAccountId = capability.ownerAccountId(),
+            )
+        }
+    }
+
+    /**
      * Open an `/i/<slug>#<secret>` link for the invite page
      * (`docs/ux/contact-invite-link.md` section 3): fetch the sealed blob,
      * open it under the fragment's secret, and decide the page's state. No
@@ -3352,6 +3392,31 @@ public data class ContactsState(
      *  [InboxError]). `null` clears on the next successful call. */
     val lastError: InboxError? = null,
 )
+
+/** What opening a link with no session gave the signed-out invite page
+ *  (UX section 3, "Signed out", amended 2026-10-26). */
+public sealed interface InvitePreviewResult {
+    public data class Preview(
+        val displayName: String?,
+        val username: String?,
+        val label: String,
+        val ownerAccountId: ByteArray,
+    ) : InvitePreviewResult {
+        /** The name the link states ([PendingContacts.statedName]). */
+        val statedName: String? get() = PendingContacts.statedName(displayName, username)
+
+        override fun equals(other: Any?): Boolean =
+            other is Preview && displayName == other.displayName && username == other.username &&
+                label == other.label && ownerAccountId.contentEquals(other.ownerAccountId)
+
+        override fun hashCode(): Int = ownerAccountId.contentHashCode()
+    }
+
+    /** Revoked, expired, used up, unknown or damaged: one state. */
+    public data object Dead : InvitePreviewResult
+    public data object RateLimited : InvitePreviewResult
+    public data object Failed : InvitePreviewResult
+}
 
 /** What opening an `/i/` link gave the invite page (ADR-0079). */
 public sealed interface InviteOpenResult {

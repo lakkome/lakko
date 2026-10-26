@@ -8437,6 +8437,30 @@
     "invite.links.error.custom_uses": {
       "text": "Укажіть кількість людей від 1 до {max}.",
       "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} запрошує вас до Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko — месенджер, у якому кожен чат і дзвінок захищені наскрізним шифруванням.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Створити акаунт",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "У мене вже є акаунт",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Посилання-запрошення більше не працює",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Попросіть відправника надіслати нове.",
+      "status": "machine"
     }
   }
 }

@@ -45,10 +45,19 @@ describe("invitePageView (docs/ux/contact-invite-link.md section 3)", () => {
     expect(invitePageView({ ...base, link: "dead" })).toEqual({ kind: "dead" });
   });
 
-  it("shows a signed-out visitor no inviter card: straight to sign-in, whatever the link (2026-10-19)", () => {
-    expect(invitePageView({ ...base, signedIn: false })).toEqual({ kind: "sign-in" });
-    expect(invitePageView({ ...base, signedIn: false, link: "dead" })).toEqual({ kind: "sign-in" });
-    expect(invitePageView({ ...base, signedIn: false, link: "loading" })).toEqual({ kind: "sign-in" });
+  it("shows a signed-out visitor who invites them, or that the link no longer works (2026-10-26)", () => {
+    expect(invitePageView({ ...base, signedIn: false, label: "Team" })).toEqual({
+      kind: "signed-out",
+      name: "Anna",
+      username: "anna",
+      label: "Team",
+    });
+    expect(invitePageView({ ...base, signedIn: false, link: "dead" })).toEqual({ kind: "signed-out-dead" });
+    expect(invitePageView({ ...base, signedIn: false, expired: true })).toEqual({ kind: "signed-out-dead" });
+    expect(invitePageView({ ...base, signedIn: false, link: "loading" })).toEqual({ kind: "loading" });
+    // A signed-out visitor's own or known state does not exist: nothing is
+    // compared with an account until one is signed in.
+    expect(invitePageView({ ...base, signedIn: false, isOwn: true }).kind).toBe("signed-out");
     // Once signed in the link is checked again: live -> the card, dead -> Contacts.
     expect(invitePageView({ ...base, signedIn: true }).kind).toBe("default");
     expect(invitePageView({ ...base, signedIn: true, link: "dead" })).toEqual({ kind: "dead" });

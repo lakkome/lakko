@@ -1849,27 +1849,16 @@ public final class ContactsRepository: ObservableObject {
         // ADR-0028 amendment 2026-09-28 — `token` is `slug#fragment`; a
         // missing or malformed fragment is a damaged link, which the page
         // shows exactly like one that no longer works.
-        let parts = InviteLinkSecret.split(token)
-        guard let blobId = Self.parseInviteSlug(parts.base),
-              let linkSecret = InviteLinkSecret.read(parts.fragment) else { return .dead }
         let bound = binding.capture()
-        let sealed: Data?
-        do {
-            sealed = try await authenticatedDiscoveryClient().fetchInvite(blobId: blobId)
-        } catch {
-            if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
-            return .failed(message: (error as? LocalizedError)?.errorDescription ?? "fetch failed")
-        }
+        let fetched = await fetchAndOpenLink(token: token, client: authenticatedDiscoveryClient())
         guard bound.isCurrent else { return .requiresReauth }
-        guard let sealed else { return .dead }
-        let capability: InviteCapability
-        do {
-            capability = try InviteCapability.openLink(sealed: sealed, linkSecret: linkSecret)
-        } catch {
-            return .dead
+        let blobId: Data, linkSecret: Data, capability: InviteCapability
+        switch fetched {
+        case .opened(let b, let s, let c): (blobId, linkSecret, capability) = (b, s, c)
+        case .dead: return .dead
+        case .rateLimited: return .rateLimited
+        case .failed(let message): return .failed(message: message)
         }
-        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
-        guard capability.isValidNow(nowMs: nowMs) else { return .dead }
         let ownerAccountId = capability.ownerAccountId()
         let opened = OpenedInvite(
             blobId: blobId,
@@ -1885,6 +1874,57 @@ public final class ContactsRepository: ObservableObject {
             label: capability.label(),
             bootstrapReferral: capability.bootstrapReferral())
         return inviteOpenResult(for: opened)
+    }
+
+    /// The ledger row of an `/i/` link opened under its fragment's secret.
+    private enum LinkFetch {
+        case opened(blobId: Data, linkSecret: Data, capability: InviteCapability)
+        /// Revoked, expired, used up, unknown or damaged.
+        case dead
+        case rateLimited
+        case failed(String)
+    }
+
+    /// Fetch the sealed blob of `token` (`slug#fragment`) and open it under
+    /// the fragment's secret. The ledger GET needs no session; nothing is
+    /// spent and nothing is sent. A missing or malformed fragment is a
+    /// damaged link (ADR-0028 amendment 2026-09-28).
+    private func fetchAndOpenLink(token: String, client: DiscoveryClient) async -> LinkFetch {
+        let parts = InviteLinkSecret.split(token)
+        guard let blobId = Self.parseInviteSlug(parts.base),
+              let linkSecret = InviteLinkSecret.read(parts.fragment) else { return .dead }
+        let sealed: Data?
+        do {
+            sealed = try await client.fetchInvite(blobId: blobId)
+        } catch {
+            if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
+            return .failed((error as? LocalizedError)?.errorDescription ?? "fetch failed")
+        }
+        guard let sealed,
+              let capability = try? InviteCapability.openLink(sealed: sealed, linkSecret: linkSecret),
+              capability.isValidNow(nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+        else { return .dead }
+        return .opened(blobId: blobId, linkSecret: linkSecret, capability: capability)
+    }
+
+    /// The signed-out invite page (`docs/ux/contact-invite-link.md` section
+    /// 3, "Signed out"; ADR-0079 amendment of 2026-10-26): open the link with
+    /// no session, only to say who invites. The ledger serves the sealed blob
+    /// without a session and it is opened on this device; nothing is spent
+    /// and nothing is sent. Signing in or creating an account then lands on
+    /// the default page through the parked link.
+    public func previewInviteLink(slug token: String) async -> InvitePreviewResult {
+        switch await fetchAndOpenLink(token: token, client: discoveryClientFactory()) {
+        case .opened(_, _, let capability):
+            return .preview(InvitePreview(
+                displayName: capability.inviterDisplayName(), username: capability.inviterUsername(),
+                label: capability.label(), ownerSignaturePubkey: capability.ownerSignaturePubkey()))
+        case .dead: return .dead
+        case .rateLimited: return .rateLimited
+        case .failed(let message):
+            NSLog("[invite] signed-out open failed: \(message)")
+            return .failed
+        }
     }
 
     /// The page's state for a link already opened (``InvitePageDecision``),
@@ -2416,6 +2456,28 @@ public enum InviteOpenResult: Equatable {
     case rateLimited
     case requiresReauth
     case failed(message: String)
+}
+
+/// What the signed-out invite page shows of a link (amended 2026-10-26).
+public struct InvitePreview: Equatable {
+    public let displayName: String?
+    public let username: String?
+    public let label: String
+    public let ownerSignaturePubkey: Data
+
+    /// The name the link states (``OpenedInvite/statedName(displayName:username:)``).
+    public var statedName: String? {
+        OpenedInvite.statedName(displayName: displayName, username: username)
+    }
+}
+
+/// What opening a link with no session gave the signed-out invite page.
+public enum InvitePreviewResult: Equatable {
+    case preview(InvitePreview)
+    /// Revoked, expired, used up, unknown or damaged: one state.
+    case dead
+    case rateLimited
+    case failed
 }
 
 /// What **Add** did.

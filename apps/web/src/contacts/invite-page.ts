@@ -7,12 +7,13 @@
  * the same rule. The page shows who invites, by the name the link states; it
  * shows no fingerprint, no safety number, no expiry and no use count.
  *
- * | the visitor | the link                       | state          |
- * |-------------|--------------------------------|----------------|
- * | signed out  | any                            | `sign-in`      |
- * | signed in   | loading                        | `loading`      |
- * | signed in   | rate-limited                   | `rate-limited` |
- * | signed in   | does not open / expired / gone | `dead`         |
+ * | the visitor | the link                       | state             |
+ * |-------------|--------------------------------|-------------------|
+ * | any         | loading                        | `loading`         |
+ * | any         | rate-limited                   | `rate-limited`    |
+ * | signed out  | does not open / expired / gone | `signed-out-dead` |
+ * | signed out  | opens                          | `signed-out`      |
+ * | signed in   | does not open / expired / gone | `dead`            |
  * | signed in   | opens, made by this account    | `own`          |
  * | signed in   | opens, inviter a contact       | `already`      |
  * | signed in   | opens, inviter added, waiting  | `pending`      |
@@ -25,9 +26,11 @@
  * on another link would be decided apart from the first and could give the
  * two a second one-to-one.
  *
- * Amended 2026-10-19 (ADR-0079): a signed-out visitor sees no inviter card at
- * all, only the sign-in screen, and the link is checked again once signed in;
- * a link that does not work has no page: `dead` takes the visitor to the
+ * Amended 2026-10-26 (ADR-0079, replacing the 2026-10-19 rule that showed
+ * none): a signed-out visitor sees who invites them, with Create an account
+ * and I already have an account, both returning to the link, which is checked
+ * again once signed in; a dead link opened signed out says so. Signed in, a
+ * link that does not work has no page: `dead` takes the visitor to the
  * Contacts screen. A damaged link (a missing or wrong secret) reads exactly
  * like one that no longer works.
  */
@@ -41,7 +44,13 @@ export type InvitePageView =
    *  error): not a link that no longer works, and offered again. */
   | { readonly kind: "open-failed" }
   | { readonly kind: "dead" }
-  | { readonly kind: "sign-in" }
+  | { readonly kind: "signed-out-dead" }
+  | {
+      readonly kind: "signed-out";
+      readonly name: string | null;
+      readonly username: string | null;
+      readonly label: string | null;
+    }
   | { readonly kind: "own" }
   | { readonly kind: "already"; readonly name: string | null; readonly contactKeyB64: string }
   | { readonly kind: "pending"; readonly name: string | null }
@@ -85,14 +94,16 @@ export interface InvitePageInput {
 
 /** The page's state for `input`. Pure. */
 export function invitePageView(input: InvitePageInput): InvitePageView {
-  if (!input.signedIn) return { kind: "sign-in" };
   if (input.link === "loading") return { kind: "loading" };
   if (input.link === "rate-limited") return { kind: "rate-limited" };
-  if (input.link === "dead" || input.expired) return { kind: "dead" };
+  if (input.link === "dead" || input.expired) {
+    return input.signedIn ? { kind: "dead" } : { kind: "signed-out-dead" };
+  }
   const name = inviterNameOf(input.inviterDisplayName, input.inviterUsername);
   const username =
     input.inviterUsername !== null && input.inviterUsername.length > 0 ? input.inviterUsername : null;
   const label = input.label.trim().length > 0 ? input.label : null;
+  if (!input.signedIn) return { kind: "signed-out", name, username, label };
   if (input.isOwn) return { kind: "own" };
   if (input.existingContactKeyB64 !== null) {
     return { kind: "already", name, contactKeyB64: input.existingContactKeyB64 };

@@ -17,6 +17,7 @@ import kotlinx.coroutines.withContext
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.contacts.InviteAddResult
 import me.lakko.app.contacts.InviteOpenResult
+import me.lakko.app.contacts.InvitePreviewResult
 import me.lakko.app.contacts.KnownContactAnswerResult
 import me.lakko.app.contacts.OpenedInvite
 
@@ -257,3 +258,59 @@ public enum class AnswerFailure {
     /** Any other failure: `invite.contact.page.answer_failed`. */
     FAILED,
 }
+
+/**
+ * What the signed-out invite page shows (`docs/ux/contact-invite-link.md`
+ * section 3, "Signed out", amended 2026-10-26). Rendered by
+ * [SignedOutInviteScreen]; decided by [signedOutInviteState].
+ */
+public sealed interface SignedOutInviteState {
+    public data object Loading : SignedOutInviteState
+
+    /**
+     * The inviter card. [statedName] is the display name, else `@username`,
+     * else `null` (the screen shows `invite.contact.page.unnamed`);
+     * [usernameLine] is `@username` when the title does not already say it.
+     */
+    public data class Live(
+        val statedName: String?,
+        val usernameLine: String?,
+        val label: String,
+        val avatarSeed: String,
+    ) : SignedOutInviteState
+
+    /** Revoked, expired, used up, unknown or damaged: one state. */
+    public data object Dead : SignedOutInviteState
+
+    public data object RateLimited : SignedOutInviteState
+    public data object OpenFailed : SignedOutInviteState
+}
+
+/** The signed-out page for each result of opening the link with no session. */
+public fun signedOutInviteState(result: InvitePreviewResult): SignedOutInviteState = when (result) {
+    is InvitePreviewResult.Preview -> {
+        val stated = result.statedName
+        val username = result.username
+        SignedOutInviteState.Live(
+            statedName = stated,
+            usernameLine = if (!username.isNullOrEmpty() && stated != "@$username") "@$username" else null,
+            label = result.label,
+            avatarSeed = me.lakko.app.ds.hexOf(result.ownerAccountId),
+        )
+    }
+    InvitePreviewResult.Dead -> SignedOutInviteState.Dead
+    InvitePreviewResult.RateLimited -> SignedOutInviteState.RateLimited
+    InvitePreviewResult.Failed -> SignedOutInviteState.OpenFailed
+}
+
+/** The page offers **Create an account** and **I already have an account**. */
+public val SignedOutInviteState.offersAccount: Boolean
+    get() = this is SignedOutInviteState.Live || this == SignedOutInviteState.Dead
+
+/**
+ * Whether choosing an account keeps the link parked, so the session that
+ * lands opens it again: only a live link. A dead one is dropped ("no
+ * return").
+ */
+public val SignedOutInviteState.keepsLinkParked: Boolean
+    get() = this is SignedOutInviteState.Live

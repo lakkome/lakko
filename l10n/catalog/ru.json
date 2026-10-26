@@ -5982,6 +5982,10 @@
       "text": "Эта ссылка больше не действует. Попросите человека прислать новую.",
       "status": "machine"
     },
+    "invite.contact.page.about": {
+      "text": "Lakko — мессенджер, в котором каждый чат и звонок защищены сквозным шифрованием.",
+      "status": "machine"
+    },
     "invite.contact.page.add": {
       "text": "Добавить",
       "status": "machine"
@@ -5998,8 +6002,24 @@
       "text": "Не удалось связаться с {name}. Проверьте подключение и попробуйте снова.",
       "status": "machine"
     },
+    "invite.contact.page.create_account": {
+      "text": "Создать аккаунт",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Попросите отправителя прислать новую.",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Ссылка-приглашение больше не работает",
+      "status": "machine"
+    },
     "invite.contact.page.done": {
       "text": "Готово",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "У меня уже есть аккаунт",
       "status": "machine"
     },
     "invite.contact.page.not_now": {
@@ -6016,6 +6036,10 @@
     },
     "invite.contact.page.own_title": {
       "text": "Это ваша собственная ссылка-приглашение",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} приглашает вас в Lakko",
       "status": "machine"
     },
     "invite.contact.page.title": {

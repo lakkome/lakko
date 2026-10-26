@@ -8437,6 +8437,30 @@
     "invite.links.error.custom_uses": {
       "text": "1 ile {max} arasında bir kişi sayısı girin.",
       "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} sizi Lakko'ya davet ediyor",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko, her sohbetin ve aramanın uçtan uca şifrelendiği bir mesajlaşma uygulamasıdır.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Hesap oluştur",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "Zaten bir hesabım var",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Bu davet bağlantısı artık çalışmıyor",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Gönderen kişiden yenisini isteyin.",
+      "status": "machine"
     }
   }
 }

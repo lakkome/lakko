@@ -8437,6 +8437,30 @@
     "invite.links.error.custom_uses": {
       "text": "Informe um número de pessoas de 1 a {max}.",
       "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} convida você para o Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "O Lakko é um mensageiro em que cada conversa e chamada tem criptografia de ponta a ponta.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Criar uma conta",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "Já tenho uma conta",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Este link de convite não funciona mais",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Peça um novo a quem o enviou.",
+      "status": "machine"
     }
   }
 }

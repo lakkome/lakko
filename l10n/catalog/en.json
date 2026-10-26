@@ -8977,6 +8977,30 @@
     "invite.links.error.custom_uses": {
       "text": "Enter a number of people from 1 to {max}.",
       "comment": "Shown under the custom number of people of a new invite link when the value is out of range. {max} is the largest allowed number, formatted for the interface language."
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} invites you to Lakko",
+      "comment": "Title of the contact invite page for a visitor who is not signed in. {name} is the inviter's display name, else @username, else the invite.contact.page.unnamed text."
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko is a messenger where every chat and call is end-to-end encrypted.",
+      "comment": "One line under the inviter on the contact invite page for a visitor who is not signed in, saying what Lakko is."
+    },
+    "invite.contact.page.create_account": {
+      "text": "Create an account",
+      "comment": "Primary button on the contact invite page for a visitor who is not signed in."
+    },
+    "invite.contact.page.have_account": {
+      "text": "I already have an account",
+      "comment": "Secondary button on the contact invite page for a visitor who is not signed in: goes to sign-in."
+    },
+    "invite.contact.page.dead_title": {
+      "text": "This invite link no longer works",
+      "comment": "Contact invite page, visitor not signed in, when the link was revoked, expired, used up, is unknown or is damaged. The inviter's name is not shown."
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Ask the person who sent it for a new one.",
+      "comment": "Line under 'This invite link no longer works'."
     }
   }
 }

@@ -104,6 +104,7 @@ import me.lakko.app.ui.contacts.ContactsScreen
 import me.lakko.app.ui.contacts.ContactsViewModel
 import me.lakko.app.ui.contacts.InviteLandingScreen
 import me.lakko.app.ui.contacts.InviteLandingViewModel
+import me.lakko.app.ui.contacts.keepsLinkParked
 import me.lakko.app.transport.AntiCensorshipManager
 import me.lakko.app.ui.devices.DevicesScreen
 import me.lakko.app.ui.settings.SettingsScreen
@@ -718,15 +719,46 @@ private fun AppRoot(
     when (val current = state) {
         AuthState.Loading -> InsetRoot { LoadingScreen() }
         is AuthState.Anon -> InsetRoot {
-            // ADR-0079 (amended 2026-10-19) - a tapped `/i/` link from a
-            // person who is not signed in shows no inviter card: the ordinary
-            // sign-in screen. The slug stays parked; once a session lands the
-            // link is checked again (live -> the invite page, dead -> Contacts).
-            AnonRoot(
-                repository = authRepository,
-                cachedUsername = current.cachedUsername,
-                startRoute = null,
-            )
+            // ADR-0079 (amended 2026-10-26) - a tapped `/i/` link from a
+            // person who is not signed in shows the inviter card first, with
+            // Create an account / I already have an account. A live link stays
+            // parked, so once a session lands it is opened again (live -> the
+            // invite page, dead -> Contacts); a dead link is dropped.
+            val anonInviteSlug by inviteIntake.pendingInviteSlug.collectAsStateWithLifecycle()
+            // The parked link the visitor already chose an account for, and
+            // the screen chosen (sign up or sign in).
+            var answeredInviteSlug by androidx.compose.runtime.saveable.rememberSaveable {
+                androidx.compose.runtime.mutableStateOf<String?>(null)
+            }
+            var anonStartRoute by androidx.compose.runtime.saveable.rememberSaveable {
+                androidx.compose.runtime.mutableStateOf<String?>(null)
+            }
+            val parkedInvite = anonInviteSlug
+            if (parkedInvite != null && parkedInvite != answeredInviteSlug) {
+                // Back drops the link and leaves the ordinary Welcome screen.
+                androidx.activity.compose.BackHandler { inviteIntake.consume() }
+                val choose = { route: String, page: me.lakko.app.ui.contacts.SignedOutInviteState ->
+                    anonStartRoute = route
+                    if (page.keepsLinkParked) {
+                        answeredInviteSlug = parkedInvite
+                    } else {
+                        answeredInviteSlug = null
+                        inviteIntake.consume()
+                    }
+                }
+                me.lakko.app.ui.contacts.SignedOutInviteScreen(
+                    slug = parkedInvite,
+                    preview = { contactsRepository.previewInviteLink(it) },
+                    onCreateAccount = { page -> choose(AnonRoutes.SIGNUP, page) },
+                    onHaveAccount = { page -> choose(AnonRoutes.LOGIN, page) },
+                )
+            } else {
+                AnonRoot(
+                    repository = authRepository,
+                    cachedUsername = current.cachedUsername,
+                    startRoute = anonStartRoute,
+                )
+            }
         }
         // Signed in, but this device does not hold the account's keys:
         // the restore prompt (another device, a passkey that carries the
@@ -2862,13 +2894,23 @@ private fun AnonRoot(
     repository: AuthRepository,
     cachedUsername: String?,
     /** The screen the signed-out invite page chose (sign in or create an
-     *  account), or `null` for Welcome. */
+     *  account), or `null` for Welcome. Opened over Welcome, so Back from it
+     *  returns there. */
     startRoute: String? = null,
 ) {
     val appContext = LocalContext.current.applicationContext
     val nav = rememberNavController()
+    var startRouteOpened by androidx.compose.runtime.saveable.rememberSaveable {
+        androidx.compose.runtime.mutableStateOf(false)
+    }
+    LaunchedEffect(startRoute) {
+        if (startRoute != null && !startRouteOpened) {
+            startRouteOpened = true
+            nav.navigate(startRoute) { launchSingleTop = true }
+        }
+    }
 
-    NavHost(navController = nav, startDestination = startRoute ?: AnonRoutes.WELCOME) {
+    NavHost(navController = nav, startDestination = AnonRoutes.WELCOME) {
         composable(AnonRoutes.WELCOME) {
             me.lakko.app.ui.auth.WelcomeScreen(
                 onCreateAccount = { nav.navigate(AnonRoutes.SIGNUP) { launchSingleTop = true } },

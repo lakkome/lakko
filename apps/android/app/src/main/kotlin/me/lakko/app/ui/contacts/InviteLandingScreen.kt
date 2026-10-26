@@ -26,11 +26,16 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import me.lakko.app.contacts.InvitePreviewResult
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.ui.components.LakkoAvatar
@@ -42,9 +47,9 @@ import me.lakko.app.ui.components.LakkoAvatar
  *
  * The inviter's name and username as the link states them, the label, **Add**
  * and **Not now**. No fingerprint, no safety number: those stay on the
- * contact's info screen. A signed-out person sees no inviter card at all
- * (UX section 3, amended 2026-10-19): the ordinary sign-in screen, with the
- * deep link parked; once a session lands the link is checked again here. A
+ * contact's info screen. A signed-out person sees [SignedOutInviteScreen]
+ * instead (UX section 3, "Signed out", amended 2026-10-26), with the deep link
+ * parked; once a session lands the link is checked again here. Signed in, a
  * link that does not work (revoked, expired, used up, unknown, damaged) has
  * no page: the person is taken to Contacts, and so is a person whose Add
  * found the link dead.
@@ -120,6 +125,118 @@ public fun InviteLandingScreen(
                 )
             }
         }
+    }
+}
+
+/**
+ * The invite page for a person who is not signed in
+ * (`docs/ux/contact-invite-link.md` section 3, "Signed out", amended
+ * 2026-10-26; ADR-0079 amendment of 2026-10-26): who invites, one line about
+ * Lakko, **Create an account** and **I already have an account**. A link that
+ * no longer works says so, with the same two buttons. Opening it spends
+ * nothing and sends nothing: the card is opened on the device from the
+ * ledger's sealed blob, fetched with no session.
+ *
+ * The caller keeps the link parked for a live link (the session that lands
+ * opens it again) and drops it for a dead one ([keepsLinkParked]).
+ */
+@Composable
+public fun SignedOutInviteScreen(
+    slug: String,
+    preview: suspend (String) -> InvitePreviewResult,
+    /** An account button: the chosen state says whether the link stays parked. */
+    onCreateAccount: (SignedOutInviteState) -> Unit,
+    onHaveAccount: (SignedOutInviteState) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var attempt by remember(slug) { mutableIntStateOf(0) }
+    val state by produceState<SignedOutInviteState>(SignedOutInviteState.Loading, slug, attempt) {
+        value = SignedOutInviteState.Loading
+        value = try {
+            signedOutInviteState(preview(slug))
+        } catch (err: Throwable) {
+            me.lakko.app.rethrowIfCancelled(err)
+            android.util.Log.w("LakkoInvite", "WARN signed-out preview threw: ${err.javaClass.simpleName}")
+            SignedOutInviteState.OpenFailed
+        }
+    }
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        when (val s = state) {
+            SignedOutInviteState.Loading -> CircularProgressIndicator(modifier = Modifier.size(48.dp))
+            is SignedOutInviteState.Live -> {
+                val name = nameOf(s.statedName)
+                LakkoAvatar(name = s.statedName.orEmpty(), seed = s.avatarSeed, size = 72.dp)
+                Spacer(Modifier.height(16.dp))
+                Title(t("invite.contact.page.signed_out_title", mapOf("name" to name)))
+                if (s.usernameLine != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = s.usernameLine,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (s.label.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = s.label,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = t("invite.contact.page.about"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                )
+                AccountButtons(onCreateAccount = { onCreateAccount(s) }, onHaveAccount = { onHaveAccount(s) })
+            }
+            SignedOutInviteState.Dead -> {
+                Title(t("invite.contact.page.dead_title"))
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = t("invite.contact.page.dead_body"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+                AccountButtons(onCreateAccount = { onCreateAccount(s) }, onHaveAccount = { onHaveAccount(s) })
+            }
+            SignedOutInviteState.RateLimited -> {
+                Text(
+                    text = me.lakko.app.discovery.INVITE_RATE_LIMITED_TEXT.text(),
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(24.dp))
+                Button(onClick = { attempt += 1 }) { Text(t("common.try_again")) }
+            }
+            SignedOutInviteState.OpenFailed -> {
+                Title(t("invite.contact.result.failed_title"))
+                Spacer(Modifier.height(24.dp))
+                Button(onClick = { attempt += 1 }) { Text(t("common.try_again")) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AccountButtons(onCreateAccount: () -> Unit, onHaveAccount: () -> Unit) {
+    Spacer(Modifier.height(24.dp))
+    Button(onClick = onCreateAccount, modifier = Modifier.fillMaxWidth()) {
+        Text(t("invite.contact.page.create_account"))
+    }
+    Spacer(Modifier.height(8.dp))
+    OutlinedButton(onClick = onHaveAccount, modifier = Modifier.fillMaxWidth()) {
+        Text(t("invite.contact.page.have_account"))
     }
 }
 

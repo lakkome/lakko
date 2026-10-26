@@ -8437,6 +8437,30 @@
     "invite.links.error.custom_uses": {
       "text": "请输入 1 到 {max} 之间的人数。",
       "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} 邀请你加入 Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko 是一款每个聊天和通话都端到端加密的通讯应用。",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "创建账号",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "我已有账号",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "此邀请链接已失效",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "请让发送者重新发一个。",
+      "status": "machine"
     }
   }
 }

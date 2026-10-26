@@ -8437,6 +8437,30 @@
     "invite.links.error.custom_uses": {
       "text": "יש להזין מספר אנשים מ-1 עד {max}.",
       "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} מזמין/ה אותך ל-Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko היא אפליקציית מסרים שבה כל צ'אט ושיחה מוצפנים מקצה לקצה.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "יצירת חשבון",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "כבר יש לי חשבון",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "קישור ההזמנה הזה כבר לא עובד",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "אפשר לבקש מהשולח/ת קישור חדש.",
+      "status": "machine"
     }
   }
 }

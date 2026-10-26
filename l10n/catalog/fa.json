@@ -8437,6 +8437,30 @@
     "invite.links.error.custom_uses": {
       "text": "تعداد افراد را بین ۱ تا {max} وارد کنید.",
       "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} شما را به Lakko دعوت می‌کند",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko پیام‌رسانی است که هر گفتگو و تماس در آن رمزنگاری سرتاسری دارد.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "ساخت حساب",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "از قبل حساب دارم",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "این پیوند دعوت دیگر کار نمی‌کند",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "از فرستنده بخواهید پیوند تازه‌ای بفرستد.",
+      "status": "machine"
     }
   }
 }

@@ -47,10 +47,26 @@ Shown at `/i/<id>#<secret>` on web, and by the deep link on iOS and Android.
 No fingerprint, no safety number, no expiry, no use count. The safety number
 stays where it is today, on the contact's info screen, for anyone who wants it.
 
-**Signed out** (amended 2026-10-19). No inviter card at all: the first screen
-is the ordinary **Sign in** / **Create an account** choice. After either, the
-link is checked again: if it still works B sees the default page above; if it
-no longer works B lands on the Contacts screen (below).
+**Signed out** (amended 2026-10-26, replacing the 2026-10-19 rule that showed
+no card). A person with no account, or not signed in on this device, must see
+that someone invites them before being asked to sign in:
+
+- Avatar, then the title **Anna invites you to Lakko** (A's display name, else
+  `@username`, else "Someone"), A's `@username` under it when A has one, and
+  the label line when the link has one.
+- One line: **Lakko is a messenger where every chat and call is end-to-end
+  encrypted.**
+- Buttons: **Create an account** (primary) and **I already have an account**
+  (secondary). Both carry the link as the return, so after sign-up or sign-in
+  the link is opened again: still working, the default page above; no longer
+  working, the Contacts screen (below).
+- A link that does not work, opened signed out: title **This invite link no
+  longer works**, line **Ask the person who sent it for a new one.**, and the
+  same two buttons with no return.
+
+The card is built on the device from the link itself (the ledger fetch needs no
+session and the name is sealed under the link's secret); nothing is consumed
+and nothing is sent until Add.
 
 **Adding.** **Add** shows a spinner in place of its label and disables both
 buttons until the request is written. Then the page closes into the chat with A

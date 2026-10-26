@@ -8437,6 +8437,30 @@
     "invite.links.error.custom_uses": {
       "text": "Indica un número de personas de 1 a {max}.",
       "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} te invita a Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko es una app de mensajería en la que cada chat y llamada tiene cifrado de extremo a extremo.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Crear una cuenta",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "Ya tengo una cuenta",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Este enlace de invitación ya no funciona",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Pide a quien te lo envió uno nuevo.",
+      "status": "machine"
     }
   }
 }

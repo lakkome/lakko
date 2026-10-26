@@ -646,3 +646,16 @@ Separately, the person card of a removed person offers **Add to contacts**
 (local, sends nothing); the shared rule `lakko_ui_rules::info` takes
 `is_contact` again for that one case and gains `InfoSection::AddContact`
 (UX `docs/ux/conversation-info.md` section 2.1).
+
+## Amendment (2026-10-26): a signed-out visitor sees who invites
+
+The maintainer reversed rule 3 of the 2026-10-19 amendment: a person with no
+Lakko account who opened a link landed on a sign-in screen with nothing to
+say that anyone invited them. A signed-out visitor now sees an inviter card
+(name, `@username`, the label, one line about Lakko) with **Create an
+account** and **I already have an account**, both returning to the link; a
+dead link opened signed out says so with the same two buttons. Signed in,
+rules 4 and 5 stand (a dead link opens Contacts). The card is opened on the
+device from the ledger's sealed blob, which the ledger serves without a
+session; nothing is consumed before Add. UX spec
+`docs/ux/contact-invite-link.md` section 3, "Signed out".
