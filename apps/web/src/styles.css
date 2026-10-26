@@ -3964,6 +3964,49 @@ button.lk-reaction {
   font-size: 15px;
   font-weight: 500;
 }
+/* The custom period of a new invite link: the number, then its unit. */
+.lk-invite-custom {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: end;
+}
+/* An invite link as a QR code. The tile is white in both themes so the code
+   stays dark-on-light, which every camera reads. */
+.lk-qr-dialog {
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  color: var(--surface-fg);
+  box-shadow: var(--shadow-1);
+  padding: 0;
+  width: min(22rem, calc(100vw - 2rem));
+}
+.lk-qr-dialog::backdrop {
+  background: rgb(0 0 0 / 0.45);
+}
+.lk-qr-dialog-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 20px;
+  text-align: center;
+}
+.lk-qr-dialog-body p {
+  margin: 0;
+}
+.lk-qr-tile {
+  background: #fff;
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  line-height: 0;
+}
+.lk-qr-tile canvas {
+  width: 256px;
+  height: 256px;
+  max-width: 100%;
+}
 
 /* ------------------------------------------------------------ channels */
 

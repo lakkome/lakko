@@ -4158,6 +4158,14 @@
       "text": "Сверить код безопасности",
       "status": "machine"
     },
+    "contacts.scan_qr": {
+      "text": "Сканировать QR-код",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "Это не ссылка Lakko. Попробуйте другой код.",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "Введите шесть цифр, которые показывает другое устройство.",
       "status": "machine"
@@ -6170,6 +6178,14 @@
       "text": "Создана {date}",
       "status": "machine"
     },
+    "invite.links.custom_expiry_amount": {
+      "text": "Срок",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Число людей",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "Любой, кто откроет одну из ваших ссылок, может отправить вам запрос в контакты, пока ссылка не истечёт или не будет исчерпана.",
       "status": "machine"
@@ -6180,6 +6196,14 @@
     },
     "invite.links.error.copy": {
       "text": "Не удалось скопировать ссылку.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "Укажите срок от 1 часа до 365 дней.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "Укажите число людей от 1 до {max}.",
       "status": "machine"
     },
     "invite.links.error.load": {
@@ -6218,16 +6242,16 @@
       "text": "Истекает через {count} мин",
       "status": "machine"
     },
+    "invite.links.expires_option_custom": {
+      "text": "Свой",
+      "status": "machine"
+    },
     "invite.links.expires_option_days": {
       "text": "{count, plural, one {Через # день} few {Через # дня} many {Через # дней} other {Через # дня}}",
       "status": "machine"
     },
     "invite.links.expires_option_never": {
       "text": "Никогда",
-      "status": "machine"
-    },
-    "invite.links.for_new_user": {
-      "text": "Для новичка в Lakko",
       "status": "machine"
     },
     "invite.links.label_field": {
@@ -6258,8 +6282,8 @@
       "text": "Новая",
       "status": "machine"
     },
-    "invite.links.referral_option": {
-      "text": "Для того, у кого ещё нет аккаунта Lakko",
+    "invite.links.qr_hint": {
+      "text": "Кто отсканирует этот код, сможет отправить вам запрос в контакты.",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -6268,6 +6292,18 @@
     },
     "invite.links.revoking": {
       "text": "Отзыв ссылки...",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "Показать QR-код",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "Дни",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "Часы",
       "status": "machine"
     },
     "invite.links.unlimited_uses": {
@@ -6284,6 +6320,10 @@
     },
     "invite.links.uses_left": {
       "text": "{count, plural, one {Осталось # использование} few {Осталось # использования} many {Осталось # использований} other {Осталось # использования}}",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Свой",
       "status": "machine"
     },
     "invite.links.uses_option_one": {

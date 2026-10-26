@@ -379,17 +379,23 @@ public final class ContactsViewModel: ObservableObject {
 
     // MARK: - Invite link actions (1.14e7)
 
-    /// Generate a fresh single-use 7-day invite link. Surfaces the
-    /// resulting ``GeneratedInvite`` in ``lastGeneratedInvite``;
-    /// failures land in ``inviteError``.
-    public func onGenerateInviteClicked() {
+    /// Create an invite link with what the sheet's create form chose
+    /// (``InviteCreateForm/params``). Surfaces the resulting
+    /// ``GeneratedInvite`` in ``lastGeneratedInvite`` and calls `onCreated`;
+    /// failures land in ``inviteError`` and leave the form open.
+    func onCreateInviteClicked(_ params: InviteCreateForm.Params, onCreated: @escaping () -> Void = {}) {
         guard !generatingInvite else { return }
         generatingInvite = true
         inviteError = nil
         Task {
             do {
-                let invite = try await repository.generateInviteLink()
+                // The sender does not decide whether the other person has an
+                // account: the invite page handles both.
+                let invite = try await repository.generateInviteLink(
+                    label: params.label, expiry: params.expiry, maxUses: params.maxUses,
+                    bootstrapReferral: false)
                 generatingInvite = false
+                onCreated()
                 inviteError = nil
                 lastGeneratedInvite = invite
                 // The sheet lists the server-side set; pull it so the new
@@ -402,6 +408,9 @@ public final class ContactsViewModel: ObservableObject {
             }
         }
     }
+
+    /// Drop the create error when the form opens or closes.
+    func clearInviteError() { inviteError = nil }
 
     /// Revoke an outstanding invite by `blobId`. On success the
     /// row is dropped from ``ContactsState/outstandingInvites``

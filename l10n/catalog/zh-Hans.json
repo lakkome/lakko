@@ -6078,10 +6078,6 @@
       "text": "永不",
       "status": "machine"
     },
-    "invite.links.for_new_user": {
-      "text": "给刚接触 Lakko 的人",
-      "status": "machine"
-    },
     "invite.links.label_field": {
       "text": "标签（可选）",
       "status": "machine"
@@ -6108,10 +6104,6 @@
     },
     "invite.links.new_badge": {
       "text": "新",
-      "status": "machine"
-    },
-    "invite.links.referral_option": {
-      "text": "给还没有 Lakko 账号的人",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -8396,6 +8388,54 @@
     },
     "invite.contact.page.answer_failed": {
       "text": "无法联系 {name}。请检查网络连接后重试。",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "显示二维码",
+      "status": "machine"
+    },
+    "invite.links.qr_hint": {
+      "text": "扫描此二维码的任何人都可以向你发送联系人请求。",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "扫描二维码",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "这不是 Lakko 链接。请换一个二维码。",
+      "status": "machine"
+    },
+    "invite.links.expires_option_custom": {
+      "text": "自定义",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "自定义",
+      "status": "machine"
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "期限",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "小时",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "天",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "人数",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "请输入 1 小时到 365 天之间的期限。",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "请输入 1 到 {max} 之间的人数。",
       "status": "machine"
     }
   }

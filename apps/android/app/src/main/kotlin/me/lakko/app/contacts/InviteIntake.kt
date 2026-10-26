@@ -56,7 +56,7 @@ public class InviteIntake {
     public val pendingGroupJoin: StateFlow<GroupJoinLink?> = mutableGroupJoin.asStateFlow()
 
     /** Publish a new slug — called from
-     *  [me.lakko.app.MainActivity.handleInviteIntent]. Replaces
+     *  `MainActivity` (via [publishLink]). Replaces
      *  any prior unconsumed value (the user has clearly chosen
      *  to act on the newer link). */
     public fun publish(slug: String) {
@@ -70,7 +70,7 @@ public class InviteIntake {
     }
 
     /** ADR-0028 (G-3) — publish a group join-ticket slug with its fragment,
-     *  called from [me.lakko.app.MainActivity.handleGroupJoinIntent]. The
+     *  called from `MainActivity` (via [publishLink]). The
      *  fragment carries the preview's link key; `null` when the tapped URL had
      *  none (the page then shows no preview). */
     public fun publishGroupJoin(slug: String, fragment: String?) {
@@ -93,7 +93,7 @@ public class InviteIntake {
     public val pendingCallJoinSlug: StateFlow<String?> = mutableCallJoinSlug.asStateFlow()
 
     /** ADR-0032 — publish a call-invite slug, called from
-     *  [me.lakko.app.MainActivity.handleCallJoinIntent]. */
+     *  `MainActivity` (via [publishLink]). */
     public fun publishCallJoin(slug: String) {
         mutableCallJoinSlug.value = slug
     }

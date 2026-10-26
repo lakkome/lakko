@@ -6078,10 +6078,6 @@
       "text": "Nunca",
       "status": "machine"
     },
-    "invite.links.for_new_user": {
-      "text": "Para alguém novo no Lakko",
-      "status": "machine"
-    },
     "invite.links.label_field": {
       "text": "Rótulo (opcional)",
       "status": "machine"
@@ -6108,10 +6104,6 @@
     },
     "invite.links.new_badge": {
       "text": "Novo",
-      "status": "machine"
-    },
-    "invite.links.referral_option": {
-      "text": "Para alguém que ainda não tem conta no Lakko",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -8396,6 +8388,54 @@
     },
     "invite.contact.page.answer_failed": {
       "text": "Não foi possível falar com {name}. Verifique sua conexão e tente de novo.",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "Mostrar QR code",
+      "status": "machine"
+    },
+    "invite.links.qr_hint": {
+      "text": "Quem escanear este código poderá enviar a você um pedido de contato.",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "Escanear QR code",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "Este código não é um link do Lakko. Tente outro código.",
+      "status": "machine"
+    },
+    "invite.links.expires_option_custom": {
+      "text": "Personalizado",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Personalizado",
+      "status": "machine"
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "Período",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "Horas",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "Dias",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Número de pessoas",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "Informe um período de 1 hora a 365 dias.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "Informe um número de pessoas de 1 a {max}.",
       "status": "machine"
     }
   }

@@ -27,6 +27,7 @@
  * account takes a request through the link from that moment.
  */
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
+import QRCode from "qrcode";
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
@@ -34,7 +35,7 @@ import { useChats } from "../chat/ChatContext";
 import { DiscoveryClient } from "../discovery/client";
 import { Icon } from "../ui/icons";
 import { loadWasm } from "../wasm";
-import { joinFacts, t } from "../l10n";
+import { currentLanguage, joinFacts, t } from "../l10n";
 import { KeyedError } from "../l10n/keyed-error";
 import { createLiveText } from "../l10n/live-text";
 import { contactsErrorText } from "./errors";
@@ -59,13 +60,17 @@ import {
 import { forgetInviteLinkSecret } from "./invite-link-secrets";
 import {
   composePointerInviteUrl,
+  CUSTOM_MAX_USES,
+  customExpiryMs,
+  customMaxUses,
   expiryPresetToMs,
+  type ExpiryUnit,
   INVITE_LABEL_MAX_LEN,
   maxUsesPresetToValue,
   type ExpiryPreset,
   type MaxUsesPreset,
 } from "./invite";
-import { describeInviteCreated, describeInviteExpiry, describeInviteLimit } from "./invite-describe";
+import { describeInviteCreated, describeInviteExpiry, describeInviteUsage } from "./invite-describe";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { listedContactLinks, type LinkRecordModel } from "../devices/sync/link-records";
 import { useProfiles } from "../profile/ProfileContext";
@@ -74,8 +79,8 @@ import { useProfiles } from "../profile/ProfileContext";
 interface LinkRow {
   readonly key: string;
   readonly url: string | null;
-  /** The owner's label, or `null` for an unlabelled link (shown as the
-   *  catalog's "Invite link"). */
+  /** The owner's label, or `null` for an unlabelled link (no title line:
+   *  the facts lead). */
   readonly label: string | null;
   /** The facts under the title, rendered in the current language. */
   readonly meta: () => string;
@@ -98,7 +103,7 @@ function rowOfRecord(record: LinkRecordModel, nowMs: number, widths: InviteLinkW
       [
         describeInviteCreated(new Date(record.mintedAtMs).toISOString()),
         describeInviteExpiry(record.expiryMs, nowMs),
-        describeInviteLimit(record.maxUses),
+        describeInviteUsage(record.uses, record.maxUses),
       ].filter((p) => p.length > 0),
     );
   return {
@@ -132,9 +137,26 @@ export function InviteLinksPanel(): JSX.Element {
 
   const [creating, setCreating] = createSignal(false);
   const [label, setLabel] = createSignal("");
-  const [expiry, setExpiry] = createSignal<ExpiryPreset>("7d");
-  const [maxUses, setMaxUses] = createSignal<MaxUsesPreset>("single");
-  const [bootstrapReferral, setBootstrapReferral] = createSignal(false);
+  const [expiry, setExpiry] = createSignal<ExpiryPreset | "custom">("7d");
+  const [customExpiryAmount, setCustomExpiryAmount] = createSignal("");
+  const [customExpiryUnit, setCustomExpiryUnit] = createSignal<ExpiryUnit>("days");
+  const [maxUses, setMaxUses] = createSignal<MaxUsesPreset | "custom">("single");
+  const [customUses, setCustomUses] = createSignal("");
+
+  /** The expiry the form describes, or `null` while a custom period is
+   *  out of range (Create stays disabled). */
+  const chosenExpiryMs = (nowMs: number): bigint | null => {
+    const e = expiry();
+    return e === "custom"
+      ? customExpiryMs(customExpiryAmount(), customExpiryUnit(), nowMs)
+      : expiryPresetToMs(e, nowMs);
+  };
+  const chosenMaxUses = (): number | null => {
+    const u = maxUses();
+    return u === "custom" ? customMaxUses(customUses()) : maxUsesPresetToValue(u);
+  };
+  const formValid = (): boolean => chosenExpiryMs(Date.now()) !== null && chosenMaxUses() !== null;
+  const [qrRow, setQrRow] = createSignal<LinkRow | null>(null);
   const [createBusy, setCreateBusy] = createSignal(false);
 
   const rows = (): LinkRow[] => {
@@ -198,8 +220,10 @@ export function InviteLinksPanel(): JSX.Element {
         throw new KeyedError("common.error.starting_up");
       }
       const wasm = await loadWasm();
-      const expiryMs = expiryPresetToMs(expiry(), Date.now());
-      const maxUsesValue = maxUsesPresetToValue(maxUses());
+      const expiryMs = chosenExpiryMs(Date.now());
+      const maxUsesValue = chosenMaxUses();
+      // The button is disabled while either is out of range.
+      if (expiryMs === null || maxUsesValue === null) return;
       const linkId = wasm.generateLinkId();
       const linkGrant = await session.newLink(linkId, expiryMs === 0n ? null : Number(expiryMs));
       // Sealed-link amendment of ADR-0028 (2026-09-28): the compose seals the
@@ -213,7 +237,9 @@ export function InviteLinksPanel(): JSX.Element {
           id.x25519PublicKey,
           expiryMs,
           maxUsesValue,
-          bootstrapReferral(),
+          // The sender does not decide whether the other person has an
+          // account: the invite page handles both.
+          false,
           label(),
           linkId,
           linkGrant,
@@ -256,7 +282,7 @@ export function InviteLinksPanel(): JSX.Element {
               label: label(),
               expiryMs: Number(expiryMs),
               maxUses: maxUsesValue,
-              bootstrapReferral: bootstrapReferral(),
+              bootstrapReferral: false,
             },
           },
         );
@@ -285,7 +311,8 @@ export function InviteLinksPanel(): JSX.Element {
       }
       setCreating(false);
       setLabel("");
-      setBootstrapReferral(false);
+      setCustomExpiryAmount("");
+      setCustomUses("");
     } catch (err) {
       setError(contactsErrorText(err, "chat.error.create_link"));
     } finally {
@@ -378,39 +405,88 @@ export function InviteLinksPanel(): JSX.Element {
             {t("invite.links.expires_field")}
             <select
               value={expiry()}
-              onChange={(e) => setExpiry(e.currentTarget.value as ExpiryPreset)}
+              onChange={(e) => setExpiry(e.currentTarget.value as ExpiryPreset | "custom")}
               disabled={createBusy()}
             >
               <option value="1d">{t("invite.links.expires_option_days", { count: 1 })}</option>
               <option value="7d">{t("invite.links.expires_option_days", { count: 7 })}</option>
               <option value="30d">{t("invite.links.expires_option_days", { count: 30 })}</option>
               <option value="never">{t("invite.links.expires_option_never")}</option>
+              <option value="custom">{t("invite.links.expires_option_custom")}</option>
             </select>
           </label>
+          <Show when={expiry() === "custom"}>
+            <div class="lk-invite-custom">
+              <label>
+                {t("invite.links.custom_expiry_amount")}
+                <input
+                  type="number"
+                  inputmode="numeric"
+                  min="1"
+                  step="1"
+                  value={customExpiryAmount()}
+                  onInput={(e) => setCustomExpiryAmount(e.currentTarget.value)}
+                  disabled={createBusy()}
+                />
+              </label>
+              <label>
+                <span class="lakko-visually-hidden">{t("invite.links.custom_expiry_amount")}</span>
+                <select
+                  value={customExpiryUnit()}
+                  onChange={(e) => setCustomExpiryUnit(e.currentTarget.value as ExpiryUnit)}
+                  disabled={createBusy()}
+                >
+                  <option value="hours">{t("invite.links.unit_hours")}</option>
+                  <option value="days">{t("invite.links.unit_days")}</option>
+                </select>
+              </label>
+            </div>
+            <Show
+              when={
+                customExpiryAmount().trim() !== "" &&
+                customExpiryMs(customExpiryAmount(), customExpiryUnit(), Date.now()) === null
+              }
+            >
+              <div class="form-error">{t("invite.links.error.custom_expiry")}</div>
+            </Show>
+          </Show>
           <label>
             {t("invite.links.uses_field")}
             <select
               value={maxUses()}
-              onChange={(e) => setMaxUses(e.currentTarget.value as MaxUsesPreset)}
+              onChange={(e) => setMaxUses(e.currentTarget.value as MaxUsesPreset | "custom")}
               disabled={createBusy()}
             >
               <option value="single">{t("invite.links.uses_option_one")}</option>
               <option value="ten">{t("invite.links.uses_option_up_to", { count: 10 })}</option>
               <option value="unlimited">{t("invite.links.uses_option_unlimited")}</option>
+              <option value="custom">{t("invite.links.uses_option_custom")}</option>
             </select>
           </label>
-          <label style={{ display: "flex", gap: "8px", "align-items": "center" }}>
-            <input
-              type="checkbox"
-              checked={bootstrapReferral()}
-              onChange={(e) => setBootstrapReferral(e.currentTarget.checked)}
-              disabled={createBusy()}
-              style={{ width: "auto", margin: 0 }}
-            />
-            <span>{t("invite.links.referral_option")}</span>
-          </label>
+          <Show when={maxUses() === "custom"}>
+            <label>
+              {t("invite.links.custom_uses_count")}
+              <input
+                type="number"
+                inputmode="numeric"
+                min="1"
+                max={CUSTOM_MAX_USES}
+                step="1"
+                value={customUses()}
+                onInput={(e) => setCustomUses(e.currentTarget.value)}
+                disabled={createBusy()}
+              />
+            </label>
+            <Show when={customUses().trim() !== "" && customMaxUses(customUses()) === null}>
+              <div class="form-error">
+                {t("invite.links.error.custom_uses", {
+                  max: CUSTOM_MAX_USES.toLocaleString(currentLanguage()),
+                })}
+              </div>
+            </Show>
+          </Show>
           <div class="lk-actions">
-            <button class="primary" type="submit" disabled={createBusy()}>
+            <button class="primary" type="submit" disabled={createBusy() || !formValid()}>
               {createBusy() ? t("chats.new_group.creating") : t("invite.links.create")}
             </button>
             <button type="button" class="ghost" disabled={createBusy()} onClick={() => setCreating(false)}>
@@ -427,10 +503,10 @@ export function InviteLinksPanel(): JSX.Element {
               {(row) => (
                 <li class="lk-invite-item">
                   <div class="lk-invite-title">
-                    <strong>{row.label ?? t("chat.invite_link.label")}</strong>
+                    <Show when={row.label}>{(label) => <strong>{label()}</strong>}</Show>
                     <span class="lk-meta">{row.meta()}</span>
                   </div>
-                  <div class="lk-link-row" role="group" aria-label={row.label ?? t("chat.invite_link.label")}>
+                  <div class="lk-link-row" role="group" aria-label={row.label ?? row.meta()}>
                     <Show when={row.url}>
                       {(url) => (
                         <>
@@ -445,6 +521,15 @@ export function InviteLinksPanel(): JSX.Element {
                             onClick={() => void onCopy(row)}
                           >
                             <Icon name={copiedKey() === row.key ? "check" : "copy"} size={16} />
+                          </button>
+                          <button
+                            type="button"
+                            class="lk-icon-button"
+                            title={t("invite.links.show_qr")}
+                            aria-label={t("invite.links.show_qr")}
+                            onClick={() => setQrRow(row)}
+                          >
+                            <Icon name="qr" size={16} />
                           </button>
                         </>
                       )}
@@ -465,6 +550,52 @@ export function InviteLinksPanel(): JSX.Element {
           </ul>
         </Show>
       </Show>
+
+      <Show when={qrRow()}>
+        {(row) => <InviteQrDialog row={row()} onClose={() => setQrRow(null)} />}
+      </Show>
     </section>
+  );
+}
+
+/** The link as a QR code in a modal `<dialog>` (focus trap and Escape come
+ *  with `showModal`). The code is drawn dark on a white tile in both themes:
+ *  a light-on-dark code does not scan on every camera. */
+function InviteQrDialog(props: { readonly row: LinkRow; readonly onClose: () => void }): JSX.Element {
+  let dialog: HTMLDialogElement | undefined;
+  let canvas: HTMLCanvasElement | undefined;
+  onMount(() => {
+    dialog?.showModal();
+    const url = props.row.url;
+    if (url !== null && canvas !== undefined) {
+      void QRCode.toCanvas(canvas, url, { errorCorrectionLevel: "M", width: 256, margin: 2 }).catch(
+        (err: unknown) => console.warn("[contacts] invite QR render failed", err instanceof Error ? err.name : ""),
+      );
+    }
+  });
+  return (
+    <dialog
+      ref={dialog}
+      class="lk-qr-dialog"
+      aria-label={props.row.label ?? t("common.qr_code")}
+      onClose={props.onClose}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) dialog?.close();
+      }}
+    >
+      <div class="lk-qr-dialog-body">
+        <Show when={props.row.label}>{(label) => <strong>{label()}</strong>}</Show>
+        <div class="lk-qr-tile">
+          <canvas ref={canvas} role="img" aria-label={t("common.qr_code")} />
+        </div>
+        <span class="lk-meta">{props.row.meta()}</span>
+        <p class="lk-muted">{t("invite.links.qr_hint")}</p>
+        <div class="lk-actions">
+          <button type="button" class="primary" onClick={() => dialog?.close()}>
+            {t("common.done")}
+          </button>
+        </div>
+      </div>
+    </dialog>
   );
 }

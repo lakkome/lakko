@@ -1451,7 +1451,8 @@ private struct SessionRoot: View, Equatable {
                 ContactsScreen(
                     viewModel: contactsVM,
                     peopleSearch: models.contactsPeopleSearch,
-                    onOpenPerson: { openFoundPerson($0, on: .contacts) })
+                    onOpenPerson: { openFoundPerson($0, on: .contacts) },
+                    onOpenLink: { inviteIntake.handle($0) })
                     .navigationDestination(for: TabRoute.self) { routeView($0, tab: .contacts) }
             }
             .tabItem { Label(l10n.t("nav.contacts"), systemImage: "person.crop.circle") }

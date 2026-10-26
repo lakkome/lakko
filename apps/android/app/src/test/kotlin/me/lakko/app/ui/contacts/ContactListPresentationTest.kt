@@ -139,6 +139,13 @@ class InviteLinkRowsTest {
         )
 
     @Test
+    fun `a link without a label has no title line`() {
+        assertEquals(null, inviteRowTitle(row("a")))
+        assertEquals(null, inviteRowTitle(row("a").copy(label = "   ")))
+        assertEquals("Work", inviteRowTitle(row("a").copy(label = " Work ")))
+    }
+
+    @Test
     fun `the limit follows the wire sentinels`() {
         assertEquals("unlimited", describeInviteLimit(INVITE_UNLIMITED_USES).en)
         assertEquals("single-use", describeInviteLimit(0L).en)
@@ -171,6 +178,22 @@ class InviteLinkRowsTest {
         assertEquals("Expires in 2d", describeInviteExpiry(now + 2 * 24 * 3_600_000L + 5, now).en)
         assertEquals("Expires in 3h", describeInviteExpiry(now + 3 * 3_600_000L + 5, now).en)
         assertEquals("Expires in 1m", describeInviteExpiry(now + 10, now).en)
+    }
 
+    @Test
+    fun `expiry rounds to the nearest unit, minutes up`() {
+        val now = 1_000_000L
+        val min = 60_000L
+        val hour = 60 * min
+        val day = 24 * hour
+        // A 7-day link made an hour ago still reads 7d (was a floored 6d).
+        assertEquals("Expires in 7d", describeInviteExpiry(now + 7 * day - hour, now).en)
+        assertEquals("Expires in 7d", describeInviteExpiry(now + (6.9 * day).toLong(), now).en)
+        assertEquals("Expires in 1d", describeInviteExpiry(now + (23.6 * hour).toLong(), now).en)
+        assertEquals("Expires in 23h", describeInviteExpiry(now + (23.4 * hour).toLong(), now).en)
+        assertEquals("Expires in 2d", describeInviteExpiry(now + 36 * hour, now).en)
+        assertEquals("Expires in 1h", describeInviteExpiry(now + (59.5 * min).toLong(), now).en)
+        assertEquals("Expires in 59m", describeInviteExpiry(now + 59 * min, now).en)
+        assertEquals("Expires in 1m", describeInviteExpiry(now + 30_000L, now).en)
     }
 }

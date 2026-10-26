@@ -38,7 +38,8 @@ public struct ReachKeySpec: Hashable {
 public struct LinkReach: Codable, Hashable {
     public let linkIdB64: String
     public let version: UInt32
-    public let expiresAtMs: UInt64
+    /// `nil` for a link that never expires (the web reach book's `null`).
+    public let expiresAtMs: UInt64?
     /// The discovery ledger id the link was uploaded under (base64), when it
     /// was — what a revoke names.
     public var blobIdB64: String?
@@ -47,11 +48,16 @@ public struct LinkReach: Codable, Hashable {
     /// A revoke goes to the ledger of its kind.
     public var kind: String?
 
+    /// Not past its expiry; a link without one is always live.
+    public func isLive(nowMs: UInt64) -> Bool {
+        expiresAtMs.map { $0 > nowMs } ?? true
+    }
+
     /// ``kind`` of a `/c/` call link.
     public static let callKind = "call"
 
     public init(
-        linkIdB64: String, version: UInt32, expiresAtMs: UInt64, blobIdB64: String? = nil,
+        linkIdB64: String, version: UInt32, expiresAtMs: UInt64?, blobIdB64: String? = nil,
         kind: String? = nil
     ) {
         self.linkIdB64 = linkIdB64
@@ -350,7 +356,7 @@ public enum ReachRules {
         if groups.contains(where: { allowsScope(setting, groupScope($0)) }) {
             out.append(accountWide(.group))
         }
-        for link in links where link.expiresAtMs > nowMs {
+        for link in links where link.isLive(nowMs: nowMs) {
             guard let id = Data(base64Encoded: link.linkIdB64), !id.isEmpty else { continue }
             out.append(ReachKeySpec(
                 reachClass: .link, scopeId: id, version: link.version,

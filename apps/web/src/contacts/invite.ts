@@ -81,6 +81,43 @@ export function expiryPresetToMs(preset: ExpiryPreset, nowMs: number): bigint {
   }
 }
 
+/** The unit of a custom expiry period. */
+export type ExpiryUnit = "hours" | "days";
+
+/** The longest custom period a link may be given: 365 days. Chosen, not
+ *  measured; the same bound on iOS and Android. */
+export const CUSTOM_EXPIRY_MAX_MS = 365 * 86_400_000;
+
+/** The wire expiry for a custom period of `amount` `unit`s from `nowMs`, or
+ *  `null` when the text is not a whole number or the period is outside
+ *  1 hour .. 365 days. */
+export function customExpiryMs(amount: string, unit: ExpiryUnit, nowMs: number): bigint | null {
+  const n = parseWholeNumber(amount);
+  if (n === null) return null;
+  const ms = n * (unit === "hours" ? 3_600_000 : 86_400_000);
+  if (ms < 3_600_000 || ms > CUSTOM_EXPIRY_MAX_MS) return null;
+  return BigInt(nowMs + ms);
+}
+
+/** The largest custom number of people a link may admit. Chosen, not
+ *  measured; the same bound on iOS and Android. */
+export const CUSTOM_MAX_USES = 10_000;
+
+/** The wire `max_uses` for a custom number of people, or `null` when the text
+ *  is not a whole number in 1 .. {@link CUSTOM_MAX_USES}. One person is the
+ *  single-use sentinel `0`, as the preset writes it. */
+export function customMaxUses(count: string): number | null {
+  const n = parseWholeNumber(count);
+  if (n === null || n < 1 || n > CUSTOM_MAX_USES) return null;
+  return n === 1 ? 0 : n;
+}
+
+function parseWholeNumber(text: string): number | null {
+  const trimmed = text.trim();
+  if (!/^\d{1,9}$/.test(trimmed)) return null;
+  return Number(trimmed);
+}
+
 /** Discrete UI choices for `max_uses`. */
 export type MaxUsesPreset = "single" | "ten" | "unlimited";
 

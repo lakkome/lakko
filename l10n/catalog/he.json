@@ -6078,10 +6078,6 @@
       "text": "אף פעם",
       "status": "machine"
     },
-    "invite.links.for_new_user": {
-      "text": "למישהו חדש ב-Lakko",
-      "status": "machine"
-    },
     "invite.links.label_field": {
       "text": "תווית (לא חובה)",
       "status": "machine"
@@ -6108,10 +6104,6 @@
     },
     "invite.links.new_badge": {
       "text": "חדש",
-      "status": "machine"
-    },
-    "invite.links.referral_option": {
-      "text": "למישהו שעדיין אין לו חשבון Lakko",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -8396,6 +8388,54 @@
     },
     "invite.contact.page.answer_failed": {
       "text": "לא ניתן היה להגיע אל {name}. כדאי לבדוק את החיבור ולנסות שוב.",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "הצגת קוד QR",
+      "status": "machine"
+    },
+    "invite.links.qr_hint": {
+      "text": "כל מי שסורק את הקוד הזה יכול לשלוח לך בקשת קשר.",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "סריקת קוד QR",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "הקוד הזה אינו קישור של Lakko. נסו קוד אחר.",
+      "status": "machine"
+    },
+    "invite.links.expires_option_custom": {
+      "text": "מותאם אישית",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "מותאם אישית",
+      "status": "machine"
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "תקופה",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "שעות",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "ימים",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "מספר אנשים",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "יש להזין תקופה משעה אחת עד 365 ימים.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "יש להזין מספר אנשים מ-1 עד {max}.",
       "status": "machine"
     }
   }

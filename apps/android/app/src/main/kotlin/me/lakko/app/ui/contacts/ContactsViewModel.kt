@@ -183,26 +183,28 @@ public class ContactsViewModel(
     }
 
     /**
-     * Generate a fresh single-use 7-day invite link. Surfaces
-     * the resulting [GeneratedInvite] in
-     * [ContactsState.outstandingInvites]; failures land in
-     * [ContactsUiState.inviteError].
-     *
-     * Single-button-fire shape for 1.15e10. The custom-config
-     * dialog (user-typed label / expiry / max_uses) lands in
-     * 1.15e10b when the UX pushes back.
+     * Create an invite link with what the Invite links sheet's form holds
+     * ([InviteCreateForm.toParams]). Surfaces the resulting
+     * [GeneratedInvite] in [ContactsState.outstandingInvites]; failures land
+     * in [ContactsUiState.inviteError]. [onCreated] runs once the link
+     * exists (the sheet closes its form).
      */
-    public fun onGenerateInviteClicked() {
+    public fun onGenerateInviteClicked(params: InviteCreateParams, onCreated: () -> Unit = {}) {
         val snapshot = mutableUi.value
         if (snapshot.generatingInvite) return
 
         mutableUi.update { it.copy(generatingInvite = true, inviteError = null) }
         viewModelScope.launch {
             try {
-                repo.generateInviteLink()
+                repo.generateInviteLink(
+                    label = params.label,
+                    expiryMillisFromNow = params.expiryMillisFromNow,
+                    maxUses = params.maxUses,
+                )
                 mutableUi.update {
                     it.copy(generatingInvite = false, inviteError = null)
                 }
+                onCreated()
             } catch (err: Throwable) {
                 me.lakko.app.rethrowIfCancelled(err) {
                     mutableUi.update { it.copy(generatingInvite = false) }

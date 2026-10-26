@@ -2797,12 +2797,12 @@ public class ContactsRepository(
      * owner shares via copy-to-clipboard or the Android share
      * sheet.
      *
-     * 1.15e10 ships with **fixed defaults**: 7-day expiry,
-     * single-use (`max_uses = 0`), non-bootstrap-referral
-     * (this flow is for connecting existing users, not new
-     * signups). A custom-config dialog (user-typed label /
-     * expiry / max_uses) layers on as 1.15e10b when the UX
-     * pushes back.
+     * The defaults are 7-day expiry and single-use (`max_uses = 0`);
+     * the Invite links sheet's form passes the owner's choice of label,
+     * expiry and uses. [expiryMillisFromNow] `null` means the link never
+     * expires: the wire expiry is then the `NEVER_EXPIRES` sentinel `0`,
+     * in the composed capability and in the ledger upload alike. Always
+     * non-bootstrap-referral (this flow connects existing users).
      *
      * The new invite is appended to [ContactsState.outstandingInvites]
      * so the UI can render a list of the owner's outstanding
@@ -2814,7 +2814,7 @@ public class ContactsRepository(
      */
     public suspend fun generateInviteLink(
         label: String = "",
-        expiryMillisFromNow: Long = DEFAULT_INVITE_EXPIRY_MS,
+        expiryMillisFromNow: Long? = DEFAULT_INVITE_EXPIRY_MS,
         maxUses: UInt = SINGLE_USE,
         bootstrapReferral: Boolean = false,
     ): GeneratedInvite {
@@ -2824,7 +2824,10 @@ public class ContactsRepository(
                     "no identity secrets — please re-enter your password",
                 ),
             )
-        val expiryMs = (System.currentTimeMillis() + expiryMillisFromNow).toULong()
+        // `0` is the NEVER_EXPIRES sentinel (a never-expiring link).
+        val expiryMs = (
+            if (expiryMillisFromNow == null) 0L else System.currentTimeMillis() + expiryMillisFromNow
+            ).toULong()
 
         val bound = sessionBinding.capture()
         return me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use { identity ->

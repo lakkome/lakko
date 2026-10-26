@@ -18,13 +18,14 @@ export const INVITE_USES_UNLIMITED = 0xffff_ffff;
 export function describeInviteExpiry(expiryMs: number, nowMs: number): string {
   if (expiryMs === 0) return t("invite.links.never_expires");
   if (expiryMs <= nowMs) return t("invite.links.expired");
+  // Rounded to the nearest unit, not down: a 7-day link made an hour ago
+  // reads "in 7d", not "in 6d". The same rule on iOS and Android.
   const deltaMs = expiryMs - nowMs;
-  const days = Math.floor(deltaMs / 86_400_000);
-  if (days >= 1) return t("invite.links.expires_days", { count: days });
-  const hours = Math.floor(deltaMs / 3_600_000);
-  if (hours >= 1) return t("invite.links.expires_hours", { count: hours });
-  const minutes = Math.max(1, Math.floor(deltaMs / 60_000));
-  return t("invite.links.expires_minutes", { count: minutes });
+  const minutes = Math.max(1, Math.ceil(deltaMs / 60_000));
+  if (minutes < 60) return t("invite.links.expires_minutes", { count: minutes });
+  const hours = Math.round(deltaMs / 3_600_000);
+  if (hours < 24) return t("invite.links.expires_hours", { count: hours });
+  return t("invite.links.expires_days", { count: Math.round(deltaMs / 86_400_000) });
 }
 
 /** Uses left, or `null` for an unlimited link. Never below zero. */
@@ -51,14 +52,28 @@ export function describeInviteLimit(maxUses: number): string {
   return t("invite.uses.up_to", { count: maxUses });
 }
 
-/** "Created 16 Sep" style date (formatted for `locale`, by default the
- *  interface language), or an empty string for an unparseable timestamp. */
+/** The uses fact of a link in the account's own list, which knows the use
+ *  count (ADR-0079 register): the limit until someone used the link, then
+ *  what is left of it. A single-use link leaves the list once used and an
+ *  unlimited one has nothing to count down, so both state their limit. */
+export function describeInviteUsage(usedCount: number, maxUses: number): string {
+  const single = maxUses === 0 || maxUses === 1;
+  if (single || maxUses === INVITE_USES_UNLIMITED || usedCount <= 0) return describeInviteLimit(maxUses);
+  return describeInviteUses(usedCount, maxUses);
+}
+
+/** "Created 16 Sep, 14:32" style date and time (formatted for `locale`, by
+ *  default the interface language), or an empty string for an unparseable
+ *  timestamp. The time is there so two links made the same day can be told
+ *  apart. */
 export function describeInviteCreated(createdAt: string, locale?: string): string {
   const ms = Date.parse(createdAt);
   if (Number.isNaN(ms)) return "";
-  const date = new Date(ms).toLocaleDateString(locale ?? currentLanguage(), {
+  const date = new Date(ms).toLocaleString(locale ?? currentLanguage(), {
     day: "numeric",
     month: "short",
+    hour: "numeric",
+    minute: "2-digit",
   });
   return t("invite.links.created", { date });
 }

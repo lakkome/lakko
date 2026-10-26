@@ -6078,10 +6078,6 @@
       "text": "कभी नहीं",
       "status": "machine"
     },
-    "invite.links.for_new_user": {
-      "text": "Lakko पर नए व्यक्ति के लिए",
-      "status": "machine"
-    },
     "invite.links.label_field": {
       "text": "लेबल (वैकल्पिक)",
       "status": "machine"
@@ -6108,10 +6104,6 @@
     },
     "invite.links.new_badge": {
       "text": "नया",
-      "status": "machine"
-    },
-    "invite.links.referral_option": {
-      "text": "ऐसे व्यक्ति के लिए जिसका अभी Lakko अकाउंट नहीं है",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -8396,6 +8388,54 @@
     },
     "invite.contact.page.answer_failed": {
       "text": "{name} तक नहीं पहुँच सके। अपना कनेक्शन जाँचें और फिर से कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "QR कोड दिखाएँ",
+      "status": "machine"
+    },
+    "invite.links.qr_hint": {
+      "text": "जो भी यह कोड स्कैन करेगा, वह आपको संपर्क अनुरोध भेज सकेगा।",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "QR कोड स्कैन करें",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "यह कोड Lakko लिंक नहीं है। कोई दूसरा कोड आज़माएँ।",
+      "status": "machine"
+    },
+    "invite.links.expires_option_custom": {
+      "text": "अपनी पसंद",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "अपनी पसंद",
+      "status": "machine"
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "अवधि",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "घंटे",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "दिन",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "लोगों की संख्या",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "1 घंटे से 365 दिन तक की अवधि डालें।",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "1 से {max} तक लोगों की संख्या डालें।",
       "status": "machine"
     }
   }

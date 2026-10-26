@@ -6078,10 +6078,6 @@
       "text": "أبدًا",
       "status": "machine"
     },
-    "invite.links.for_new_user": {
-      "text": "لشخص جديد على Lakko",
-      "status": "machine"
-    },
     "invite.links.label_field": {
       "text": "التسمية (اختياري)",
       "status": "machine"
@@ -6108,10 +6104,6 @@
     },
     "invite.links.new_badge": {
       "text": "جديد",
-      "status": "machine"
-    },
-    "invite.links.referral_option": {
-      "text": "لشخص ليس لديه حساب Lakko بعد",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -8396,6 +8388,54 @@
     },
     "invite.contact.page.answer_failed": {
       "text": "تعذّر الوصول إلى {name}. تحقّق من اتصالك وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "إظهار رمز QR",
+      "status": "machine"
+    },
+    "invite.links.qr_hint": {
+      "text": "يمكن لأي شخص يمسح هذا الرمز أن يرسل إليك طلب تواصل.",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "مسح رمز QR",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "هذا الرمز ليس رابط Lakko. جرّب رمزًا آخر.",
+      "status": "machine"
+    },
+    "invite.links.expires_option_custom": {
+      "text": "مخصص",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "مخصص",
+      "status": "machine"
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "المدة",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "ساعات",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "أيام",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "عدد الأشخاص",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "أدخل مدة من ساعة واحدة إلى 365 يومًا.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "أدخل عدد أشخاص من 1 إلى {max}.",
       "status": "machine"
     }
   }

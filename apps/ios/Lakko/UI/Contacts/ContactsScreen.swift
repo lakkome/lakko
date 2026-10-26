@@ -27,6 +27,9 @@ public struct ContactsScreen: View {
     let peopleSearch: PeopleSearchModel?
     /// **Open** on a found person who is already a contact.
     let onOpenPerson: (FoundPerson) -> Void
+    /// A scanned Lakko link (`/i/`, `/g/`, `/c/`), handed to the same route
+    /// an opened Universal Link takes (``InviteIntake/handle(_:)``).
+    let onOpenLink: (URL) -> Void
 
     /// ADR-0048 — names resolve through the directory; observing it here
     /// regroups the list in place when a profile or a verdict arrives.
@@ -36,16 +39,19 @@ public struct ContactsScreen: View {
 
     @State private var query = ""
     @State private var inviteLinksPresented = false
+    @State private var scanPresented = false
     @State private var sentExpanded = false
 
     public init(
         viewModel: ContactsViewModel,
         peopleSearch: PeopleSearchModel? = nil,
-        onOpenPerson: @escaping (FoundPerson) -> Void = { _ in }
+        onOpenPerson: @escaping (FoundPerson) -> Void = { _ in },
+        onOpenLink: @escaping (URL) -> Void = { _ in }
     ) {
         self.viewModel = viewModel
         self.peopleSearch = peopleSearch
         self.onOpenPerson = onOpenPerson
+        self.onOpenLink = onOpenLink
     }
 
     // MARK: - Derived
@@ -182,6 +188,14 @@ public struct ContactsScreen: View {
         .sheet(isPresented: $inviteLinksPresented) {
             InviteLinksSheet(viewModel: viewModel, onDismiss: { inviteLinksPresented = false })
         }
+        .sheet(isPresented: $scanPresented) {
+            ScanLinkSheet(
+                onLink: { url in
+                    scanPresented = false
+                    onOpenLink(url)
+                },
+                onDismiss: { scanPresented = false })
+        }
         // The inbox long-poll runs for the whole session in `SessionRoot`,
         // so a chat or group created elsewhere lands whether or not this
         // screen is open. A visit only loads the invite links and asks for
@@ -200,9 +214,9 @@ public struct ContactsScreen: View {
     /// section 6.1): a person is found through the search field, which sends
     /// the request from its row.
     ///
-    /// Show / scan a contact QR code are not offered: no contact-QR flow
-    /// exists in the repository (the QR renderer and scanner serve device
-    /// pairing only).
+    /// Scan QR code reads a Lakko link (`/i/`, `/g/`, `/c/`) someone shows
+    /// from their invite-links list and opens it like a tapped link; the
+    /// code itself is shown per link in the invite-links sheet.
     ///
     /// There is no call-link entry here (`docs/ux/navigation.md` section 3).
     /// It was put in this menu by the redesign only because Calls had been
@@ -213,6 +227,9 @@ public struct ContactsScreen: View {
         Menu {
             Button { inviteLinksPresented = true } label: {
                 Label(l10n.t("contacts.add.share_invite"), systemImage: "link")
+            }
+            Button { scanPresented = true } label: {
+                Label(l10n.t("contacts.scan_qr"), systemImage: "qrcode.viewfinder")
             }
         } label: {
             Image(systemName: "person.badge.plus")
@@ -491,5 +508,61 @@ private struct ReauthPanel: View {
                 .foregroundStyle(Color.lakkoTextMuted)
         }
         .padding(.vertical, 8)
+    }
+}
+
+/// Contacts > Scan QR code: the camera reads codes until one is a Lakko link,
+/// which is then opened through the app's link route; any other code shows
+/// a line and the camera keeps scanning.
+private struct ScanLinkSheet: View {
+    let onLink: (URL) -> Void
+    let onDismiss: () -> Void
+    @ObservedObject private var l10n = Localization.shared
+    @State private var notALink = false
+    /// A catalog key of a camera failure, when the camera could not start.
+    @State private var cameraErrorKey: String?
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                if let cameraErrorKey {
+                    Text(l10n.t(cameraErrorKey))
+                        .font(.callout)
+                        .foregroundStyle(Color.lakkoDanger)
+                        .multilineTextAlignment(.center)
+                        .padding()
+                } else {
+                    QrScannerView(
+                        onDetected: { text in
+                            if let url = InviteIntake.scannedLink(text) { onLink(url) }
+                        },
+                        onError: { key in cameraErrorKey = key },
+                        accept: { InviteIntake.scannedLink($0) != nil },
+                        onRejected: { _ in
+                            if !notALink { notALink = true }
+                        })
+                        .aspectRatio(1, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .padding(.horizontal, 16)
+                    if notALink {
+                        Text(l10n.t("contacts.scan_qr.not_a_link"))
+                            .font(.callout)
+                            .foregroundStyle(Color.lakkoDanger)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 16)
+            .navigationTitle(l10n.t("contacts.scan_qr"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(l10n.t("common.cancel"), action: onDismiss)
+                }
+            }
+        }
+        .presentationDetents([.large])
     }
 }
