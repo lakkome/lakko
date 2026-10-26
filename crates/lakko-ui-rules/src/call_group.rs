@@ -192,7 +192,11 @@ pub fn call_grid(count: u32, width: u32, height: u32) -> CallGrid {
 }
 
 /// One person, as the stage rule sees them.
+///
+/// Four independent facts about a tile, so four booleans rather than a
+/// state enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct StageCandidate {
     /// This device's own tile.
     pub is_local: bool,
@@ -203,16 +207,20 @@ pub struct StageCandidate {
     /// When the person last was the active speaker, in milliseconds on the
     /// caller's own clock; `0` for never.
     pub last_spoke_at_ms: u64,
+    /// The tile is a shared screen, not a person's camera (ADR-0083). A
+    /// share tile is its own entry beside the sharer's camera tile.
+    pub is_screen: bool,
 }
 
 /// Who is on the stage in the layout with one large tile: an index into
 /// `people`, or `None` when the call is empty.
 ///
-/// In order: the pinned person; the person speaking now; the person who
-/// spoke most recently; the first person sending a picture; the first other
+/// In order: the pinned person; a shared screen (`docs/ux/screen-share.md`,
+/// a pin wins over a share); the person speaking now; the person who spoke
+/// most recently; the first person sending a picture; the first other
 /// person. This device's own tile takes the stage only when nobody else is
-/// in the call. A `pinned` index that is out of range, or that names this
-/// device's own tile, is ignored.
+/// in the call, and this device's own share never does. A `pinned` index
+/// that is out of range, or that names this device's own tile, is ignored.
 ///
 /// Stateless on purpose: how long a speaker must speak before they count, and
 /// how long the stage holds them, is the caller's smoothing of `speaking` and
@@ -225,6 +233,15 @@ pub fn call_stage(people: &[StageCandidate], pinned: Option<usize>) -> Option<us
         }
     }
     let others = || people.iter().enumerate().filter(|(_, p)| !p.is_local);
+    if let Some((index, _)) = others().find(|(_, p)| p.is_screen) {
+        return Some(index);
+    }
+    let others = || {
+        people
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.is_local && !p.is_screen)
+    };
     if let Some((index, _)) = others().find(|(_, p)| p.speaking) {
         return Some(index);
     }
@@ -242,7 +259,7 @@ pub fn call_stage(people: &[StageCandidate], pinned: Option<usize>) -> Option<us
     if let Some((index, _)) = others().next() {
         return Some(index);
     }
-    people.iter().position(|p| p.is_local)
+    people.iter().position(|p| p.is_local && !p.is_screen)
 }
 
 /// Which of a person's video tracks a call tile asks the call server for
@@ -451,6 +468,7 @@ mod tests {
             camera_on,
             speaking: false,
             last_spoke_at_ms: 0,
+            is_screen: false,
         }
     }
 
@@ -493,6 +511,24 @@ mod tests {
         let mut people = [person(false, false), person(true, true)];
         people[1].speaking = true;
         people[1].last_spoke_at_ms = 100;
+        assert_eq!(call_stage(&people, None), Some(0));
+    }
+
+    #[test]
+    fn a_share_takes_the_stage_unless_someone_is_pinned() {
+        let mut people = [
+            person(false, true),
+            person(false, false),
+            person(true, true),
+            person(false, false),
+        ];
+        people[0].speaking = true;
+        people[3].is_screen = true;
+        assert_eq!(call_stage(&people, None), Some(3));
+        assert_eq!(call_stage(&people, Some(1)), Some(1));
+        // This device's own share never takes the stage.
+        people[3].is_screen = false;
+        people[2].is_screen = true;
         assert_eq!(call_stage(&people, None), Some(0));
     }
 

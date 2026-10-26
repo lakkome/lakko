@@ -97,8 +97,12 @@ import {
   isSFrameTransformSupported,
   SFRAME_STREAM_CAMERA_LIGHT,
   SFRAME_STREAM_CAMERA_MIDDLE,
+  SFRAME_STREAM_SCREEN_AUDIO,
+  SFRAME_STREAM_SCREEN_SHARE,
   type SFrameStreamIndex,
 } from "./sframe-transform";
+import { ScreenShareNotSealedError, screenStreamPeerOf } from "./screen-share-tracks";
+import { queueParameterWrite } from "./sender-parameters";
 import {
   sframePeerConnectionConfig,
   sframeTransport,
@@ -137,6 +141,7 @@ import {
   BUDGETED_SENDER_KINDS,
   describePublishBudgetChange,
   readEncodingCeiling,
+  screenSenderCeiling,
   SenderCeiling,
   senderCeiling,
   type BudgetedSenderKind,
@@ -359,6 +364,13 @@ export interface SfuCallCallbacks {
    */
   onRemoteMediaState?(peerId: string, cameraOn: boolean): void;
   /**
+   * A peer's signed screen-share state arrived, sealed under the call's relay
+   * key (ADR-0083). `peerId` is the SFU's word for the sender; the caller
+   * verifies the state against the leaf key that peer's announcement
+   * verified with before acting on it.
+   */
+  onRemoteScreenShareState?(peerId: string, state: Uint8Array): void;
+  /**
    * The device did not have everything the call asked for, so the person
    * joined with less (`docs/ux/calls.md` section 4.4): the camera failed and
    * only the microphone is live, or neither could be captured and they
@@ -407,6 +419,18 @@ interface CopySlot {
 function emptyCopySlot(): CopySlot {
   return { sender: null, transformId: null, refusalWarned: false };
 }
+
+/** This device's screen share in the call (ADR-0083): its transceivers, one
+ *  for the picture and one for the sound when the capture has any. */
+interface ScreenSlot {
+  readonly transceivers: RTCRtpTransceiver[];
+  readonly transformIds: string[];
+  readonly video: RTCRtpSender | null;
+}
+
+/** The screen sender's frame-rate ceiling. A screen is read, not watched:
+ *  chosen, not measured. */
+export const SCREEN_MAX_FRAMERATE = 15;
 
 export class SfuCallSession {
   private state: SfuCallState = "idle";
@@ -500,6 +524,11 @@ export class SfuCallSession {
     main: new SenderCeiling("main"),
     middle: new SenderCeiling("middle"),
   };
+  /** This device's screen share, while it sends one (ADR-0083). */
+  private screen: ScreenSlot | null = null;
+  /** Keeps the screen sender under the third ceiling of the SFU's
+   *  `publish-budget` frame, when it names one. */
+  private readonly screenCeiling = new SenderCeiling("screen");
 
   /** The shared rules, once loaded (`connect()`). */
   private wasm: Awaited<ReturnType<typeof loadWasm>> | null = null;
@@ -758,6 +787,8 @@ export class SfuCallSession {
       const ceiling = this.senderCeilings[kind];
       if (ceiling.bound) ceiling.want(senderCeiling(kind, this.publishBudget));
     }
+    this.screenCeiling.bind(this.screen?.video ?? null);
+    if (this.screenCeiling.bound) this.screenCeiling.want(screenSenderCeiling(this.publishBudget));
   }
 
   /**
@@ -820,6 +851,11 @@ export class SfuCallSession {
     // The relay key follows the seed; announce under the new one.
     this.relay?.setSeed(newSeed);
     this.announceSelf();
+  }
+
+  /** The shared core, once `connect()` loaded it; `null` before. */
+  loadedWasm(): Awaited<ReturnType<typeof loadWasm>> | null {
+    return this.wasm;
   }
 
   /** Current lifecycle phase. */
@@ -1031,6 +1067,139 @@ export class SfuCallSession {
       if (this.isOver()) return;
       this.fail("publish failed", err);
       throw err;
+    }
+  }
+
+  /**
+   * Add a screen capture to the call (ADR-0083 section 3): the picture, and
+   * its sound when there is any, each an ordinary sender on a transceiver of
+   * its own, sealed under SFrame stream index 2 (picture) and 5 (sound)
+   * before the renegotiation that describes them. Every offer from then on
+   * names their `mid`s, so the SFU forwards them as `<peer>~screen`.
+   *
+   * Rejects with {@link ScreenShareNotSealedError} when a sender cannot be
+   * sealed: nothing of the share is then left in the call (invariant #4).
+   * Rejects with a plain error when there is no media connection yet or a
+   * share is already there.
+   */
+  async attachScreenShare(capture: MediaStream): Promise<void> {
+    const pc = this.pc;
+    const seed = this.activeSeed;
+    if (pc === null || seed === null || this.isOver()) {
+      throw new Error("no media connection to share the screen on");
+    }
+    if (this.screen !== null) throw new Error("a screen share is already in the call");
+    const tracks = [...capture.getVideoTracks().slice(0, 1), ...capture.getAudioTracks().slice(0, 1)];
+    const transceivers: RTCRtpTransceiver[] = [];
+    const transformIds: string[] = [];
+    let video: RTCRtpSender | null = null;
+    try {
+      for (const track of tracks) {
+        // A transceiver of its own, never one the SFU opened to send this
+        // device someone else's media, and never the camera's.
+        const transceiver = pc.addTransceiver(track, { direction: "sendonly", streams: [capture] });
+        transceivers.push(transceiver);
+        if (track.kind === "video") video = transceiver.sender;
+      }
+    } catch (err) {
+      this.removeScreenTransceivers(pc, transceivers);
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+    try {
+      for (const transceiver of transceivers) {
+        const kind = transceiver.sender.track?.kind;
+        transformIds.push(
+          attachSenderSFrame(transceiver.sender, {
+            seed,
+            localLeaf: this.publishLeaf,
+            streamIndex: kind === "video" ? SFRAME_STREAM_SCREEN_SHARE : SFRAME_STREAM_SCREEN_AUDIO,
+          }),
+        );
+      }
+    } catch (err) {
+      // An unsealed share sender is never left in the call.
+      this.removeScreenTransceivers(pc, transceivers);
+      throw new ScreenShareNotSealedError(err);
+    }
+    for (const id of transformIds) this.transformIds.add(id);
+    this.screen = { transceivers, transformIds, video };
+    if (video !== null) {
+      // Sharpness over motion: keep the resolution, cap the frame rate.
+      const sender = video;
+      void queueParameterWrite(sender, async () => {
+        const params = sender.getParameters();
+        (params as RTCRtpSendParameters & { degradationPreference?: string }).degradationPreference =
+          "maintain-resolution";
+        const first = params.encodings[0];
+        if (first !== undefined) params.encodings[0] = { ...first, maxFramerate: SCREEN_MAX_FRAMERATE };
+        await sender.setParameters(params);
+      }).catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("SfuCallSession: the screen sender's frame-rate ceiling was refused", err);
+      });
+    }
+    this.syncSenderCeilings(this.mainCameraSender() ?? null);
+    // The senders were added in this turn, so the renegotiation
+    // `onnegotiationneeded` runs describes them; the offer names their mids.
+  }
+
+  /** Take this device's screen share out of the call. Idempotent. */
+  detachScreenShare(): void {
+    const slot = this.screen;
+    if (slot === null) return;
+    this.screen = null;
+    for (const id of slot.transformIds) this.transformIds.delete(id);
+    this.screenCeiling.reset();
+    const pc = this.pc;
+    if (pc !== null) this.removeScreenTransceivers(pc, slot.transceivers);
+  }
+
+  /** Whether this device sends a screen now. */
+  sharingScreen(): boolean {
+    return this.screen !== null;
+  }
+
+  private removeScreenTransceivers(pc: RTCPeerConnection, transceivers: readonly RTCRtpTransceiver[]): void {
+    for (const transceiver of transceivers) {
+      try {
+        if (typeof transceiver.stop === "function") transceiver.stop();
+        else pc.removeTrack(transceiver.sender);
+      } catch {
+        try {
+          pc.removeTrack(transceiver.sender);
+        } catch {
+          // A closed connection has nothing left to remove.
+        }
+      }
+    }
+  }
+
+  /** The `mid`s of this device's screen-share m-lines, once a local
+   *  description has given them one. */
+  private screenMids(): string[] {
+    const out: string[] = [];
+    for (const transceiver of this.screen?.transceivers ?? []) {
+      const mid = transceiver.mid;
+      if (typeof mid === "string" && mid.length > 0) out.push(mid);
+    }
+    return out;
+  }
+
+  /**
+   * Seal `plaintext` under the call's relay key and send it to everyone in
+   * the call (ADR-0078 section 2). Best-effort: `false` when there is no
+   * relay key or no open socket.
+   */
+  sendSealedRelay(plaintext: Uint8Array): boolean {
+    const wasm = this.wasm;
+    if (wasm === null || this.signaling === null) return false;
+    const sealed = this.relayFor(wasm).seal(plaintext);
+    if (sealed === null) return false;
+    try {
+      this.signaling.sendSignalRelayToCall(sealed);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -1409,11 +1578,13 @@ export class SfuCallSession {
     readyState?: MediaStreamTrackState,
   ): RTCRtpSender | undefined {
     const copySenders = CAMERA_COPY_KINDS.map((k) => this.copies[k].sender?.sender);
+    const screenSenders = this.screen?.transceivers.map((t) => t.sender) ?? [];
     return pc
       .getSenders()
       .find(
         (s) =>
           !copySenders.includes(s) &&
+          !screenSenders.includes(s) &&
           s.track?.kind === kind &&
           (readyState === undefined || s.track.readyState === readyState),
       );
@@ -1884,6 +2055,10 @@ export class SfuCallSession {
     for (const kind of CAMERA_SENDER_KINDS) this.senderActivity[kind].reset();
     this.publishBudget = null;
     for (const kind of BUDGETED_SENDER_KINDS) this.senderCeilings[kind].reset();
+    // The share's tracks were stopped with the peer connection's; the
+    // capture itself is its owner's to stop.
+    this.screen = null;
+    this.screenCeiling.reset();
     // Nothing more is asked of the SFU, and the tiles of a later call start
     // from nothing.
     this.wantsSender.reset();
@@ -2086,6 +2261,16 @@ export class SfuCallSession {
       // Where the browser has no per-frame callback, the tile reads this
       // receiver's statistics instead (`video-frame-watch.ts`).
       if (ev.track.kind === "video") registerVideoFrameSource(ev.track, ev.receiver);
+      // A shared screen (ADR-0083) is not one of the peer's camera pictures
+      // nor its voice: decrypted like everything else, then handed over.
+      if (screenStreamPeerOf(remoteStream.id) !== null) {
+        this.callbacks.onRemoteTrack?.({
+          streamId: remoteStream.id,
+          track: ev.track,
+          stream: remoteStream,
+        });
+        return;
+      }
       // The receiver of a light companion or of a middle track is named as
       // such in the media counters.
       const role = splitStreamId(remoteStream.id).role;
@@ -2136,7 +2321,12 @@ export class SfuCallSession {
       throw new Error("createOffer produced no SDP body");
     }
     // The copies' transceivers have their `mid`s now.
-    this.signaling?.sendSdpOffer(offer.sdp, this.copyMids("light"), this.copyMids("middle"));
+    this.signaling?.sendSdpOffer(
+      offer.sdp,
+      this.copyMids("light"),
+      this.copyMids("middle"),
+      this.screenMids(),
+    );
     // The SFU has media state for this peer from this offer on: tell it what
     // this device shows of everyone.
     this.publishOfferSent = true;
@@ -2311,6 +2501,8 @@ export class SfuCallSession {
         } else if (opened.kind === "announcement") {
           const identity = this.config.peerAnnouncer?.verify(frame.from, opened.bytes) ?? null;
           if (identity !== null) identifiedCb?.(frame.from, identity);
+        } else if (opened.kind === "screen-share") {
+          this.callbacks.onRemoteScreenShareState?.(frame.from, opened.state);
         }
         return;
       }
@@ -2407,7 +2599,12 @@ export class SfuCallSession {
       await pc.setLocalDescription(); // implicit createOffer
       const sdp = pc.localDescription?.sdp;
       if (sdp !== undefined) {
-        signaling.sendSdpOffer(sdp, this.copyMids("light"), this.copyMids("middle"));
+        signaling.sendSdpOffer(
+          sdp,
+          this.copyMids("light"),
+          this.copyMids("middle"),
+          this.screenMids(),
+        );
       }
     } catch {
       // A failed renegotiation leaves the call up as-is; the publishVideo

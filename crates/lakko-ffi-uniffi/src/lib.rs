@@ -4601,6 +4601,9 @@ pub enum FfiCallSignalingBody {
         leaf_index: u32,
         reason: FfiCallEndReason,
     },
+    /// One-to-one screen-share state (ADR-0083): verify `state` with
+    /// [`call_relay::verify_call_screen_share`] against the MLS sender's leaf.
+    ScreenShare { call_id: Vec<u8>, state: Vec<u8> },
 }
 
 fn body_into_inner(body: FfiCallSignalingBody) -> Result<lakko_calls::SignalingBody, FfiError> {
@@ -4675,6 +4678,12 @@ fn body_into_inner(body: FfiCallSignalingBody) -> Result<lakko_calls::SignalingB
             leaf_index,
             reason: reason.into_inner(),
         },
+        FfiCallSignalingBody::ScreenShare { call_id, state } => {
+            lakko_calls::SignalingBody::ScreenShare {
+                call_id: take_id(call_id)?,
+                state,
+            }
+        },
     })
 }
 
@@ -4738,6 +4747,12 @@ fn body_from_inner(body: lakko_calls::SignalingBody) -> FfiCallSignalingBody {
             call_id: call_id.to_vec(),
             leaf_index,
             reason: FfiCallEndReason::from_inner(reason),
+        },
+        lakko_calls::SignalingBody::ScreenShare { call_id, state } => {
+            FfiCallSignalingBody::ScreenShare {
+                call_id: call_id.to_vec(),
+                state,
+            }
         },
     }
 }

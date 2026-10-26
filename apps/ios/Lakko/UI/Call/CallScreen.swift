@@ -703,9 +703,15 @@ private struct GroupCallArea: View {
 
     var body: some View {
         GeometryReader { geo in
-            let people = state.participants
+            // The roster and, while someone shares, the share's own tile
+            // (ADR-0083, section 6.3).
+            let people = state.groupLayoutPeople
             let kind = GroupCallLayout.kind(
                 choice: state.layoutChoice, pinnedId: state.pinnedId, people: people)
+            let stageIsScreen = kind == .focus
+                && GroupCallLayout.stagePerson(
+                    rules, people: people, pinnedId: state.pinnedId, speech: state.speech)?
+                    .isScreen == true
             Group {
                 switch kind {
                 case .grid: grid(people: people, area: geo.size)
@@ -713,7 +719,16 @@ private struct GroupCallArea: View {
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
+            .onAppear { state.setScreenShareOnLargePlace(stageIsScreen) }
+            .onChange(of: stageIsScreen) { _, on in state.setScreenShareOnLargePlace(on) }
         }
+    }
+
+    /// A finished drag that is not a page turn: the collapse swipe, unless it
+    /// was panning a zoomed share.
+    private func otherDrag(_ translation: CGSize) {
+        guard !state.screenShareZoomed else { return }
+        onOtherDrag(translation)
     }
 
     // MARK: Grid
@@ -754,7 +769,7 @@ private struct GroupCallArea: View {
                         translation: value.translation, page: shown.page, pages: shown.pages) {
                         page = next
                     } else {
-                        onOtherDrag(value.translation)
+                        otherDrag(value.translation)
                     }
                 })
             .accessibilityAction(named: Text(l10n.t("call.grid.next_a11y"))) {
@@ -825,20 +840,42 @@ private struct GroupCallArea: View {
             if let stage {
                 tile(stage, size: stageSize, isStage: true)
                     .id(stage.id)
+                    // A share offered while a pin holds (section 6.3): a chip
+                    // on the stage, and `View` stages the share.
+                    .overlay(alignment: .top) {
+                        if state.screenShare != nil, state.pinnedId != nil, !stage.isScreen {
+                            ScreenSharePinnedChip(state: state)
+                                .padding(.top, 8)
+                                .padding(.horizontal, 8)
+                        }
+                    }
             }
         }
         .frame(width: area.width, height: area.height)
         .contentShape(Rectangle())
         .simultaneousGesture(
             DragGesture(minimumDistance: 20).onEnded { value in
-                onOtherDrag(value.translation)
+                otherDrag(value.translation)
             })
     }
 
     // MARK: A tile
 
+    @ViewBuilder
     private func tile(
         _ person: CallUiState.Participant, size: CGSize, isStage: Bool = false
+    ) -> some View {
+        if person.isScreen {
+            // A shared screen's own tile: no pin control, no tap controls, and
+            // no report of a picture to the SFU.
+            ScreenShareTile(state: state, tile: person, size: size, isStage: isStage)
+        } else {
+            personTile(person, size: size, isStage: isStage)
+        }
+    }
+
+    private func personTile(
+        _ person: CallUiState.Participant, size: CGSize, isStage: Bool
     ) -> some View {
         ParticipantTile(
             participant: person,
@@ -1130,6 +1167,8 @@ public struct CallScreen: View {
     /// `state.reset()` would wipe the live call's phase, roster, encryption and
     /// tracks on the way out of a collapse that changed nothing about the call.
     @State private var collapsing = false
+    /// The name the last share-start announcement said, for its stop.
+    @State private var announcedShareName: String?
 
     /// `true` when the camera controls drive a real call, so turning the camera
     /// on must settle the camera permission first.
@@ -1217,7 +1256,36 @@ public struct CallScreen: View {
             // `CallSession` path never does.
             groupCall: externallyDriven,
             remoteCount: remoteParticipants.count,
-            remotePicture: hasRemotePicture)
+            remotePicture: hasRemotePicture,
+            screenShare: oneToOneShare)
+    }
+
+    /// The other person of a one-to-one is sharing their screen (ADR-0083
+    /// section 4): the share is the large picture.
+    private var oneToOneShare: Bool {
+        !externallyDriven && state.screenShare != nil
+    }
+
+    /// A share is on the large place: the landscape gate reads this.
+    private var shareOnLargePlace: Bool {
+        externallyDriven ? state.screenShareOnLargePlace : oneToOneShare
+    }
+
+    /// Say `Anna started sharing their screen` / `Anna stopped sharing`, once
+    /// each (`screen-share.md` section 5.3).
+    private func announceShareChange(from old: ScreenShareShown?, to new: ScreenShareShown?) {
+        guard let announcement = ScreenShareAnnouncement.of(old: old, new: new) else { return }
+        let name: String
+        switch announcement {
+        case .started:
+            name = CallPeerName.tileLabel(displayName: state.screenShareSharerName, isLocal: false)
+            announcedShareName = name
+        case .stopped:
+            name = announcedShareName
+                ?? CallPeerName.tileLabel(displayName: "", isLocal: false)
+            announcedShareName = nil
+        }
+        ScreenShareAnnouncer.post(l10n.t(announcement.key, texts: ["name": name]))
     }
 
     /// The three numbers that decide the whole shape of the screen, printed on
@@ -1325,7 +1393,12 @@ public struct CallScreen: View {
             guard !externallyDriven else { return }
             state.setPeerName(newValue)
         }
+        // ADR-0083: a share that starts or stops is announced, and the screen
+        // turns with the phone only while a share is on the large place.
+        .onChange(of: state.screenShare) { old, new in announceShareChange(from: old, to: new) }
+        .onChange(of: shareOnLargePlace) { _, on in CallOrientation.setAllowsLandscape(on) }
         .onDisappear {
+            CallOrientation.setAllowsLandscape(false)
             hideTask?.cancel()
             // Stopped either way: a looping ringback outlives nothing, and the
             // sound controller goes away with this view.
@@ -1436,10 +1509,20 @@ public struct CallScreen: View {
             case .portrait:
                 portrait
             case .video, .gallery:
-                remoteVideo
+                if oneToOneShare {
+                    oneToOneSharePicture
+                } else {
+                    remoteVideo
+                }
             }
 
-            tapLayer
+            // The zoomable share takes its own taps and drags; under the
+            // tap layer it would take none.
+            if oneToOneShare {
+                oneToOneCornerTile
+            } else {
+                tapLayer
+            }
 
             if local?.camOn == true, let track = state.localVideoTrack {
                 selfView(track: track)
@@ -1739,6 +1822,48 @@ public struct CallScreen: View {
             LocalVideoPreviewView(track: track, mirrored: false, contentMode: .scaleAspectFill)
                 .ignoresSafeArea()
                 .accessibilityHidden(true)
+        }
+    }
+
+    /// The other person's shared screen as the large picture of a one-to-one
+    /// (`screen-share.md` section 5.1): whole, on black, zoomable. A tap shows
+    /// the controls; a drag while whole is the collapse swipe.
+    private var oneToOneSharePicture: some View {
+        ScreenSharePicture(
+            state: state, large: true,
+            onSingleTap: {
+                if state.qualityPopoverOpen { state.setQualityPopoverOpen(false) }
+                showControls()
+            },
+            onUnzoomedDrag: { collapseIfSwipedDown($0) })
+            .ignoresSafeArea()
+    }
+
+    /// While the other person of a one-to-one shares, their camera (or their
+    /// initials) moves to a small tile in the corner opposite the self-view.
+    private var oneToOneCornerTile: some View {
+        GeometryReader { geo in
+            let width = min(geo.size.width, geo.size.height) * 0.26
+            let height = width * 4 / 3
+            ZStack {
+                Color.lakkoSurfaceSunken
+                if hasRemotePicture, let track = soleRemoteVideoTrack {
+                    LocalVideoPreviewView(track: track, mirrored: false, contentMode: .scaleAspectFill)
+                } else {
+                    InitialsAvatar(
+                        name: state.peerName ?? "", identity: tintIdentity, size: width * 0.5,
+                        placeholderSymbol: "person.fill")
+                }
+            }
+            .frame(width: width, height: height)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
+            .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+            .offset(x: 16, y: max(90, geo.size.height - height - 140))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(displayName)
         }
     }
 

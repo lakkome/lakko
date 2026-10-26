@@ -1151,6 +1151,86 @@
       "text": "Up",
       "comment": "Connection details: label of the outgoing bitrate."
     },
+    "call.screen_share.bar_status": {
+      "text": "Sharing your screen",
+      "comment": "Status line of the collapsed call bar while this device shares its screen."
+    },
+    "call.screen_share.button": {
+      "text": "Share screen",
+      "comment": "The call-row button that starts sharing this device's screen (docs/ux/screen-share.md)."
+    },
+    "call.screen_share.button_stop": {
+      "text": "Stop sharing",
+      "comment": "The same call-row button while this device is sharing its screen."
+    },
+    "call.screen_share.not_sealed": {
+      "text": "Can't share your screen securely right now. Try again.",
+      "comment": "Shown when the share could not be protected, so it was not sent."
+    },
+    "call.screen_share.own_strip": {
+      "text": "You're sharing your screen",
+      "comment": "The strip across the top of the call while this device shares its screen."
+    },
+    "call.screen_share.own_strip_sound": {
+      "text": "You're sharing your screen and its sound",
+      "comment": "The same strip when the share also carries the shared tab's or system's sound."
+    },
+    "call.screen_share.own_tile": {
+      "text": "You're sharing your screen",
+      "comment": "Text on this device's own share tile, which shows no picture of the share."
+    },
+    "call.screen_share.pinned_chip": {
+      "text": "{name} is sharing their screen",
+      "comment": "Chip on the stage when someone shares while the viewer has pinned another person; {name} is the person sharing."
+    },
+    "call.screen_share.refused": {
+      "text": "Can't share your screen. Allow screen sharing for this site in your browser settings.",
+      "comment": "Shown when the browser refused screen sharing."
+    },
+    "call.screen_share.refused_macos": {
+      "text": "Can't share your screen. Allow screen recording for your browser in System Settings.",
+      "comment": "Shown on macOS when the system refused screen recording for the browser."
+    },
+    "call.screen_share.started": {
+      "text": "{name} started sharing their screen",
+      "comment": "Screen-reader announcement when someone starts sharing."
+    },
+    "call.screen_share.stop": {
+      "text": "Stop",
+      "comment": "The button in the sharing strip that stops the share."
+    },
+    "call.screen_share.stopped": {
+      "text": "{name} stopped sharing",
+      "comment": "Screen-reader announcement when someone stops sharing."
+    },
+    "call.screen_share.superseded": {
+      "text": "{name} is sharing now, so your share stopped.",
+      "comment": "Shown for a few seconds when another person started sharing and this device's share was stopped; {name} is that person."
+    },
+    "call.screen_share.tile": {
+      "text": "{name}'s screen",
+      "comment": "Label of a tile showing someone's shared screen; {name} is the person."
+    },
+    "call.screen_share.view": {
+      "text": "View",
+      "comment": "Button on that chip that puts the shared screen on the stage."
+    },
+    "call.screen_share.waiting": {
+      "text": "Waiting for {name}'s screen",
+      "comment": "Shown on a share tile until the first picture arrives; {name} is the person sharing."
+    },
+    "call.screen_share.zoom_in": {
+      "text": "Zoom in",
+      "comment": "Button that enlarges a shared screen."
+    },
+    "call.screen_share.zoom_out": {
+      "text": "Zoom out",
+      "comment": "Button that shrinks a shared screen."
+    },
+    "call.screen_share.zoom_reset": {
+      "text": "Fit to screen",
+      "comment": "Button that shows the whole shared screen again."
+    },
     "call.self.camera_a11y": {
       "text": "Your camera",
       "comment": "Accessible name of the video of your own camera in a call."

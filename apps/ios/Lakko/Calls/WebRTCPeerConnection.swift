@@ -112,16 +112,23 @@ public final class WebRTCPeerConnection: NSObject {
         /// MSID stream group = the source peer id on an SFU-routed call.
         /// Default no-op so the 1×1 direct path is unaffected.
         public let onRemoteReceiver: (RTCRtpReceiver, _ streamId: String?) -> Void
+        /// The id of a remote video track that was removed. Fired just before
+        /// the `onRemoteVideoTrack(nil, nil)` of the same removal, so a caller
+        /// holding more than one remote video track (a camera and a shared
+        /// screen, ADR-0083) can tell which one went. Default no-op.
+        public let onRemoteVideoTrackRemoved: (_ trackId: String) -> Void
         public init(
             onLocalCandidate: @escaping (String, Int32, String) -> Void,
             onConnectionState: @escaping (RTCPeerConnectionState) -> Void,
             onRemoteVideoTrack: @escaping (RTCVideoTrack?, String?) -> Void = { _, _ in },
-            onRemoteReceiver: @escaping (RTCRtpReceiver, String?) -> Void = { _, _ in }
+            onRemoteReceiver: @escaping (RTCRtpReceiver, String?) -> Void = { _, _ in },
+            onRemoteVideoTrackRemoved: @escaping (String) -> Void = { _ in }
         ) {
             self.onLocalCandidate = onLocalCandidate
             self.onConnectionState = onConnectionState
             self.onRemoteVideoTrack = onRemoteVideoTrack
             self.onRemoteReceiver = onRemoteReceiver
+            self.onRemoteVideoTrackRemoved = onRemoteVideoTrackRemoved
         }
     }
 
@@ -1719,10 +1726,12 @@ extension WebRTCPeerConnection: RTCPeerConnectionDelegate {
         _ peerConnection: RTCPeerConnection,
         didRemove rtpReceiver: RTCRtpReceiver
     ) {
-        guard rtpReceiver.track is RTCVideoTrack else {
+        guard let removed = rtpReceiver.track as? RTCVideoTrack else {
             return
         }
+        let trackId = removed.trackId
         Task { @MainActor [weak self] in
+            self?.delegate?.onRemoteVideoTrackRemoved(trackId)
             self?.delegate?.onRemoteVideoTrack(nil, nil)
         }
     }

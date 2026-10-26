@@ -68,7 +68,14 @@ import {
   attachSenderSFrame,
   coverEncodedStreams,
   isSFrameTransformSupported,
+  SFRAME_STREAM_SCREEN_AUDIO,
+  SFRAME_STREAM_SCREEN_SHARE,
 } from "./sframe-transform";
+import {
+  ScreenShareNotSealedError,
+  screenStreamPeerOf,
+  withScreenStreamId,
+} from "./screen-share-tracks";
 import {
   sframePeerConnectionConfig,
   sframeTransport,
@@ -86,7 +93,14 @@ export interface SFrameAttachers {
   readonly supported: () => boolean;
   readonly attachSender: (
     sender: RTCRtpSender,
-    opts: { readonly seed: Uint8Array; readonly localLeaf: number; readonly kind?: "audio" | "video" },
+    opts: {
+      readonly seed: Uint8Array;
+      readonly localLeaf: number;
+      readonly kind?: "audio" | "video";
+      /** Stated for a sender that is not the microphone or the camera (a
+       *  screen share, ADR-0083); otherwise the kind decides. */
+      readonly streamIndex?: number;
+    },
   ) => void;
   readonly attachReceiver: (
     receiver: RTCRtpReceiver,
@@ -232,6 +246,10 @@ export interface CallSessionCallbacks {
    *  it. Fires on every transition (`off` → `starting` → `live` /
    *  `failed`, and back to `off` at teardown). */
   onVideoPublishState?(state: VideoPublishState): void;
+  /** The other person's screen share arrived (ADR-0083): a stream whose id
+   *  ends in `~screen`, never the camera stream `onRemoteStream` names.
+   *  Optional: a caller that shows no share omits it. */
+  onRemoteScreenStream?(stream: MediaStream, track: MediaStreamTrack): void;
 }
 
 /** Audio / video request flags. Phase 3a8 MVP is audio-only
@@ -445,14 +463,97 @@ export class CallSession {
     sender: RTCRtpSender,
     key: { readonly seed: Uint8Array; readonly localLeaf: number },
     kind?: "audio" | "video",
+    streamIndex?: number,
   ): void {
     if (this.sealedSenders.has(sender)) return;
     this.sframe.attachSender(sender, {
       seed: key.seed,
       localLeaf: key.localLeaf,
       ...(kind !== undefined ? { kind } : {}),
+      ...(streamIndex !== undefined ? { streamIndex } : {}),
     });
     this.sealedSenders.add(sender);
+  }
+
+  /** This device's screen share, while it sends one (ADR-0083). */
+  private screen: { readonly streamId: string; readonly transceivers: RTCRtpTransceiver[] } | null =
+    null;
+
+  /**
+   * Add a screen capture to the call (ADR-0083 section 4): its picture and,
+   * when there is any, its sound, each on a transceiver of its own, sealed
+   * as the camera is on this path but under stream index 2 (picture) and 5
+   * (sound), so it never shares the camera's key. The renegotiation the
+   * camera uses describes them; the SDP sent names their stream with the
+   * `~screen` suffix, which is how the other device knows it is a share.
+   *
+   * Rejects with {@link ScreenShareNotSealedError} when a sender could not be
+   * sealed (nothing of the share is left in the call), with a plain error
+   * when there is no connection yet or a share is already there.
+   */
+  async attachScreenShare(capture: MediaStream): Promise<void> {
+    const pc = this.pc;
+    const key = this.callKey;
+    if (pc === null || key === null || this.callIsOver()) {
+      throw new Error("no media connection to share the screen on");
+    }
+    if (this.screen !== null) throw new Error("a screen share is already in the call");
+    const tracks = [...capture.getVideoTracks().slice(0, 1), ...capture.getAudioTracks().slice(0, 1)];
+    const transceivers: RTCRtpTransceiver[] = [];
+    try {
+      for (const track of tracks) {
+        // A new transceiver, never one the other side's offer created (whose
+        // sender may already carry the camera's seal).
+        transceivers.push(pc.addTransceiver(track, { direction: "sendonly", streams: [capture] }));
+      }
+    } catch (err) {
+      this.removeTransceivers(pc, transceivers);
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+    try {
+      for (const transceiver of transceivers) {
+        const video = transceiver.sender.track?.kind === "video";
+        this.sealSender(
+          transceiver.sender,
+          key,
+          video ? "video" : "audio",
+          video ? SFRAME_STREAM_SCREEN_SHARE : SFRAME_STREAM_SCREEN_AUDIO,
+        );
+      }
+    } catch (err) {
+      this.removeTransceivers(pc, transceivers);
+      throw new ScreenShareNotSealedError(err);
+    }
+    this.screen = { streamId: capture.id, transceivers };
+  }
+
+  /** Take this device's screen share out of the call. Idempotent. */
+  detachScreenShare(): void {
+    const slot = this.screen;
+    if (slot === null) return;
+    this.screen = null;
+    const pc = this.pc;
+    if (pc !== null) this.removeTransceivers(pc, slot.transceivers);
+  }
+
+  private removeTransceivers(pc: RTCPeerConnection, transceivers: readonly RTCRtpTransceiver[]): void {
+    for (const transceiver of transceivers) {
+      try {
+        if (typeof transceiver.stop === "function") transceiver.stop();
+        else pc.removeTrack(transceiver.sender);
+      } catch {
+        try {
+          pc.removeTrack(transceiver.sender);
+        } catch {
+          // A closed connection has nothing left to remove.
+        }
+      }
+    }
+  }
+
+  /** An SDP this device sends, with its share's stream named as a share. */
+  private outgoingSdp(sdp: string): string {
+    return withScreenStreamId(sdp, this.screen?.streamId ?? null);
   }
 
   /**
@@ -1166,6 +1267,9 @@ export class CallSession {
     this.makingOffer = false;
     this.isSettingRemoteAnswerPending = false;
     this.addingVideo = false;
+    // The share's tracks went with the peer connection; the capture is its
+    // owner's to stop.
+    this.screen = null;
     // Back to `off` so a reused instance (or the UI after teardown) starts
     // clean — the camera button drops any spinner.
     this.setVideoPublishState("off");
@@ -1300,6 +1404,11 @@ export class CallSession {
       this.sealReceiver(ev.receiver, key.seed);
       const remote = ev.streams[0];
       if (remote !== undefined) {
+        // The other person's screen share (ADR-0083) is not their camera.
+        if (screenStreamPeerOf(remote.id) !== null) {
+          this.callbacks.onRemoteScreenStream?.(remote, ev.track);
+          return;
+        }
         this.callbacks.onRemoteStream(remote);
       }
     };
@@ -1428,7 +1537,7 @@ export class CallSession {
       const wasm = await loadWasm();
       const bytes = wasm.composeCallOfferSignaling(
         this.callId,
-        sdp,
+        this.outgoingSdp(sdp),
         BigInt(Date.now()),
         true,
         true,
@@ -1479,7 +1588,7 @@ export class CallSession {
       const answerSdp = pc.localDescription?.sdp;
       if (answerSdp === undefined) return;
       const wasm = await loadWasm();
-      const bytes = wasm.composeCallAnswerSignaling(this.callId, answerSdp);
+      const bytes = wasm.composeCallAnswerSignaling(this.callId, this.outgoingSdp(answerSdp));
       this.callbacks.onOutboundSignaling(bytes);
     } catch (err) {
       // eslint-disable-next-line no-console

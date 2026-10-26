@@ -31,15 +31,25 @@ internal const val LIGHT_STREAM_SUFFIX: String = "~light"
 /** What the SFU appends to a peer id to name that peer's middle track. */
 internal const val MIDDLE_STREAM_SUFFIX: String = "~mid"
 
+/**
+ * What names a peer's shared screen (ADR-0083 section 3): its picture and its
+ * sound arrive in a stream `<peer>~screen`, and on a one-to-one the remote
+ * side adds them in a stream whose id ends in it (section 4). The core's
+ * `screenStreamSuffix()`; written here as a constant because the host JVM
+ * cannot call the core, and checked against it at the start of every SFU call
+ * ([SfuCallSession]).
+ */
+internal const val SCREEN_STREAM_SUFFIX: String = "~screen"
+
 /** Which of a peer's streams a remote stream id names. */
-internal enum class RemoteStreamRole { MAIN, MIDDLE, LIGHT }
+internal enum class RemoteStreamRole { MAIN, MIDDLE, LIGHT, SCREEN }
 
 /** A remote MSID stream id, read. */
 internal data class RemoteStreamId(
     /** The source peer. */
     val peerId: String,
     /** The peer's main stream (audio and the camera as it is sent), its
-     *  middle track, or its light companion. */
+     *  middle track, its light companion, or its shared screen. */
     val role: RemoteStreamRole,
 )
 
@@ -60,7 +70,13 @@ internal fun splitStreamId(streamId: String): RemoteStreamId {
 private val STREAM_SUFFIXES: List<Pair<String, RemoteStreamRole>> = listOf(
     LIGHT_STREAM_SUFFIX to RemoteStreamRole.LIGHT,
     MIDDLE_STREAM_SUFFIX to RemoteStreamRole.MIDDLE,
+    SCREEN_STREAM_SUFFIX to RemoteStreamRole.SCREEN,
 )
+
+/** Whether a remote stream id names a shared screen (any peer id before the
+ *  suffix, the one-to-one remote side's own choice included). */
+internal fun isScreenStreamId(streamId: String?): Boolean =
+    streamId != null && splitStreamId(streamId).role == RemoteStreamRole.SCREEN
 
 /** The light stream id of a peer (the inverse of [splitStreamId]). */
 internal fun lightStreamIdOf(peerId: String): String = "$peerId$LIGHT_STREAM_SUFFIX"
@@ -86,7 +102,8 @@ internal fun peerIdOfParticipant(participantId: String): String = participantId.
  *
  * A light companion or a middle track goes to its own map only. It creates no
  * participant and no tile, never replaces the main track and never touches a
- * camera flag.
+ * camera flag. A shared screen goes to the share map, keyed on its sharer's
+ * roster id; the share tile comes from the share state, not from the track.
  */
 internal fun applyRemoteVideoTrack(
     ui: CallUiState,
@@ -99,6 +116,7 @@ internal fun applyRemoteVideoTrack(
     when (id.role) {
         RemoteStreamRole.LIGHT -> ui.setRemoteLightVideoTrack(track, participantId)
         RemoteStreamRole.MIDDLE -> ui.setRemoteMiddleVideoTrack(track, participantId)
+        RemoteStreamRole.SCREEN -> ui.setRemoteScreenVideoTrack(track, participantId)
         RemoteStreamRole.MAIN -> {
             ui.setRemoteVideoTrack(track, participantId)
             val on = if (track != null) lastKnownCameraOn[participantId] ?: true else false

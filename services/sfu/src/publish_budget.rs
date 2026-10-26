@@ -34,19 +34,26 @@
 //!    [`PROTECTION_PERCENT`]`/100`: a sender's ceiling bounds its encoder,
 //!    and retransmissions and FEC ride on top of it. The share is a
 //!    constant; nothing new is measured for it.
-//! 2. **Middle.** The middle sender gets its plan rate
+//! 2. **Screen share** ([ADR-0083](../../../docs/adr/0083-screen-share.md)).
+//!    While the publisher sends a screen, its sender is given its share of
+//!    what is left **before** any camera sender: everything above the
+//!    floors of the camera senders that are on, kept within
+//!    [`SCREEN_FLOOR_BPS`] and [`SCREEN_PLAN_BPS`]. The cameras share what
+//!    the screen leaves. A publisher that sends no screen is told no screen
+//!    ceiling (`screen_kbps` absent) and the rest of the rule is unchanged.
+//! 3. **Middle.** The middle sender gets its plan rate
 //!    ([`MIDDLE_PLAN_BPS`]). When the main sender is needed too and the
 //!    budget does not hold both, the middle sender gives way until the main
 //!    one has its floor.
-//! 3. **Main.** The main sender gets the rest: all of it when the middle
+//! 4. **Main.** The main sender gets the rest: all of it when the middle
 //!    sender is not needed (or the publisher has none), what the middle
 //!    sender leaves otherwise.
-//! 4. **Bounds.** Never below a floor that still carries a recognisable
+//! 5. **Bounds.** Never below a floor that still carries a recognisable
 //!    picture ([`MAIN_FLOOR_BPS`], [`MIDDLE_FLOOR_BPS`]), never above the
 //!    plan maximum ([`MAIN_PLAN_BPS`], [`MIDDLE_PLAN_BPS`]). On a path that
 //!    carries less than the floors add up to, the floors win and the
 //!    budget is above the estimate: the alternative is no picture.
-//! 5. **A sender nobody watches** ([`crate::video_needed`]) takes nothing
+//! 6. **A sender nobody watches** ([`crate::video_needed`]) takes nothing
 //!    from the budget and is given its ceiling anyway, the one it would
 //!    have if it were switched on now. It is off; the figure is what it
 //!    starts under.
@@ -58,7 +65,8 @@
 //! - A **lower** one at once: a ceiling below [`DROP_PERCENT`] of what was
 //!   last told.
 //! - A change of **which senders are needed** at once, when it changes a
-//!   ceiling: the allocation changed by rule, not by noise.
+//!   ceiling: the allocation changed by rule, not by noise. A screen share
+//!   starting or stopping is such a change.
 //! - A **higher** one (or a fall too small to be "lower") no sooner than
 //!   [`RAISE_INTERVAL`] after the last frame, and only when a ceiling
 //!   differs from what was told by at least [`RAISE_SHARE_PERCENT`] of it,
@@ -131,8 +139,20 @@ pub const RAISE_INTERVAL: Duration = Duration::from_secs(2);
 /// share of it, in percent (or reaches its plan maximum). Chosen.
 pub const RAISE_SHARE_PERCENT: u64 = 10;
 
+/// The most the screen-share sender is ever allowed, bits per second
+/// (ADR-0083). Chosen, not measured: a screen of text and windows, encoded
+/// with resolution kept over frame rate, at 1080p and a few frames a
+/// second.
+pub const SCREEN_PLAN_BPS: u64 = 1_500_000;
+
+/// The least the screen-share sender is allowed (ADR-0083). Chosen, not
+/// measured: about what keeps text on a shared screen readable at a lower
+/// frame rate; above the main camera's floor, since a share is what the
+/// whole call is looking at.
+pub const SCREEN_FLOOR_BPS: u64 = 300_000;
+
 /// What one budget is made from.
-// Four independent facts about one publisher, each a yes or a no.
+// Five independent facts about one publisher, each a yes or a no.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Inputs {
@@ -151,16 +171,22 @@ pub struct Inputs {
     pub main_needed: bool,
     /// And the middle sender. Read only with [`Self::has_middle`].
     pub middle_needed: bool,
+    /// The publisher sends a screen share (a declared screen video line
+    /// that it sends on, ADR-0083).
+    pub has_screen: bool,
 }
 
-/// The content of one `publish-budget` frame: the two ceilings, kilobits
-/// per second.
+/// The content of one `publish-budget` frame: the ceilings, kilobits per
+/// second.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     /// The main sender's ceiling.
     pub main_kbps: u32,
     /// The middle sender's ceiling.
     pub middle_kbps: u32,
+    /// The screen-share sender's ceiling (ADR-0083); `None` while the
+    /// publisher sends no screen.
+    pub screen_kbps: Option<u32>,
 }
 
 /// Why a budget is sent. A fixed, small set: it is a log field and a
@@ -195,6 +221,7 @@ impl Why {
 struct Shape {
     main: bool,
     middle: bool,
+    screen: bool,
 }
 
 impl Shape {
@@ -202,6 +229,7 @@ impl Shape {
         Self {
             main: inputs.main_needed,
             middle: inputs.has_middle && inputs.middle_needed,
+            screen: inputs.has_screen,
         }
     }
 }
@@ -211,8 +239,9 @@ fn kbps(bps: u64) -> u32 {
     u32::try_from(bps / 1000).unwrap_or(u32::MAX)
 }
 
-/// What is left of the estimate for the encoders of the two heavy senders,
-/// bits per second (steps 1 of the rule).
+/// What is left of the estimate for the encoders of the heavy senders (the
+/// two camera senders and, while there is one, the screen), bits per
+/// second (step 1 of the rule).
 #[must_use]
 pub fn video_budget_bps(inputs: Inputs) -> u64 {
     let audio = inputs
@@ -234,13 +263,32 @@ pub fn video_budget_bps(inputs: Inputs) -> u64 {
         / (100 + PROTECTION_PERCENT)
 }
 
-/// The two ceilings for `inputs` (the rule of the module, steps 1 to 5).
+/// The screen sender's share of `video`, bits per second (step 2 of the
+/// rule): what the camera senders that are on leave above their floors,
+/// within [`SCREEN_FLOOR_BPS`] and [`SCREEN_PLAN_BPS`].
+fn screen_bps(video: u64, shape: Shape) -> u64 {
+    let mut camera_floors = 0;
+    if shape.main {
+        camera_floors += MAIN_FLOOR_BPS;
+    }
+    if shape.middle {
+        camera_floors += MIDDLE_FLOOR_BPS;
+    }
+    video
+        .saturating_sub(camera_floors)
+        .clamp(SCREEN_FLOOR_BPS, SCREEN_PLAN_BPS)
+}
+
+/// The ceilings for `inputs` (the rule of the module, steps 1 to 6).
 /// Total: every input gives a budget within the floors and the plan
 /// maxima.
 #[must_use]
 pub fn allocate(inputs: Inputs) -> Budget {
     let shape = Shape::of(inputs);
-    let video = video_budget_bps(inputs);
+    let all_video = video_budget_bps(inputs);
+    // The screen is given its share first; the cameras share the rest.
+    let screen = shape.screen.then(|| screen_bps(all_video, shape));
+    let video = all_video.saturating_sub(screen.unwrap_or(0));
     // The middle sender gets its plan rate; it gives way only to the main
     // sender's floor, and only while the main sender is needed.
     let middle_room = if shape.main {
@@ -260,7 +308,40 @@ pub fn allocate(inputs: Inputs) -> Budget {
     Budget {
         main_kbps: kbps(main),
         middle_kbps: kbps(middle),
+        screen_kbps: screen.map(kbps),
     }
+}
+
+/// Whether `next` has a ceiling below [`DROP_PERCENT`] of the same ceiling
+/// in `last`. A screen ceiling that appears or goes is not a fall: it is a
+/// change of senders.
+fn any_lower(next: Budget, last: Budget) -> bool {
+    let screen_lower = match (next.screen_kbps, last.screen_kbps) {
+        (Some(next), Some(last)) => below(next, last, DROP_PERCENT),
+        _ => false,
+    };
+    below(next.main_kbps, last.main_kbps, DROP_PERCENT)
+        || below(next.middle_kbps, last.middle_kbps, DROP_PERCENT)
+        || screen_lower
+}
+
+/// Whether `next` differs from `last` enough to be told as a rise: by
+/// [`RAISE_SHARE_PERCENT`] of a ceiling, or by reaching a plan maximum.
+fn any_higher(next: Budget, last: Budget) -> bool {
+    let main_plan = kbps(MAIN_PLAN_BPS);
+    let middle_plan = kbps(MIDDLE_PLAN_BPS);
+    let screen_plan = kbps(SCREEN_PLAN_BPS);
+    let screen_higher = match (next.screen_kbps, last.screen_kbps) {
+        (Some(next), Some(last)) => {
+            differs_enough(next, last) || (next == screen_plan && last != screen_plan)
+        },
+        _ => false,
+    };
+    differs_enough(next.main_kbps, last.main_kbps)
+        || differs_enough(next.middle_kbps, last.middle_kbps)
+        || (next.main_kbps == main_plan && last.main_kbps != main_plan)
+        || (next.middle_kbps == middle_plan && last.middle_kbps != middle_plan)
+        || screen_higher
 }
 
 /// `value` is below `percent` of `told`.
@@ -314,19 +395,12 @@ impl PublishBudget {
             },
             Some(told) => {
                 let last = told.budget;
-                let main_plan = kbps(MAIN_PLAN_BPS);
-                let middle_plan = kbps(MIDDLE_PLAN_BPS);
-                if below(next.main_kbps, last.main_kbps, DROP_PERCENT)
-                    || below(next.middle_kbps, last.middle_kbps, DROP_PERCENT)
-                {
+                if any_lower(next, last) {
                     Why::Lower
                 } else if told.shape != shape {
                     Why::Senders
                 } else if now.saturating_duration_since(told.at) >= RAISE_INTERVAL
-                    && (differs_enough(next.main_kbps, last.main_kbps)
-                        || differs_enough(next.middle_kbps, last.middle_kbps)
-                        || (next.main_kbps == main_plan && last.main_kbps != main_plan)
-                        || (next.middle_kbps == middle_plan && last.middle_kbps != middle_plan))
+                    && any_higher(next, last)
                 {
                     Why::Higher
                 } else {
@@ -367,6 +441,7 @@ mod tests {
             has_middle: true,
             main_needed: true,
             middle_needed: true,
+            has_screen: false,
         }
     }
 
@@ -374,6 +449,22 @@ mod tests {
         Budget {
             main_kbps,
             middle_kbps,
+            screen_kbps: None,
+        }
+    }
+
+    const fn sharing(estimate_kbps: u64) -> Inputs {
+        Inputs {
+            has_screen: true,
+            ..inputs(estimate_kbps)
+        }
+    }
+
+    const fn with_screen(main_kbps: u32, middle_kbps: u32, screen_kbps: u32) -> Budget {
+        Budget {
+            main_kbps,
+            middle_kbps,
+            screen_kbps: Some(screen_kbps),
         }
     }
 
@@ -684,6 +775,91 @@ mod tests {
     }
 
     #[test]
+    fn a_publisher_without_a_screen_is_told_no_screen_ceiling() {
+        for estimate in (0..6000).step_by(13) {
+            assert_eq!(allocate(inputs(estimate)).screen_kbps, None);
+        }
+    }
+
+    #[test]
+    fn the_screen_is_given_its_share_before_the_cameras() {
+        // 3000 -> video 2422. The screen takes what the camera floors
+        // (200 + 100) leave, up to its plan of 1500; the cameras share the
+        // 922 left: middle 500, main 422.
+        assert_eq!(allocate(sharing(3000)), with_screen(422, 500, 1500));
+        // 1000 -> video 683: the screen 383, the cameras at their floors.
+        assert_eq!(allocate(sharing(1000)), with_screen(200, 100, 383));
+        // Nothing at all: every sender at its floor.
+        assert_eq!(
+            allocate(sharing(0)),
+            with_screen(
+                kbps(MAIN_FLOOR_BPS),
+                kbps(MIDDLE_FLOOR_BPS),
+                kbps(SCREEN_FLOOR_BPS)
+            )
+        );
+        // Plenty: the screen at its plan, the cameras as without a share
+        // but for what the screen took.
+        let rich = allocate(sharing(50_000));
+        assert_eq!(rich.screen_kbps, Some(kbps(SCREEN_PLAN_BPS)));
+        assert_eq!(rich.main_kbps, kbps(MAIN_PLAN_BPS));
+        // Camera senders nobody watches leave the screen their floors too.
+        let cameras_off = Inputs {
+            main_needed: false,
+            middle_needed: false,
+            ..sharing(1000)
+        };
+        assert_eq!(allocate(cameras_off).screen_kbps, Some(683));
+    }
+
+    #[test]
+    fn every_budget_with_a_screen_is_within_its_bounds() {
+        let screen_floor = kbps(SCREEN_FLOOR_BPS);
+        let screen_plan = kbps(SCREEN_PLAN_BPS);
+        let extreme = Inputs {
+            estimate_bps: u64::MAX,
+            audio_bps: Some(u64::MAX),
+            ..sharing(0)
+        };
+        assert_eq!(allocate(extreme).screen_kbps, Some(screen_plan));
+        let mut last = allocate(sharing(0));
+        for estimate in 0..6000 {
+            let got = allocate(sharing(estimate));
+            let screen = got.screen_kbps.unwrap_or(0);
+            assert!((screen_floor..=screen_plan).contains(&screen));
+            assert!((kbps(MAIN_FLOOR_BPS)..=kbps(MAIN_PLAN_BPS)).contains(&got.main_kbps));
+            assert_eq!(
+                lakko_sfu_proto::publish_budget_problem(got.main_kbps, got.middle_kbps),
+                None
+            );
+            // A richer path never gets a lower screen ceiling.
+            assert!(screen >= last.screen_kbps.unwrap_or(0));
+            last = got;
+        }
+    }
+
+    #[test]
+    fn a_share_starting_or_stopping_is_told_at_once() {
+        let t0 = Instant::now();
+        let mut state = PublishBudget::new();
+        let _ = state.update(inputs(3000), t0);
+        let at = t0 + Duration::from_millis(20);
+        // The share starts: the main camera gives the screen its room, a
+        // fall, told in the same pass.
+        assert_eq!(
+            state.update(sharing(3000), at),
+            Some((with_screen(422, 500, 1500), Why::Lower))
+        );
+        assert_eq!(state.update(sharing(3000), at), None);
+        // The share stops: the screen ceiling goes and the main camera
+        // gets its room back, a change of senders told at once.
+        assert_eq!(
+            state.update(inputs(3000), at),
+            Some((budget(1922, 500), Why::Senders))
+        );
+    }
+
+    #[test]
     fn the_constants_keep_their_order() {
         const { assert!(MAIN_FLOOR_BPS < MAIN_PLAN_BPS) };
         const { assert!(MIDDLE_FLOOR_BPS < MIDDLE_PLAN_BPS) };
@@ -694,11 +870,15 @@ mod tests {
         const { assert!(AUDIO_RESERVE_BPS <= AUDIO_RESERVE_MAX_BPS) };
         const { assert!(DROP_PERCENT < 100) };
         const { assert!(RAISE_SHARE_PERCENT > 100 - DROP_PERCENT) };
+        const { assert!(SCREEN_FLOOR_BPS < SCREEN_PLAN_BPS) };
+        const { assert!(SCREEN_FLOOR_BPS > MAIN_FLOOR_BPS) };
+        const { assert!(SCREEN_FLOOR_BPS % 1000 == 0 && SCREEN_PLAN_BPS % 1000 == 0) };
         // Whole kilobits, so a ceiling at a bound is exactly the bound.
         const { assert!(MAIN_FLOOR_BPS % 1000 == 0 && MIDDLE_FLOOR_BPS % 1000 == 0) };
         const { assert!(MAIN_PLAN_BPS % 1000 == 0 && MIDDLE_PLAN_BPS % 1000 == 0) };
         // Within the frame's bound.
         assert!(kbps(MAIN_PLAN_BPS) <= lakko_sfu_proto::MAX_PUBLISH_BUDGET_KBPS);
+        assert!(kbps(SCREEN_PLAN_BPS) <= lakko_sfu_proto::MAX_PUBLISH_BUDGET_KBPS);
         assert!(RAISE_INTERVAL >= Duration::from_secs(1));
     }
 }

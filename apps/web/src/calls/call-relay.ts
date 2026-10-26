@@ -27,6 +27,7 @@ import type {
   CallRelayKey,
   Group as WasmGroup,
   Identity as WasmIdentity,
+  VerifiedCallScreenShare,
 } from "../../wasm/lakko_ffi_wasm";
 import { base64Encode } from "../auth/account-id";
 
@@ -37,12 +38,17 @@ export type CallRelayWasm = Pick<
   | "classifyCallRelayPlaintext"
   | "composeCallPeerAnnouncement"
   | "verifyCallPeerAnnouncement"
+  | "composeCallScreenShare"
+  | "verifyCallScreenShare"
 >;
 
 /** What an opened relay payload carries. */
 export type OpenedRelay =
   | { readonly kind: "announcement"; readonly bytes: Uint8Array }
   | { readonly kind: "media-state"; readonly cameraOn: boolean }
+  /** A signed screen-share state (ADR-0083), to verify against the sender's
+   *  verified announcement. */
+  | { readonly kind: "screen-share"; readonly state: Uint8Array }
   | { readonly kind: "unknown" };
 
 /** The relay keys of the current and the previous call epoch. */
@@ -102,6 +108,8 @@ export class CallRelay {
             return { kind: "announcement", bytes: classified.announcement };
           case "media-state":
             return { kind: "media-state", cameraOn: classified.cameraOn };
+          case "screen-share":
+            return { kind: "screen-share", state: classified.state };
           default:
             return { kind: "unknown" };
         }
@@ -142,6 +150,24 @@ export interface PeerAnnouncer {
   /** Who a verified announcement from `from` names, or `null` when it
    *  does not verify. */
   verify(from: string, announcement: Uint8Array): VerifiedPeerIdentity | null;
+  /** This device's leaf signature key: the key its share states are folded
+   *  under (ADR-0083). Absent: this call shares nothing. */
+  ownSignerKey?(): Uint8Array;
+  /** This device's signed share state as `selfPeerId`, or `null`. */
+  composeScreenShare?(
+    selfPeerId: string,
+    seq: bigint,
+    sharing: boolean,
+    withSound: boolean,
+  ): Uint8Array | null;
+  /** A share state from `from`, verified against the leaf key its
+   *  announcement verified with, or `null`. The caller owns (and frees) the
+   *  returned object. */
+  verifyScreenShare?(
+    from: string,
+    signerKey: Uint8Array,
+    state: Uint8Array,
+  ): VerifiedCallScreenShare | null;
 }
 
 /** The announcer for a call whose roster is `group()`. */
@@ -179,7 +205,33 @@ export function groupPeerAnnouncer(
         return null;
       }
     },
+    ownSignerKey: () => identity.signaturePublicKey,
+    composeScreenShare: (selfPeerId, seq, sharing, withSound) => {
+      if (group() === null) return null;
+      try {
+        return wasm.composeCallScreenShare(identity, callId, selfPeerId, seq, sharing, withSound);
+      } catch {
+        return null;
+      }
+    },
+    verifyScreenShare: (from, signerKey, state) => {
+      const g = group();
+      if (g === null) return null;
+      try {
+        return wasm.verifyCallScreenShare(g, callId, from, signerKey, state);
+      } catch {
+        return null;
+      }
+    },
   };
+}
+
+/** The bytes of a lower-case hex string, or `null` when it is not one. */
+export function bytesOfHex(hex: string): Uint8Array | null {
+  if (hex.length % 2 !== 0 || !/^[0-9a-f]*$/.test(hex)) return null;
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i += 1) out[i] = parseInt(hex.slice(2 * i, 2 * i + 2), 16);
+  return out;
 }
 
 function hexOf(bytes: Uint8Array): string {

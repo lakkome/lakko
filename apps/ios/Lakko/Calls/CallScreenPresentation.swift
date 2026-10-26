@@ -295,10 +295,17 @@ public enum CallScreenPresentation {
     ///   - remotePicture: a remote video frame has actually been rendered —
     ///     ``hasRemotePicture(trackPresent:framesArrived:)``, never a bare track
     ///     handle. With no picture the portrait is the honest thing to show.
+    ///   - screenShare: the other person of a one-to-one is sharing their
+    ///     screen (ADR-0083). The share is the large picture, so even a voice
+    ///     call shows the video layout while it is live
+    ///     (`docs/ux/screen-share.md` section 5.1); it goes back to the
+    ///     portrait when the share stops and nobody's camera is on.
     public static func layout(
-        groupCall: Bool = false, remoteCount: Int, remotePicture: Bool
+        groupCall: Bool = false, remoteCount: Int, remotePicture: Bool,
+        screenShare: Bool = false
     ) -> CallScreenLayout {
         if groupCall || remoteCount > 1 { return .gallery }
+        if screenShare { return .video }
         return remotePicture ? .video : .portrait
     }
 

@@ -242,19 +242,22 @@ impl<'a> Router<'a> {
                 sdp,
                 light_mids,
                 middle_mids,
+                screen_mids,
             } => {
                 let Some(media) = self.media else {
                     return Err(RouterError::MediaNotWired);
                 };
-                // `light_mids` and `middle_mids` are within the protocol's
-                // bounds: the frame would not have decoded otherwise.
+                // `light_mids`, `middle_mids` and `screen_mids` are within
+                // the protocol's bounds: the frame would not have decoded
+                // otherwise.
                 let answer = media
-                    .accept_offer_with_copies(
+                    .accept_offer_with_screen(
                         sender.id.clone(),
                         sender.room.clone(),
                         sdp,
                         light_mids,
                         middle_mids,
+                        screen_mids,
                     )
                     .await
                     .map_err(RouterError::from)?;

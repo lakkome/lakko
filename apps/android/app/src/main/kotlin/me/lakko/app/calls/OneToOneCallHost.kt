@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import uniffi.lakko_ffi_uniffi.FfiCallEndReason
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
+import uniffi.lakko_ffi_uniffi.VerifiedCallScreenShare
 
 /**
  * The app-level owner of the 1x1 call: one slot for the whole signed-in
@@ -87,6 +88,10 @@ public interface OneToOneCallSession {
     public fun setCallKey(seed: ByteArray, localLeaf: Int)
 
     public fun applyIncomingSignaling(body: FfiCallSignalingBody)
+
+    /** A share state from the other person, verified against the
+     *  conversation's MLS sender (ADR-0083 section 4). */
+    public fun applyScreenShare(share: VerifiedCallScreenShare) {}
 
     public fun dial(audio: Boolean = true, video: Boolean = false)
 
@@ -248,6 +253,9 @@ internal fun routeOneToOneSignaling(
         is FfiCallSignalingBody.Answer -> callIdHexOf(body.callId)
         is FfiCallSignalingBody.IceCandidate -> callIdHexOf(body.callId)
         is FfiCallSignalingBody.End -> callIdHexOf(body.callId)
+        // ADR-0083 — a share state reaches a call only verified, through
+        // [OneToOneCallHost.deliverScreenShare]; the raw body applies nothing.
+        is FfiCallSignalingBody.ScreenShare -> return OneToOneRoute.DROP
         // C-11 — group-control bodies never advance a 1x1 call.
         is FfiCallSignalingBody.GroupStart,
         is FfiCallSignalingBody.GroupJoin,
@@ -448,6 +456,26 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         }
     }
 
+    /**
+     * A screen-share state of the call [callIdHex] in [groupIdHex], already
+     * verified against the conversation's MLS sender (ADR-0083 section 4).
+     * Called from inside a poll's critical section, like [deliver]: checks
+     * the same per-group high-water mark and enqueues.
+     */
+    public fun deliverScreenShare(
+        groupIdHex: String,
+        messageId: Long,
+        callIdHex: String,
+        share: VerifiedCallScreenShare,
+    ) {
+        synchronized(highWater) {
+            val last = highWater[groupIdHex]
+            if (last != null && messageId <= last) return
+            highWater[groupIdHex] = messageId
+            send(Event.ScreenShare(groupIdHex, callIdHex, share))
+        }
+    }
+
     // ---- UI commands --------------------------------------------------------
 
     /**
@@ -622,6 +650,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         data class ConversationMoved(val groupIdHex: String) : Event
         class SessionState(val session: OneToOneCallSession, val state: CallSession.WebCallState) : Event
         class Timeout(val session: OneToOneCallSession, val generation: Long) : Event
+        class ScreenShare(val groupIdHex: String, val callIdHex: String, val share: VerifiedCallScreenShare) : Event
     }
 
     private class Outbound(val groupIdHex: String, val bytes: ByteArray)
@@ -754,6 +783,9 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
             is Event.ConversationMoved -> onConversationMoved(event.groupIdHex)
             is Event.SessionState -> onSessionState(event)
             is Event.Timeout -> onTimeout(event)
+            is Event.ScreenShare -> liveSlot()
+                ?.takeIf { it.callIdHex == event.callIdHex && it.call.groupIdHex.lowercase() == event.groupIdHex.lowercase() }
+                ?.call?.session?.applyScreenShare(event.share)
         }
     }
 
@@ -1319,6 +1351,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         is FfiCallSignalingBody.Answer -> body.callId
         is FfiCallSignalingBody.IceCandidate -> body.callId
         is FfiCallSignalingBody.End -> body.callId
+        is FfiCallSignalingBody.ScreenShare -> body.callId
         is FfiCallSignalingBody.GroupStart -> body.callId
         is FfiCallSignalingBody.GroupJoin -> body.callId
         is FfiCallSignalingBody.GroupLeave -> body.callId

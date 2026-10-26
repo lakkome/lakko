@@ -21,6 +21,11 @@ struct InboundCallRow: Equatable {
     /// rule reads.
     let createdAt: String
     let body: FfiCallSignalingBody
+    /// ADR-0083 section 4: for a `.screenShare` body, the state verified
+    /// against the row's MLS sender leaf (`verifyCallScreenShare` with
+    /// `callScreenShareOneToOnePeerId()`). `nil` for every other body, and
+    /// for a share state that did not verify (then the row is dropped).
+    var verifiedScreenShare: VerifiedCallScreenShare? = nil
 
     /// The exactly-once key. Row 42 of one group is not row 42 of another.
     var dedupKey: String { "\(groupIdHex)#\(messageId)" }
@@ -152,6 +157,11 @@ enum CallHostRouting {
             return .drop
         case .answer, .iceCandidate, .end:
             return forActive ? .apply : .drop
+        case .screenShare:
+            // ADR-0083: a share state is applied only to the call in the slot,
+            // and only once verified (``InboundCallRow/verifiedScreenShare``).
+            // It never rings.
+            return forActive && row.verifiedScreenShare != nil ? .apply : .drop
         case .offer:
             // The call in the slot: a renegotiation offer (camera turned on).
             if forActive { return .apply }

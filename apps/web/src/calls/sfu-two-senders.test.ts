@@ -81,6 +81,8 @@ const hooks = vi.hoisted(() => ({
   attachFailsFor: null as number | null,
   /** What happened, in order: attaches, offers and wants. */
   events: [] as string[],
+  /** Every offer that named screen-share lines (ADR-0083). */
+  screenOffers: [] as Array<{ screenMids: string[] }>,
 }));
 
 vi.mock("../wasm", async () => {
@@ -93,6 +95,16 @@ vi.mock("../wasm", async () => {
       hooks.offers.push({ sdp, lightMids: [...lightMids], middleMids: [...middleMids] });
       hooks.events.push("offer-sent");
       return real.composeSfuSdpOfferWithMiddle(sdp, lightMids, middleMids);
+    },
+    composeSfuSdpOfferWithScreen: (
+      sdp: string,
+      lightMids: string[],
+      middleMids: string[],
+      screenMids: string[],
+    ): string => {
+      hooks.screenOffers.push({ screenMids: [...screenMids] });
+      hooks.events.push("offer-sent");
+      return real.composeSfuSdpOfferWithScreen(sdp, lightMids, middleMids, screenMids);
     },
     composeSfuVideoWants: (peers: string[], qualities: string[]): string => {
       hooks.wants.push({ peers: [...peers], qualities: [...qualities] });
@@ -475,6 +487,7 @@ beforeEach(() => {
   hooks.receiverAttaches = [];
   hooks.attachFailsFor = null;
   hooks.events = [];
+  hooks.screenOffers = [];
   pcs.length = 0;
   sockets.length = 0;
   captured.length = 0;
@@ -2033,5 +2046,83 @@ describe("the publish budget", () => {
       info.mockRestore();
       vi.useRealTimers();
     }
+  });
+});
+
+// ---- The screen share (ADR-0083 section 3) ----------------------------------
+
+describe("a screen share", () => {
+  function capture(withSound: boolean): FakeStream {
+    const tracks = [fakeTrack("video", "screen")];
+    if (withSound) tracks.push(fakeTrack("audio", "tab"));
+    const stream = new FakeStream(tracks);
+    stream.id = "capture";
+    return stream;
+  }
+
+  it("is two send-only senders of its own, sealed under 2 and 5 before the renegotiation, named in screen_mids", async () => {
+    const { session, pc } = await connected();
+    await answer();
+    hooks.events = [];
+    const before = pc.transceivers.length;
+    await session.attachScreenShare(capture(true) as unknown as MediaStream);
+    const added = pc.transceivers.slice(before);
+    expect(added.map((t) => [t.via, t.direction])).toEqual([
+      ["addTransceiver", "sendonly"],
+      ["addTransceiver", "sendonly"],
+    ]);
+    const indices = hooks.attaches.filter((a) => added.some((t) => t.sender === a.sender));
+    expect(indices.map((a) => a.streamIndex).sort()).toEqual([2, 5]);
+    expect(hooks.events.filter((e) => e === "createOffer")).toHaveLength(0);
+    await negotiate(pc);
+    const mids = added.map((t) => t.mid);
+    expect(hooks.screenOffers.at(-1)?.screenMids).toEqual(mids);
+    expect(session.sharingScreen()).toBe(true);
+    // The camera is still the main sender: a share is never taken for it.
+    expect(pc.main()?.sender.track?.label).not.toBe("screen");
+  });
+
+  it("is never left in the call when it cannot be sealed (invariant #4)", async () => {
+    const { session, pc } = await connected();
+    await answer();
+    const before = pc.transceivers.length;
+    hooks.attachFailsFor = 2;
+    await expect(session.attachScreenShare(capture(false) as unknown as MediaStream)).rejects.toThrow(
+      "could not be sealed",
+    );
+    expect(pc.transceivers.slice(before).every((t) => t.stopped)).toBe(true);
+    expect(session.sharingScreen()).toBe(false);
+    await negotiate(pc);
+    expect(hooks.screenOffers).toHaveLength(0);
+  });
+
+  it("leaves the call with its lines when it stops", async () => {
+    const { session, pc } = await connected();
+    await answer();
+    const before = pc.transceivers.length;
+    await session.attachScreenShare(capture(true) as unknown as MediaStream);
+    await negotiate(pc);
+    await answer();
+    session.detachScreenShare();
+    expect(pc.transceivers.slice(before).every((t) => t.stopped)).toBe(true);
+    expect(session.sharingScreen()).toBe(false);
+    const screenOffersBefore = hooks.screenOffers.length;
+    await negotiate(pc);
+    expect(hooks.screenOffers).toHaveLength(screenOffersBefore);
+  });
+
+  it("keeps the screen sender under the third ceiling of publish-budget", async () => {
+    const { session, pc } = await connected();
+    await answer();
+    const before = pc.transceivers.length;
+    await session.attachScreenShare(capture(false) as unknown as MediaStream);
+    const screen = pc.transceivers[before];
+    sockets[0]?.onmessage?.({
+      data: JSON.stringify({ kind: "publish-budget", main_kbps: 900, middle_kbps: 400, screen_kbps: 1200 }),
+    });
+    await flush();
+    await flush();
+    expect(screen?.sender.params.encodings[0]?.["maxBitrate"]).toBe(1_200_000);
+    expect(screen?.sender.params.encodings[0]?.["maxFramerate"]).toBe(15);
   });
 });

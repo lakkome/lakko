@@ -55,6 +55,12 @@ protocol GroupLayoutPerson {
     var id: String { get }
     var isLocal: Bool { get }
     var camOn: Bool { get }
+    /// The entry is a shared screen's tile (ADR-0083), not a person.
+    var isScreen: Bool { get }
+}
+
+extension GroupLayoutPerson {
+    var isScreen: Bool { false }
 }
 
 extension CallUiState.Participant: GroupLayoutPerson {}
@@ -233,7 +239,8 @@ enum GroupCallLayout {
 
     /// Who is on the stage in Focus, or `nil` for an empty call.
     ///
-    /// The shared rule decides: pinned, else speaking now, else the most
+    /// The shared rule decides: pinned, else a shared screen (ADR-0083,
+    /// `group-call-grid.md` section 6.3), else speaking now, else the most
     /// recent speaker, else the first person with a picture, else the first
     /// other person; this device's own tile only when alone.
     static func stagePerson<P: GroupLayoutPerson>(
@@ -245,7 +252,8 @@ enum GroupCallLayout {
                 isLocal: person.isLocal,
                 cameraOn: person.camOn,
                 speaking: speech.activeSpeakerId == person.id,
-                lastSpokeAtMs: speech.lastSpokeAtMs[person.id] ?? 0)
+                lastSpokeAtMs: speech.lastSpokeAtMs[person.id] ?? 0,
+                isScreen: person.isScreen)
         }
         let pinnedIndex = pinnedId
             .flatMap { id in people.firstIndex(where: { $0.id == id }) }

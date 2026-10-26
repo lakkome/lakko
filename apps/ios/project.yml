@@ -125,8 +125,14 @@ targets:
         # under (`ApiEndpoints.webOrigin`): the host the same stack's web
         # client and app-link association live on. Debug: the test stack.
         LakkoWebOrigin: "$(LAKKO_WEB_ORIGIN)"
+        # Portrait in practice: the app delegate answers portrait everywhere
+        # except the call screen while a shared screen is on the large place
+        # (ADR-0083, `CallOrientation`). The landscape entries make that one
+        # exception possible.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         # KT-log S3d — transparency-log integration config (mirror of
         # the web `VITE_LAKKO_TRANSPARENCY_URL` /
         # `VITE_LAKKO_TRANSPARENCY_OPERATOR_KEY`). Both default to EMPTY

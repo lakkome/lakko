@@ -54,6 +54,10 @@ public final class CallUiState: ObservableObject {
         public let quality: QualityTier
         public let speaking: Bool
         public let screenSharing: Bool
+        /// This entry is a shared screen's tile (ADR-0083), its own entry
+        /// beside the sharer's camera tile. Never set on a roster entry: the
+        /// share tile is built by ``screenShareTile`` for the layout only.
+        public var isScreen: Bool = false
     }
 
     /// Lifecycle phase (`docs/ux/calls.md` section 4).
@@ -273,6 +277,26 @@ public final class CallUiState: ObservableObject {
     /// the roster participant id (ADR-0070 step 6, ``VideoGiven``). Empty
     /// until it says anything; a tile then shows what it wants.
     @Published private(set) var remoteVideoGiven: [String: TileVideoQuality] = [:]
+
+    // MARK: Screen share (ADR-0083, `docs/ux/screen-share.md` section 5)
+
+    /// The share this screen shows, or `nil`: the current share of the call's
+    /// fold. One at a time.
+    @Published private(set) var screenShare: ScreenShareShown?
+    /// Each sharer's screen track, keyed on the sharer's roster id. Kept apart
+    /// from the camera tracks: a share is never a picture of a person.
+    @Published private(set) var screenShareTracks: [String: RTCVideoTrack] = [:]
+    /// Sharers whose current screen track has rendered a frame. Until then the
+    /// share tile says it is waiting for the picture.
+    @Published private(set) var screenShareFramed: Set<String> = []
+    /// The share is on the large place: the stage of Focus in a group call,
+    /// the large picture of a one-to-one. The call screen allows landscape
+    /// while it is.
+    @Published private(set) var screenShareOnLargePlace = false
+    /// The share on the large place is zoomed in: a drag pans it rather than
+    /// putting the call away.
+    @Published private(set) var screenShareZoomed = false
+    private var screenShareLayout = ScreenShareLayoutMemory()
 
     /// Where a tile's report of the picture it shows goes: the live SFU
     /// call's session, which asks the SFU accordingly. Set by the call's
@@ -687,6 +711,96 @@ public final class CallUiState: ObservableObject {
         self.videoPublishState = s
     }
 
+    // MARK: - Screen share
+
+    /// The share on screen changed (ADR-0083). The first share switches the
+    /// layout to Focus; when the last stops the layout returns to what it was
+    /// before (``ScreenShareLayoutMemory``). A pin on a share tile that is no
+    /// longer current goes with it, so the new share takes the stage.
+    func setScreenShare(_ next: ScreenShareShown?) {
+        let old = screenShare
+        guard old != next else { return }
+        if let old, pinnedId == old.tileId, pinnedId != next?.tileId { pinnedId = nil }
+        let choice = screenShareLayout.shareChanged(hasShare: next != nil, choice: layoutChoice)
+        screenShare = next
+        if layoutChoice != choice { layoutChoice = choice }
+        if next == nil { screenShareZoomed = false }
+    }
+
+    /// Set (or, with `nil`, remove) a sharer's screen track. A new track has
+    /// rendered nothing yet.
+    func setScreenShareTrack(_ track: RTCVideoTrack?, forSharer id: String) {
+        guard screenShareTracks[id] !== track else { return }
+        if let track {
+            screenShareTracks[id] = track
+        } else {
+            screenShareTracks.removeValue(forKey: id)
+        }
+        if screenShareFramed.contains(id) { screenShareFramed.remove(id) }
+    }
+
+    /// Record that a sharer's screen track rendered its first frame (or, with
+    /// `false`, that it has none).
+    func setScreenShareFramed(_ framed: Bool, forSharer id: String) {
+        if framed {
+            if !screenShareFramed.contains(id) { screenShareFramed.insert(id) }
+        } else if screenShareFramed.contains(id) {
+            screenShareFramed.remove(id)
+        }
+    }
+
+    /// `View` on the chip of a share offered while a pin holds: the pin is
+    /// cleared and the share takes the stage.
+    func viewScreenShare() {
+        pinnedId = nil
+        if layoutChoice != .focus { layoutChoice = .focus }
+    }
+
+    func setScreenShareOnLargePlace(_ on: Bool) {
+        if screenShareOnLargePlace != on { screenShareOnLargePlace = on }
+        if !on, screenShareZoomed { screenShareZoomed = false }
+    }
+
+    func setScreenShareZoomed(_ zoomed: Bool) {
+        if screenShareZoomed != zoomed { screenShareZoomed = zoomed }
+    }
+
+    /// The current share's track, when there is one.
+    var screenShareTrack: RTCVideoTrack? {
+        screenShare.flatMap { screenShareTracks[$0.sharerParticipantId] }
+    }
+
+    /// The current share's track has rendered a frame.
+    var screenShareHasPicture: Bool {
+        screenShare.map { screenShareFramed.contains($0.sharerParticipantId) } ?? false
+    }
+
+    /// The sharer's display name as the roster resolves it (``CallPeerName``).
+    var screenShareSharerName: String {
+        guard let share = screenShare else { return "" }
+        let name = participants.first(where: { $0.id == share.sharerParticipantId })?
+            .displayName ?? ""
+        if name.isEmpty, share.sharerParticipantId == "remote" { return peerName ?? "" }
+        return name
+    }
+
+    /// The share's tile, for the layout: its own entry, named after the
+    /// sharer. `nil` without a share.
+    var screenShareTile: Participant? {
+        guard let share = screenShare else { return nil }
+        return Participant(
+            id: share.tileId, displayName: screenShareSharerName, isLocal: false,
+            micOn: true, camOn: true, handRaised: false, quality: .good,
+            speaking: false, screenSharing: true, isScreen: true)
+    }
+
+    /// The tiles of a group call: the roster, and the share tile after the
+    /// other people (before this device's own tile, ``GroupCallLayout``).
+    var groupLayoutPeople: [Participant] {
+        guard let tile = screenShareTile else { return participants }
+        return participants + [tile]
+    }
+
     /// The id of the only remote participant, when exactly one
     /// exists (the 1×1 case). `nil` when alone or in an N-way
     /// call. `CallScreen` gates remote-video rendering on
@@ -730,6 +844,13 @@ public final class CallUiState: ObservableObject {
         self.remoteLightVideoTracks = [:]
         self.remoteMiddleVideoTracks = [:]
         self.remoteVideoGiven = [:]
+        // No share outlives its call.
+        self.screenShare = nil
+        self.screenShareTracks = [:]
+        self.screenShareFramed = []
+        self.screenShareOnLargePlace = false
+        self.screenShareZoomed = false
+        self.screenShareLayout = ScreenShareLayoutMemory()
         // B2a — no camera-on in flight for a fresh call.
         self.videoPublishState = .off
     }
@@ -891,6 +1012,12 @@ extension CallUiState {
             self.setLocalVideoTrack(session.localVideoTrack)
             self.setRemoteVideoTrack(remoteTrack)
             self.setRemoteVideoFlowing(remotePicture)
+            // ADR-0083 section 4: the other person's shared screen. The
+            // sharer of a one-to-one is always the remote tile.
+            self.setScreenShareTrack(session.remoteScreenTrack, forSharer: Self.oneToOneSharerId)
+            self.setScreenShareFramed(session.remoteScreenFlowing, forSharer: Self.oneToOneSharerId)
+            self.setScreenShare(
+                ScreenShareShown.of(session.screenShare, sharerParticipantId: { _ in Self.oneToOneSharerId }))
             // B2a — mirror the 1×1 mid-call camera-on lifecycle so the
             // camera button spins (+ disables) and the self-tile shows
             // the "Starting camera…" hint while it is `.starting`.
@@ -962,14 +1089,28 @@ extension CallUiState {
         let undecryptable = session.$remoteMediaUndecryptable
             .receive(on: DispatchQueue.main)
             .sink { _ in onMain(rebuild) }
+        // The share, its track and its first frame are inputs like the rest.
+        let share = session.$screenShare
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
+        let screenTrack = session.$remoteScreenTrack
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
+        let screenFlowing = session.$remoteScreenFlowing
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
         // Seed once synchronously so the first frame is correct
         // before any publisher fires.
         rebuild()
         return [
             state, localTrack, remoteTrack, mic, camera, e2ee,
             rtt, relay, down, up, videoPublish, remoteFlowing, undecryptable,
+            share, screenTrack, screenFlowing,
         ]
     }
+
+    /// The roster id of the other person of a one-to-one, and so of its sharer.
+    static let oneToOneSharerId = "remote"
 
     /// B2a — map the 1×1 `CallSession` camera-on lifecycle onto the UI
     /// enum. Identity mapping (the two enums share the same cases); kept

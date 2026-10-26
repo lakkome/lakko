@@ -14,6 +14,9 @@
 //!   SFU peer id, signed with its MLS leaf key.
 //! - `verifyCallPeerAnnouncement(group, callId, relayFrom, announcement)` -
 //!   the check a receiver runs before it names a tile.
+//! - `composeCallScreenShare`, `verifyCallScreenShare` and
+//!   `CallScreenShareState` - the signed screen-share state and the
+//!   one-share-per-call fold of ADR-0083 (`lakko_calls::screen_share`).
 //!
 //! A refusal throws an `Error` whose `callRelayError` own property is the
 //! frozen code (`badLength`, `unknownVersion`, `notOpened`, `wrongDomain`,
@@ -24,6 +27,7 @@
 //! [ADR-0078]: ../../../docs/adr/0078-servers-cannot-link-accounts.md
 
 use lakko_calls::relay::{self as core, RelayError, RelayPayload, CALL_ID_LEN};
+use lakko_calls::screen_share::{self as share, ShareId, ShareStatus};
 use wasm_bindgen::prelude::*;
 
 use crate::contacts::coded_error;
@@ -109,11 +113,13 @@ pub struct CallRelayPayload {
     kind: &'static str,
     camera_on: bool,
     announcement: Vec<u8>,
+    state: Vec<u8>,
 }
 
 #[wasm_bindgen]
 impl CallRelayPayload {
-    /// `"peer-announcement"`, `"media-state"` or `"unknown"`.
+    /// `"peer-announcement"`, `"media-state"`, `"screen-share"` or
+    /// `"unknown"`.
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn kind(&self) -> String {
@@ -133,6 +139,13 @@ impl CallRelayPayload {
     pub fn announcement(&self) -> Vec<u8> {
         self.announcement.clone()
     }
+
+    /// For `"screen-share"`: the whole share state (ADR-0083).
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn state(&self) -> Vec<u8> {
+        self.state.clone()
+    }
 }
 
 /// Classify an opened relay plaintext.
@@ -144,16 +157,25 @@ pub fn classify_call_relay_plaintext(plaintext: &[u8]) -> CallRelayPayload {
             kind: "peer-announcement",
             camera_on: false,
             announcement,
+            state: Vec::new(),
         },
         RelayPayload::MediaState { camera_on } => CallRelayPayload {
             kind: "media-state",
             camera_on,
             announcement: Vec::new(),
+            state: Vec::new(),
+        },
+        RelayPayload::ScreenShare(state) => CallRelayPayload {
+            kind: "screen-share",
+            camera_on: false,
+            announcement: Vec::new(),
+            state,
         },
         RelayPayload::Unknown => CallRelayPayload {
             kind: "unknown",
             camera_on: false,
             announcement: Vec::new(),
+            state: Vec::new(),
         },
     }
 }
@@ -242,6 +264,319 @@ pub fn verify_call_peer_announcement(
         signature_key: verified.signature_key.to_vec(),
         account_key: verified.account_key,
     })
+}
+
+fn key32(bytes: &[u8]) -> Result<[u8; 32], JsValue> {
+    <[u8; 32]>::try_from(bytes).map_err(|_| {
+        coded_error(
+            &format!("a leaf key is 32 bytes, got {}", bytes.len()),
+            PROPERTY,
+            "keyLength",
+        )
+    })
+}
+
+const fn status_of(sharing: bool) -> ShareStatus {
+    if sharing {
+        ShareStatus::Sharing
+    } else {
+        ShareStatus::Stopped
+    }
+}
+
+/// The peer id a one-to-one call's screen-share state carries (ADR-0083).
+#[wasm_bindgen(js_name = callScreenShareOneToOnePeerId)]
+#[must_use]
+pub fn call_screen_share_one_to_one_peer_id() -> String {
+    share::ONE_TO_ONE_PEER_ID.to_owned()
+}
+
+/// SFrame stream index of a screen share's picture (ADR-0083).
+#[wasm_bindgen(js_name = sframeStreamScreen)]
+#[must_use]
+pub fn sframe_stream_screen() -> u8 {
+    share::SFRAME_STREAM_SCREEN
+}
+
+/// SFrame stream index of a screen share's sound (ADR-0083).
+#[wasm_bindgen(js_name = sframeStreamScreenAudio)]
+#[must_use]
+pub fn sframe_stream_screen_audio() -> u8 {
+    share::SFRAME_STREAM_SCREEN_AUDIO
+}
+
+/// The stream-id suffix a share's tracks travel under (`~screen`).
+#[wasm_bindgen(js_name = screenStreamSuffix)]
+#[must_use]
+pub fn screen_stream_suffix() -> String {
+    share::SCREEN_STREAM_SUFFIX.to_owned()
+}
+
+/// Compose this device's screen-share state (ADR-0083): share `seq` in
+/// call `callId` under `peerId` (the SFU peer id, or
+/// `callScreenShareOneToOnePeerId()`), sharing or stopped, signed with
+/// `identity`'s leaf key.
+///
+/// # Errors
+///
+/// `callIdLength`, `malformed` (a bad peer id or a seq of 0) or
+/// `identityKeyMismatch`.
+#[wasm_bindgen(js_name = composeCallScreenShare)]
+pub fn compose_call_screen_share(
+    identity: &Identity,
+    call_id: &[u8],
+    peer_id: &str,
+    seq: u64,
+    sharing: bool,
+    with_sound: bool,
+) -> Result<Vec<u8>, JsValue> {
+    share::compose_screen_share(
+        identity.mls_identity(),
+        &call_id16(call_id)?,
+        peer_id,
+        seq,
+        status_of(sharing),
+        with_sound,
+    )
+    .map_err(relay_err)
+}
+
+/// A screen-share state that verified against the call's roster.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct VerifiedCallScreenShare {
+    seq: u64,
+    signer_key: Vec<u8>,
+    peer_id: String,
+    sharing: bool,
+    with_sound: bool,
+    account_key: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl VerifiedCallScreenShare {
+    /// The share's sequence number.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// The sharer's 32-byte leaf signature key.
+    #[wasm_bindgen(getter, js_name = signerKey)]
+    #[must_use]
+    pub fn signer_key(&self) -> Vec<u8> {
+        self.signer_key.clone()
+    }
+
+    /// The sharer's peer id.
+    #[wasm_bindgen(getter, js_name = peerId)]
+    #[must_use]
+    pub fn peer_id(&self) -> String {
+        self.peer_id.clone()
+    }
+
+    /// `true` while sharing, `false` for a stop.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn sharing(&self) -> bool {
+        self.sharing
+    }
+
+    /// Whether the share carries sound.
+    #[wasm_bindgen(getter, js_name = withSound)]
+    #[must_use]
+    pub fn with_sound(&self) -> bool {
+        self.with_sound
+    }
+
+    /// The account key the signer's leaf resolves to: the person.
+    #[wasm_bindgen(getter, js_name = accountKey)]
+    #[must_use]
+    pub fn account_key(&self) -> Vec<u8> {
+        self.account_key.clone()
+    }
+}
+
+/// Verify a screen-share state. `peerId` and `peerSignerKey` are what the
+/// caller has bound to the sender: in a group call the relay `from` and the
+/// signature key of that peer's verified announcement; in a one-to-one call
+/// `callScreenShareOneToOnePeerId()` and the MLS sender's leaf key.
+///
+/// # Errors
+///
+/// Any refusal (`wrongCall`, `wrongPeer`, `notAMember`, `noAccount`,
+/// `badSignature`, a decode code, `callIdLength`): drop the state.
+#[wasm_bindgen(js_name = verifyCallScreenShare)]
+pub fn verify_call_screen_share(
+    group: &Group,
+    call_id: &[u8],
+    peer_id: &str,
+    peer_signer_key: &[u8],
+    state: &[u8],
+) -> Result<VerifiedCallScreenShare, JsValue> {
+    let call_id = call_id16(call_id)?;
+    let g = group
+        .mls_group()
+        .lock()
+        .map_err(|_| coded_error("group lock poisoned", PROPERTY, "lockPoisoned"))?;
+    let v = share::verify_screen_share(&g, &call_id, peer_id, peer_signer_key, state)
+        .map_err(relay_err)?;
+    Ok(VerifiedCallScreenShare {
+        seq: v.id.seq,
+        signer_key: v.id.signer_key.to_vec(),
+        peer_id: v.peer_id,
+        sharing: v.status == ShareStatus::Sharing,
+        with_sound: v.with_sound,
+        account_key: v.account_key,
+    })
+}
+
+/// The share a call is showing now.
+#[wasm_bindgen]
+pub struct CallCurrentScreenShare {
+    seq: u64,
+    signer_key: Vec<u8>,
+    peer_id: String,
+    with_sound: bool,
+    account_key: Vec<u8>,
+    is_own: bool,
+}
+
+#[wasm_bindgen]
+impl CallCurrentScreenShare {
+    /// The share's sequence number.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// The sharer's leaf signature key.
+    #[wasm_bindgen(getter, js_name = signerKey)]
+    #[must_use]
+    pub fn signer_key(&self) -> Vec<u8> {
+        self.signer_key.clone()
+    }
+
+    /// The sharer's peer id.
+    #[wasm_bindgen(getter, js_name = peerId)]
+    #[must_use]
+    pub fn peer_id(&self) -> String {
+        self.peer_id.clone()
+    }
+
+    /// Whether it carries sound.
+    #[wasm_bindgen(getter, js_name = withSound)]
+    #[must_use]
+    pub fn with_sound(&self) -> bool {
+        self.with_sound
+    }
+
+    /// The sharer's account key (empty for this device's own share).
+    #[wasm_bindgen(getter, js_name = accountKey)]
+    #[must_use]
+    pub fn account_key(&self) -> Vec<u8> {
+        self.account_key.clone()
+    }
+
+    /// Whether it is this device's own share.
+    #[wasm_bindgen(getter, js_name = isOwn)]
+    #[must_use]
+    pub fn is_own(&self) -> bool {
+        self.is_own
+    }
+}
+
+/// The one-share-per-call fold of ADR-0083 (C-87), one per call.
+#[wasm_bindgen]
+pub struct CallScreenShareState {
+    inner: share::ScreenShareState,
+}
+
+#[wasm_bindgen]
+impl CallScreenShareState {
+    /// A fold for a device whose leaf signature key is `ownKey`.
+    ///
+    /// # Errors
+    ///
+    /// `keyLength` when the key is not 32 bytes.
+    #[wasm_bindgen(constructor)]
+    pub fn new(own_key: &[u8]) -> Result<Self, JsValue> {
+        Ok(Self {
+            inner: share::ScreenShareState::new(key32(own_key)?),
+        })
+    }
+
+    /// The seq a share this device starts now must carry.
+    #[wasm_bindgen(js_name = nextStartSeq)]
+    #[must_use]
+    pub fn next_start_seq(&self) -> u64 {
+        self.inner.next_start_seq()
+    }
+
+    /// Fold in a verified state from another participant. Returns whether
+    /// the current share changed.
+    ///
+    /// # Errors
+    ///
+    /// `keyLength` for a signer key not 32 bytes.
+    pub fn observe(&mut self, state: &VerifiedCallScreenShare) -> Result<bool, JsValue> {
+        let verified = share::VerifiedShare {
+            id: ShareId {
+                seq: state.seq,
+                signer_key: key32(&state.signer_key)?,
+            },
+            peer_id: state.peer_id.clone(),
+            status: status_of(state.sharing),
+            with_sound: state.with_sound,
+            account_key: state.account_key.clone(),
+        };
+        Ok(self.inner.observe(&verified) == share::ShareChange::Changed)
+    }
+
+    /// Record that this device started share `seq`. Returns whether the
+    /// current share changed.
+    #[wasm_bindgen(js_name = startOwn)]
+    pub fn start_own(&mut self, seq: u64, peer_id: &str, with_sound: bool) -> bool {
+        self.inner.start_own(seq, peer_id, with_sound) == share::ShareChange::Changed
+    }
+
+    /// Record that this device stopped its share: the seq its stopped state
+    /// must carry, or `undefined` when it had none.
+    #[wasm_bindgen(js_name = stopOwn)]
+    pub fn stop_own(&mut self) -> Option<u64> {
+        self.inner.stop_own()
+    }
+
+    /// The seq of this device's share when another share superseded it:
+    /// stop the capture, then `stopOwn()`.
+    #[wasm_bindgen(js_name = ownSuperseded)]
+    #[must_use]
+    pub fn own_superseded(&self) -> Option<u64> {
+        self.inner.own_superseded()
+    }
+
+    /// The participant whose leaf key is `signerKey` left the call.
+    /// Returns whether the current share changed.
+    #[wasm_bindgen(js_name = participantLeft)]
+    pub fn participant_left(&mut self, signer_key: &[u8]) -> bool {
+        self.inner.participant_left(signer_key) == share::ShareChange::Changed
+    }
+
+    /// The share to show, or `undefined`.
+    #[must_use]
+    pub fn current(&self) -> Option<CallCurrentScreenShare> {
+        let is_own = self.inner.current_is_own();
+        self.inner.current().map(|c| CallCurrentScreenShare {
+            seq: c.id.seq,
+            signer_key: c.id.signer_key.to_vec(),
+            peer_id: c.peer_id,
+            with_sound: c.with_sound,
+            account_key: c.account_key,
+            is_own,
+        })
+    }
 }
 
 #[cfg(test)]

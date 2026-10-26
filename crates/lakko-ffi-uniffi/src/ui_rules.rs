@@ -762,7 +762,11 @@ pub fn call_grid(count: u32, width: u32, height: u32) -> CallGrid {
 }
 
 /// One person, as the stage rule sees them.
+///
+/// Four independent facts about a tile, so four booleans rather than a
+/// state enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct StageCandidate {
     /// This device's own tile.
     pub is_local: bool,
@@ -773,6 +777,10 @@ pub struct StageCandidate {
     /// When the person last was the active speaker, in milliseconds on the
     /// caller's own clock; `0` for never.
     pub last_spoke_at_ms: u64,
+    /// The tile is a shared screen (ADR-0083), its own entry beside the
+    /// sharer's camera tile.
+    #[uniffi(default = false)]
+    pub is_screen: bool,
 }
 
 /// Who is on the stage in the layout with one large tile: an index into
@@ -787,6 +795,7 @@ pub fn call_stage(people: Vec<StageCandidate>, pinned: Option<u32>) -> Option<u3
             camera_on: p.camera_on,
             speaking: p.speaking,
             last_spoke_at_ms: p.last_spoke_at_ms,
+            is_screen: p.is_screen,
         })
         .collect();
     let pinned = pinned.and_then(|p| usize::try_from(p).ok());

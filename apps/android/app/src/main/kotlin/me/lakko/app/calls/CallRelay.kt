@@ -7,9 +7,11 @@ import uniffi.lakko_ffi_uniffi.CallRelayKey
 import uniffi.lakko_ffi_uniffi.CallRelayPayload
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.VerifiedCallScreenShare
 import uniffi.lakko_ffi_uniffi.classifyCallRelayPlaintext
 import uniffi.lakko_ffi_uniffi.composeCallPeerAnnouncement
 import uniffi.lakko_ffi_uniffi.verifyCallPeerAnnouncement
+import uniffi.lakko_ffi_uniffi.verifyCallScreenShare
 
 /**
  * The sealed `signal-relay` channel of an SFU call and who a peer is
@@ -34,6 +36,9 @@ public class CallRelay {
     public sealed interface Opened {
         public class Announcement(public val bytes: ByteArray) : Opened
         public data class MediaState(val cameraOn: Boolean) : Opened
+
+        /** A signed screen-share state (ADR-0083); verify it before use. */
+        public class ScreenShare(public val state: ByteArray) : Opened
         public data object Unknown : Opened
     }
 
@@ -78,6 +83,7 @@ public class CallRelay {
             return when (val payload = classifyCallRelayPlaintext(plaintext)) {
                 is CallRelayPayload.PeerAnnouncement -> Opened.Announcement(payload.announcement)
                 is CallRelayPayload.MediaState -> Opened.MediaState(payload.cameraOn)
+                is CallRelayPayload.ScreenShare -> Opened.ScreenShare(payload.state)
                 CallRelayPayload.Unknown -> Opened.Unknown
             }
         }
@@ -112,6 +118,14 @@ public class CallPeerAnnouncer(
     public val compose: (selfPeerId: String) -> ByteArray?,
     /** A peer's announcement verified against the roster, or `null`. */
     public val verify: (from: String, announcement: ByteArray) -> VerifiedPeerIdentity?,
+    /** A peer's screen-share state (ADR-0083) verified against the roster,
+     *  for the peer `from` whose verified announcement named [signerKey];
+     *  `null` on any refusal. Absent: no share is ever accepted. */
+    public val verifyScreenShare: (from: String, signerKey: ByteArray, state: ByteArray) -> VerifiedCallScreenShare? =
+        { _, _, _ -> null },
+    /** This device's own leaf signature key, the fold's own key; `null`
+     *  when it cannot be read (no share is then folded). */
+    public val ownSignatureKey: () -> ByteArray? = { null },
 ) {
     public companion object {
         /** The announcer for a call whose roster is `group()`. */
@@ -130,6 +144,22 @@ public class CallPeerAnnouncer(
                 },
                 verify = { from, announcement ->
                     group()?.let { verifiedIdentity(it, callId, from, announcement) }
+                },
+                verifyScreenShare = { from, signerKey, state ->
+                    group()?.let { g ->
+                        try {
+                            verifyCallScreenShare(g, callId, from, signerKey, state)
+                        } catch (_: Throwable) {
+                            null
+                        }
+                    }
+                },
+                ownSignatureKey = {
+                    try {
+                        identity.signaturePublicKey()
+                    } catch (_: Throwable) {
+                        null
+                    }
                 },
             )
 

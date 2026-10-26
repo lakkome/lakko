@@ -320,7 +320,9 @@ final class SfuSignalingClient {
             callbacks.onVideoGiven?(given)
         case let .videoNeeded(main, middle):
             callbacks.onVideoNeeded?(main, middle)
-        case let .publishBudget(mainKbps, middleKbps):
+        case let .publishBudget(mainKbps, middleKbps, _):
+            // ADR-0083: `screenKbps` is the ceiling of a screen sender this
+            // client never has (it receives shares and sends none).
             callbacks.onPublishBudget?(mainKbps, middleKbps)
         }
     }

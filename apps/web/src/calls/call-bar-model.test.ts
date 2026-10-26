@@ -155,6 +155,30 @@ describe("callBarWouldShow — may this call be put away", () => {
   });
 });
 
+describe("callBarStatus — while this device shares its screen", () => {
+  it("says so in place of the running time", () => {
+    const rules = spy({ kind: "elapsed", elapsed: 124_000n });
+    const line = callBarStatus(rules, {
+      phase: rules.CallBarPhase.Connected,
+      connectedAtMs: 1_000,
+      nowMs: 125_000,
+      sharingScreen: true,
+    });
+    expect(line.text).toBe("Sharing your screen");
+  });
+
+  it("never in place of Reconnecting", () => {
+    const rules = spy({ kind: "reconnecting" });
+    const line = callBarStatus(rules, {
+      phase: rules.CallBarPhase.Connected,
+      connectedAtMs: 1_000,
+      nowMs: 125_000,
+      sharingScreen: true,
+    });
+    expect(line.text).toBe("Reconnecting...");
+  });
+});
+
 describe("callBarStatus — one line, never two things", () => {
   it("says the word for each of the three word kinds, and asks for no time", () => {
     for (const [kind, text] of [

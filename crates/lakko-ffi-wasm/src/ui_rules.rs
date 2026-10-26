@@ -943,12 +943,14 @@ pub const STAGE_FLAG_LOCAL: u8 = 1;
 pub const STAGE_FLAG_CAMERA: u8 = 2;
 /// Flag bit of {@link callStage}: the person is the active speaker now.
 pub const STAGE_FLAG_SPEAKING: u8 = 4;
+/// Flag bit of {@link callStage}: the tile is a shared screen (ADR-0083).
+pub const STAGE_FLAG_SCREEN: u8 = 8;
 
 /// Who is on the stage in the layout with one large tile: an index into the
 /// roster, or `undefined` when the call is empty.
 ///
-/// `flags` carries one byte per person (bit 1: this device's own tile, bit 2:
-/// camera on, bit 4: speaking now) and `lastSpokeAtMs` one number per person
+/// `flags` carries one byte per tile (bit 1: this device's own tile, bit 2:
+/// camera on, bit 4: speaking now, bit 8: a shared screen) and `lastSpokeAtMs` one number per person
 /// (0 for never), both in roster order. A `lastSpokeAtMs` shorter than
 /// `flags` reads as "never" for the people it does not cover.
 #[wasm_bindgen(js_name = callStage)]
@@ -961,6 +963,7 @@ pub fn call_stage(flags: &[u8], last_spoke_at_ms: &[f64], pinned: Option<u32>) -
             is_local: bits & STAGE_FLAG_LOCAL != 0,
             camera_on: bits & STAGE_FLAG_CAMERA != 0,
             speaking: bits & STAGE_FLAG_SPEAKING != 0,
+            is_screen: bits & STAGE_FLAG_SCREEN != 0,
             last_spoke_at_ms: last_spoke_at_ms
                 .get(index)
                 .copied()

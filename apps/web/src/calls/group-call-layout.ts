@@ -86,6 +86,9 @@ export interface LayoutPerson {
   readonly id: string;
   readonly isLocal: boolean;
   readonly camOn: boolean;
+  /** A shared screen's tile (ADR-0083), not a person's. The shared rule puts
+   *  a share ahead of the speaker on the stage, never this device's own. */
+  readonly screen?: boolean;
 }
 
 /** Which of the two layouts is showing. */
@@ -150,6 +153,7 @@ export function gridPage<T extends LayoutPerson>(
 const STAGE_FLAG_LOCAL = 1;
 const STAGE_FLAG_CAMERA = 2;
 const STAGE_FLAG_SPEAKING = 4;
+const STAGE_FLAG_SCREEN = 8;
 
 /** What the stage rule needs beyond the roster. */
 export interface StageSpeech {
@@ -162,9 +166,10 @@ export interface StageSpeech {
 /**
  * Who is on the stage in Focus, or `null` for an empty call.
  *
- * The shared rule decides: pinned, else speaking now, else the most recent
- * speaker, else the first person with a picture, else the first other
- * person; this device's own tile only when alone.
+ * The shared rule decides: pinned, else a shared screen (never this
+ * device's own), else speaking now, else the most recent speaker, else the
+ * first person with a picture, else the first other person; this device's
+ * own tile only when alone.
  */
 export function stagePerson<T extends LayoutPerson>(
   rules: Pick<GroupCallRules, "callStage">,
@@ -179,7 +184,8 @@ export function stagePerson<T extends LayoutPerson>(
     flags[i] =
       (p.isLocal ? STAGE_FLAG_LOCAL : 0) |
       (p.camOn ? STAGE_FLAG_CAMERA : 0) |
-      (speech.activeSpeakerId === p.id ? STAGE_FLAG_SPEAKING : 0);
+      (speech.activeSpeakerId === p.id ? STAGE_FLAG_SPEAKING : 0) |
+      (p.screen === true ? STAGE_FLAG_SCREEN : 0);
     spoke[i] = speech.lastSpokeAtMs[p.id] ?? 0;
   });
   const pinnedIndex = pinnedId === null ? -1 : people.findIndex((p) => p.id === pinnedId);

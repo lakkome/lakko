@@ -210,6 +210,14 @@ final class SfuCallSession {
         /// peer id (ADR-0070 step 6): the whole set. Empty before the first
         /// `video-given` frame and with downlink control off.
         var onVideoGiven: (([String: TileVideoQuality]) -> Void)? = nil
+        /// The call's current screen share changed (ADR-0083): the fold's
+        /// answer after a verified share state or a sharer leaving, `nil`
+        /// when no share is live.
+        var onScreenShareChanged: ((CallCurrentScreenShare?) -> Void)? = nil
+        /// The shared screen of `peerId` arrived (or, `nil`, went): a remote
+        /// video track under `<peer>~screen`. Its own tile, never a picture
+        /// of the person's camera, and never in `video-wants`.
+        var onRemoteScreenVideoTrack: ((RTCVideoTrack?, _ peerId: String) -> Void)? = nil
     }
 
     private let config: Config
@@ -243,6 +251,13 @@ final class SfuCallSession {
     /// `layer=middle` for their receivers.
     private var lightTrackIds: Set<String> = []
     private var middleTrackIds: Set<String> = []
+    /// The leaf signature key each peer's verified announcement named, by SFU
+    /// peer id: what a screen-share state from that peer must be signed by
+    /// (ADR-0083 section 1), and whose share ends when the peer leaves.
+    private var peerSignerKeys: [String: Data] = [:]
+    /// The call's one-share-at-a-time fold (C-87).
+    private lazy var screenShares = ScreenShareFold(
+        ownKey: config.peerAnnouncer?.ownSignatureKey ?? Data())
     /// When the last media reading was taken, on a clock that never goes
     /// back; for the senders' bitrate over the interval.
     private var mediaLogLastAtMs: UInt64?
@@ -768,6 +783,7 @@ final class SfuCallSession {
         audioTrackPeers.removeAll()
         lightTrackIds.removeAll()
         middleTrackIds.removeAll()
+        peerSignerKeys.removeAll()
         avAlign.clear()
         avReceivers.removeAll()
         offerQueue.removeAll()
@@ -1196,6 +1212,12 @@ final class SfuCallSession {
                     self.callbacks.onVideoGiven?(self.givenBook.snapshot)
                 }
                 self.onRosterChanged(joined: false)
+                // A participant that leaves ends their share (ADR-0083
+                // section 2).
+                if let signer = self.peerSignerKeys.removeValue(forKey: peerId),
+                    self.screenShares.participantLeft(signerKey: signer) {
+                    self.callbacks.onScreenShareChanged?(self.screenShares.current)
+                }
                 self.callbacks.onPeerLeft?(peerId)
             }
         }
@@ -1255,14 +1277,36 @@ final class SfuCallSession {
                 callbacks.onRemoteMediaState?(from, cameraOn)
             case .announcement(let announcement):
                 if let identity = config.peerAnnouncer?.verify(from, announcement) {
+                    if !identity.signatureKey.isEmpty { peerSignerKeys[from] = identity.signatureKey }
                     callbacks.onPeerIdentified?(from, identity)
                 }
+            case .screenShare(let state):
+                receiveScreenShare(from: from, state: state)
             case .unknown:
                 break
             }
             return
         }
         callbacks.onSignalRelay?(from, payload)
+    }
+
+    /// A sealed screen-share state from `from` (ADR-0083 section 1). It is
+    /// accepted only once `from` has a verified announcement, and only when it
+    /// verifies against the call's group with that announcement's leaf key and
+    /// `from` as its peer id; anything else is dropped.
+    private func receiveScreenShare(from: String, state: Data) {
+        guard let signer = peerSignerKeys[from],
+            let verified = config.peerAnnouncer?.verifyScreenShare(from, signer, state)
+        else {
+            NSLog("SfuCallSession: screen-share state dropped (unverified)")
+            return
+        }
+        if screenShares.observe(verified) {
+            NSLog(
+                "SfuCallSession: current screen share changed: live=%@",
+                screenShares.current != nil ? "true" : "false")
+            callbacks.onScreenShareChanged?(screenShares.current)
+        }
     }
 
     private func applyRemoteAnswer(_ sdp: String) async {
@@ -1545,6 +1589,11 @@ final class SfuCallSession {
                     guard let track else { return }
                     NSLog("SfuCallSession: middle track attached peer=%@", peerId)
                     self.callbacks.onRemoteMiddleVideoTrack?(track, peerId)
+                case .screen(let peerId):
+                    NSLog(
+                        "SfuCallSession: screen track %@ peer=%@",
+                        track != nil ? "attached" : "removed", peerId)
+                    self.callbacks.onRemoteScreenVideoTrack?(track, peerId)
                 }
             },
             onRemoteReceiver: { [weak self] receiver, streamId in
@@ -1576,7 +1625,10 @@ final class SfuCallSession {
                     switch role {
                     case .light: self.lightTrackIds.insert(trackId)
                     case .middle: self.middleTrackIds.insert(trackId)
-                    case .main: break
+                    // A screen's picture and sound (stream indices 2 and 5)
+                    // are decrypted by the same decryptor as any receiver,
+                    // below; its sound plays with the call.
+                    case .main, .screen: break
                     }
                     // Which of the person's receivers this is, for the rule
                     // that keeps their sound and picture together. A track

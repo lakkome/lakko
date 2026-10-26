@@ -1013,7 +1013,8 @@ private let committerBeaconEnvelopeFirstByte: UInt8 = 0x6C
 /// proto's first wire tag is one of `0x52` / `0x5A` / `0x62` / `0x6A`
 /// (`CallSignalingPayload.body` oneof fields 10..13, the 1x1 bodies),
 /// `0x72` / `0x7A` (`GroupCallStart` 14 / `GroupCallJoin` 15) or the two-byte
-/// `0x82 0x01` (`GroupCallLeave` 16), while a chat envelope starts with `{`
+/// `0x82 0x01` (`GroupCallLeave` 16) or `0x8A 0x01` (`ScreenShareSignal` 17,
+/// ADR-0083: call signalling that never rings), while a chat envelope starts with `{`
 /// (`0x7B`) — no overlap. Without the group tags a group-call body reached the
 /// chat parser's lossy fallback and became a notification preview of garbage.
 ///
@@ -1036,7 +1037,7 @@ public func nseLooksLikeCallSignaling(_ bytes: Data) -> Bool {
         return true
     case 0x72, 0x7A:
         return nseIsFramedGroupCallBody(bytes, tagLength: 1)
-    case 0x82:
+    case 0x82, 0x8A:
         return bytes.count >= 2
             && bytes[bytes.startIndex + 1] == 0x01
             && nseIsFramedGroupCallBody(bytes, tagLength: 2)

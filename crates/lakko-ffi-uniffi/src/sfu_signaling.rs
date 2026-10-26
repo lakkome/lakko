@@ -180,6 +180,9 @@ pub enum SfuServerFrame {
         main_kbps: u32,
         /// The ceiling of the middle (half size) camera sender, kbit/s.
         middle_kbps: u32,
+        /// The ceiling of this publisher's screen-share sender, kbit/s,
+        /// present only while it sends a screen (ADR-0083).
+        screen_kbps: Option<u32>,
     },
 }
 
@@ -237,9 +240,11 @@ impl From<ServerFrame> for SfuServerFrame {
             ServerFrame::PublishBudget {
                 main_kbps,
                 middle_kbps,
+                screen_kbps,
             } => Self::PublishBudget {
                 main_kbps,
                 middle_kbps,
+                screen_kbps,
             },
         }
     }
@@ -308,6 +313,28 @@ pub fn compose_sfu_sdp_offer_with_middle(
         sdp,
         light_mids,
         middle_mids,
+        screen_mids: Vec::new(),
+    })?)
+}
+
+/// Compose a client -> SFU SDP offer that also names its screen-share
+/// lines (ADR-0083): `screen_mids` are the `mid`s of the share's picture
+/// and, when it has one, its sound. The SFU forwards them under the stream
+/// id `<peer>~screen`. The bounds are those of `light_mids`; outside them
+/// this is an error. With an empty `screen_mids` the frame is exactly
+/// [`compose_sfu_sdp_offer_with_middle`]'s.
+#[uniffi::export]
+pub fn compose_sfu_sdp_offer_with_screen(
+    sdp: String,
+    light_mids: Vec<String>,
+    middle_mids: Vec<String>,
+    screen_mids: Vec<String>,
+) -> Result<String, FfiError> {
+    Ok(encode_client_frame(&ClientFrame::SdpOffer {
+        sdp,
+        light_mids,
+        middle_mids,
+        screen_mids,
     })?)
 }
 
@@ -446,10 +473,12 @@ mod tests {
                 sdp,
                 light_mids,
                 middle_mids,
+                screen_mids,
             } => {
                 assert_eq!(sdp, "v=0\r\n");
                 assert_eq!(light_mids, vec!["2".to_owned()]);
                 assert!(middle_mids.is_empty());
+                assert!(screen_mids.is_empty());
             },
             _ => panic!("expected SdpOffer"),
         }
@@ -565,7 +594,11 @@ mod tests {
                 SfuServerFrame::PublishBudget {
                     main_kbps,
                     middle_kbps,
-                } => assert_eq!((main_kbps, middle_kbps), (main, middle)),
+                    screen_kbps,
+                } => {
+                    assert_eq!((main_kbps, middle_kbps), (main, middle));
+                    assert_eq!(screen_kbps, None);
+                },
                 _ => panic!("expected PublishBudget"),
             }
         }

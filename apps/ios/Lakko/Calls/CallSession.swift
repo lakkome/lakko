@@ -156,6 +156,25 @@ public final class CallSession: ObservableObject {
     /// Sticky: a receiver that failed to arm is never re-armed.
     @Published public private(set) var remoteMediaUndecryptable: Bool = false
 
+    /// The other person's shared screen (ADR-0083 section 4): a remote video
+    /// track in a stream whose id ends in `~screen`. Its own picture, never
+    /// their camera.
+    @Published public private(set) var remoteScreenTrack: RTCVideoTrack?
+    /// `true` once ``remoteScreenTrack`` rendered a frame; until then the share
+    /// says it is waiting for the picture.
+    @Published public private(set) var remoteScreenFlowing: Bool = false
+    /// The call's current share, as the fold answers it: `nil` when none is
+    /// live. Fed only with states verified against the MLS sender
+    /// (``applyScreenShare(_:)``).
+    @Published private(set) var screenShare: CallCurrentScreenShare?
+    /// The one-share-at-a-time fold (C-87). Its own key decides only whether
+    /// a share is this device's own; this client never shares, so a key no
+    /// signer holds is enough.
+    private lazy var screenShares = ScreenShareFold(ownKey: Data(count: 32))
+    private var remoteScreenProbe: RemoteVideoFrameProbe?
+    /// The id of the remote video track the pod last reported removed.
+    private var lastRemovedVideoTrackId: String?
+
     /// The frame probe attached to the current remote video track, held so it
     /// can be detached when the track is replaced or the call ends.
     private var remoteVideoProbe: RemoteVideoFrameProbe?
@@ -966,6 +985,11 @@ public final class CallSession: ObservableObject {
                 sdpMLineIndex: remote.sdpMLineIndex,
                 candidate: remote.candidate
             ) }
+        case .screenShare:
+            // ADR-0083: a share state is folded only once verified against the
+            // row's MLS sender (``applyScreenShare(_:callId:)``); the raw body
+            // carries no verdict.
+            break
         case .groupStart, .groupJoin, .groupLeave:
             // Group-call signaling (Phase 3c2) folds into the
             // repository's per-chat group-call record
@@ -1132,6 +1156,10 @@ public final class CallSession: ObservableObject {
         // `remoteVideoFlowing` from surviving into the next call.
         self.remoteVideoTrack = nil
         self.watchRemoteVideoFrames(on: nil)
+        // No share outlives the call.
+        self.setRemoteScreenTrack(nil)
+        self.screenShare = nil
+        self.screenShares = ScreenShareFold(ownKey: Data(count: 32))
         // G3-1-conn-quality — clear the stale stats so a fresh
         // call doesn't briefly show the previous RTT / bitrate.
         self.rttMs = nil
@@ -1244,6 +1272,41 @@ public final class CallSession: ObservableObject {
     /// Re-attaching on every track change matters: a peer that stops and
     /// restarts its camera produces a NEW track, and a stale `true` would send
     /// the screen to the video layout before the new track has drawn anything.
+    // MARK: - Screen share (ADR-0083 section 4)
+
+    /// Fold a share state already verified against the row's MLS sender leaf
+    /// (``ChatRepository/routeCallSignaling``). A state for another call is
+    /// dropped.
+    func applyScreenShare(_ verified: VerifiedCallScreenShare, callId: Data) {
+        guard callId == self.callId, state != .done else { return }
+        if screenShares.observe(verified) {
+            NSLog(
+                "CallSession: current screen share changed: live=%@",
+                screenShares.current != nil ? "true" : "false")
+            screenShare = screenShares.current
+        }
+    }
+
+    /// Keep (or, `nil`, drop) the other person's screen track, and probe it
+    /// for its first frame.
+    private func setRemoteScreenTrack(_ track: RTCVideoTrack?) {
+        if let previous = remoteScreenTrack, let probe = remoteScreenProbe {
+            previous.remove(probe)
+        }
+        remoteScreenProbe = nil
+        remoteScreenFlowing = false
+        remoteScreenTrack = track
+        guard let track else { return }
+        NSLog("CallSession: remote screen track attached; waiting for the first frame")
+        let probe = RemoteVideoFrameProbe { [weak self, weak track] in
+            guard let self, let track, self.remoteScreenTrack === track else { return }
+            NSLog("CallSession: remote screen first frame rendered")
+            self.remoteScreenFlowing = true
+        }
+        track.add(probe)
+        remoteScreenProbe = probe
+    }
+
     private func watchRemoteVideoFrames(on track: RTCVideoTrack?) {
         if let previous = probedRemoteVideoTrack, let probe = remoteVideoProbe {
             previous.remove(probe)
@@ -1391,13 +1454,24 @@ public final class CallSession: ObservableObject {
             onConnectionState: { [weak self] newState in
                 self?.handleConnectionState(newState)
             },
-            onRemoteVideoTrack: { [weak self] track, _ in
-                // 1×1: a single remote video track. The
-                // stream id is ignored here; the N-way SFU
-                // path will key on it to map the track to a
-                // specific participant leaf.
-                self?.remoteVideoTrack = track
-                self?.watchRemoteVideoFrames(on: track)
+            onRemoteVideoTrack: { [weak self] track, streamId in
+                guard let self else { return }
+                // ADR-0083: a stream id ending in `~screen` is the other
+                // person's shared screen, not their camera.
+                if case .screen = RemoteVideoRoute.of(streamId: streamId) {
+                    self.setRemoteScreenTrack(track)
+                    return
+                }
+                // A removal names no stream: it is the screen's when the
+                // track the pod just removed is the screen track.
+                if track == nil, let screen = self.remoteScreenTrack,
+                    self.lastRemovedVideoTrackId == screen.trackId {
+                    self.setRemoteScreenTrack(nil)
+                    return
+                }
+                // 1×1: a single remote camera track.
+                self.remoteVideoTrack = track
+                self.watchRemoteVideoFrames(on: track)
             },
             onRemoteReceiver: { [weak self] receiver, _ in
                 // Arm the SFrame decryptor on EVERY incoming track
@@ -1427,6 +1501,9 @@ public final class CallSession: ObservableObject {
                 // dead, and hanging up would replace a describable state with a
                 // dropped call — the same ambiguity one layer further out.
                 if !armed { self.remoteMediaUndecryptable = true }
+            },
+            onRemoteVideoTrackRemoved: { [weak self] trackId in
+                self?.lastRemovedVideoTrackId = trackId
             }
         ))
     }
@@ -1618,6 +1695,8 @@ extension CallSession {
         case .groupStart(let cid, _, _, _),
              .groupJoin(let cid, _, _),
              .groupLeave(let cid, _, _):
+            return cid
+        case .screenShare(let cid, _):
             return cid
         }
     }

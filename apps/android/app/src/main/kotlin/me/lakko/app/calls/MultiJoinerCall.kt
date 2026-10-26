@@ -261,6 +261,8 @@ class MultiJoinerCall private constructor(
                 onRemoteVideoTrack = { track, streamId -> onRemoteVideoTrack(track, streamId) },
                 // What the SFU says it gives of each person (`VideoGiven.kt`).
                 onVideoGiven = { given -> applyVideoGiven(opts.ui, given) },
+                // The call's current screen share (ADR-0083), as SfuCallUi.
+                onScreenShare = { share -> opts.ui.setScreenShare(share) },
                 onRemoteMediaState = { peerId, cameraOn ->
                     // camera-off-cleanup — a remote peer signalled its camera
                     // on/off over the opaque SFU relay (SfuCallSession

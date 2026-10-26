@@ -48,6 +48,15 @@ public enum class CallStage {
      */
     LOCAL_VIDEO,
 
+    /**
+     * One other person, sharing their screen (ADR-0083,
+     * `docs/ux/screen-share.md` section 5.1): the share is the large
+     * picture, uncropped; their camera, or their initials, is a small tile;
+     * this device's own camera keeps the self-view. A voice call takes this
+     * video layout too while the share is live.
+     */
+    SCREEN_SHARE,
+
     /** A group call: its tiles, in the grid or the focus layout
      *  ([groupLayoutKind]). */
     GRID,
@@ -73,9 +82,13 @@ public fun callStage(
     remoteVideoPresent: Boolean,
     localVideoPresent: Boolean = false,
     groupCall: Boolean = false,
+    /** The other person is sharing their screen (announced; its picture may
+     *  not have arrived yet). A group call shows a share as a tile instead. */
+    screenSharePresent: Boolean = false,
 ): CallStage = when {
     groupCall -> CallStage.GRID
     remoteParticipants > 1 -> CallStage.GRID
+    screenSharePresent -> CallStage.SCREEN_SHARE
     remoteVideoPresent -> CallStage.REMOTE_VIDEO
     localVideoPresent -> CallStage.LOCAL_VIDEO
     else -> CallStage.PORTRAIT
@@ -95,7 +108,7 @@ public fun callStage(
  *    self-view as well would be the same camera twice on one screen.
  */
 public fun showsSelfViewPip(stage: CallStage, localVideoPresent: Boolean): Boolean =
-    localVideoPresent && stage == CallStage.REMOTE_VIDEO
+    localVideoPresent && (stage == CallStage.REMOTE_VIDEO || stage == CallStage.SCREEN_SHARE)
 
 /**
  * What the call screen is titled — `docs/ux/calls.md` section 4's status line.
@@ -164,4 +177,4 @@ public fun controlsMayAutoHide(
 ): Boolean =
     connected &&
         !alone &&
-        (stage == CallStage.REMOTE_VIDEO || stage == CallStage.LOCAL_VIDEO)
+        (stage == CallStage.REMOTE_VIDEO || stage == CallStage.LOCAL_VIDEO || stage == CallStage.SCREEN_SHARE)

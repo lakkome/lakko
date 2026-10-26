@@ -94,12 +94,16 @@ export type SFrameStreamIndex = number;
 export const SFRAME_STREAM_AUDIO: SFrameStreamIndex = 0;
 /** The stream index of a participant's camera (the main sender). */
 export const SFRAME_STREAM_CAMERA: SFrameStreamIndex = 1;
-/** Reserved for a screen share. Nothing is sealed under it yet. */
+/** The stream index of a screen share's picture (ADR-0083,
+ *  `sframeStreamScreen()` in the core). */
 export const SFRAME_STREAM_SCREEN_SHARE: SFrameStreamIndex = 2;
 /** The stream index of the camera's light sender (ADR-0070 step 1). */
 export const SFRAME_STREAM_CAMERA_LIGHT: SFrameStreamIndex = 3;
 /** The stream index of the camera's middle sender (ADR-0070 step 5). */
 export const SFRAME_STREAM_CAMERA_MIDDLE: SFrameStreamIndex = 4;
+/** The stream index of a screen share's sound (ADR-0083,
+ *  `sframeStreamScreenAudio()` in the core). */
+export const SFRAME_STREAM_SCREEN_AUDIO: SFrameStreamIndex = 5;
 
 /** Map an `RTCRtpSender` track `kind` to the ADR-0035 stream index of a
  *  participant's microphone or main camera. Anything that is not `"video"`

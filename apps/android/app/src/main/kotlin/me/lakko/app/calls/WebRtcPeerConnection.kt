@@ -158,6 +158,12 @@ public class WebRtcPeerConnection(
     /** `RtpReceiver.id()` of the peer's video receiver, while it has one. */
     private var remoteVideoReceiverId: String? = null
 
+    /** The receiver of a remote shared screen's picture and the stream id it
+     *  arrived in (ADR-0083), kept apart from [remoteVideoReceiverId] so a
+     *  share starting or stopping never reads as the camera doing so. */
+    private var remoteScreenReceiverId: String? = null
+    private var remoteScreenStreamId: String? = null
+
     /**
      * The MSID stream id each incoming audio track arrived in, by track id.
      * Written on libwebrtc's signaling thread as tracks arrive and read by
@@ -375,6 +381,14 @@ public class WebRtcPeerConnection(
                     runCatching { track.id() }.getOrNull()?.let { remoteMiddleVideoTrackIds += it }
                 else -> Unit
             }
+            // A shared screen's picture (ADR-0083): its own receiver, so its
+            // removal clears the share's picture and not the camera.
+            if (isScreenStreamId(streamId)) {
+                remoteScreenReceiverId = runCatching { r.id() }.getOrNull()
+                remoteScreenStreamId = streamId
+                delegate?.onRemoteVideoTrack(track, streamId)
+                return
+            }
             // Remembered so `onRemoveTrack` can tell the peer's video receiver
             // from its audio one: by the time that callback runs, the track is
             // already detached and cannot be inspected.
@@ -396,6 +410,13 @@ public class WebRtcPeerConnection(
         override fun onRemoveTrack(receiver: RtpReceiver?) {
             val r = receiver ?: return
             val id = runCatching { r.id() }.getOrNull()
+            if (id != null && id == remoteScreenReceiverId) {
+                val screenStream = remoteScreenStreamId
+                remoteScreenReceiverId = null
+                remoteScreenStreamId = null
+                delegate?.onRemoteVideoTrack(null, screenStream)
+                return
+            }
             if (id == null || id != remoteVideoReceiverId) return
             remoteVideoReceiverId = null
             delegate?.onRemoteVideoTrack(null, null)

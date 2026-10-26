@@ -18,6 +18,7 @@ import {
   SFRAME_STREAM_CAMERA,
   SFRAME_STREAM_CAMERA_LIGHT,
   SFRAME_STREAM_CAMERA_MIDDLE,
+  SFRAME_STREAM_SCREEN_AUDIO,
   SFRAME_STREAM_SCREEN_SHARE,
   streamIndexOfKind,
   syncSenderCodecs,
@@ -65,11 +66,12 @@ const sender = (kind: "audio" | "video"): RTCRtpSender => ({ track: { kind }, tr
 const seed = new Uint8Array(32).fill(5);
 
 describe("SFrame stream indices", () => {
-  it("are audio 0, camera 1, screen share 2 (reserved), light camera 3", () => {
+  it("are audio 0, camera 1, screen share 2, light camera 3, screen sound 5", () => {
     expect(SFRAME_STREAM_AUDIO).toBe(0);
     expect(SFRAME_STREAM_CAMERA).toBe(1);
     expect(SFRAME_STREAM_SCREEN_SHARE).toBe(2);
     expect(SFRAME_STREAM_CAMERA_LIGHT).toBe(3);
+    expect(SFRAME_STREAM_SCREEN_AUDIO).toBe(5);
     expect(streamIndexOfKind("audio")).toBe(0);
     expect(streamIndexOfKind("video")).toBe(1);
   });
@@ -84,6 +86,7 @@ describe("the middle camera's stream index", () => {
       SFRAME_STREAM_SCREEN_SHARE,
       SFRAME_STREAM_CAMERA_LIGHT,
       SFRAME_STREAM_CAMERA_MIDDLE,
+      SFRAME_STREAM_SCREEN_AUDIO,
     ];
     expect(new Set(all).size).toBe(all.length);
   });

@@ -2187,6 +2187,16 @@ public class ChatRepository(
     internal var oneToOneMovedSink: ((groupIdHex: String) -> Unit)? = null
 
     /**
+     * ADR-0083 section 4 — a one-to-one call's screen-share state, verified
+     * against the row's MLS sender leaf. Installed with [oneToOneCallInbound];
+     * invoked inside the poll's critical section with the row's DS message id.
+     */
+    @Volatile
+    internal var oneToOneScreenShareInbound:
+        ((groupIdHex: String, messageId: Long, callIdHex: String, share: uniffi.lakko_ffi_uniffi.VerifiedCallScreenShare) -> Unit)? =
+        null
+
+    /**
      * `docs/ux/calls.md` section 4.1.2 — a group call was ended for everyone by
      * the person who started it: a `CallEnd` with the reason `EndedForAll`
      * whose MLS sender, resolved to a person at receipt (C-68), is the starter
@@ -2325,6 +2335,7 @@ public class ChatRepository(
         senderLeaf: UInt?,
         senderKey: MemberIdentity?,
         senderPersonKey: MemberIdentity?,
+        group: Group? = null,
     ) {
         val body = try {
             uniffi.lakko_ffi_uniffi.parseCallSignaling(payload)
@@ -2332,7 +2343,42 @@ public class ChatRepository(
             android.util.Log.w("ChatRepository", "call signaling: parse failed, dropped", cause)
             return
         }
+        if (body is uniffi.lakko_ffi_uniffi.FfiCallSignalingBody.ScreenShare) {
+            routeScreenShareSignal(groupIdHex, messageId, body, senderKey, group)
+            return
+        }
         routeParsedCallSignaling(groupIdHex, messageId, body, createdAt, senderLeaf, senderKey, senderPersonKey)
+    }
+
+    /**
+     * ADR-0083 section 4 — a one-to-one call's screen-share state. Verified
+     * here, in the poll's locked apply region where the row's MLS sender was
+     * resolved: signed by that sender's leaf key, for the one-to-one peer id.
+     * Anything that does not verify is dropped; nothing of it reaches a call.
+     */
+    private fun routeScreenShareSignal(
+        groupIdHex: String,
+        messageId: Long,
+        body: uniffi.lakko_ffi_uniffi.FfiCallSignalingBody.ScreenShare,
+        senderKey: MemberIdentity?,
+        group: Group?,
+    ) {
+        val sink = oneToOneScreenShareInbound ?: return
+        val g = group ?: return
+        val signerKey = senderKey?.let { runCatching { java.util.Base64.getDecoder().decode(it) }.getOrNull() } ?: return
+        val verified = try {
+            uniffi.lakko_ffi_uniffi.verifyCallScreenShare(
+                g,
+                body.callId,
+                uniffi.lakko_ffi_uniffi.callScreenShareOneToOnePeerId(),
+                signerKey,
+                body.state,
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "call signaling: screen share refused, dropped")
+            return
+        }
+        sink(groupIdHex, messageId, me.lakko.app.calls.callIdHexOf(body.callId), verified)
     }
 
     /**
@@ -8040,6 +8086,7 @@ public class ChatRepository(
                 callSignalingSink = { messageId, payload, createdAt, senderLeaf, senderKey, senderPersonKey ->
                     routeIncomingCallSignaling(
                         groupIdHex, messageId, payload, createdAt, senderLeaf, senderKey, senderPersonKey,
+                        record.group,
                     )
                 },
                 profileSink = { senderKey, profile ->
@@ -11866,6 +11913,7 @@ public class ChatRepository(
                             callSignalingSink = { messageId, payload, createdAt, senderLeaf, senderKey, senderPersonKey ->
                                 routeIncomingCallSignaling(
                                     groupIdHex, messageId, payload, createdAt, senderLeaf, senderKey, senderPersonKey,
+                                    record.group,
                                 )
                             },
                             profileSink = { senderKey, profile ->

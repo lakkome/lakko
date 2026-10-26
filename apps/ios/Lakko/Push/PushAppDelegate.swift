@@ -52,6 +52,18 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
         return true
     }
 
+    // MARK: - Orientation
+
+    /// Portrait everywhere, except the call screen while a shared screen is on
+    /// the large place (ADR-0083, ``CallOrientation``). Info.plist lists the
+    /// landscape orientations so that one exception is possible at all.
+    public func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        CallOrientation.mask
+    }
+
     // MARK: - APNs registration callbacks
 
     public func application(

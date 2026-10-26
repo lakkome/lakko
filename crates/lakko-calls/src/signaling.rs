@@ -201,6 +201,15 @@ pub enum SignalingBody {
         /// `Error` (unrecoverable per-participant fault).
         reason: EndReason,
     },
+    /// One-to-one screen share (ADR-0083 section 4): the signed share
+    /// state of [`crate::screen_share`], verified by the receiver against
+    /// the MLS sender's leaf.
+    ScreenShare {
+        call_id: CallId,
+        /// The whole share state, as [`crate::screen_share::compose_screen_share`]
+        /// produced it.
+        state: Vec<u8>,
+    },
 }
 
 impl SignalingBody {
@@ -214,7 +223,8 @@ impl SignalingBody {
             | Self::End { call_id, .. }
             | Self::GroupStart { call_id, .. }
             | Self::GroupJoin { call_id, .. }
-            | Self::GroupLeave { call_id, .. } => call_id,
+            | Self::GroupLeave { call_id, .. }
+            | Self::ScreenShare { call_id, .. } => call_id,
         }
     }
 
@@ -244,6 +254,7 @@ pub fn compose_signaling_payload(body: &SignalingBody) -> Result<Vec<u8>> {
     use lakko_proto::mls_app::call_signaling::v1::{
         call_signaling_payload::Body as ProtoBody, CallAnswer, CallEnd, CallOffer,
         CallSignalingPayload, GroupCallJoin, GroupCallLeave, GroupCallStart, IceCandidate,
+        ScreenShareSignal,
     };
 
     let proto_body = match body {
@@ -306,6 +317,12 @@ pub fn compose_signaling_payload(body: &SignalingBody) -> Result<Vec<u8>> {
             leaf_index: *leaf_index,
             reason: reason.into_proto(),
         }),
+        SignalingBody::ScreenShare { call_id, state } => {
+            ProtoBody::ScreenShare(ScreenShareSignal {
+                call_id: call_id.to_vec(),
+                state: state.clone(),
+            })
+        },
     };
 
     let payload = CallSignalingPayload {
@@ -389,6 +406,10 @@ pub fn parse_signaling_payload(bytes: &[u8]) -> Result<SignalingBody> {
             leaf_index: l.leaf_index,
             reason: EndReason::from_proto(l.reason),
         },
+        ProtoBody::ScreenShare(x) => SignalingBody::ScreenShare {
+            call_id: take_call_id(x.call_id)?,
+            state: x.state,
+        },
     })
 }
 
@@ -401,6 +422,19 @@ mod tests {
         id[0] = 0xAB;
         id[15] = 0xCD;
         id
+    }
+
+    #[test]
+    fn screen_share_round_trips_and_is_not_group_control() {
+        let body = SignalingBody::ScreenShare {
+            call_id: fixture_call_id(),
+            state: vec![1, 2, 3],
+        };
+        let bytes = compose_signaling_payload(&body).unwrap();
+        // Field 17, length-delimited: the tag the iOS NSE byte peek tabulates.
+        assert_eq!(&bytes[..2], &[0x8a, 0x01]);
+        assert_eq!(parse_signaling_payload(&bytes).unwrap(), body);
+        assert!(!body.is_group_control());
     }
 
     #[test]

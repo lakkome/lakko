@@ -4861,6 +4861,20 @@ public final class ChatRepository: ObservableObject {
             NSLog("parseCallSignaling failed: %@", error.localizedDescription)
             return
         }
+        // ADR-0083 section 4: a one-to-one share state is accepted only when
+        // its signer is the row's MLS sender leaf and it verifies against this
+        // conversation's group; anything else is dropped here, before routing.
+        var verifiedScreenShare: VerifiedCallScreenShare?
+        if case .screenShare(let callId, let state) = body {
+            guard let group = groups[groupIdHex]?.group,
+                let verified = Self.verifiedOneToOneScreenShare(
+                    group: group, callId: callId, state: state, senderDeviceKey: senderDeviceKey)
+            else {
+                NSLog("screen-share state dropped: not verified against the MLS sender")
+                return
+            }
+            verifiedScreenShare = verified
+        }
         let route = CallSignalingRoute.of(body)
         // Read before the record is closed below: who started the call this
         // end names. The sender is the row's MLS sender, never a field of the
@@ -4915,8 +4929,24 @@ public final class ChatRepository: ObservableObject {
         if route.forwardToOneToOne {
             callSignalingSink?(
                 InboundCallRow(
-                    groupIdHex: groupIdHex, messageId: messageId, createdAt: createdAt, body: body))
+                    groupIdHex: groupIdHex, messageId: messageId, createdAt: createdAt, body: body,
+                    verifiedScreenShare: verifiedScreenShare))
         }
+    }
+
+    /// `verifyCallScreenShare` for a one-to-one call (ADR-0083 section 4): the
+    /// fixed peer id `p2p`, and the row's MLS sender leaf (base64, resolved at
+    /// receipt) as the key the state must be signed by. `nil` on any refusal,
+    /// and when the sender did not resolve.
+    static func verifiedOneToOneScreenShare(
+        group: Group, callId: Data, state: Data, senderDeviceKey: MemberIdentity?
+    ) -> VerifiedCallScreenShare? {
+        guard let senderDeviceKey, let signer = Data(base64Encoded: senderDeviceKey),
+            signer.count == 32
+        else { return nil }
+        return try? verifyCallScreenShare(
+            group: group, callId: callId, peerId: callScreenShareOneToOnePeerId(),
+            peerSignerKey: signer, state: state)
     }
 
     /// Fold one group-call signal from `participant` into ``groupCalls``, and

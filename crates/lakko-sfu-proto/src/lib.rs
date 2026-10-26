@@ -265,6 +265,18 @@ where
     }
 }
 
+/// Deserialize the optional screen ceiling of a
+/// [`ServerFrame::PublishBudget`] (ADR-0083) under the same bounds.
+#[allow(clippy::unnecessary_wraps)]
+fn deserialize_optional_publish_budget_kbps<'de, D>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_publish_budget_kbps(deserializer).map(Some)
+}
+
 /// A sequence read with its entry count checked as it is read, so an
 /// over-long list is refused without being collected, and then checked as
 /// a whole by `problem`.
@@ -297,6 +309,38 @@ impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Bounded<T> {
             None => Ok(entries),
         }
     }
+}
+
+/// Why a `screen_mids` list is out of bounds, or `None` when it is within
+/// them (ADR-0083). The bounds are those of `light_mids`
+/// ([`MAX_LIGHT_MIDS`] entries, each non-empty and at most
+/// [`MAX_LIGHT_MID_BYTES`] bytes); a share is one video and at most one
+/// audio line.
+#[must_use]
+pub fn screen_mids_problem(mids: &[String]) -> Option<&'static str> {
+    if mids.len() > MAX_LIGHT_MIDS {
+        return Some("screen_mids has more entries than the protocol allows");
+    }
+    if mids.iter().any(String::is_empty) {
+        return Some("screen_mids has an empty entry");
+    }
+    if mids.iter().any(|mid| mid.len() > MAX_LIGHT_MID_BYTES) {
+        return Some("screen_mids has an entry longer than the protocol allows");
+    }
+    None
+}
+
+/// Deserialize `screen_mids`, refusing a list outside its bounds
+/// ([`screen_mids_problem`]).
+fn deserialize_screen_mids<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserializer.deserialize_seq(Bounded {
+        max: MAX_LIGHT_MIDS,
+        too_many: "screen_mids has more entries than the protocol allows",
+        problem: |mids: &[String]| screen_mids_problem(mids),
+    })
 }
 
 /// Deserialize `light_mids`, refusing a list outside its bounds
@@ -550,6 +594,16 @@ pub enum ServerFrame {
         /// has nothing to apply it to.
         #[serde(deserialize_with = "deserialize_publish_budget_kbps")]
         middle_kbps: u32,
+        /// The ceiling of the publisher's screen-share sender, kbit/s
+        /// (ADR-0083): present only while the publisher sends a screen
+        /// (`screen_mids`), whose room the SFU reserves before the camera
+        /// ceilings above are computed. Same bounds as the other two.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_optional_publish_budget_kbps"
+        )]
+        screen_kbps: Option<u32>,
     },
 }
 
@@ -650,6 +704,22 @@ pub enum ClientFrame {
             deserialize_with = "deserialize_middle_mids"
         )]
         middle_mids: Vec<String>,
+        /// The `mid`s of this offer's lines that carry the sender's
+        /// **screen share** (ADR-0083): its picture (SFrame stream index
+        /// 2) and its sound when it has any (stream index 5). The SFU
+        /// forwards them under the MSID stream id = the sender's peer id
+        /// followed by `~screen`, to every subscriber, never paused by
+        /// [`Self::VideoWants`].
+        ///
+        /// Absent on the wire when empty, and an absent field decodes
+        /// to empty. The bounds are those of `light_mids`
+        /// ([`screen_mids_problem`]).
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "deserialize_screen_mids"
+        )]
+        screen_mids: Vec<String>,
     },
 
     /// Client → SFU: a trickle-ICE candidate the client gathered
@@ -800,15 +870,18 @@ pub fn decode_client_frame(json: &str) -> Result<ClientFrame, SfuProtoError> {
 /// an SDP offer's `light_mids` or `middle_mids`, or the `wants` of a
 /// [`ClientFrame::VideoWants`], is outside its bounds
 /// ([`light_mids_problem`], [`middle_mids_problem`],
-/// [`video_wants_problem`]): the server would refuse that frame, so it is
+/// [`screen_mids_problem`], [`video_wants_problem`]): the server would refuse that frame, so it is
 /// not composed.
 pub fn encode_client_frame(frame: &ClientFrame) -> Result<String, SfuProtoError> {
     let problem = match frame {
         ClientFrame::SdpOffer {
             light_mids,
             middle_mids,
+            screen_mids,
             ..
-        } => light_mids_problem(light_mids).or_else(|| middle_mids_problem(middle_mids)),
+        } => light_mids_problem(light_mids)
+            .or_else(|| middle_mids_problem(middle_mids))
+            .or_else(|| screen_mids_problem(screen_mids)),
         ClientFrame::VideoWants { wants } => video_wants_problem(wants),
         _ => None,
     };
@@ -843,7 +916,9 @@ pub fn encode_server_frame(frame: &ServerFrame) -> Result<String, SfuProtoError>
         ServerFrame::PublishBudget {
             main_kbps,
             middle_kbps,
-        } => publish_budget_problem(*main_kbps, *middle_kbps),
+            screen_kbps,
+        } => publish_budget_problem(*main_kbps, *middle_kbps)
+            .or_else(|| screen_kbps.and_then(|screen| publish_budget_problem(screen, screen))),
         _ => None,
     };
     if let Some(problem) = problem {
@@ -935,6 +1010,7 @@ mod tests {
             sdp: "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\n".into(),
             light_mids: Vec::new(),
             middle_mids: Vec::new(),
+            screen_mids: Vec::new(),
         };
         let json = encode_client_frame(&frame).expect("encode");
         assert!(json.contains("\"kind\":\"sdp-offer\""), "got {json}");
@@ -956,6 +1032,7 @@ mod tests {
             sdp: "v=0\r\n".into(),
             light_mids: vec!["2".into()],
             middle_mids: Vec::new(),
+            screen_mids: Vec::new(),
         };
         let json = encode_client_frame(&frame).expect("encode");
         assert!(json.contains("\"light_mids\":[\"2\"]"), "got {json}");
@@ -970,10 +1047,12 @@ mod tests {
                 sdp,
                 light_mids,
                 middle_mids,
+                screen_mids,
             } => {
                 assert_eq!(sdp, "v=0");
                 assert!(light_mids.is_empty());
                 assert!(middle_mids.is_empty());
+                assert!(screen_mids.is_empty());
             },
             other => panic!("expected SdpOffer, got {other:?}"),
         }
@@ -1021,6 +1100,7 @@ mod tests {
             sdp: "v=0".into(),
             light_mids,
             middle_mids: Vec::new(),
+            screen_mids: Vec::new(),
         };
         assert!(encode_client_frame(&offer(vec!["1".into(); MAX_LIGHT_MIDS])).is_ok());
         assert!(encode_client_frame(&offer(vec!["1".into(); MAX_LIGHT_MIDS + 1])).is_err());
@@ -1034,6 +1114,7 @@ mod tests {
             sdp: "v=0\r\n".into(),
             light_mids: vec!["2".into()],
             middle_mids: vec!["3".into()],
+            screen_mids: Vec::new(),
         };
         let json = encode_client_frame(&frame).expect("encode");
         assert!(json.contains("\"middle_mids\":[\"3\"]"), "got {json}");
@@ -1073,11 +1154,65 @@ mod tests {
             sdp: "v=0".into(),
             light_mids: Vec::new(),
             middle_mids,
+            screen_mids: Vec::new(),
         };
         assert!(encode_client_frame(&offer(vec!["1".into(); MAX_LIGHT_MIDS])).is_ok());
         assert!(encode_client_frame(&offer(vec!["1".into(); MAX_LIGHT_MIDS + 1])).is_err());
         assert!(encode_client_frame(&offer(vec![String::new()])).is_err());
         assert!(encode_client_frame(&offer(vec!["m".repeat(MAX_LIGHT_MID_BYTES + 1)])).is_err());
+    }
+
+    #[test]
+    fn sdp_offer_screen_mids_round_trip_and_bounds() {
+        let frame = ClientFrame::SdpOffer {
+            sdp: "v=0\r\n".into(),
+            light_mids: Vec::new(),
+            middle_mids: Vec::new(),
+            screen_mids: vec!["4".into(), "5".into()],
+        };
+        let json = encode_client_frame(&frame).expect("encode");
+        assert!(json.contains("\"screen_mids\":[\"4\",\"5\"]"), "got {json}");
+        assert_eq!(decode_client_frame(&json).expect("decode"), frame);
+        let raw =
+            |mids: &str| format!(r#"{{"kind":"sdp-offer","sdp":"v=0","screen_mids":{mids}}}"#);
+        for bad in [r#"["a","b","c","d","e"]"#, r#"[""]"#, "[1]"] {
+            assert!(decode_client_frame(&raw(bad)).is_err(), "refused: {bad}");
+        }
+        let too_many = ClientFrame::SdpOffer {
+            sdp: "v=0".into(),
+            light_mids: Vec::new(),
+            middle_mids: Vec::new(),
+            screen_mids: vec!["1".into(); MAX_LIGHT_MIDS + 1],
+        };
+        assert!(encode_client_frame(&too_many).is_err());
+    }
+
+    #[test]
+    fn publish_budget_screen_kbps_is_optional_and_bounded() {
+        let without = ServerFrame::PublishBudget {
+            main_kbps: 900,
+            middle_kbps: 300,
+            screen_kbps: None,
+        };
+        let json = encode_server_frame(&without).expect("encode");
+        assert!(!json.contains("screen_kbps"), "got {json}");
+        assert_eq!(decode_server_frame(&json).expect("decode"), without);
+        let with = ServerFrame::PublishBudget {
+            main_kbps: 900,
+            middle_kbps: 300,
+            screen_kbps: Some(1200),
+        };
+        let json = encode_server_frame(&with).expect("encode");
+        assert!(json.contains("\"screen_kbps\":1200"), "got {json}");
+        assert_eq!(decode_server_frame(&json).expect("decode"), with);
+        let zero = ServerFrame::PublishBudget {
+            main_kbps: 900,
+            middle_kbps: 300,
+            screen_kbps: Some(0),
+        };
+        assert!(encode_server_frame(&zero).is_err());
+        let raw = r#"{"kind":"publish-budget","main_kbps":900,"middle_kbps":300,"screen_kbps":0}"#;
+        assert!(decode_server_frame(raw).is_err());
     }
 
     #[test]
@@ -1440,6 +1575,7 @@ mod tests {
             let frame = ServerFrame::PublishBudget {
                 main_kbps,
                 middle_kbps,
+                screen_kbps: None,
             };
             assert_eq!(encode_server_frame(&frame).expect("encode"), wire);
             assert_eq!(decode_server_frame(wire).expect("decode"), frame);
@@ -1477,6 +1613,7 @@ mod tests {
         let frame = |main_kbps, middle_kbps| ServerFrame::PublishBudget {
             main_kbps,
             middle_kbps,
+            screen_kbps: None,
         };
         assert!(encode_server_frame(&frame(0, 500)).is_err());
         assert!(encode_server_frame(&frame(2500, 0)).is_err());
@@ -1529,6 +1666,7 @@ mod tests {
             ServerFrame::PublishBudget {
                 main_kbps: 1200,
                 middle_kbps: 500,
+                screen_kbps: None,
             },
         ];
         for frame in &frames {
@@ -1559,6 +1697,7 @@ mod tests {
                 sdp: "v=0".into(),
                 light_mids: vec!["1".into()],
                 middle_mids: vec!["2".into()],
+                screen_mids: Vec::new(),
             },
             ClientFrame::IceCandidate {
                 candidate_sdp: "candidate:1".into(),

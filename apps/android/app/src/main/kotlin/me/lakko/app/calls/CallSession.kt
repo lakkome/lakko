@@ -20,6 +20,7 @@ import org.webrtc.PeerConnection
 import uniffi.lakko_ffi_uniffi.FfiCallEndReason
 import uniffi.lakko_ffi_uniffi.FfiCallMediaFlags
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
+import uniffi.lakko_ffi_uniffi.VerifiedCallScreenShare
 import uniffi.lakko_ffi_uniffi.callSafetyNumber
 import uniffi.lakko_ffi_uniffi.composeCallSignaling
 import uniffi.lakko_ffi_uniffi.parseCallSignaling
@@ -74,6 +75,12 @@ public class CallSession(
     private val applicationContext: Context,
     override val callId: ByteArray,
     private val onOutboundSignaling: (ByteArray) -> Unit,
+    /**
+     * This device's own leaf signature key in the conversation, the screen
+     * share fold's own key (ADR-0083). `null`: no share is folded, and the
+     * other person's share is never shown.
+     */
+    private val ownSignatureKey: ByteArray? = null,
 ) : OneToOneCallSession {
 
     /** Lifecycle phases. Mirror of `lakko_calls::CallState`. */
@@ -207,6 +214,43 @@ public class CallSession(
         MutableStateFlow(null)
     public val remoteVideoTrack: StateFlow<org.webrtc.VideoTrack?> =
         mutableRemoteVideoTrack.asStateFlow()
+
+    /**
+     * ADR-0083 section 4 — the picture of the other person's shared screen:
+     * a remote video track in a stream whose id ends in `~screen`, kept apart
+     * from their camera. `null` when nobody shares, and after the call.
+     */
+    private val mutableRemoteScreenTrack: MutableStateFlow<org.webrtc.VideoTrack?> =
+        MutableStateFlow(null)
+    public val remoteScreenTrack: StateFlow<org.webrtc.VideoTrack?> =
+        mutableRemoteScreenTrack.asStateFlow()
+
+    /** The call's current screen share from the shared fold, or `null`. */
+    private val mutableScreenShare: MutableStateFlow<ScreenShareView?> = MutableStateFlow(null)
+    public val screenShare: StateFlow<ScreenShareView?> = mutableScreenShare.asStateFlow()
+
+    /** The fold, made on the first share state. Main thread only. */
+    private var screenShareReceiver: ScreenShareReceiver? = null
+
+    /**
+     * A share state from the other person, verified against the
+     * conversation's MLS sender leaf (`verifyCallScreenShare` with
+     * `callScreenShareOneToOnePeerId()`). Folded; the screen follows
+     * [screenShare]. Ignored once the call is over.
+     */
+    override fun applyScreenShare(share: VerifiedCallScreenShare) {
+        if (mutableState.value == WebCallState.Done) return
+        val receiver = screenShareReceiver ?: run {
+            val ownKey = ownSignatureKey ?: return
+            val fold = try {
+                NativeScreenShareFold(ownKey)
+            } catch (_: Throwable) {
+                return
+            }
+            ScreenShareReceiver(fold) { mutableScreenShare.value = it }.also { screenShareReceiver = it }
+        }
+        receiver.receive(share)
+    }
 
     /**
      * G3-2-call-controls — observable local mic / camera enabled
@@ -378,6 +422,7 @@ public class CallSession(
             is FfiCallSignalingBody.Answer -> body.callId
             is FfiCallSignalingBody.IceCandidate -> body.callId
             is FfiCallSignalingBody.End -> body.callId
+            is FfiCallSignalingBody.ScreenShare -> body.callId
             is FfiCallSignalingBody.GroupStart -> body.callId
             is FfiCallSignalingBody.GroupJoin -> body.callId
             is FfiCallSignalingBody.GroupLeave -> body.callId
@@ -999,6 +1044,11 @@ public class CallSession(
                 if (mutableState.value == WebCallState.Done) return
                 endRemote(toReason(body.reason))
             }
+            // ADR-0083 section 4 — a share state is verified against the
+            // conversation's MLS sender before it reaches a call
+            // ([applyScreenShare]); the raw body carries no sender and is
+            // never applied here.
+            is FfiCallSignalingBody.ScreenShare -> Unit
             is FfiCallSignalingBody.GroupStart,
             is FfiCallSignalingBody.GroupJoin,
             is FfiCallSignalingBody.GroupLeave -> {
@@ -1086,13 +1136,18 @@ public class CallSession(
                 onConnectionState = { newState ->
                     scope.launch { handleConnectionState(newState) }
                 },
-                onRemoteVideoTrack = { track, _ ->
-                    // 1×1: a single remote video track. The
-                    // stream id is ignored here; the N-way SFU
-                    // path will key on it to map the track to a
-                    // specific participant leaf. Hop to the main
+                onRemoteVideoTrack = { track, streamId ->
+                    // 1×1: a single remote camera track, plus the other
+                    // person's shared screen in a stream whose id ends in
+                    // `~screen` (ADR-0083 section 4). Hop to the main
                     // dispatcher before touching the StateFlow.
-                    scope.launch { mutableRemoteVideoTrack.value = track }
+                    scope.launch {
+                        if (isScreenStreamId(streamId)) {
+                            mutableRemoteScreenTrack.value = track
+                        } else {
+                            mutableRemoteVideoTrack.value = track
+                        }
+                    }
                 },
                 onRemoteReceiver = { receiver, _ ->
                     // The native 1×1 media is SFrame-sealed on the send side
@@ -1492,6 +1547,11 @@ public class CallSession(
         // gallery tile reverts to the avatar placeholder on
         // both end paths.
         mutableRemoteVideoTrack.value = null
+        // ADR-0083 — the share goes with the call.
+        mutableRemoteScreenTrack.value = null
+        screenShareReceiver?.close()
+        screenShareReceiver = null
+        mutableScreenShare.value = null
         // G3-2-conn-quality — clear stale stats (RTT + bitrate).
         mutableRttMs.value = null
         mutableConnectionRelayed.value = false

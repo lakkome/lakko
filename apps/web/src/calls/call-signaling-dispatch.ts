@@ -142,6 +142,9 @@ export function routeSignalingKind(kind: string): SignalingRoute {
     case "offer":
     case "answer":
     case "iceCandidate":
+    // ADR-0083: the other person's screen-share state, for the call in the
+    // slot only (never a ring: only an `offer` rings).
+    case "screenShare":
       return "oneToOne";
     default:
       return "drop";

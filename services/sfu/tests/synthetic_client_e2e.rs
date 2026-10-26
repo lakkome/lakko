@@ -2667,6 +2667,174 @@ async fn frame_descriptor_survives_the_relay_to_a_subscriber() {
     );
 }
 
+/// **ADR-0083, screen share** — a publisher's video line declared in its
+/// offer's `screen_mids` reaches a subscriber over the live SFU as a screen
+/// track: the SFU's renegotiation offer names it under the MSID stream id
+/// `<publisher>~screen` (the `~` restored after str0m drops it), and the
+/// publisher's frame arrives at the subscriber byte for byte. The
+/// subscriber has said, in `video-wants`, that it shows only the light
+/// picture of this publisher: a screen is forwarded all the same.
+///
+/// Opacity is unaffected: the SFU relays the payload as it arrived (C-39).
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_declared_screen_line_reaches_a_subscriber_as_a_screen_track_verbatim() {
+    use lakko_svc_sfu::protocol::{VideoQuality, VideoWant};
+    let peers = PeerRegistry::new();
+    let b_id = fresh_peer_id();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    assert!(
+        peers
+            .register(Peer {
+                id: b_id.clone(),
+                room: "screen-share-test".to_owned(),
+                outbound: Some(b_tx),
+            })
+            .await,
+        "fresh PeerId must register cleanly"
+    );
+
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new_with_frame_descriptor().await;
+    let mut b = SyntheticClient::new_with_frame_descriptor().await;
+    let a_id = fresh_peer_id();
+
+    let (b_offer, b_pending) = b.create_video_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), "screen-share-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's RecvOnly video subscriber offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+
+    // A publishes one video line and declares it as its screen.
+    let (a_offer, a_pending, screen_mid) = a.create_video_publisher_offer();
+    let a_answer = media
+        .accept_offer_with_screen(
+            a_id.clone(),
+            "screen-share-call".to_owned(),
+            a_offer,
+            Vec::new(),
+            Vec::new(),
+            vec![screen_mid.to_string()],
+        )
+        .await
+        .expect("SFU accepts A's screen-share offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    // B shows only the light picture of A: a camera main track would be
+    // paused, a screen is not.
+    media
+        .set_video_wants(
+            b_id.clone(),
+            vec![VideoWant {
+                peer: a_id.to_string(),
+                quality: VideoQuality::Light,
+            }],
+        )
+        .expect("the wants are queued");
+
+    let descriptor: Vec<u8> = vec![0xf0, 0x01, 0x2a, 0x00, 0x05, 0x00, 0x02, 0xd0];
+    let payload: Vec<u8> = (0..3000_u32)
+        .map(|i| {
+            u8::try_from(i % 241)
+                .unwrap_or(0)
+                .wrapping_mul(11)
+                .wrapping_add(5)
+        })
+        .collect();
+
+    let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
+    let mut reneg_answered = false;
+    let mut pending_reneg: Option<String> = None;
+    let mut offers: Vec<String> = Vec::new();
+    let mut frame_idx: u64 = 0;
+    let mut received = false;
+
+    while Instant::now() < deadline {
+        let _ = a.drain().await;
+        let b_payloads = b.drain().await;
+        if b_payloads
+            .iter()
+            .any(|p| p.as_slice() == payload.as_slice())
+        {
+            received = true;
+            break;
+        }
+
+        while let Ok(frame) = b_rx.try_recv() {
+            if let ServerFrame::SdpOffer { sdp } = frame {
+                offers.push(sdp.clone());
+                pending_reneg = Some(sdp);
+            }
+        }
+        if !reneg_answered && b.is_connected() {
+            if let Some(sdp) = pending_reneg.take() {
+                if let Ok(answer) = b.answer_renegotiation(&sdp) {
+                    if media
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .is_ok()
+                    {
+                        reneg_answered = true;
+                    }
+                }
+            }
+        }
+
+        if a.is_connected() && b.is_connected() && reneg_answered {
+            a.write_video_frame_with_descriptor(screen_mid, &payload, &descriptor, frame_idx);
+            frame_idx += 1;
+        }
+
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        let mut abuf = [0u8; 2048];
+        let mut bbuf = [0u8; 2048];
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((n, src)) = r {
+                    a.feed_receive(&abuf[..n], src, sfu_addr);
+                }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((n, src)) = r {
+                    b.feed_receive(&bbuf[..n], src, sfu_addr);
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {
+                a.feed_timeout();
+                b.feed_timeout();
+            }
+        }
+    }
+
+    assert!(
+        received,
+        "subscriber B never received A's screen frame within \
+         {CROSS_FANOUT_DEADLINE:?}; a_connected={} b_connected={} \
+         reneg_answered={}",
+        a.is_connected(),
+        b.is_connected(),
+        reneg_answered,
+    );
+    let msid_of_screen = format!("a=msid:{a_id}~screen ");
+    assert!(
+        offers.iter().any(|sdp| sdp.contains(&msid_of_screen)),
+        "the SFU's offer to B must name A's screen under `<peer>~screen`; \
+         offers were:\n{offers:?}"
+    );
+    let msid_of_main = format!("a=msid:{a_id} ");
+    assert!(
+        !offers.iter().any(|sdp| sdp.contains(&msid_of_main)),
+        "a declared screen line is never opened as a main track"
+    );
+}
+
 /// **The case the live failure was, and the harness did not cover** — a
 /// subscriber that joined a call **audio-only**, and later has a video track
 /// renegotiated onto it by the SFU.
@@ -10163,6 +10331,7 @@ async fn a_sender_nobody_watches_is_switched_off_and_comes_back_at_a_key_frame()
             if let ServerFrame::PublishBudget {
                 main_kbps,
                 middle_kbps,
+                ..
             } = frame
             {
                 budgets.push((Instant::now(), main_kbps, middle_kbps));

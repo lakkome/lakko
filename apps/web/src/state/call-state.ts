@@ -585,14 +585,14 @@ export const callActions = {
   setSelectedAudioOutput(id: string | null): void {
     setSettings((s) => ({ ...s, selectedAudioOutput: id }));
   },
-  /** Show one line under the status row for `CALL_NOTICE_MS`, replacing any
-   *  line already up. */
-  showNotice(text: string): void {
+  /** Show one line under the status row for `CALL_NOTICE_MS` (or
+   *  `durationMs`), replacing any line already up. */
+  showNotice(text: string, durationMs: number = CALL_NOTICE_MS): void {
     setNotice(text);
     if (noticeTimer !== null) clearTimeout(noticeTimer);
     noticeTimer = setTimeout(() => {
       noticeTimer = null;
       setNotice(null);
-    }, CALL_NOTICE_MS);
+    }, durationMs);
   },
 };

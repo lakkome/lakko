@@ -4391,6 +4391,8 @@ pub struct ParsedCallSignaling {
     leaf_index_val: u32,
     initiator_leaf_val: u32,
     joined_at_ms_val: u64,
+    // ADR-0083 — the one-to-one screen-share state.
+    screen_share_state_val: Vec<u8>,
 }
 
 const CALL_KIND_OFFER: &str = "offer";
@@ -4400,6 +4402,7 @@ const CALL_KIND_END: &str = "end";
 const CALL_KIND_GROUP_START: &str = "groupStart";
 const CALL_KIND_GROUP_JOIN: &str = "groupJoin";
 const CALL_KIND_GROUP_LEAVE: &str = "groupLeave";
+const CALL_KIND_SCREEN_SHARE: &str = "screenShare";
 
 #[wasm_bindgen]
 impl ParsedCallSignaling {
@@ -4489,6 +4492,13 @@ impl ParsedCallSignaling {
     #[wasm_bindgen(getter, js_name = joinedAtMs)]
     pub fn joined_at_ms(&self) -> u64 {
         self.joined_at_ms_val
+    }
+
+    /// `screenShare` only: the signed share state (ADR-0083); verify it
+    /// with `verifyCallScreenShare` against the MLS sender's leaf.
+    #[wasm_bindgen(getter, js_name = screenShareState)]
+    pub fn screen_share_state(&self) -> Vec<u8> {
+        self.screen_share_state_val.clone()
     }
 }
 
@@ -4618,6 +4628,20 @@ pub fn compose_group_call_leave_signaling(
     lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
 }
 
+/// Compose a one-to-one `ScreenShare` call signal (ADR-0083) carrying
+/// `state`, the output of `composeCallScreenShare`.
+#[wasm_bindgen(js_name = composeCallScreenShareSignaling)]
+pub fn compose_call_screen_share_signaling(
+    call_id: &[u8],
+    state: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    let body = lakko_calls::SignalingBody::ScreenShare {
+        call_id: take_call_id(call_id)?,
+        state: state.to_vec(),
+    };
+    lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
+}
+
 /// Parse plaintext bytes (the `Application` payload from
 /// `processIncoming`) into a typed
 /// [`ParsedCallSignaling`] (Phase 3a3).
@@ -4638,6 +4662,7 @@ pub fn parse_call_signaling(plaintext: &[u8]) -> Result<ParsedCallSignaling, JsV
         leaf_index_val: 0,
         initiator_leaf_val: 0,
         joined_at_ms_val: 0,
+        screen_share_state_val: Vec::new(),
     };
     match body {
         lakko_calls::SignalingBody::Offer {
@@ -4707,6 +4732,11 @@ pub fn parse_call_signaling(plaintext: &[u8]) -> Result<ParsedCallSignaling, JsV
             out.call_id_val = call_id.to_vec();
             out.leaf_index_val = leaf_index;
             out.end_reason_val = end_reason_str(reason);
+        },
+        lakko_calls::SignalingBody::ScreenShare { call_id, state } => {
+            out.kind_val = CALL_KIND_SCREEN_SHARE;
+            out.call_id_val = call_id.to_vec();
+            out.screen_share_state_val = state;
         },
     }
     Ok(out)

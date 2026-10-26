@@ -47,6 +47,9 @@ import { queueParameterWrite } from "./sender-parameters";
 export interface PublishBudget {
   readonly mainKbps: number;
   readonly middleKbps: number;
+  /** The screen-share sender's ceiling, present only while this device
+   *  sends a screen (ADR-0083 section 3). */
+  readonly screenKbps?: number;
 }
 
 /** The highest ceiling the frame may carry, kbit/s
@@ -78,10 +81,16 @@ export function readPublishBudgetFrame(parser: PublishBudgetParser, raw: string)
   } catch {
     return null;
   }
-  if (ceilings.length !== 2) return null;
+  // Two ceilings, or three while this device sends a screen (ADR-0083).
+  if (ceilings.length !== 2 && ceilings.length !== 3) return null;
   const mainKbps = ceilings[0];
   const middleKbps = ceilings[1];
   if (!validKbps(mainKbps) || !validKbps(middleKbps)) return null;
+  if (ceilings.length === 3) {
+    const screenKbps = ceilings[2];
+    if (!validKbps(screenKbps)) return null;
+    return { mainKbps, middleKbps, screenKbps };
+  }
   return { mainKbps, middleKbps };
 }
 
@@ -125,7 +134,13 @@ export function senderCeiling(kind: CameraSenderKind, budget: PublishBudget | nu
 /** Whether two budgets say the same. */
 export function sameBudget(a: PublishBudget | null, b: PublishBudget | null): boolean {
   if (a === null || b === null) return a === b;
-  return a.mainKbps === b.mainKbps && a.middleKbps === b.middleKbps;
+  return a.mainKbps === b.mainKbps && a.middleKbps === b.middleKbps && a.screenKbps === b.screenKbps;
+}
+
+/** The screen-share sender's ceiling, bits a second, or `null`: nothing is
+ *  written (no frame yet, or the frame names no screen). */
+export function screenSenderCeiling(budget: PublishBudget | null): number | null {
+  return budget?.screenKbps === undefined ? null : budget.screenKbps * 1000;
 }
 
 /**
@@ -138,7 +153,8 @@ export function describePublishBudgetChange(
   budget: PublishBudget,
 ): string | null {
   if (sameBudget(before, budget)) return null;
-  return `call publish budget main=${budget.mainKbps} middle=${budget.middleKbps}`;
+  const screen = budget.screenKbps === undefined ? "" : ` screen=${budget.screenKbps}`;
+  return `call publish budget main=${budget.mainKbps} middle=${budget.middleKbps}${screen}`;
 }
 
 /**
