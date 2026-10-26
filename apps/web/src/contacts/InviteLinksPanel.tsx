@@ -34,6 +34,7 @@ import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { DiscoveryClient } from "../discovery/client";
 import { Icon } from "../ui/icons";
+import { requestConfirm } from "../ui/confirm-dialog";
 import { loadWasm } from "../wasm";
 import { currentLanguage, joinFacts, t } from "../l10n";
 import { KeyedError } from "../l10n/keyed-error";
@@ -63,7 +64,10 @@ import {
   CUSTOM_MAX_USES,
   customExpiryMs,
   customMaxUses,
+  DEFAULT_LINK_EXPIRY,
+  DEFAULT_LINK_USES,
   expiryPresetToMs,
+  termsFormOf,
   type ExpiryUnit,
   INVITE_LABEL_MAX_LEN,
   maxUsesPresetToValue,
@@ -135,7 +139,8 @@ export function InviteLinksPanel(): JSX.Element {
   const [busyKey, setBusyKey] = createSignal<string | null>(null);
   const [copiedKey, setCopiedKey] = createSignal<string | null>(null);
 
-  const [creating, setCreating] = createSignal(false);
+  /** The row whose terms are being edited (UX section 9), or `null`. */
+  const [editingKey, setEditingKey] = createSignal<string | null>(null);
   const [label, setLabel] = createSignal("");
   const [expiry, setExpiry] = createSignal<ExpiryPreset | "custom">("7d");
   const [customExpiryAmount, setCustomExpiryAmount] = createSignal("");
@@ -158,6 +163,21 @@ export function InviteLinksPanel(): JSX.Element {
   const formValid = (): boolean => chosenExpiryMs(Date.now()) !== null && chosenMaxUses() !== null;
   const [qrRow, setQrRow] = createSignal<LinkRow | null>(null);
   const [createBusy, setCreateBusy] = createSignal(false);
+  const [saveBusy, setSaveBusy] = createSignal(false);
+
+  /** Open the terms form of `row`, prefilled with the link's terms. */
+  function startEdit(row: LinkRow): void {
+    const form = termsFormOf(row.record);
+    setLabel(form.label);
+    setExpiry(form.expiry);
+    setCustomExpiryAmount(form.customExpiryAmount);
+    setCustomExpiryUnit(form.customExpiryUnit);
+    setMaxUses(form.maxUses);
+    setCustomUses(form.customUses);
+    setError(null);
+    setNotice(null);
+    setEditingKey(row.key);
+  }
 
   const rows = (): LinkRow[] => {
     const now = Date.now();
@@ -197,12 +217,15 @@ export function InviteLinksPanel(): JSX.Element {
     }
   }
 
-  async function onCreate(e: SubmitEvent): Promise<void> {
-    e.preventDefault();
-    setError(null);
-    setNotice(null);
-    setCreateBusy(true);
-    try {
+  /** Mint one link with these terms: reach key, sealed capability, ledger
+   *  row, this device's record and the synced register. Throws on any
+   *  failure, having minted nothing. */
+  async function mintLink(terms: {
+    readonly label: string;
+    readonly expiryMs: bigint;
+    readonly maxUses: number;
+  }): Promise<void> {
+    {
       // The account key signs the capability, never this device's key: the
       // link grant carries the account's mailbox binding and the core refuses
       // a grant not bound to the capability's signer (ADR-0078). iOS and
@@ -220,10 +243,8 @@ export function InviteLinksPanel(): JSX.Element {
         throw new KeyedError("common.error.starting_up");
       }
       const wasm = await loadWasm();
-      const expiryMs = chosenExpiryMs(Date.now());
-      const maxUsesValue = chosenMaxUses();
-      // The button is disabled while either is out of range.
-      if (expiryMs === null || maxUsesValue === null) return;
+      const expiryMs = terms.expiryMs;
+      const maxUsesValue = terms.maxUses;
       const linkId = wasm.generateLinkId();
       const linkGrant = await session.newLink(linkId, expiryMs === 0n ? null : Number(expiryMs));
       // Sealed-link amendment of ADR-0028 (2026-09-28): the compose seals the
@@ -240,7 +261,7 @@ export function InviteLinksPanel(): JSX.Element {
           // The sender does not decide whether the other person has an
           // account: the invite page handles both.
           false,
-          label(),
+          terms.label,
           linkId,
           linkGrant,
           // ADR-0079 section 1 — the link names its owner on the invite page.
@@ -279,7 +300,7 @@ export function InviteLinksPanel(): JSX.Element {
             linkId,
             revocationSeed: revocation.seed,
             facts: {
-              label: label(),
+              label: terms.label,
               expiryMs: Number(expiryMs),
               maxUses: maxUsesValue,
               bootstrapReferral: false,
@@ -297,7 +318,7 @@ export function InviteLinksPanel(): JSX.Element {
           expiryMs: Number(expiryMs),
           maxUses: maxUsesValue,
           mintedAtMs: Date.now(),
-          label: label(),
+          label: terms.label,
         });
         // A link this device would not remember after a reload is not handed
         // out: every request through it would wait for ever.
@@ -309,10 +330,20 @@ export function InviteLinksPanel(): JSX.Element {
         await session.revokeLink(linkId).catch(() => undefined);
         throw uploadErr;
       }
-      setCreating(false);
-      setLabel("");
-      setCustomExpiryAmount("");
-      setCustomUses("");
+    }
+  }
+
+  /** Create link (UX section 9): a link with the default terms, at once. */
+  async function onCreate(): Promise<void> {
+    setError(null);
+    setNotice(null);
+    setCreateBusy(true);
+    try {
+      await mintLink({
+        label: "",
+        expiryMs: expiryPresetToMs(DEFAULT_LINK_EXPIRY, Date.now()),
+        maxUses: maxUsesPresetToValue(DEFAULT_LINK_USES),
+      });
     } catch (err) {
       setError(contactsErrorText(err, "chat.error.create_link"));
     } finally {
@@ -320,9 +351,37 @@ export function InviteLinksPanel(): JSX.Element {
     }
   }
 
+  /** Save new terms for `row`: a new link first, then the old one deleted,
+   *  so a failure leaves the old link working. */
+  async function onSave(e: SubmitEvent, row: LinkRow): Promise<void> {
+    e.preventDefault();
+    const expiryMs = chosenExpiryMs(Date.now());
+    const maxUsesValue = chosenMaxUses();
+    // The button is disabled while either is out of range.
+    if (expiryMs === null || maxUsesValue === null) return;
+    setError(null);
+    setNotice(null);
+    setSaveBusy(true);
+    try {
+      try {
+        await mintLink({ label: label().trim(), expiryMs, maxUses: maxUsesValue });
+      } catch (err) {
+        setError(contactsErrorText(err, "invite.links.error.edit"));
+        return;
+      }
+      setEditingKey(null);
+      if (!(await removeLink(row.record))) setError(() => t("invite.links.error.delete"));
+    } finally {
+      setSaveBusy(false);
+    }
+  }
+
   async function onCopy(row: LinkRow): Promise<void> {
     if (row.url === null) return;
     try {
+      // UX section 9: a copied link is no longer editable on any device,
+      // marked before the text reaches the clipboard.
+      await sync.markLinkShared(row.record.linkId);
       await navigator.clipboard.writeText(row.url);
       setCopiedKey(row.key);
       window.setTimeout(() => setCopiedKey((k) => (k === row.key ? null : k)), 2000);
@@ -332,11 +391,34 @@ export function InviteLinksPanel(): JSX.Element {
     }
   }
 
-  async function onRevoke(row: LinkRow): Promise<void> {
-    const record = row.record;
+  /** Delete link (UX section 9): a link nobody can hold goes at once; a
+   *  copied or used one asks first. */
+  async function onDelete(row: LinkRow): Promise<void> {
+    if (!row.record.editable) {
+      const yes = await requestConfirm({
+        title: t("invite.links.delete_confirm_title"),
+        body: t("invite.links.delete_confirm_body"),
+        confirmLabel: t("common.delete"),
+        cancelLabel: t("common.cancel"),
+        tone: "danger",
+      });
+      if (!yes) return;
+    }
     setError(null);
     setNotice(null);
     setBusyKey(row.key);
+    try {
+      if (await removeLink(row.record)) setNotice(() => t("invite.links.deleted"));
+      else setError(() => t("invite.links.error.delete"));
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
+  /** Remove a link (the old Revoke): marked revoked in the register, its
+   *  ledger row and reach key deleted. `false` when it could not be done in
+   *  full; the register already refuses the link either way. */
+  async function removeLink(record: LinkRecordModel): Promise<boolean> {
     try {
       const secrets = auth.identitySecrets();
       if (secrets === null) throw new KeyedError("invite.links.error.sign_in_revoke");
@@ -361,35 +443,17 @@ export function InviteLinksPanel(): JSX.Element {
         forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), local.blobIdSlug);
         setLinks(links().filter((l) => l.blobIdSlug !== local.blobIdSlug));
       }
-      if (outcome === "unreachable") throw new KeyedError("chat.error.revoke_link");
-      setNotice(() => t("invite.links.revoked"));
+      return outcome !== "unreachable";
     } catch (err) {
-      setError(contactsErrorText(err, "chat.error.revoke_link"));
-    } finally {
-      setBusyKey(null);
+      console.warn("[contacts] delete link failed", err instanceof Error ? err.name : "");
+      return false;
     }
   }
 
-  return (
-    <section class="lk-card">
-      <h2>{t("contacts.invite_links.title")}</h2>
-      <p class="lk-card-desc">{t("invite.links.desc")}</p>
-
-      <Show when={error()}>{(m) => <div class="form-error">{m()}</div>}</Show>
-      <Show when={notice()}>{(m) => <div class="form-info">{m()}</div>}</Show>
-
-      <Show
-        when={creating()}
-        fallback={
-          <div class="lk-actions">
-            <button type="button" class="primary" onClick={() => setCreating(true)}>
-              <Icon name="plus" size={18} />
-              {t("invite.links.create")}
-            </button>
-          </div>
-        }
-      >
-        <form onSubmit={(e) => void onCreate(e)} class="lk-stack" style={{ gap: "12px" }}>
+  /** The terms form of `row` (UX section 9), shown under it while edited. */
+  const termsForm = (row: LinkRow): JSX.Element => (
+        <form onSubmit={(e) => void onSave(e, row)} class="lk-stack lk-invite-edit" style={{ gap: "12px" }}>
+          <strong>{t("invite.links.edit_title")}</strong>
           <label>
             {t("invite.links.label_field")}
             <input
@@ -398,7 +462,7 @@ export function InviteLinksPanel(): JSX.Element {
               onInput={(e) => setLabel(e.currentTarget.value)}
               placeholder={t("invite.links.label_placeholder")}
               maxlength={INVITE_LABEL_MAX_LEN}
-              disabled={createBusy()}
+              disabled={saveBusy()}
             />
           </label>
           <label>
@@ -406,7 +470,7 @@ export function InviteLinksPanel(): JSX.Element {
             <select
               value={expiry()}
               onChange={(e) => setExpiry(e.currentTarget.value as ExpiryPreset | "custom")}
-              disabled={createBusy()}
+              disabled={saveBusy()}
             >
               <option value="1d">{t("invite.links.expires_option_days", { count: 1 })}</option>
               <option value="7d">{t("invite.links.expires_option_days", { count: 7 })}</option>
@@ -426,7 +490,7 @@ export function InviteLinksPanel(): JSX.Element {
                   step="1"
                   value={customExpiryAmount()}
                   onInput={(e) => setCustomExpiryAmount(e.currentTarget.value)}
-                  disabled={createBusy()}
+                  disabled={saveBusy()}
                 />
               </label>
               <label>
@@ -434,7 +498,7 @@ export function InviteLinksPanel(): JSX.Element {
                 <select
                   value={customExpiryUnit()}
                   onChange={(e) => setCustomExpiryUnit(e.currentTarget.value as ExpiryUnit)}
-                  disabled={createBusy()}
+                  disabled={saveBusy()}
                 >
                   <option value="hours">{t("invite.links.unit_hours")}</option>
                   <option value="days">{t("invite.links.unit_days")}</option>
@@ -455,7 +519,7 @@ export function InviteLinksPanel(): JSX.Element {
             <select
               value={maxUses()}
               onChange={(e) => setMaxUses(e.currentTarget.value as MaxUsesPreset | "custom")}
-              disabled={createBusy()}
+              disabled={saveBusy()}
             >
               <option value="single">{t("invite.links.uses_option_one")}</option>
               <option value="ten">{t("invite.links.uses_option_up_to", { count: 10 })}</option>
@@ -474,7 +538,7 @@ export function InviteLinksPanel(): JSX.Element {
                 step="1"
                 value={customUses()}
                 onInput={(e) => setCustomUses(e.currentTarget.value)}
-                disabled={createBusy()}
+                disabled={saveBusy()}
               />
             </label>
             <Show when={customUses().trim() !== "" && customMaxUses(customUses()) === null}>
@@ -485,16 +549,32 @@ export function InviteLinksPanel(): JSX.Element {
               </div>
             </Show>
           </Show>
+          <p class="lk-muted">{t("invite.links.edit_note")}</p>
           <div class="lk-actions">
-            <button class="primary" type="submit" disabled={createBusy() || !formValid()}>
-              {createBusy() ? t("chats.new_group.creating") : t("invite.links.create")}
+            <button class="primary" type="submit" disabled={saveBusy() || !formValid()}>
+              {t("common.save")}
             </button>
-            <button type="button" class="ghost" disabled={createBusy()} onClick={() => setCreating(false)}>
+            <button type="button" class="ghost" disabled={saveBusy()} onClick={() => setEditingKey(null)}>
               {t("common.cancel")}
             </button>
           </div>
         </form>
-      </Show>
+  );
+
+  return (
+    <section class="lk-card">
+      <h2>{t("contacts.invite_links.title")}</h2>
+      <p class="lk-card-desc">{t("invite.links.desc")}</p>
+
+      <Show when={error()}>{(m) => <div class="form-error">{m()}</div>}</Show>
+      <Show when={notice()}>{(m) => <div class="form-info">{m()}</div>}</Show>
+
+      <div class="lk-actions">
+        <button type="button" class="primary" disabled={createBusy()} onClick={() => void onCreate()}>
+          <Icon name="plus" size={18} />
+          {createBusy() ? t("chats.new_group.creating") : t("invite.links.create")}
+        </button>
+      </div>
 
       <Show when={loaded()} fallback={<p class="lk-muted">{t("common.loading")}</p>}>
         <Show when={rows().length > 0} fallback={<p class="lk-muted">{t("invite.links.empty")}</p>}>
@@ -534,16 +614,31 @@ export function InviteLinksPanel(): JSX.Element {
                         </>
                       )}
                     </Show>
+                    <Show when={row.record.editable && editingKey() !== row.key}>
+                      <button
+                        type="button"
+                        class="lk-icon-button"
+                        title={t("invite.links.edit")}
+                        aria-label={t("invite.links.edit")}
+                        disabled={busyKey() !== null || saveBusy()}
+                        onClick={() => startEdit(row)}
+                      >
+                        <Icon name="pencil" size={16} />
+                      </button>
+                    </Show>
                     <button
                       type="button"
-                      class="ghost small"
+                      class="lk-icon-button"
                       style={{ color: "var(--danger)" }}
-                      disabled={busyKey() !== null}
-                      onClick={() => void onRevoke(row)}
+                      title={t("invite.links.delete")}
+                      aria-label={t("invite.links.delete")}
+                      disabled={busyKey() !== null || saveBusy()}
+                      onClick={() => void onDelete(row)}
                     >
-                      {busyKey() === row.key ? t("invite.links.revoking") : t("chat.invite_link.revoke")}
+                      <Icon name="trash" size={16} />
                     </button>
                   </div>
+                  <Show when={editingKey() === row.key}>{termsForm(row)}</Show>
                 </li>
               )}
             </For>

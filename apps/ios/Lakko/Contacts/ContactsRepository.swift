@@ -1528,6 +1528,26 @@ public final class ContactsRepository: ObservableObject {
     /// `DELETE` endpoint, signed by the link's own revocation seed from this
     /// device's record (ADR-0078 section 10), + drop the row from
     /// ``ContactsState/outstandingInvites``.
+    /// The account's synced link records (ADR-0079 section 4) and their
+    /// changes; empty / `nil` while the register is not wired. The Invite
+    /// links sheet reads `shared` and `editable` from them.
+    public var linkRecords: [LinkRecord] { deviceGroupSync?.linkRecords ?? [] }
+    public var linkRecordsPublisher: AnyPublisher<[LinkRecord], Never>? {
+        deviceGroupSync?.$linkRecords.eraseToAnyPublisher()
+    }
+
+    /// Copy (`docs/ux/contact-invite-link.md` section 9): mark the contact
+    /// link at `slug` copied in the synced register before its text reaches
+    /// the clipboard, so no device of the account offers to edit it any more.
+    /// `false` when the register holds no record for it or nothing changed
+    /// (already copied).
+    @discardableResult
+    public func markInviteLinkShared(slug: String) async -> Bool {
+        guard let record = LinkRecords.contactRecord(slug: slug, in: linkRecords),
+              !record.shared else { return false }
+        return await deviceGroupSync?.markLinkShared(linkId: record.linkId) ?? false
+    }
+
     public func revokeInviteLink(blobId: Data) async throws -> RevokeInviteResult {
         guard let secrets = authRepository.identitySecrets else {
             throw ContactsError.wrap(

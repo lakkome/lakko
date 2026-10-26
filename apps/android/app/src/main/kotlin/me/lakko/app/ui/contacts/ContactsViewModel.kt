@@ -162,6 +162,7 @@ public class ContactsViewModel(
             outstandingInvites = repoState.outstandingInvites,
             generatingInvite = ui.generatingInvite,
             inviteError = ui.inviteError,
+            inviteNotice = ui.inviteNotice,
             activeInvitesLoaded = ui.activeInvitesLoaded,
             activeInvites = ui.activeInvites,
             activeInviteUrls = ui.activeInviteUrls,
@@ -183,28 +184,23 @@ public class ContactsViewModel(
     }
 
     /**
-     * Create an invite link with what the Invite links sheet's form holds
-     * ([InviteCreateForm.toParams]). Surfaces the resulting
+     * Create link (UX `contact-invite-link.md` section 9): mints a link at
+     * once with [params], the defaults unless given ([INVITE_DEFAULT_PARAMS]:
+     * no label, 7 days, one person). Surfaces the resulting
      * [GeneratedInvite] in [ContactsState.outstandingInvites]; failures land
-     * in [ContactsUiState.inviteError]. [onCreated] runs once the link
-     * exists (the sheet closes its form).
+     * in [ContactsUiState.inviteError].
      */
-    public fun onGenerateInviteClicked(params: InviteCreateParams, onCreated: () -> Unit = {}) {
+    public fun onGenerateInviteClicked(params: InviteCreateParams = INVITE_DEFAULT_PARAMS) {
         val snapshot = mutableUi.value
         if (snapshot.generatingInvite) return
 
-        mutableUi.update { it.copy(generatingInvite = true, inviteError = null) }
+        mutableUi.update { it.copy(generatingInvite = true, inviteError = null, inviteNotice = null) }
         viewModelScope.launch {
             try {
-                repo.generateInviteLink(
-                    label = params.label,
-                    expiryMillisFromNow = params.expiryMillisFromNow,
-                    maxUses = params.maxUses,
-                )
+                mint(params)
                 mutableUi.update {
                     it.copy(generatingInvite = false, inviteError = null)
                 }
-                onCreated()
             } catch (err: Throwable) {
                 me.lakko.app.rethrowIfCancelled(err) {
                     mutableUi.update { it.copy(generatingInvite = false) }
@@ -217,23 +213,133 @@ public class ContactsViewModel(
         }
     }
 
+    private suspend fun mint(params: InviteCreateParams): GeneratedInvite =
+        repo.generateInviteLink(
+            label = params.label,
+            expiryMillisFromNow = params.expiryMillisFromNow,
+            maxUses = params.maxUses,
+        )
+
+    /** The account's synced link records (ADR-0079 section 4), which say
+     *  whether a row is editable and whether Delete asks first. */
+    public fun inviteLinkRecords(): StateFlow<List<uniffi.lakko_ffi_uniffi.LinkRecord>> = repo.inviteLinkRecords()
+
     /**
-     * Revoke an outstanding invite by [blobId]. On success the
-     * row is dropped from [ContactsState.outstandingInvites]
-     * automatically by [ContactsRepository.revokeInviteLink].
+     * Copy (UX section 9): mark the link copied in the account's synced
+     * state (sent to the other devices like a revoke or a use) FIRST, then
+     * [writeClipboard]. A link whose record is not known, or already marked,
+     * is copied without a write. Showing the QR code does not come here.
      */
-    public fun onRevokeInviteClicked(blobId: ByteArray) {
+    public fun onCopyInviteClicked(slug: String, url: String, writeClipboard: (String) -> Unit) {
+        val sync = inviteLinkSyncBySlug(repo.inviteLinkRecords().value)[slug]
+        if (sync == null || sync.shared) {
+            writeClipboard(url)
+            return
+        }
         viewModelScope.launch {
             try {
-                repo.revokeInviteLink(blobId)
+                repo.markInviteLinkShared(sync.linkId)
             } catch (err: Throwable) {
                 me.lakko.app.rethrowIfCancelled(err)
-                logFailure("revoke invite link", err)
-                mutableUi.update {
-                    it.copy(inviteError = contactsErrorText(err, "chat.error.revoke_link"))
+                // The copy still happens: the person asked for the link. The
+                // record stays editable on the devices until the next write.
+                logFailure("mark invite link copied", err)
+            }
+            writeClipboard(url)
+        }
+    }
+
+    /**
+     * Delete link (the old Revoke, UX section 9): the existing revoke path.
+     * The sheet asks first when [inviteDeleteNeedsConfirmation] says so; this
+     * deletes. On success the row leaves both lists and the sheet says
+     * `invite.links.deleted`; a failure says `invite.links.error.delete`.
+     */
+    public fun onDeleteInviteClicked(slug: String) {
+        if (mutableUi.value.revokingActiveInviteSlug != null) return
+        mutableUi.update {
+            it.copy(revokingActiveInviteSlug = slug, inviteError = null, activeInvitesError = null, inviteNotice = null)
+        }
+        viewModelScope.launch {
+            val ok = try {
+                deleteBySlug(slug)
+                true
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableUi.update { it.copy(revokingActiveInviteSlug = null) }
                 }
+                logFailure("delete invite link", err)
+                false
+            }
+            mutableUi.update {
+                it.copy(
+                    revokingActiveInviteSlug = null,
+                    inviteNotice = if (ok) UiText("invite.links.deleted") else null,
+                    inviteError = if (ok) null else UiText("invite.links.error.delete"),
+                )
             }
         }
+    }
+
+    /**
+     * Save on the edit form (UX section 9): mint a NEW link with [params]
+     * first, then delete the old one [slug] by the Delete path. A failure to
+     * mint leaves the old link and says `invite.links.error.edit`; a failure
+     * to delete the old one (the new one exists) says
+     * `invite.links.error.delete`. [onSaved] runs once the new link exists
+     * (the sheet closes its form).
+     */
+    public fun onEditInviteSaved(slug: String, params: InviteCreateParams, onSaved: () -> Unit = {}) {
+        val snapshot = mutableUi.value
+        if (snapshot.generatingInvite || snapshot.revokingActiveInviteSlug != null) return
+        mutableUi.update {
+            it.copy(generatingInvite = true, revokingActiveInviteSlug = slug, inviteError = null, inviteNotice = null)
+        }
+        viewModelScope.launch {
+            try {
+                mint(params)
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableUi.update { it.copy(generatingInvite = false, revokingActiveInviteSlug = null) }
+                }
+                logFailure("edit invite link: mint", err)
+                mutableUi.update {
+                    it.copy(
+                        generatingInvite = false,
+                        revokingActiveInviteSlug = null,
+                        inviteError = UiText("invite.links.error.edit"),
+                    )
+                }
+                return@launch
+            }
+            onSaved()
+            val deleted = try {
+                deleteBySlug(slug)
+                true
+            } catch (err: Throwable) {
+                me.lakko.app.rethrowIfCancelled(err) {
+                    mutableUi.update { it.copy(generatingInvite = false, revokingActiveInviteSlug = null) }
+                }
+                logFailure("edit invite link: delete old", err)
+                false
+            }
+            mutableUi.update {
+                it.copy(
+                    generatingInvite = false,
+                    revokingActiveInviteSlug = null,
+                    inviteError = if (deleted) null else UiText("invite.links.error.delete"),
+                )
+            }
+        }
+    }
+
+    /** Revoke the link [slug] through [ContactsRepository.revokeInviteLink]
+     *  (it drops a session row) and drop it from the loaded list. A slug that
+     *  is not base64url throws [IllegalArgumentException]. */
+    private suspend fun deleteBySlug(slug: String) {
+        val blobId = me.lakko.app.auth.base64UrlDecodeNoPad(slug)
+        repo.revokeInviteLink(blobId)
+        mutableUi.update { ui -> ui.copy(activeInvites = ui.activeInvites.filterNot { it.blobIdSlug == slug }) }
     }
 
     /**
@@ -277,60 +383,6 @@ public class ContactsViewModel(
                     it.copy(
                         loadingActiveInvites = false,
                         activeInvitesError = contactsErrorText(err, "invite.links.error.load"),
-                    )
-                }
-            }
-        }
-    }
-
-    /**
-     * Revoke an active invite from the loaded list. Drops the
-     * row locally on success or on a 404 (server-side already
-     * gone — same terminal state).
-     */
-    public fun onRevokeActiveInviteClicked(slug: String) {
-        val snapshot = mutableUi.value
-        if (snapshot.revokingActiveInviteSlug != null) return
-        val row = snapshot.activeInvites.firstOrNull { it.blobIdSlug == slug } ?: return
-        // `base64UrlDecodeNoPad` returns a NON-null ByteArray and THROWS
-        // `IllegalArgumentException` on a character outside the base64url
-        // alphabet — it never returns null, so an elvis here would be dead
-        // code and the raw exception would escape into the click handler.
-        // The slug is server-supplied (it arrives on the active-invites
-        // list), so a malformed one must land in the error state rather
-        // than crash the screen.
-        val blobId = try {
-            me.lakko.app.auth.base64UrlDecodeNoPad(row.blobIdSlug)
-        } catch (e: IllegalArgumentException) {
-            logFailure("revoke invite link: malformed slug", e)
-            mutableUi.update {
-                it.copy(activeInvitesError = UiText("chat.error.revoke_link"))
-            }
-            return
-        }
-        mutableUi.update {
-            it.copy(revokingActiveInviteSlug = slug, activeInvitesError = null)
-        }
-        viewModelScope.launch {
-            try {
-                repo.revokeInviteLink(blobId)
-                mutableUi.update {
-                    it.copy(
-                        revokingActiveInviteSlug = null,
-                        activeInvites = it.activeInvites.filterNot { row ->
-                            row.blobIdSlug == slug
-                        },
-                    )
-                }
-            } catch (err: Throwable) {
-                me.lakko.app.rethrowIfCancelled(err) {
-                    mutableUi.update { it.copy(revokingActiveInviteSlug = null) }
-                }
-                logFailure("revoke invite link", err)
-                mutableUi.update {
-                    it.copy(
-                        revokingActiveInviteSlug = null,
-                        activeInvitesError = contactsErrorText(err, "chat.error.revoke_link"),
                     )
                 }
             }
@@ -457,6 +509,8 @@ public class ContactsViewModel(
     private data class UiSlice(
         val generatingInvite: Boolean = false,
         val inviteError: UiText? = null,
+        /** A notice on the Invite links sheet (`invite.links.deleted`). */
+        val inviteNotice: UiText? = null,
         /** Phase 1.18d2b-list — server-authoritative active-
          *  invites slice. `activeInvitesLoaded` distinguishes
          *  "user hasn't tapped Refresh yet" from "Refresh ran
@@ -469,9 +523,9 @@ public class ContactsViewModel(
         val activeInviteUrls: Map<String, String> = emptyMap(),
         val loadingActiveInvites: Boolean = false,
         val activeInvitesError: UiText? = null,
-        /** `blobIdSlug` of the row currently being revoked, when
-         *  any. The screen disables the Revoke button on that
-         *  row + shows a spinner. */
+        /** `blobIdSlug` of the row being deleted (or replaced by an
+         *  edit), when any. The screen disables Delete and Edit
+         *  meanwhile. */
         val revokingActiveInviteSlug: String? = null,
     )
 }
@@ -484,6 +538,8 @@ public data class ContactsUiState(
     val outstandingInvites: List<GeneratedInvite>,
     val generatingInvite: Boolean,
     val inviteError: UiText?,
+    /** A notice on the Invite links sheet (`invite.links.deleted`). */
+    val inviteNotice: UiText? = null,
     /** Phase 1.18d2b-list. */
     val activeInvitesLoaded: Boolean,
     val activeInvites: List<me.lakko.app.discovery.ActiveInvite>,

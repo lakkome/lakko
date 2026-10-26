@@ -30,8 +30,11 @@ import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.t
 
 /**
- * The Invite links sheet's "Create link" form (the web `InviteLinksPanel`
- * form): Label, Expires, Uses, then Create and Cancel. Choices are Lakko
+ * The Invite links sheet's terms form (the web `InviteLinksPanel` form):
+ * Label, Expires, Uses, then the submit button and Cancel. Since 2026-10-26
+ * (UX `contact-invite-link.md` section 9) Create link mints with the
+ * defaults and this form edits one link: [title] and [note] head it, and
+ * [submitLabel] / [busyLabel] name its button (Save / Saving). Choices are Lakko
  * chips inside the sheet, never a system dialog. The validation and the
  * mapping to the repository's parameters live in [InviteCreateForm].
  */
@@ -44,6 +47,10 @@ internal fun InviteCreateFormView(
     onCreate: (InviteCreateParams) -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
+    title: String? = null,
+    note: String? = null,
+    submitLabel: String = t("invite.links.create"),
+    busyLabel: String = t("common.creating"),
 ) {
     val language = LocalStrings.current.language
     val maxUsesText = remember(language) {
@@ -57,6 +64,16 @@ internal fun InviteCreateFormView(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        if (title != null) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+        }
+        if (note != null) {
+            Text(
+                note,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         OutlinedTextField(
             value = form.label,
             onValueChange = { onChange(form.copy(label = clampInviteLabel(it))) },
@@ -148,9 +165,9 @@ internal fun InviteCreateFormView(
                     color = MaterialTheme.colorScheme.onPrimary,
                 )
                 Spacer(Modifier.width(8.dp))
-                Text(t("common.creating"))
+                Text(busyLabel)
             } else {
-                Text(t("invite.links.create"))
+                Text(submitLabel)
             }
         }
         TextButton(onClick = onCancel, enabled = !busy, modifier = Modifier.fillMaxWidth()) {

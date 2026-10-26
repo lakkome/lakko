@@ -3,8 +3,11 @@
 
 import Foundation
 
-/// The "Create link" form of the Invite links sheet, as pure data: the
-/// presets, the custom-field validation and the mapping to what
+/// The terms form of the Invite links sheet, as pure data. Since
+/// `docs/ux/contact-invite-link.md` section 9 (2026-10-26) it is the EDIT form
+/// of one link (**Create link** mints the defaults, ``InviteCreateForm()``,
+/// with no form), prefilled by ``prefilled(label:expiryMs:maxUses:mintedAtMs:)``.
+/// The presets, the custom-field validation and the mapping to what
 /// ``ContactsRepository/generateInviteLink(label:expiry:maxUses:bootstrapReferral:)``
 /// takes. The same choices and bounds as the web `invite.ts`
 /// (`expiryPresetToMs`, `customExpiryMs`, `customMaxUses`) and Android
@@ -101,6 +104,55 @@ struct InviteCreateForm: Equatable {
         let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.utf8.count <= Self.labelMaxBytes else { return nil }
         return Params(label: trimmed, expiry: expiryChoice, maxUses: maxUses)
+    }
+
+    /// How close a link's lifetime must be to a preset (1, 7 or 30 days) to
+    /// read back as that preset: one minute, the slack between the moment the
+    /// form asked for "7 days from now" and the moment the core stamped
+    /// `mintedAtMs`.
+    static let presetToleranceMs: Int64 = 60_000
+
+    /// The edit form of an existing link (`docs/ux/contact-invite-link.md`
+    /// section 9), prefilled with its terms. The expiry reads back as a
+    /// preset when the lifetime (`expiryMs - mintedAtMs`) is within
+    /// ``presetToleranceMs`` of 1, 7 or 30 days, as **Never** only for `0`,
+    /// else as Custom: whole days when the lifetime is whole days, otherwise
+    /// hours (rounded, 1 at least). The uses read back as One (`0` or `1`),
+    /// Up to 10, Unlimited (`UInt32.max`), else Custom with the number.
+    static func prefilled(
+        label: String, expiryMs: UInt64, maxUses: UInt32, mintedAtMs: UInt64
+    ) -> InviteCreateForm {
+        var form = InviteCreateForm()
+        form.label = clampLabel(label)
+        if expiryMs == 0 {
+            form.expiry = .never
+        } else {
+            let lifetime = Int64(clamping: expiryMs) - Int64(clamping: mintedAtMs)
+            let presets: [(Int64, Expiry)] = [(1, .oneDay), (7, .sevenDays), (30, .thirtyDays)]
+            if let preset = presets.first(where: { abs(lifetime - $0.0 * dayMs) <= presetToleranceMs }) {
+                form.expiry = preset.1
+            } else {
+                form.expiry = .custom
+                let days = (Double(lifetime) / Double(dayMs)).rounded()
+                if days >= 1, abs(lifetime - Int64(days) * dayMs) <= presetToleranceMs {
+                    form.customExpiryUnit = .days
+                    form.customExpiryAmount = String(Int64(days))
+                } else {
+                    form.customExpiryUnit = .hours
+                    let hours = max(1, Int64((Double(lifetime) / Double(hourMs)).rounded()))
+                    form.customExpiryAmount = String(hours)
+                }
+            }
+        }
+        switch maxUses {
+        case 0, 1: form.uses = .one
+        case 10: form.uses = .upToTen
+        case unlimitedUsesWire: form.uses = .unlimited
+        default:
+            form.uses = .custom
+            form.customUses = String(maxUses)
+        }
+        return form
     }
 
     /// `text` cut, at a character boundary, to ``labelMaxBytes`` UTF-8 bytes:

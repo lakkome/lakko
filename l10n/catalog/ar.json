@@ -8461,6 +8461,42 @@
     "invite.contact.page.dead_body": {
       "text": "اطلب من المرسل رابطًا جديدًا.",
       "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "تعديل الرابط",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "شروط الرابط",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "عند الحفظ يُنشأ رابط جديد ويتوقف الرابط القديم.",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "حذف الرابط",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "هل تريد حذف هذا الرابط؟",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "من لديه الرابط بالفعل لن يتمكن من استخدامه.",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "تم حذف الرابط.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "تعذّر حذف الرابط. تحقّق من اتصالك وحاول مرة أخرى.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "تعذّر حفظ الرابط. تحقّق من اتصالك وحاول مرة أخرى.",
+      "status": "machine"
     }
   }
 }

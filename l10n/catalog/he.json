@@ -8461,6 +8461,42 @@
     "invite.contact.page.dead_body": {
       "text": "אפשר לבקש מהשולח/ת קישור חדש.",
       "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "עריכת קישור",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "תנאי הקישור",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "השמירה יוצרת קישור חדש. הקישור הישן יפסיק לעבוד.",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "מחיקת קישור",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "למחוק את הקישור הזה?",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "מי שכבר קיבל אותו לא יוכל להשתמש בו.",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "הקישור נמחק.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "לא ניתן למחוק את הקישור. יש לבדוק את החיבור ולנסות שוב.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "לא ניתן לשמור את הקישור. יש לבדוק את החיבור ולנסות שוב.",
+      "status": "machine"
     }
   }
 }

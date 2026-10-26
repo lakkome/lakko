@@ -143,7 +143,7 @@ public fun removedPeerContact(
 internal const val INVITE_UNLIMITED_USES: Long = 0xFFFF_FFFFL
 
 /** UX 5.3 — the line a row shows in place of Copy and Share when this device
- *  does not hold the link's secret. Revoke stays. */
+ *  does not hold the link's secret. Delete link stays. */
 public val INVITE_CREATED_ELSEWHERE_COPY: UiText = UiText("invite.links.made_elsewhere_hint")
 
 /** One row of the "Invite links" sheet. */
@@ -177,7 +177,7 @@ public data class InviteLinkRow(
 public fun inviteRowTitle(row: InviteLinkRow): String? = row.label.trim().ifEmpty { null }
 
 /** What a row offers: Copy and Share with the full URL, or the
- *  [INVITE_CREATED_ELSEWHERE_COPY] line; Revoke is offered either way. */
+ *  [INVITE_CREATED_ELSEWHERE_COPY] line; Delete link is offered either way. */
 public sealed interface InviteRowShare {
     public data class Shareable(val url: String) : InviteRowShare
 

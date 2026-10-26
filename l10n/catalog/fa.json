@@ -8461,6 +8461,42 @@
     "invite.contact.page.dead_body": {
       "text": "از فرستنده بخواهید پیوند تازه‌ای بفرستد.",
       "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "ویرایش پیوند",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "شرایط پیوند",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "با ذخیره، پیوند تازه‌ای ساخته می‌شود و پیوند قبلی کار نمی‌کند.",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "حذف پیوند",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "این پیوند حذف شود؟",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "کسی که آن را دارد دیگر نمی‌تواند از آن استفاده کند.",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "پیوند حذف شد.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "حذف پیوند ممکن نشد. اتصال را بررسی کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "ذخیرهٔ پیوند ممکن نشد. اتصال را بررسی کنید و دوباره امتحان کنید.",
+      "status": "machine"
     }
   }
 }

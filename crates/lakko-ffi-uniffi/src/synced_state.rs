@@ -691,9 +691,18 @@ pub struct LinkRecord {
     pub label: String,
     /// Account keys (32 bytes each) of the requesters accepted through it.
     pub answered: Vec<Vec<u8>>,
+    /// Copied on one of the account's devices (final, 2026-10-26). Set it
+    /// with [`SyncedState::mark_link_shared`], not on write.
+    #[uniffi(default = false)]
+    pub shared: bool,
+    /// The link's terms may still be changed: not revoked, never copied,
+    /// never answered. Computed by the core on read; ignored on write.
+    #[uniffi(default = false)]
+    pub editable: bool,
 }
 
 fn link_record(s: Stamped<core::LinkRecordEntry>) -> LinkRecord {
+    let editable = s.value.editable();
     LinkRecord {
         hlc: s.hlc,
         link_id: s.value.link_id.to_vec(),
@@ -706,6 +715,8 @@ fn link_record(s: Stamped<core::LinkRecordEntry>) -> LinkRecord {
         uses: s.value.uses,
         revoked: s.value.revoked,
         minted_at_ms: s.value.minted_at_ms,
+        editable,
+        shared: s.value.shared,
         label: s.value.label,
         answered: s.value.answered.iter().map(|k| k.to_vec()).collect(),
     }
@@ -727,6 +738,7 @@ fn link_record_entry(r: LinkRecord) -> Result<core::LinkRecordEntry, FfiError> {
         max_uses: r.max_uses,
         uses: r.uses,
         revoked: r.revoked,
+        shared: r.shared,
         minted_at_ms: r.minted_at_ms,
         label: r.label,
         answered: r
@@ -1283,6 +1295,19 @@ impl SyncedState {
             .map_err(|e| FfiError::SyncedState(format!("bounds: {e}")))
     }
 
+    /// Mark a link copied (2026-10-26): it is no longer editable, on this
+    /// device and, once [`Self::link_record_envelope_for`] is sent, on every
+    /// device of the account. `true` when the register changed (send it).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::SyncedState`] for an id of the wrong length.
+    pub fn mark_link_shared(&self, hlc: u64, link_id: Vec<u8>) -> Result<bool, FfiError> {
+        let id = fixed::<16>(&link_id, "link id")?;
+        self.with(|s| s.mark_link_shared(hlc, &id))?
+            .map_err(|e| FfiError::SyncedState(format!("bounds: {e}")))
+    }
+
     /// Count one request accepted through a link from `requester_key` (the
     /// request's 32-byte `from_pubkey`). `true` when the register changed:
     /// send [`Self::link_record_envelope_for`].
@@ -1760,8 +1785,11 @@ mod tests {
             minted_at_ms: 9,
             label: "home".into(),
             answered: vec![],
+            shared: false,
+            editable: false,
         };
         assert!(a.set_link_record(5, record.clone()).unwrap());
+        assert!(a.all_link_records().unwrap()[0].editable);
         let bob = vec![0xB0; 32];
         assert_eq!(
             a.link_answer_verdict(vec![1; 16], vec![2; 12], bob.clone(), 0)

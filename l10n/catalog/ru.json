@@ -6210,8 +6210,36 @@
       "text": "Число людей",
       "status": "machine"
     },
+    "invite.links.delete": {
+      "text": "Удалить ссылку",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Тот, у кого она уже есть, больше не сможет ею воспользоваться.",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Удалить эту ссылку?",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "Ссылка удалена.",
+      "status": "machine"
+    },
     "invite.links.desc": {
       "text": "Любой, кто откроет одну из ваших ссылок, может отправить вам запрос в контакты, пока ссылка не истечёт или не будет исчерпана.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "Изменить ссылку",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "При сохранении появится новая ссылка. Старая перестанет работать.",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "Условия ссылки",
       "status": "machine"
     },
     "invite.links.empty": {
@@ -6228,6 +6256,14 @@
     },
     "invite.links.error.custom_uses": {
       "text": "Укажите число людей от 1 до {max}.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "Не удалось удалить ссылку. Проверьте подключение и попробуйте снова.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "Не удалось сохранить ссылку. Проверьте подключение и попробуйте снова.",
       "status": "machine"
     },
     "invite.links.error.load": {

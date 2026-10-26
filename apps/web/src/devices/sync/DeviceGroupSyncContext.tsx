@@ -323,6 +323,9 @@ export interface DeviceGroupSyncApi {
   /** Mark a link revoked (final), fold and send. `false` when nothing
    *  changed. */
   revokeLinkRecord(linkId: Uint8Array): Promise<boolean>;
+  /** Mark a link copied (2026-10-26): it is no longer editable on any of
+   *  the account's devices. Fold, persist and send. */
+  markLinkShared(linkId: Uint8Array): Promise<boolean>;
   /** Count one request accepted through a link, remembering the requester's
    *  account key, fold and send. */
   recordLinkUse(linkId: Uint8Array, requesterKey: Uint8Array): Promise<boolean>;
@@ -1353,6 +1356,22 @@ export function DeviceGroupSyncProvider(props: {
     let written: boolean;
     try {
       written = synced.revokeLinkRecord(mintHlc(), linkId);
+    } catch {
+      return false;
+    }
+    if (written) {
+      refresh();
+      await persistSyncedNow();
+      await afterLinkRecordWrite(linkId);
+    }
+    return written;
+  }
+
+  async function markLinkSharedImpl(linkId: Uint8Array): Promise<boolean> {
+    if (synced === null) return false;
+    let written: boolean;
+    try {
+      written = synced.markLinkShared(mintHlc(), linkId);
     } catch {
       return false;
     }
@@ -2690,6 +2709,7 @@ export function DeviceGroupSyncProvider(props: {
     linkRecords,
     setLinkRecord: setLinkRecordImpl,
     revokeLinkRecord: revokeLinkRecordImpl,
+    markLinkShared: markLinkSharedImpl,
     recordLinkUse: recordLinkUseImpl,
     linkAnswerVerdictAt: linkAnswerVerdictAtImpl,
     postLinkClaim: postLinkClaimImpl,

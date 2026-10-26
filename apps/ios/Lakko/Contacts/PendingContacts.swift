@@ -181,6 +181,29 @@ public enum LinkRecords {
             .filter { $0.kind == .contact && !$0.ledgerId.isEmpty && isLive($0, nowMs: nowMs) }
             .sorted { $0.mintedAtMs > $1.mintedAtMs }
     }
+
+    /// The contact link record whose ledger row is `slug` (the `/i/<slug>`
+    /// segment), or `nil` when the register holds none.
+    public static func contactRecord(slug: String, in records: [LinkRecord]) -> LinkRecord? {
+        guard let ledgerId = base64UrlDecodeNoPad(slug) else { return nil }
+        return records.first { $0.kind == .contact && $0.ledgerId == ledgerId }
+    }
+
+    /// Whether a row offers **Edit link** (`docs/ux/contact-invite-link.md`
+    /// section 9): only when the synced record says so (the core's one rule,
+    /// `LinkRecordEntry::editable`: not revoked, never copied, never
+    /// answered). No record (the register not loaded yet) is not editable.
+    public static func editable(_ record: LinkRecord?) -> Bool {
+        record?.editable ?? false
+    }
+
+    /// Whether **Delete link** asks first: a link that was copied or used
+    /// might be held by someone. Only a link the register knows was never
+    /// copied and never used is deleted at once; no record asks.
+    public static func deleteNeedsConfirmation(_ record: LinkRecord?) -> Bool {
+        guard let record else { return true }
+        return record.shared || record.uses > 0 || !record.answered.isEmpty
+    }
 }
 
 /// The order of **Add** on a contact invite page (ADR-0079 section 5, amended

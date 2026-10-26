@@ -3,6 +3,7 @@
 
 import Combine
 import Foundation
+import LakkoCore
 
 /// State + dispatcher for ``ContactsScreen``.
 ///
@@ -377,30 +378,22 @@ public final class ContactsViewModel: ObservableObject {
         chatRepository?.deleteChat(groupIdHex: groupIdHex) ?? false
     }
 
-    // MARK: - Invite link actions (1.14e7)
+    // MARK: - Invite link actions (1.14e7; `docs/ux/contact-invite-link.md` section 9)
 
-    /// Create an invite link with what the sheet's create form chose
-    /// (``InviteCreateForm/params``). Surfaces the resulting
-    /// ``GeneratedInvite`` in ``lastGeneratedInvite`` and calls `onCreated`;
-    /// failures land in ``inviteError`` and leave the form open.
-    func onCreateInviteClicked(_ params: InviteCreateForm.Params, onCreated: @escaping () -> Void = {}) {
-        guard !generatingInvite else { return }
+    /// **Create link**: a link with the default terms (no label, 7 days, one
+    /// person) at once, no form before it. Surfaces the resulting
+    /// ``GeneratedInvite`` in ``lastGeneratedInvite``; a failure lands in
+    /// ``inviteError``.
+    func onCreateLinkClicked() {
+        guard !generatingInvite, let params = InviteCreateForm().params else { return }
         generatingInvite = true
         inviteError = nil
+        inviteNotice = nil
         Task {
             do {
-                // The sender does not decide whether the other person has an
-                // account: the invite page handles both.
-                let invite = try await repository.generateInviteLink(
-                    label: params.label, expiry: params.expiry, maxUses: params.maxUses,
-                    bootstrapReferral: false)
+                let invite = try await mint(params)
                 generatingInvite = false
-                onCreated()
-                inviteError = nil
                 lastGeneratedInvite = invite
-                // The sheet lists the server-side set; pull it so the new
-                // link shows with its server row rather than only the
-                // session copy.
                 await loadActiveInvites()
             } catch {
                 generatingInvite = false
@@ -409,20 +402,102 @@ public final class ContactsViewModel: ObservableObject {
         }
     }
 
-    /// Drop the create error when the form opens or closes.
+    /// **Save** on the edit form of the link at `slug`: a NEW link with
+    /// `params` first, then the old one deleted by the path of **Delete
+    /// link** (old first would leave nothing on a failure). A failed mint
+    /// leaves the old link and keeps the form open; `onSaved` runs once the
+    /// new link exists. A failed mint says `invite.links.error.edit`, a
+    /// failed delete of the old link `invite.links.error.delete` (as web and
+    /// Android).
+    func onSaveLinkTermsClicked(
+        slug: String, params: InviteCreateForm.Params, onSaved: @escaping () -> Void
+    ) {
+        guard !generatingInvite, revokingActiveInviteSlug == nil else { return }
+        generatingInvite = true
+        inviteError = nil
+        inviteNotice = nil
+        Task {
+            let invite: GeneratedInvite
+            do {
+                invite = try await mint(params)
+            } catch {
+                generatingInvite = false
+                NSLog("[contacts] link terms: the new link was not made: \(error)")
+                inviteError = .key("invite.links.error.edit")
+                return
+            }
+            generatingInvite = false
+            lastGeneratedInvite = invite
+            onSaved()
+            do {
+                try await deleteLink(slug: slug)
+            } catch {
+                // The new link exists; the old one still works and stays
+                // listed, with its own Delete.
+                NSLog("[contacts] link terms: the old link was not deleted: \(error)")
+                inviteError = .key("invite.links.error.delete")
+            }
+            await loadActiveInvites()
+        }
+    }
+
+    private func mint(_ params: InviteCreateForm.Params) async throws -> GeneratedInvite {
+        // The sender does not decide whether the other person has an
+        // account: the invite page handles both.
+        try await repository.generateInviteLink(
+            label: params.label, expiry: params.expiry, maxUses: params.maxUses,
+            bootstrapReferral: false)
+    }
+
+    /// Drop the create / edit error when a form opens or closes.
     func clearInviteError() { inviteError = nil }
 
-    /// Revoke an outstanding invite by `blobId`. On success the
-    /// row is dropped from ``ContactsState/outstandingInvites``
-    /// automatically by ``ContactsRepository/revokeInviteLink(blobId:)``.
-    public func onRevokeInviteClicked(blobId: Data) {
+    /// The synced record of the contact link at `slug`, when the register
+    /// holds one.
+    func linkRecord(slug: String) -> LinkRecord? {
+        LinkRecords.contactRecord(slug: slug, in: linkRecords)
+    }
+
+    /// **Copy**, before the clipboard: the link is marked copied in the
+    /// account's synced state (and sent to the other devices), so no device
+    /// offers to edit it any more. Showing the QR code does not mark it.
+    func onCopyLinkClicked(slug: String) async {
+        await repository.markInviteLinkShared(slug: slug)
+    }
+
+    /// **Delete link** (the old Revoke), once confirmed when it had to be
+    /// (``LinkRecords/deleteNeedsConfirmation(_:)``): the register marks it
+    /// revoked, the ledger row is deleted with the link's revocation seed and
+    /// its reach key goes. `Link deleted.` after it; a failure says so.
+    func onDeleteLinkClicked(slug: String) {
+        guard revokingActiveInviteSlug == nil, !generatingInvite else { return }
+        revokingActiveInviteSlug = slug
+        activeInvitesError = nil
+        inviteError = nil
+        inviteNotice = nil
         Task {
+            defer { revokingActiveInviteSlug = nil }
             do {
-                _ = try await repository.revokeInviteLink(blobId: blobId)
+                try await deleteLink(slug: slug)
+                inviteNotice = .key("invite.links.deleted")
             } catch {
-                inviteError = Self.contactsErrorText(for: error, fallbackKey: "chat.error.revoke_link")
+                NSLog("[contacts] delete link failed: \(error)")
+                activeInvitesError = .key("invite.links.error.delete")
             }
         }
+    }
+
+    /// The one delete path, shared by **Delete link** and the edit form's
+    /// **Save** (``ContactsRepository/revokeInviteLink(blobId:)``). The row
+    /// leaves the list on success and when the ledger row was already gone
+    /// (the same end state).
+    private func deleteLink(slug: String) async throws {
+        guard let blobId = base64UrlDecodeNoPad(slug) else {
+            throw ContactsError.simple("not an invite link id")
+        }
+        _ = try await repository.revokeInviteLink(blobId: blobId)
+        activeInvites = activeInvites.filter { $0.blobIdSlug != slug }
+        deletedLinkSlugs.insert(slug)
     }
 
     /// Dismiss the "just generated this link" sheet without
@@ -447,9 +522,38 @@ public final class ContactsViewModel: ObservableObject {
     /// The screen disables the Revoke button on that row + shows
     /// a spinner.
     @Published public private(set) var revokingActiveInviteSlug: String?
+    /// The notice under the list after a delete (`Link deleted.`).
+    @Published public private(set) var inviteNotice: UiText?
+    /// The account's synced link records (ADR-0079 section 4), live: whether
+    /// a row offers Edit and whether Delete asks first are read from them.
+    @Published public private(set) var linkRecords: [LinkRecord] = []
+    /// Links deleted from this sheet: the session copy of one
+    /// (``ContactsState/outstandingInvites``) whose ledger row was already
+    /// gone stays in the repository and must not come back as a row.
+    @Published public private(set) var deletedLinkSlugs: Set<String> = []
+    private var linkRecordsSubscription: AnyCancellable?
+
+    /// Follow the register once it is wired (at app start, which may come
+    /// after this view model): a copy, use or delete on any device of the
+    /// account changes the rows at once.
+    private func followLinkRecords() {
+        guard linkRecordsSubscription == nil,
+              let publisher = repository.linkRecordsPublisher else { return }
+        linkRecords = repository.linkRecords
+        linkRecordsSubscription = publisher
+            .dropFirst()
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] records in
+                guard let self else { return }
+                self.linkRecords = records
+                Task { await self.loadActiveInvites() }
+            }
+    }
 
     /// Load the owner-side active-invites list.
     public func loadActiveInvites() async {
+        followLinkRecords()
         guard !loadingActiveInvites else { return }
         loadingActiveInvites = true
         activeInvitesError = nil
@@ -473,31 +577,6 @@ public final class ContactsViewModel: ObservableObject {
             // of the load. The next visit loads it again.
             if Cancellation.endedByCancellation(error) { return }
             activeInvitesError = Self.contactsErrorText(for: error, fallbackKey: "invite.links.error.load")
-        }
-    }
-
-    /// Revoke an active invite from the loaded list. Drops the
-    /// row locally on success or on a 404 (server-side already
-    /// gone — same terminal state).
-    public func onRevokeActiveInviteClicked(slug: String) {
-        guard revokingActiveInviteSlug == nil else { return }
-        guard let row = activeInvites.first(where: { $0.blobIdSlug == slug }) else {
-            return
-        }
-        guard let blobId = base64UrlDecodeNoPad(row.blobIdSlug) else {
-            activeInvitesError = .key("chat.error.revoke_link")
-            return
-        }
-        revokingActiveInviteSlug = slug
-        activeInvitesError = nil
-        Task {
-            defer { revokingActiveInviteSlug = nil }
-            do {
-                _ = try await repository.revokeInviteLink(blobId: blobId)
-                activeInvites = activeInvites.filter { $0.blobIdSlug != slug }
-            } catch {
-                activeInvitesError = Self.contactsErrorText(for: error, fallbackKey: "chat.error.revoke_link")
-            }
         }
     }
 

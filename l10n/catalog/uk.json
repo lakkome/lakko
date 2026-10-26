@@ -8461,6 +8461,42 @@
     "invite.contact.page.dead_body": {
       "text": "Попросіть відправника надіслати нове.",
       "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "Змінити посилання",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "Умови посилання",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "Після збереження з'явиться нове посилання. Старе перестане працювати.",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "Видалити посилання",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Видалити це посилання?",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Той, у кого воно вже є, більше не зможе ним скористатися.",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "Посилання видалено.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "Не вдалося видалити посилання. Перевірте з'єднання і спробуйте ще раз.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "Не вдалося зберегти посилання. Перевірте з'єднання і спробуйте ще раз.",
+      "status": "machine"
     }
   }
 }

@@ -8461,6 +8461,42 @@
     "invite.contact.page.dead_body": {
       "text": "请让发送者重新发一个。",
       "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "编辑链接",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "链接条件",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "保存后会生成新链接，旧链接将失效。",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "删除链接",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "删除此链接？",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "已经拿到此链接的人将无法再使用它。",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "链接已删除。",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "无法删除链接。请检查网络后重试。",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "无法保存链接。请检查网络后重试。",
+      "status": "machine"
     }
   }
 }

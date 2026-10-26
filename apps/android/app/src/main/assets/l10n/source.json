@@ -9001,6 +9001,42 @@
     "invite.contact.page.dead_body": {
       "text": "Ask the person who sent it for a new one.",
       "comment": "Line under 'This invite link no longer works'."
+    },
+    "invite.links.edit": {
+      "text": "Edit link",
+      "comment": "Accessible name of the pencil button on an invite link nobody can hold yet (never copied, never used): opens its terms."
+    },
+    "invite.links.edit_title": {
+      "text": "Link terms",
+      "comment": "Heading of the form that changes an invite link's label, expiry and number of people. Saving makes a new link and removes the old one."
+    },
+    "invite.links.edit_note": {
+      "text": "Saving makes a new link. The old one stops working.",
+      "comment": "One line on the invite link terms form."
+    },
+    "invite.links.delete": {
+      "text": "Delete link",
+      "comment": "Accessible name of the trash button on an invite link."
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Delete this link?",
+      "comment": "Confirmation before deleting an invite link that was copied or used."
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Anyone who already has it will no longer be able to use it.",
+      "comment": "Body of the confirmation before deleting an invite link that was copied or used."
+    },
+    "invite.links.deleted": {
+      "text": "Link deleted.",
+      "comment": "Notice after an invite link was deleted."
+    },
+    "invite.links.error.delete": {
+      "text": "Could not delete the link. Check your connection and try again.",
+      "comment": "Shown when deleting an invite link failed."
+    },
+    "invite.links.error.edit": {
+      "text": "Could not save the link. Check your connection and try again.",
+      "comment": "Shown when saving new terms for an invite link failed; the old link still works."
     }
   }
 }

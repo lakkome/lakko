@@ -777,6 +777,7 @@ impl LinkRecord {
             max_uses,
             uses: 0,
             revoked: false,
+            shared: false,
             minted_at_ms,
             label,
             answered: Vec::new(),
@@ -842,6 +843,17 @@ impl LinkRecord {
     #[wasm_bindgen(getter)]
     pub fn revoked(&self) -> bool {
         self.inner.value.revoked
+    }
+    /// Copied on one of the account's devices (final, 2026-10-26).
+    #[wasm_bindgen(getter)]
+    pub fn shared(&self) -> bool {
+        self.inner.value.shared
+    }
+    /// The link's terms may still be changed: not revoked, never copied,
+    /// never answered (the core's one rule).
+    #[wasm_bindgen(getter)]
+    pub fn editable(&self) -> bool {
+        self.inner.value.editable()
     }
     /// UNIX millis at which the link was minted.
     #[wasm_bindgen(getter, js_name = mintedAtMs)]
@@ -1375,6 +1387,16 @@ impl SyncedState {
                 .map(|inner| LinkRecord { inner })
                 .collect()
         })
+    }
+
+    /// Mark a link copied (final, 2026-10-26): it is no longer editable.
+    /// `true` when the register changed (send its envelope).
+    #[wasm_bindgen(js_name = markLinkShared)]
+    pub fn mark_link_shared(&self, hlc: u64, link_id: &[u8]) -> Result<bool, JsError> {
+        let id = <[u8; 16]>::try_from(link_id)
+            .map_err(|_| JsError::new("bounds: link id must be 16 bytes"))?;
+        self.with(|s| s.mark_link_shared(hlc, &id))?
+            .map_err(|e| JsError::new(&format!("bounds: {e}")))
     }
 
     /// Mark a link revoked (final). `true` when the register changed.

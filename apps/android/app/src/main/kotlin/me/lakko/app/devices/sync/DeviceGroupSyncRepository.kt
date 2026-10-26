@@ -906,6 +906,12 @@ public class DeviceGroupSyncRepository(
     public suspend fun revokeLinkRecord(linkId: ByteArray): Boolean =
         writeLinkRecord(linkId) { it.revokeLinkRecord(Hlc.mint(), linkId) }
 
+    /** Mark a link copied (final, ADR-0079 amendment 2026-10-26): from then
+     *  on no device of the account offers to edit it. `false` when nothing
+     *  changed (already copied) or the state is not open. */
+    public suspend fun markLinkShared(linkId: ByteArray): Boolean =
+        writeLinkRecord(linkId) { it.markLinkShared(Hlc.mint(), linkId) }
+
     /** Count one request accepted through a link, remembering the requester. */
     public suspend fun recordLinkUse(linkId: ByteArray, requesterKey: ByteArray): Boolean =
         writeLinkRecord(linkId) { it.recordLinkUse(Hlc.mint(), linkId, requesterKey) }

@@ -3,7 +3,34 @@
 
 import { describe, expect, it } from "vitest";
 
-import { CUSTOM_MAX_USES, customExpiryMs, customMaxUses } from "./invite";
+import { CUSTOM_MAX_USES, customExpiryMs, customMaxUses, termsFormOf } from "./invite";
+
+describe("the terms form of a link", () => {
+  const minted = 1_000_000_000_000;
+  const day = 86_400_000;
+  const of = (expiryMs: number, maxUses: number) =>
+    termsFormOf({ label: "Team", expiryMs, mintedAtMs: minted, maxUses });
+  it("reads the presets back", () => {
+    expect(of(minted + 7 * day + 30_000, 0)).toMatchObject({ label: "Team", expiry: "7d", maxUses: "single" });
+    expect(of(minted + day, 10)).toMatchObject({ expiry: "1d", maxUses: "ten" });
+    expect(of(minted + 30 * day, 0xff_ff_ff_ff)).toMatchObject({ expiry: "30d", maxUses: "unlimited" });
+    expect(of(0, 0)).toMatchObject({ expiry: "never" });
+  });
+  it("reads anything else as custom", () => {
+    expect(of(minted + 12 * day, 25)).toMatchObject({
+      expiry: "custom",
+      customExpiryAmount: "12",
+      customExpiryUnit: "days",
+      maxUses: "custom",
+      customUses: "25",
+    });
+    expect(of(minted + 5 * 3_600_000, 0)).toMatchObject({
+      expiry: "custom",
+      customExpiryAmount: "5",
+      customExpiryUnit: "hours",
+    });
+  });
+});
 
 describe("custom invite expiry", () => {
   const now = 1_000_000_000_000;

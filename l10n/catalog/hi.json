@@ -8461,6 +8461,42 @@
     "invite.contact.page.dead_body": {
       "text": "भेजने वाले से नया लिंक माँगें।",
       "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "लिंक बदलें",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "लिंक की शर्तें",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "सहेजने पर नया लिंक बनता है। पुराना काम करना बंद कर देता है।",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "लिंक हटाएँ",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "यह लिंक हटाएँ?",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "जिसके पास यह पहले से है, वह इसका उपयोग नहीं कर पाएगा।",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "लिंक हटा दिया गया।",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "लिंक नहीं हटाया जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "लिंक सहेजा नहीं जा सका। कनेक्शन जाँचें और फिर कोशिश करें।",
+      "status": "machine"
     }
   }
 }

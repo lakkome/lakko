@@ -396,6 +396,7 @@ mod fuzz_api_tests {
                     max_uses: 0,
                     uses: 0,
                     revoked: false,
+                    shared: false,
                     minted_at_ms: 1,
                     label: "home".into(),
                     answered: vec![[7; 32]],

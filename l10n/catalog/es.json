@@ -8461,6 +8461,42 @@
     "invite.contact.page.dead_body": {
       "text": "Pide a quien te lo envió uno nuevo.",
       "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "Editar enlace",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "Condiciones del enlace",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "Al guardar se crea un enlace nuevo. El anterior deja de funcionar.",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "Eliminar enlace",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "¿Eliminar este enlace?",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Quien ya lo tenga no podrá usarlo.",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "Enlace eliminado.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "No se pudo eliminar el enlace. Revisa tu conexión e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "No se pudo guardar el enlace. Revisa tu conexión e inténtalo de nuevo.",
+      "status": "machine"
     }
   }
 }

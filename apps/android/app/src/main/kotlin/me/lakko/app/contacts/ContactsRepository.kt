@@ -2988,6 +2988,8 @@ public class ContactsRepository(
                     mintedAtMs = System.currentTimeMillis().toULong(),
                     label = label,
                     answered = emptyList(),
+                    shared = false,
+                    editable = false,
                 ),
             ) ?: false
             if (!recorded) {
@@ -3086,6 +3088,24 @@ public class ContactsRepository(
             }
         }
     }
+
+    /**
+     * The account's synced link-record register (ADR-0079 section 4), every
+     * device's links with `shared` / `editable`; empty while the device-group
+     * sync is not wired. The Invite links sheet joins its rows with it by
+     * ledger id.
+     */
+    public fun inviteLinkRecords(): kotlinx.coroutines.flow.StateFlow<List<uniffi.lakko_ffi_uniffi.LinkRecord>> =
+        deviceGroupSync?.linkRecords ?: kotlinx.coroutines.flow.MutableStateFlow(emptyList())
+
+    /**
+     * Copy (ADR-0079 amendment 2026-10-26): mark the link [linkId] copied in
+     * the synced state and send its record to the account's other devices,
+     * before the text reaches the clipboard. `false` when nothing changed
+     * (already copied) or the register is not open.
+     */
+    public suspend fun markInviteLinkShared(linkId: ByteArray): Boolean =
+        deviceGroupSync?.markLinkShared(linkId) ?: false
 
     /**
      * The live `/i/` links this device minted and keeps a record of

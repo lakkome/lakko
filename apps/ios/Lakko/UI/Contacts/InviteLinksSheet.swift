@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import SwiftUI
 
-/// Contacts > Share invite link (UX spec section 5.3): the active links with
-/// Copy, Share and Revoke, and "Create link". The server list
-/// (`listActiveInvites`) is the truth; links generated in this session that
-/// the server list does not show yet are merged in (``InviteLinkRows/merge``).
-/// A raw URL is never shown in a text field — a row is a title, the dates and
-/// the actions.
+/// Contacts > Invite links (`docs/ux/contact-invite-link.md` section 9): the
+/// account's live links with Copy, QR code, Edit (only while nobody can hold
+/// the link) and Delete, and **Create link**, which makes a link with the
+/// default terms at once. The rows are the account's synced link-record
+/// register (``ContactsRepository/listActiveInvites()``) with the links
+/// generated in this session that the list does not show yet
+/// (``InviteLinkRows/merge``); whether a row offers Edit and whether Delete
+/// asks first are read from its synced record. A raw URL is never shown in a
+/// text field — a row is a title, the facts and the actions.
 struct InviteLinksSheet: View {
     @ObservedObject var viewModel: ContactsViewModel
     let onDismiss: () -> Void
@@ -19,10 +23,12 @@ struct InviteLinksSheet: View {
     @State private var now = Date()
     /// The link whose QR code is on screen, when one is.
     @State private var qrLink: QrLink?
-    /// The create form is open.
-    @State private var creating = false
-    /// What the create form holds; reset each time it opens.
+    /// The slug of the link whose terms the edit form shows, when it is open.
+    @State private var editingSlug: String?
+    /// What the edit form holds; prefilled each time it opens.
     @State private var form = InviteCreateForm()
+    /// The slug of the link whose deletion waits for confirmation.
+    @State private var confirmingDeleteSlug: String?
 
     private var rows: [InviteLinkRow] {
         InviteLinkRows.merge(
@@ -30,75 +36,41 @@ struct InviteLinksSheet: View {
             sessionGenerated: viewModel.repositoryState.outstandingInvites,
             now: now,
             accountIdB64: viewModel.inviteAccountIdB64)
+            .filter { !viewModel.deletedLinkSlugs.contains($0.slug) }
     }
 
     var body: some View {
         NavigationStack {
             List {
-                if creating {
-                    createForm
+                if editingSlug != nil {
+                    editForm
                 } else {
-                    Section {
-                        Button {
-                            form = InviteCreateForm()
-                            viewModel.clearInviteError()
-                            creating = true
-                        } label: {
-                            Label(l10n.t("invite.links.create"), systemImage: "link.badge.plus")
-                                .foregroundStyle(Color.lakkoAccent)
-                        }
-                        if let error = viewModel.inviteError {
-                            errorLine(error.text)
-                        }
-                    } footer: {
-                        Text(l10n.t("invite.links.desc"))
-                    }
-                }
-
-                Section {
-                    if let error = viewModel.activeInvitesError {
-                        Text(error.text)
-                            .font(.footnote)
-                            .foregroundStyle(Color.lakkoDanger)
-                    }
-                    if !viewModel.activeInvitesLoaded && rows.isEmpty {
-                        HStack(spacing: 8) {
-                            if viewModel.loadingActiveInvites {
-                                ProgressView().controlSize(.small)
-                            }
-                            Text(l10n.t("common.loading"))
-                                .foregroundStyle(Color.lakkoTextMuted)
-                        }
-                    } else if rows.isEmpty {
-                        Text(l10n.t("invite.links.empty"))
-                            .foregroundStyle(Color.lakkoTextMuted)
-                    } else {
-                        ForEach(rows) { row in
-                            LinkActionsRow(
-                                title: row.title,
-                                details: details(for: row),
-                                url: row.url,
-                                highlighted: row.slug == viewModel.lastGeneratedInvite?.blobIdSlug,
-                                revoking: viewModel.revokingActiveInviteSlug == row.slug,
-                                revoke: { revoke(row) },
-                                showQr: row.url.map { url in { qrLink = QrLink(url: url) } }
-                            )
-                            .disabled(
-                                viewModel.revokingActiveInviteSlug != nil
-                                    && viewModel.revokingActiveInviteSlug != row.slug)
-                        }
-                    }
-                } header: {
-                    Text(l10n.t("invite.links.list"))
+                    createSection
+                    listSection
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle(l10n.t("contacts.invite_links.title"))
+            .navigationTitle(l10n.t(editingSlug == nil ? "contacts.invite_links.title" : "invite.links.edit_title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(l10n.t("common.done"), action: onDismiss)
                 }
+            }
+        }
+        .overlay {
+            if let slug = confirmingDeleteSlug {
+                LakkoConfirmDialog(
+                    title: l10n.t("invite.links.delete_confirm_title"),
+                    message: l10n.t("invite.links.delete_confirm_body"),
+                    primaryTitle: l10n.t("common.delete"),
+                    primaryIsDestructive: true,
+                    secondaryTitle: l10n.t("common.cancel"),
+                    onPrimary: {
+                        confirmingDeleteSlug = nil
+                        viewModel.onDeleteLinkClicked(slug: slug)
+                    },
+                    onSecondary: { confirmingDeleteSlug = nil })
             }
         }
         .sheet(item: $qrLink) { link in
@@ -111,13 +83,115 @@ struct InviteLinksSheet: View {
         .presentationDetents([.large])
     }
 
-    // MARK: - Create form
+    // MARK: - Create and list
 
-    /// Label, Expires and Uses (the web form's choices and bounds), then
-    /// Create and Cancel. Create stays disabled while a custom field does not
-    /// hold a valid value.
+    private var createSection: some View {
+        Section {
+            Button {
+                now = Date()
+                viewModel.onCreateLinkClicked()
+            } label: {
+                HStack(spacing: 8) {
+                    if viewModel.generatingInvite {
+                        ProgressView().controlSize(.small)
+                    }
+                    Label(l10n.t("invite.links.create"), systemImage: "link.badge.plus")
+                        .foregroundStyle(Color.lakkoAccent)
+                }
+            }
+            .disabled(viewModel.generatingInvite)
+            if let error = viewModel.inviteError {
+                errorLine(error.text)
+            }
+        } footer: {
+            Text(l10n.t("invite.links.desc"))
+        }
+    }
+
+    private var listSection: some View {
+        Section {
+            if let error = viewModel.activeInvitesError {
+                errorLine(error.text)
+            }
+            if let notice = viewModel.inviteNotice {
+                Text(notice.text)
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+            if !viewModel.activeInvitesLoaded && rows.isEmpty {
+                HStack(spacing: 8) {
+                    if viewModel.loadingActiveInvites {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text(l10n.t("common.loading"))
+                        .foregroundStyle(Color.lakkoTextMuted)
+                }
+            } else if rows.isEmpty {
+                Text(l10n.t("invite.links.empty"))
+                    .foregroundStyle(Color.lakkoTextMuted)
+            } else {
+                ForEach(rows) { row in
+                    linkRow(row)
+                }
+            }
+        } header: {
+            Text(l10n.t("invite.links.list"))
+        }
+    }
+
+    private func linkRow(_ row: InviteLinkRow) -> some View {
+        let record = viewModel.linkRecord(slug: row.slug)
+        let busy = viewModel.revokingActiveInviteSlug != nil || viewModel.generatingInvite
+        let edit: (() -> Void)? = LinkRecords.editable(record) && !busy
+            ? { openEdit(slug: row.slug, record: record) } : nil
+        return LinkActionsRow(
+            title: row.title,
+            details: details(for: row),
+            url: row.url,
+            highlighted: row.slug == viewModel.lastGeneratedInvite?.blobIdSlug,
+            deleting: viewModel.revokingActiveInviteSlug == row.slug,
+            beforeCopy: { await viewModel.onCopyLinkClicked(slug: row.slug) },
+            edit: edit,
+            delete: { delete(row.slug, record: record) },
+            showQr: row.url.map { url in { qrLink = QrLink(url: url) } }
+        )
+        .disabled(
+            viewModel.revokingActiveInviteSlug != nil
+                && viewModel.revokingActiveInviteSlug != row.slug)
+    }
+
+    private func delete(_ slug: String, record: LinkRecord?) {
+        if LinkRecords.deleteNeedsConfirmation(record) {
+            confirmingDeleteSlug = slug
+        } else {
+            viewModel.onDeleteLinkClicked(slug: slug)
+        }
+    }
+
+    private func openEdit(slug: String, record: LinkRecord?) {
+        guard let record else { return }
+        form = InviteCreateForm.prefilled(
+            label: record.label, expiryMs: record.expiryMs, maxUses: record.maxUses,
+            mintedAtMs: record.mintedAtMs)
+        viewModel.clearInviteError()
+        editingSlug = slug
+    }
+
+    private func closeEdit() {
+        editingSlug = nil
+        now = Date()
+        viewModel.clearInviteError()
+    }
+
+    // MARK: - Edit form
+
+    /// The link's terms (label, Expires, Uses: the web form's choices and
+    /// bounds), the line that saving makes a new link, then Save and Cancel.
+    /// Save stays disabled while a custom field does not hold a valid value,
+    /// and once the link can no longer be edited (copied or used meanwhile,
+    /// on any device).
     @ViewBuilder
-    private var createForm: some View {
+    private var editForm: some View {
         Section {
             TextField(l10n.t("invite.links.label_placeholder"), text: labelBinding)
                 .textInputAutocapitalization(.sentences)
@@ -186,28 +260,28 @@ struct InviteLinksSheet: View {
         .disabled(viewModel.generatingInvite)
 
         Section {
+            Text(l10n.t("invite.links.edit_note"))
+                .font(.footnote)
+                .foregroundStyle(Color.lakkoTextMuted)
             HStack(spacing: 12) {
                 Button {
-                    guard let params = form.params else { return }
-                    viewModel.onCreateInviteClicked(params) { creating = false }
+                    guard let slug = editingSlug, let params = form.params else { return }
+                    viewModel.onSaveLinkTermsClicked(slug: slug, params: params) { closeEdit() }
                 } label: {
                     HStack(spacing: 8) {
                         if viewModel.generatingInvite {
                             ProgressView().controlSize(.small)
-                            Text(l10n.t("chats.new_group.creating"))
-                        } else {
-                            Text(l10n.t("invite.links.create"))
                         }
+                        Text(l10n.t("common.save"))
                     }
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Color.lakkoAccent)
-                .disabled(viewModel.generatingInvite || form.params == nil)
+                .disabled(viewModel.generatingInvite || form.params == nil || !stillEditable)
 
                 Button {
-                    creating = false
-                    viewModel.clearInviteError()
+                    closeEdit()
                 } label: {
                     Text(l10n.t("common.cancel"))
                         .frame(maxWidth: .infinity)
@@ -220,9 +294,13 @@ struct InviteLinksSheet: View {
             if let error = viewModel.inviteError {
                 errorLine(error.text)
             }
-        } footer: {
-            Text(l10n.t("invite.links.desc"))
         }
+    }
+
+    /// The link the form edits is still editable per its synced record.
+    private var stillEditable: Bool {
+        guard let slug = editingSlug else { return false }
+        return LinkRecords.editable(viewModel.linkRecord(slug: slug))
     }
 
     /// The label as typed, never longer than the core accepts.
@@ -263,15 +341,6 @@ struct InviteLinksSheet: View {
             "common.fact_pair", texts: ["first": status, "second": InviteLinkRows.useFact(row)])
         lines.append(status)
         return lines
-    }
-
-    private func revoke(_ row: InviteLinkRow) {
-        switch row.origin {
-        case .server:
-            viewModel.onRevokeActiveInviteClicked(slug: row.slug)
-        case .session(let blobId):
-            viewModel.onRevokeInviteClicked(blobId: blobId)
-        }
     }
 }
 
@@ -320,22 +389,29 @@ struct LinkQrSheet: View {
 }
 
 /// One shareable link as a row: title (when the link has a label), detail
-/// lines, then Copy, Show QR code and (when offered) Revoke. A link always
-/// looks the same and the URL itself stays out of the way.
+/// lines, then Copy, Show QR code, Edit (when offered) and the trash button
+/// Delete link. A link always looks the same and the URL itself stays out of
+/// the way.
 struct LinkActionsRow: View {
     /// The link's label; `nil` when it has none — the facts then lead.
     let title: String?
     var details: [String] = []
     /// `nil` when the link's secret is not on this device (a link another
-    /// device minted, ADR-0028 amendment 2026-09-28): Revoke only.
+    /// device minted, ADR-0028 amendment 2026-09-28): Delete only.
     let url: String?
     var highlighted: Bool = false
-    var revoking: Bool = false
-    var revoke: (() -> Void)? = nil
+    var deleting: Bool = false
+    /// Runs before the link reaches the clipboard (marks it copied in the
+    /// account's synced state).
+    var beforeCopy: (() async -> Void)? = nil
+    /// Opens the link's terms; `nil` when the link can no longer be edited.
+    var edit: (() -> Void)? = nil
+    var delete: (() -> Void)? = nil
     /// Opens the link's QR code; `nil` when this device has no URL to show.
     var showQr: (() -> Void)? = nil
 
     @State private var copied = false
+    @State private var copying = false
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
@@ -351,17 +427,13 @@ struct LinkActionsRow: View {
             HStack(spacing: 8) {
                 if let url {
                     Button {
-                        UIPasteboard.general.string = url
-                        copied = true
-                        Task { @MainActor in
-                            try? await Task.sleep(nanoseconds: 1_500_000_000)
-                            copied = false
-                        }
+                        copy(url)
                     } label: {
                         Label(l10n.t(copied ? "common.copied" : "common.copy"), systemImage: copied ? "checkmark" : "doc.on.doc")
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .disabled(copying)
                     // A link is never handed to the system's share sheet:
                     // Copy, or a QR code someone scans.
                     if let showQr {
@@ -378,22 +450,45 @@ struct LinkActionsRow: View {
                         .foregroundStyle(Color.lakkoTextMuted)
                 }
 
-                if let revoke {
-                    Spacer()
-                    Button(role: .destructive, action: revoke) {
-                        if revoking {
+                Spacer()
+                if let edit {
+                    Button(action: edit) {
+                        Image(systemName: "pencil")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityLabel(l10n.t("invite.links.edit"))
+                }
+                if let delete {
+                    Button(role: .destructive, action: delete) {
+                        if deleting {
                             ProgressView().controlSize(.small)
                         } else {
-                            Label(l10n.t("chat.invite_link.revoke"), systemImage: "trash")
+                            Image(systemName: "trash")
                         }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .disabled(revoking)
+                    .disabled(deleting)
+                    .accessibilityLabel(l10n.t("invite.links.delete"))
                 }
             }
         }
         .padding(.vertical, 4)
+    }
+
+    /// Mark the link copied first, then the clipboard.
+    private func copy(_ url: String) {
+        guard !copying else { return }
+        copying = true
+        Task { @MainActor in
+            await beforeCopy?()
+            UIPasteboard.general.string = url
+            copying = false
+            copied = true
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            copied = false
+        }
     }
 
     private var titleLine: some View {

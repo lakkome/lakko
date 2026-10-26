@@ -108,11 +108,12 @@ use super::recovery_email::{
 /// `2` since the saved-message register (ADR-0065 section 4) joined the
 /// state, `3` since the link-record register (ADR-0079 section 4), `4` since
 /// a link record carries its ledger row's revocation seed (ADR-0079 as
-/// reworked 2026-10-17). Older
+/// reworked 2026-10-17), `5` since a link record carries the `shared` flag
+/// (2026-10-26). Older
 /// versions are refused rather than read: nothing is deployed, and a build
 /// that silently accepted an older layout would be a second decoder nobody
 /// tests.
-const STATE_VERSION: u8 = 4;
+const STATE_VERSION: u8 = 5;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,11 +175,15 @@ pub struct SyncedState {
 
 /// `true` when `(a_hlc, a_bytes)` beats `(b_hlc, b_bytes)`. Between two link
 /// records a revoked one beats a live one first (ADR-0079: a revocation is
-/// final).
+/// final), then a shared one beats an unshared one (a copied link never
+/// becomes editable again, 2026-10-26).
 fn beats(a_hlc: u64, a: &SyncEntry, b_hlc: u64, b: &SyncEntry) -> bool {
     if let (SyncEntry::LinkRecord(x), SyncEntry::LinkRecord(y)) = (a, b) {
         if x.revoked != y.revoked {
             return x.revoked;
+        }
+        if x.shared != y.shared {
+            return x.shared;
         }
     }
     match a_hlc.cmp(&b_hlc) {
@@ -722,6 +727,31 @@ impl SyncedState {
         self.set_link_record(hlc.max(held.hlc.saturating_add(1)), next)
     }
 
+    /// Mark a link copied (2026-10-26): someone may hold it now, so it is no
+    /// longer editable. `Ok(true)` when the register changed (send it);
+    /// `Ok(false)` when no record is held, it is revoked, or it was already
+    /// shared.
+    ///
+    /// # Errors
+    ///
+    /// The [`super::entry::BoundsError`] the held record breaks (never, for
+    /// a record the fold accepted).
+    pub fn mark_link_shared(
+        &mut self,
+        hlc: u64,
+        link_id: &[u8; LINK_RECORD_ID_LEN],
+    ) -> Result<bool, super::entry::BoundsError> {
+        let Some(held) = self.link_record(link_id) else {
+            return Ok(false);
+        };
+        if held.value.revoked || held.value.shared {
+            return Ok(false);
+        }
+        let mut next = held.value;
+        next.shared = true;
+        self.set_link_record(hlc.max(held.hlc.saturating_add(1)), next)
+    }
+
     /// Count one accepted request through a link, remembering the
     /// requester. `Ok(true)` when the register changed (send it); `Ok(false)`
     /// when no live record is held for the link.
@@ -1209,6 +1239,8 @@ mod tests {
             max_uses: 3,
             uses,
             revoked,
+            // Odd labels are shared, so the fold proptests cover that order.
+            shared: label % 2 == 1,
             minted_at_ms: 0,
             label: "x".repeat(usize::from(label)),
             answered: vec![],
@@ -1258,6 +1290,34 @@ mod tests {
             c.link_answer_verdict(&id, &secret, &bob, 1),
             LinkAnswerVerdict::Answered
         );
+    }
+
+    #[test]
+    fn a_copy_on_one_device_ends_editing_on_every_device() {
+        let SyncEntry::LinkRecord(record) = link(3, 0, false, 2) else {
+            unreachable!()
+        };
+        assert!(record.editable());
+        let id = record.link_id;
+        let mut a = SyncedState::new();
+        let mut b = SyncedState::new();
+        a.set_link_record(5, record.clone()).unwrap();
+        b.set_link_record(5, record).unwrap();
+        // Copied on a; b meanwhile writes a later, unshared change.
+        assert_eq!(a.mark_link_shared(6, &id), Ok(true));
+        assert_eq!(a.mark_link_shared(7, &id), Ok(false));
+        let mut later = b.link_record(&id).unwrap().value;
+        later.label = "renamed".into();
+        b.set_link_record(50, later).unwrap();
+        let shared = a.link_record_envelope_for(&id).unwrap();
+        let unshared = b.link_record_envelope_for(&id).unwrap();
+        assert_eq!(b.apply_link_record_envelope(&shared), Ok(true));
+        assert_eq!(a.apply_link_record_envelope(&unshared), Ok(false));
+        assert_eq!(a.all_link_records(), b.all_link_records());
+        assert!(!a.link_record(&id).unwrap().value.editable());
+        // A revoked link is never marked.
+        assert_eq!(a.revoke_link_record(60, &id), Ok(true));
+        assert_eq!(a.mark_link_shared(61, &id), Ok(false));
     }
 
     #[test]
@@ -1566,15 +1626,15 @@ mod tests {
         let mut s = SyncedState::new();
         s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
         let mut old = s.to_bytes();
-        assert_eq!(old[0], 4);
-        for version in [1u8, 2, 3] {
+        assert_eq!(old[0], 5);
+        for version in [1u8, 2, 3, 4] {
             old[0] = version;
             assert_eq!(
                 SyncedState::from_bytes(&old),
                 Err(CodecError::UnknownVersion)
             );
         }
-        assert_eq!(SyncedState::new().to_bytes(), vec![4, 0, 0, 0, 0]);
+        assert_eq!(SyncedState::new().to_bytes(), vec![5, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -2109,7 +2169,7 @@ mod tests {
         assert_eq!(SyncedState::from_bytes(&bytes), Ok(s));
         assert_eq!(SyncedState::from_bytes(&[]), Err(CodecError::Truncated));
         assert_eq!(
-            SyncedState::from_bytes(&[5, 0, 0, 0, 0]),
+            SyncedState::from_bytes(&[6, 0, 0, 0, 0]),
             Err(CodecError::UnknownVersion)
         );
         let mut trailing = bytes;
