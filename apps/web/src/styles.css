@@ -468,7 +468,7 @@ a:focus-visible {
   height: 38px;
   padding: 0 12px;
   margin: 4px 12px 8px;
-  border-radius: var(--radius-pill);
+  border-radius: 10px;
   background: var(--surface-sunken);
   color: var(--surface-faint);
 }
@@ -489,7 +489,14 @@ a:focus-visible {
   height: 36px;
   min-height: 0;
   padding: 0;
-  border-radius: var(--radius-pill);
+  /* A square with rounded corners, the shape of the call buttons in the chat
+     header; never a circle. Flex-centred here, not only through the global
+     `button` rule, because the composer's attach control is a `<label>`. */
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
   border: none;
   background: transparent;
   color: var(--surface-muted);
@@ -1592,7 +1599,7 @@ a.ghost.small.lk-wide-only {
   border-radius: 10px;
 }
 .lk-composer .lk-send {
-  border-radius: var(--radius-pill);
+  border-radius: 10px;
   background: var(--accent);
   color: var(--accent-fg);
 }
@@ -1611,7 +1618,7 @@ a.ghost.small.lk-wide-only {
   overflow-y: auto;
   line-height: 22px;
   border: none;
-  border-radius: 21px;
+  border-radius: var(--radius-md);
   background: var(--surface-sunken);
   padding: 10px 16px;
 }
@@ -2565,11 +2572,11 @@ input.lk-sas-code {
   width: 38px;
   height: 38px;
   /* The global `button` rule floors every button at `--control-h` (40px), and
-     `min-height` beats `height` — so the disc was a 38x40 ellipse, not the
-     circle the spec asks for. Every button inside a bubble has to say this. */
+     `min-height` beats `height` — so the disc was a 38x40 shape, not the
+     square the spec asks for. Every button inside a bubble has to say this. */
   min-height: 0;
   padding: 0;
-  border-radius: 50%;
+  border-radius: 10px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -5887,7 +5894,7 @@ html[data-call-bar] body {
   flex: none;
   height: 32px;
   padding: 0 14px;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--surface-border);
   background: var(--surface-elevated);
   color: var(--surface-muted);
@@ -6181,7 +6188,7 @@ html[data-call-bar] body {
   height: 32px;
   padding: 0 12px;
   border: 1px solid var(--surface-border);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--surface-bg);
   color: var(--surface-muted);
   font: inherit;

@@ -62,8 +62,8 @@ The parts were written down here and their **arrangement** was not, so the three
 arranged them three ways and only one of them reads as a voice message. The iOS one is
 the shape; the other two come to it.
 
-**One row.** A filled circle 38 pt across on the leading edge, carrying a play or pause
-glyph - the circle takes the bubble's text colour and the glyph the bubble's own
+**One row.** A filled square 38 pt across with rounded corners (radius 10) on the leading
+edge, carrying a play or pause glyph - never a circle - the square takes the bubble's text colour and the glyph the bubble's own
 background, so it reads as a solid button on both the incoming and the outgoing surface.
 Beside it a column of fixed width, about 170 pt, holding two things:
 
