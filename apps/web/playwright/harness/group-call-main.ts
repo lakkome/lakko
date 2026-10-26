@@ -16,6 +16,7 @@
 
 import { SfuCallSession } from "../../src/calls/sfu-call-session";
 import { splitStreamId } from "../../src/calls/light-stream";
+import { screenStreamPeerOf } from "../../src/calls/screen-share-tracks";
 import type { VideoQuality } from "../../src/calls/video-wants";
 
 export interface GroupCallInput {
@@ -31,6 +32,8 @@ export type GroupStep =
   | { readonly do: "wait"; readonly ms: number }
   /** Participant `who` turns its camera on during the call. */
   | { readonly do: "camera"; readonly who: number }
+  /** Participant `who` shares a screen (a moving canvas) during the call. */
+  | { readonly do: "screen"; readonly who: number }
   /** Every participant asks for this picture of every other one. */
   | { readonly do: "want"; readonly quality: VideoQuality }
   /**
@@ -96,7 +99,9 @@ async function run(input: GroupCallInput): Promise<ParticipantReport[]> {
           selfIds[i] = self;
         },
         onRemoteTrack: (rt) => {
-          const { peerId, role } = splitStreamId(rt.streamId);
+          const screenPeer = screenStreamPeerOf(rt.streamId);
+          const { peerId, role } =
+            screenPeer !== null ? { peerId: screenPeer, role: "screen" } : splitStreamId(rt.streamId);
           trackPeer[i]?.set(rt.track.id, { peer: peerId, role });
           // Played, muted, as the app plays a remote stream: an engine that is
           // not asked to play a track's audio decodes none of it.
@@ -118,6 +123,7 @@ async function run(input: GroupCallInput): Promise<ParticipantReport[]> {
   for (const step of input.steps) {
     if (step.do === "wait") await new Promise((r) => setTimeout(r, step.ms));
     else if (step.do === "camera") await sessions[step.who]?.publishVideo();
+    else if (step.do === "screen") await sessions[step.who]?.attachScreenShare(movingCanvas());
     else if (step.do === "until") {
       const until = Date.now() + step.ms;
       const who = step.who ?? sessions.map((_, i) => i);
@@ -189,6 +195,28 @@ async function run(input: GroupCallInput): Promise<ParticipantReport[]> {
     }
     return reports;
   }
+}
+
+/** A screen stand-in: a canvas that changes every frame, captured. */
+function movingCanvas(): MediaStream {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1280;
+  canvas.height = 720;
+  const g = canvas.getContext("2d");
+  let n = 0;
+  const draw = (): void => {
+    if (g !== null) {
+      g.fillStyle = `hsl(${(n * 7) % 360} 60% 50%)`;
+      g.fillRect(0, 0, canvas.width, canvas.height);
+      g.fillStyle = "#000";
+      g.font = "64px sans-serif";
+      g.fillText(`screen ${n}`, 80, 160);
+    }
+    n += 1;
+  };
+  draw();
+  setInterval(draw, 66);
+  return canvas.captureStream(15);
 }
 
 async function waitFor(ok: () => boolean, what: string, ms = 20_000): Promise<void> {

@@ -50,6 +50,7 @@ interface ParticipantReport {
 type GroupStep =
   | { do: "wait"; ms: number }
   | { do: "camera"; who: number }
+  | { do: "screen"; who: number }
   | { do: "want"; quality: "main" | "middle" | "light" }
   | { do: "until"; frames: number; ms: number; track?: string; who?: number[]; from?: number[] };
 
@@ -251,4 +252,25 @@ test("an audio call where one person turns the camera on: the other two see it",
   eachPair(r, (got, who) => {
     expect(got?.audioPackets ?? 0, `${who}: no audio`).toBeGreaterThan(0);
   });
+});
+
+test("one person shares a screen: the other two see it beside the camera", async ({ page }) => {
+  const r = await groupCall(page, [true, false, false], [
+    { do: "until", frames: SHOWN, ms: 20_000, who: [1, 2], from: [0] },
+    { do: "screen", who: 0 },
+    { do: "until", frames: SHOWN + 20, ms: 20_000, track: "screen", who: [1, 2], from: [0] },
+    { do: "wait", ms: 1_000 },
+  ]);
+  const sharer = r[0]?.peerId ?? "";
+  for (const i of [1, 2]) {
+    expect(
+      r[i]?.from[sharer]?.videoFramesByTrack["screen"] ?? 0,
+      `participant ${i} does not see the shared screen`,
+    ).toBeGreaterThan(SHOWN);
+    const byTrack = r[i]?.from[sharer]?.videoFramesByTrack ?? {};
+    const camera = Object.entries(byTrack)
+      .filter(([track]) => track !== "screen")
+      .reduce((n, [, frames]) => n + frames, 0);
+    expect(camera, `participant ${i} lost the camera`).toBeGreaterThan(SHOWN);
+  }
 });
