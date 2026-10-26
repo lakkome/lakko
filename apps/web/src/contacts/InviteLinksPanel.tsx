@@ -27,14 +27,16 @@
  * account takes a request through the link from that moment.
  */
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
+import QRCode from "qrcode";
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { DiscoveryClient } from "../discovery/client";
 import { Icon } from "../ui/icons";
+import { requestConfirm } from "../ui/confirm-dialog";
 import { loadWasm } from "../wasm";
-import { joinFacts, t } from "../l10n";
+import { currentLanguage, joinFacts, t } from "../l10n";
 import { KeyedError } from "../l10n/keyed-error";
 import { createLiveText } from "../l10n/live-text";
 import { contactsErrorText } from "./errors";
@@ -59,13 +61,20 @@ import {
 import { forgetInviteLinkSecret } from "./invite-link-secrets";
 import {
   composePointerInviteUrl,
+  CUSTOM_MAX_USES,
+  customExpiryMs,
+  customMaxUses,
+  DEFAULT_LINK_EXPIRY,
+  DEFAULT_LINK_USES,
   expiryPresetToMs,
+  termsFormOf,
+  type ExpiryUnit,
   INVITE_LABEL_MAX_LEN,
   maxUsesPresetToValue,
   type ExpiryPreset,
   type MaxUsesPreset,
 } from "./invite";
-import { describeInviteCreated, describeInviteExpiry, describeInviteLimit } from "./invite-describe";
+import { describeInviteCreated, describeInviteExpiry, describeInviteUsage } from "./invite-describe";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { listedContactLinks, type LinkRecordModel } from "../devices/sync/link-records";
 import { useProfiles } from "../profile/ProfileContext";
@@ -74,8 +83,8 @@ import { useProfiles } from "../profile/ProfileContext";
 interface LinkRow {
   readonly key: string;
   readonly url: string | null;
-  /** The owner's label, or `null` for an unlabelled link (shown as the
-   *  catalog's "Invite link"). */
+  /** The owner's label, or `null` for an unlabelled link (no title line:
+   *  the facts lead). */
   readonly label: string | null;
   /** The facts under the title, rendered in the current language. */
   readonly meta: () => string;
@@ -98,7 +107,7 @@ function rowOfRecord(record: LinkRecordModel, nowMs: number, widths: InviteLinkW
       [
         describeInviteCreated(new Date(record.mintedAtMs).toISOString()),
         describeInviteExpiry(record.expiryMs, nowMs),
-        describeInviteLimit(record.maxUses),
+        describeInviteUsage(record.uses, record.maxUses),
       ].filter((p) => p.length > 0),
     );
   return {
@@ -130,12 +139,45 @@ export function InviteLinksPanel(): JSX.Element {
   const [busyKey, setBusyKey] = createSignal<string | null>(null);
   const [copiedKey, setCopiedKey] = createSignal<string | null>(null);
 
-  const [creating, setCreating] = createSignal(false);
+  /** The row whose terms are being edited (UX section 9), or `null`. */
+  const [editingKey, setEditingKey] = createSignal<string | null>(null);
   const [label, setLabel] = createSignal("");
-  const [expiry, setExpiry] = createSignal<ExpiryPreset>("7d");
-  const [maxUses, setMaxUses] = createSignal<MaxUsesPreset>("single");
-  const [bootstrapReferral, setBootstrapReferral] = createSignal(false);
+  const [expiry, setExpiry] = createSignal<ExpiryPreset | "custom">("7d");
+  const [customExpiryAmount, setCustomExpiryAmount] = createSignal("");
+  const [customExpiryUnit, setCustomExpiryUnit] = createSignal<ExpiryUnit>("days");
+  const [maxUses, setMaxUses] = createSignal<MaxUsesPreset | "custom">("single");
+  const [customUses, setCustomUses] = createSignal("");
+
+  /** The expiry the form describes, or `null` while a custom period is
+   *  out of range (Create stays disabled). */
+  const chosenExpiryMs = (nowMs: number): bigint | null => {
+    const e = expiry();
+    return e === "custom"
+      ? customExpiryMs(customExpiryAmount(), customExpiryUnit(), nowMs)
+      : expiryPresetToMs(e, nowMs);
+  };
+  const chosenMaxUses = (): number | null => {
+    const u = maxUses();
+    return u === "custom" ? customMaxUses(customUses()) : maxUsesPresetToValue(u);
+  };
+  const formValid = (): boolean => chosenExpiryMs(Date.now()) !== null && chosenMaxUses() !== null;
+  const [qrRow, setQrRow] = createSignal<LinkRow | null>(null);
   const [createBusy, setCreateBusy] = createSignal(false);
+  const [saveBusy, setSaveBusy] = createSignal(false);
+
+  /** Open the terms form of `row`, prefilled with the link's terms. */
+  function startEdit(row: LinkRow): void {
+    const form = termsFormOf(row.record);
+    setLabel(form.label);
+    setExpiry(form.expiry);
+    setCustomExpiryAmount(form.customExpiryAmount);
+    setCustomExpiryUnit(form.customExpiryUnit);
+    setMaxUses(form.maxUses);
+    setCustomUses(form.customUses);
+    setError(null);
+    setNotice(null);
+    setEditingKey(row.key);
+  }
 
   const rows = (): LinkRow[] => {
     const now = Date.now();
@@ -175,12 +217,15 @@ export function InviteLinksPanel(): JSX.Element {
     }
   }
 
-  async function onCreate(e: SubmitEvent): Promise<void> {
-    e.preventDefault();
-    setError(null);
-    setNotice(null);
-    setCreateBusy(true);
-    try {
+  /** Mint one link with these terms: reach key, sealed capability, ledger
+   *  row, this device's record and the synced register. Throws on any
+   *  failure, having minted nothing. */
+  async function mintLink(terms: {
+    readonly label: string;
+    readonly expiryMs: bigint;
+    readonly maxUses: number;
+  }): Promise<void> {
+    {
       // The account key signs the capability, never this device's key: the
       // link grant carries the account's mailbox binding and the core refuses
       // a grant not bound to the capability's signer (ADR-0078). iOS and
@@ -198,8 +243,8 @@ export function InviteLinksPanel(): JSX.Element {
         throw new KeyedError("common.error.starting_up");
       }
       const wasm = await loadWasm();
-      const expiryMs = expiryPresetToMs(expiry(), Date.now());
-      const maxUsesValue = maxUsesPresetToValue(maxUses());
+      const expiryMs = terms.expiryMs;
+      const maxUsesValue = terms.maxUses;
       const linkId = wasm.generateLinkId();
       const linkGrant = await session.newLink(linkId, expiryMs === 0n ? null : Number(expiryMs));
       // Sealed-link amendment of ADR-0028 (2026-09-28): the compose seals the
@@ -213,8 +258,10 @@ export function InviteLinksPanel(): JSX.Element {
           id.x25519PublicKey,
           expiryMs,
           maxUsesValue,
-          bootstrapReferral(),
-          label(),
+          // The sender does not decide whether the other person has an
+          // account: the invite page handles both.
+          false,
+          terms.label,
           linkId,
           linkGrant,
           // ADR-0079 section 1 — the link names its owner on the invite page.
@@ -253,10 +300,10 @@ export function InviteLinksPanel(): JSX.Element {
             linkId,
             revocationSeed: revocation.seed,
             facts: {
-              label: label(),
+              label: terms.label,
               expiryMs: Number(expiryMs),
               maxUses: maxUsesValue,
-              bootstrapReferral: bootstrapReferral(),
+              bootstrapReferral: false,
             },
           },
         );
@@ -271,7 +318,7 @@ export function InviteLinksPanel(): JSX.Element {
           expiryMs: Number(expiryMs),
           maxUses: maxUsesValue,
           mintedAtMs: Date.now(),
-          label: label(),
+          label: terms.label,
         });
         // A link this device would not remember after a reload is not handed
         // out: every request through it would wait for ever.
@@ -283,9 +330,20 @@ export function InviteLinksPanel(): JSX.Element {
         await session.revokeLink(linkId).catch(() => undefined);
         throw uploadErr;
       }
-      setCreating(false);
-      setLabel("");
-      setBootstrapReferral(false);
+    }
+  }
+
+  /** Create link (UX section 9): a link with the default terms, at once. */
+  async function onCreate(): Promise<void> {
+    setError(null);
+    setNotice(null);
+    setCreateBusy(true);
+    try {
+      await mintLink({
+        label: "",
+        expiryMs: expiryPresetToMs(DEFAULT_LINK_EXPIRY, Date.now()),
+        maxUses: maxUsesPresetToValue(DEFAULT_LINK_USES),
+      });
     } catch (err) {
       setError(contactsErrorText(err, "chat.error.create_link"));
     } finally {
@@ -293,9 +351,37 @@ export function InviteLinksPanel(): JSX.Element {
     }
   }
 
+  /** Save new terms for `row`: a new link first, then the old one deleted,
+   *  so a failure leaves the old link working. */
+  async function onSave(e: SubmitEvent, row: LinkRow): Promise<void> {
+    e.preventDefault();
+    const expiryMs = chosenExpiryMs(Date.now());
+    const maxUsesValue = chosenMaxUses();
+    // The button is disabled while either is out of range.
+    if (expiryMs === null || maxUsesValue === null) return;
+    setError(null);
+    setNotice(null);
+    setSaveBusy(true);
+    try {
+      try {
+        await mintLink({ label: label().trim(), expiryMs, maxUses: maxUsesValue });
+      } catch (err) {
+        setError(contactsErrorText(err, "invite.links.error.edit"));
+        return;
+      }
+      setEditingKey(null);
+      if (!(await removeLink(row.record))) setError(() => t("invite.links.error.delete"));
+    } finally {
+      setSaveBusy(false);
+    }
+  }
+
   async function onCopy(row: LinkRow): Promise<void> {
     if (row.url === null) return;
     try {
+      // UX section 9: a copied link is no longer editable on any device,
+      // marked before the text reaches the clipboard.
+      await sync.markLinkShared(row.record.linkId);
       await navigator.clipboard.writeText(row.url);
       setCopiedKey(row.key);
       window.setTimeout(() => setCopiedKey((k) => (k === row.key ? null : k)), 2000);
@@ -305,11 +391,34 @@ export function InviteLinksPanel(): JSX.Element {
     }
   }
 
-  async function onRevoke(row: LinkRow): Promise<void> {
-    const record = row.record;
+  /** Delete link (UX section 9): a link nobody can hold goes at once; a
+   *  copied or used one asks first. */
+  async function onDelete(row: LinkRow): Promise<void> {
+    if (!row.record.editable) {
+      const yes = await requestConfirm({
+        title: t("invite.links.delete_confirm_title"),
+        body: t("invite.links.delete_confirm_body"),
+        confirmLabel: t("common.delete"),
+        cancelLabel: t("common.cancel"),
+        tone: "danger",
+      });
+      if (!yes) return;
+    }
     setError(null);
     setNotice(null);
     setBusyKey(row.key);
+    try {
+      if (await removeLink(row.record)) setNotice(() => t("invite.links.deleted"));
+      else setError(() => t("invite.links.error.delete"));
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
+  /** Remove a link (the old Revoke): marked revoked in the register, its
+   *  ledger row and reach key deleted. `false` when it could not be done in
+   *  full; the register already refuses the link either way. */
+  async function removeLink(record: LinkRecordModel): Promise<boolean> {
     try {
       const secrets = auth.identitySecrets();
       if (secrets === null) throw new KeyedError("invite.links.error.sign_in_revoke");
@@ -334,14 +443,123 @@ export function InviteLinksPanel(): JSX.Element {
         forgetInviteLinkSecret(base64UrlEncodeNoPad(secrets.accountId), local.blobIdSlug);
         setLinks(links().filter((l) => l.blobIdSlug !== local.blobIdSlug));
       }
-      if (outcome === "unreachable") throw new KeyedError("chat.error.revoke_link");
-      setNotice(() => t("invite.links.revoked"));
+      return outcome !== "unreachable";
     } catch (err) {
-      setError(contactsErrorText(err, "chat.error.revoke_link"));
-    } finally {
-      setBusyKey(null);
+      console.warn("[contacts] delete link failed", err instanceof Error ? err.name : "");
+      return false;
     }
   }
+
+  /** The terms form of `row` (UX section 9), shown under it while edited. */
+  const termsForm = (row: LinkRow): JSX.Element => (
+        <form onSubmit={(e) => void onSave(e, row)} class="lk-stack lk-invite-edit" style={{ gap: "12px" }}>
+          <strong>{t("invite.links.edit_title")}</strong>
+          <label>
+            {t("invite.links.label_field")}
+            <input
+              type="text"
+              value={label()}
+              onInput={(e) => setLabel(e.currentTarget.value)}
+              placeholder={t("invite.links.label_placeholder")}
+              maxlength={INVITE_LABEL_MAX_LEN}
+              disabled={saveBusy()}
+            />
+          </label>
+          <label>
+            {t("invite.links.expires_field")}
+            <select
+              value={expiry()}
+              onChange={(e) => setExpiry(e.currentTarget.value as ExpiryPreset | "custom")}
+              disabled={saveBusy()}
+            >
+              <option value="1d">{t("invite.links.expires_option_days", { count: 1 })}</option>
+              <option value="7d">{t("invite.links.expires_option_days", { count: 7 })}</option>
+              <option value="30d">{t("invite.links.expires_option_days", { count: 30 })}</option>
+              <option value="never">{t("invite.links.expires_option_never")}</option>
+              <option value="custom">{t("invite.links.expires_option_custom")}</option>
+            </select>
+          </label>
+          <Show when={expiry() === "custom"}>
+            <div class="lk-invite-custom">
+              <label>
+                {t("invite.links.custom_expiry_amount")}
+                <input
+                  type="number"
+                  inputmode="numeric"
+                  min="1"
+                  step="1"
+                  value={customExpiryAmount()}
+                  onInput={(e) => setCustomExpiryAmount(e.currentTarget.value)}
+                  disabled={saveBusy()}
+                />
+              </label>
+              <label>
+                <span class="lakko-visually-hidden">{t("invite.links.custom_expiry_amount")}</span>
+                <select
+                  value={customExpiryUnit()}
+                  onChange={(e) => setCustomExpiryUnit(e.currentTarget.value as ExpiryUnit)}
+                  disabled={saveBusy()}
+                >
+                  <option value="hours">{t("invite.links.unit_hours")}</option>
+                  <option value="days">{t("invite.links.unit_days")}</option>
+                </select>
+              </label>
+            </div>
+            <Show
+              when={
+                customExpiryAmount().trim() !== "" &&
+                customExpiryMs(customExpiryAmount(), customExpiryUnit(), Date.now()) === null
+              }
+            >
+              <div class="form-error">{t("invite.links.error.custom_expiry")}</div>
+            </Show>
+          </Show>
+          <label>
+            {t("invite.links.uses_field")}
+            <select
+              value={maxUses()}
+              onChange={(e) => setMaxUses(e.currentTarget.value as MaxUsesPreset | "custom")}
+              disabled={saveBusy()}
+            >
+              <option value="single">{t("invite.links.uses_option_one")}</option>
+              <option value="ten">{t("invite.links.uses_option_up_to", { count: 10 })}</option>
+              <option value="unlimited">{t("invite.links.uses_option_unlimited")}</option>
+              <option value="custom">{t("invite.links.uses_option_custom")}</option>
+            </select>
+          </label>
+          <Show when={maxUses() === "custom"}>
+            <label>
+              {t("invite.links.custom_uses_count")}
+              <input
+                type="number"
+                inputmode="numeric"
+                min="1"
+                max={CUSTOM_MAX_USES}
+                step="1"
+                value={customUses()}
+                onInput={(e) => setCustomUses(e.currentTarget.value)}
+                disabled={saveBusy()}
+              />
+            </label>
+            <Show when={customUses().trim() !== "" && customMaxUses(customUses()) === null}>
+              <div class="form-error">
+                {t("invite.links.error.custom_uses", {
+                  max: CUSTOM_MAX_USES.toLocaleString(currentLanguage()),
+                })}
+              </div>
+            </Show>
+          </Show>
+          <p class="lk-muted">{t("invite.links.edit_note")}</p>
+          <div class="lk-actions">
+            <button class="primary" type="submit" disabled={saveBusy() || !formValid()}>
+              {t("common.save")}
+            </button>
+            <button type="button" class="ghost" disabled={saveBusy()} onClick={() => setEditingKey(null)}>
+              {t("common.cancel")}
+            </button>
+          </div>
+        </form>
+  );
 
   return (
     <section class="lk-card">
@@ -351,74 +569,12 @@ export function InviteLinksPanel(): JSX.Element {
       <Show when={error()}>{(m) => <div class="form-error">{m()}</div>}</Show>
       <Show when={notice()}>{(m) => <div class="form-info">{m()}</div>}</Show>
 
-      <Show
-        when={creating()}
-        fallback={
-          <div class="lk-actions">
-            <button type="button" class="primary" onClick={() => setCreating(true)}>
-              <Icon name="plus" size={18} />
-              {t("invite.links.create")}
-            </button>
-          </div>
-        }
-      >
-        <form onSubmit={(e) => void onCreate(e)} class="lk-stack" style={{ gap: "12px" }}>
-          <label>
-            {t("invite.links.label_field")}
-            <input
-              type="text"
-              value={label()}
-              onInput={(e) => setLabel(e.currentTarget.value)}
-              placeholder={t("invite.links.label_placeholder")}
-              maxlength={INVITE_LABEL_MAX_LEN}
-              disabled={createBusy()}
-            />
-          </label>
-          <label>
-            {t("invite.links.expires_field")}
-            <select
-              value={expiry()}
-              onChange={(e) => setExpiry(e.currentTarget.value as ExpiryPreset)}
-              disabled={createBusy()}
-            >
-              <option value="1d">{t("invite.links.expires_option_days", { count: 1 })}</option>
-              <option value="7d">{t("invite.links.expires_option_days", { count: 7 })}</option>
-              <option value="30d">{t("invite.links.expires_option_days", { count: 30 })}</option>
-              <option value="never">{t("invite.links.expires_option_never")}</option>
-            </select>
-          </label>
-          <label>
-            {t("invite.links.uses_field")}
-            <select
-              value={maxUses()}
-              onChange={(e) => setMaxUses(e.currentTarget.value as MaxUsesPreset)}
-              disabled={createBusy()}
-            >
-              <option value="single">{t("invite.links.uses_option_one")}</option>
-              <option value="ten">{t("invite.links.uses_option_up_to", { count: 10 })}</option>
-              <option value="unlimited">{t("invite.links.uses_option_unlimited")}</option>
-            </select>
-          </label>
-          <label style={{ display: "flex", gap: "8px", "align-items": "center" }}>
-            <input
-              type="checkbox"
-              checked={bootstrapReferral()}
-              onChange={(e) => setBootstrapReferral(e.currentTarget.checked)}
-              disabled={createBusy()}
-              style={{ width: "auto", margin: 0 }}
-            />
-            <span>{t("invite.links.referral_option")}</span>
-          </label>
-          <div class="lk-actions">
-            <button class="primary" type="submit" disabled={createBusy()}>
-              {createBusy() ? t("chats.new_group.creating") : t("invite.links.create")}
-            </button>
-            <button type="button" class="ghost" disabled={createBusy()} onClick={() => setCreating(false)}>
-              {t("common.cancel")}
-            </button>
-          </div>
-        </form>
-      </Show>
+      <div class="lk-actions">
+        <button type="button" class="primary" disabled={createBusy()} onClick={() => void onCreate()}>
+          <Icon name="plus" size={18} />
+          {createBusy() ? t("chats.new_group.creating") : t("invite.links.create")}
+        </button>
+      </div>
 
       <Show when={loaded()} fallback={<p class="lk-muted">{t("common.loading")}</p>}>
         <Show when={rows().length > 0} fallback={<p class="lk-muted">{t("invite.links.empty")}</p>}>
@@ -427,10 +583,10 @@ export function InviteLinksPanel(): JSX.Element {
               {(row) => (
                 <li class="lk-invite-item">
                   <div class="lk-invite-title">
-                    <strong>{row.label ?? t("chat.invite_link.label")}</strong>
+                    <Show when={row.label}>{(label) => <strong>{label()}</strong>}</Show>
                     <span class="lk-meta">{row.meta()}</span>
                   </div>
-                  <div class="lk-link-row" role="group" aria-label={row.label ?? t("chat.invite_link.label")}>
+                  <div class="lk-link-row" role="group" aria-label={row.label ?? row.meta()}>
                     <Show when={row.url}>
                       {(url) => (
                         <>
@@ -446,25 +602,95 @@ export function InviteLinksPanel(): JSX.Element {
                           >
                             <Icon name={copiedKey() === row.key ? "check" : "copy"} size={16} />
                           </button>
+                          <button
+                            type="button"
+                            class="lk-icon-button"
+                            title={t("invite.links.show_qr")}
+                            aria-label={t("invite.links.show_qr")}
+                            onClick={() => setQrRow(row)}
+                          >
+                            <Icon name="qr" size={16} />
+                          </button>
                         </>
                       )}
                     </Show>
+                    <Show when={row.record.editable && editingKey() !== row.key}>
+                      <button
+                        type="button"
+                        class="lk-icon-button"
+                        title={t("invite.links.edit")}
+                        aria-label={t("invite.links.edit")}
+                        disabled={busyKey() !== null || saveBusy()}
+                        onClick={() => startEdit(row)}
+                      >
+                        <Icon name="pencil" size={16} />
+                      </button>
+                    </Show>
                     <button
                       type="button"
-                      class="ghost small"
+                      class="lk-icon-button"
                       style={{ color: "var(--danger)" }}
-                      disabled={busyKey() !== null}
-                      onClick={() => void onRevoke(row)}
+                      title={t("invite.links.delete")}
+                      aria-label={t("invite.links.delete")}
+                      disabled={busyKey() !== null || saveBusy()}
+                      onClick={() => void onDelete(row)}
                     >
-                      {busyKey() === row.key ? t("invite.links.revoking") : t("chat.invite_link.revoke")}
+                      <Icon name="trash" size={16} />
                     </button>
                   </div>
+                  <Show when={editingKey() === row.key}>{termsForm(row)}</Show>
                 </li>
               )}
             </For>
           </ul>
         </Show>
       </Show>
+
+      <Show when={qrRow()}>
+        {(row) => <InviteQrDialog row={row()} onClose={() => setQrRow(null)} />}
+      </Show>
     </section>
+  );
+}
+
+/** The link as a QR code in a modal `<dialog>` (focus trap and Escape come
+ *  with `showModal`). The code is drawn dark on a white tile in both themes:
+ *  a light-on-dark code does not scan on every camera. */
+function InviteQrDialog(props: { readonly row: LinkRow; readonly onClose: () => void }): JSX.Element {
+  let dialog: HTMLDialogElement | undefined;
+  let canvas: HTMLCanvasElement | undefined;
+  onMount(() => {
+    dialog?.showModal();
+    const url = props.row.url;
+    if (url !== null && canvas !== undefined) {
+      void QRCode.toCanvas(canvas, url, { errorCorrectionLevel: "M", width: 256, margin: 2 }).catch(
+        (err: unknown) => console.warn("[contacts] invite QR render failed", err instanceof Error ? err.name : ""),
+      );
+    }
+  });
+  return (
+    <dialog
+      ref={dialog}
+      class="lk-qr-dialog"
+      aria-label={props.row.label ?? t("common.qr_code")}
+      onClose={props.onClose}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) dialog?.close();
+      }}
+    >
+      <div class="lk-qr-dialog-body">
+        <Show when={props.row.label}>{(label) => <strong>{label()}</strong>}</Show>
+        <div class="lk-qr-tile">
+          <canvas ref={canvas} role="img" aria-label={t("common.qr_code")} />
+        </div>
+        <span class="lk-meta">{props.row.meta()}</span>
+        <p class="lk-muted">{t("invite.links.qr_hint")}</p>
+        <div class="lk-actions">
+          <button type="button" class="primary" onClick={() => dialog?.close()}>
+            {t("common.done")}
+          </button>
+        </div>
+      </div>
+    </dialog>
   );
 }

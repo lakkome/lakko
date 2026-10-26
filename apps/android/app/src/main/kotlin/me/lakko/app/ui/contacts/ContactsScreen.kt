@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,10 +27,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.QrCode
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
@@ -84,8 +89,9 @@ import java.util.Date
  * The Contacts tab — docs/ux/client-redesign.md section 5.3.
  *
  * Top bar with the title, a search field and one add action whose menu holds
- * Share invite link (the QR entries of the spec are omitted: this client has
- * no contact-QR payload, only the device-pairing one). The search field is
+ * Share invite link and Scan QR code (a scanned `/i/`, `/g/` or `/c/` link
+ * takes the route an opened app link takes; an invite link's own QR is shown
+ * from its row in the Invite links sheet). The search field is
  * the one people search of `docs/ux/who-can-find-me.md` section 6.1: it
  * filters the contacts and, from 3 characters, asks the network for people
  * on its own, listed under **People** with **Add contact** on each row.
@@ -94,8 +100,8 @@ import java.util.Date
  * sticky letter headers. Pull-to-refresh runs the same inbox poll the screen
  * already runs continuously.
  *
- * Invite links are managed in an "Invite links" sheet (copy, share, revoke,
- * create).
+ * Invite links are managed in an "Invite links" sheet (create with the
+ * defaults, copy, QR code, edit while unshared, delete).
  *
  * Call links are not here at all. They were, briefly, and the create-a-link
  * form that held them is gone from every screen: a link now belongs to a call
@@ -118,6 +124,10 @@ public fun ContactsScreen(
     /** `docs/ux/who-can-find-me.md` section 6.1 — people under the search
      *  field, local and network; `null` filters the contacts only (tests). */
     peopleSearch: me.lakko.app.search.PeopleSearchService? = null,
+    /** A Lakko `/i/`, `/g/` or `/c/` link read off a scanned QR code, handed
+     *  to the same intake an opened app link uses; `null` hides Scan QR code
+     *  (tests). */
+    onScannedLink: ((me.lakko.app.contacts.LakkoLink) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -142,6 +152,7 @@ public fun ContactsScreen(
     var query by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
     var inviteSheetOpen by remember { mutableStateOf(false) }
+    var scanSheetOpen by remember { mutableStateOf(false) }
     var sentExpanded by remember { mutableStateOf(false) }
 
     // docs/ux/who-can-find-me.md section 6.1 — the field asks the network on
@@ -151,20 +162,25 @@ public fun ContactsScreen(
     LaunchedEffect(query, peopleSession) { peopleSession?.onQuery(query) }
 
     if (inviteSheetOpen) {
+        val linkRecords by remember(viewModel) { viewModel.inviteLinkRecords() }.collectAsStateWithLifecycle()
         InviteLinksSheet(
             state = state,
+            linkSync = remember(linkRecords) { inviteLinkSyncBySlug(linkRecords) },
             onLoad = viewModel::onRefreshActiveInvitesClicked,
-            onCreate = viewModel::onGenerateInviteClicked,
-            onCopy = { url -> copyToClipboard(context, url) },
-            onRevoke = { row ->
-                val session = state.outstandingInvites.firstOrNull { it.blobIdSlug == row.slug }
-                if (session != null) {
-                    viewModel.onRevokeInviteClicked(session.blobId)
-                } else {
-                    viewModel.onRevokeActiveInviteClicked(row.slug)
-                }
-            },
+            onCreate = { viewModel.onGenerateInviteClicked() },
+            onSaveEdit = viewModel::onEditInviteSaved,
+            onCopy = { row, url -> viewModel.onCopyInviteClicked(row.slug, url) { copyToClipboard(context, it) } },
+            onDelete = { row -> viewModel.onDeleteInviteClicked(row.slug) },
             onDismiss = { inviteSheetOpen = false },
+        )
+    }
+    if (scanSheetOpen && onScannedLink != null) {
+        ScanLinkSheet(
+            onLink = { link ->
+                scanSheetOpen = false
+                onScannedLink(link)
+            },
+            onDismiss = { scanSheetOpen = false },
         )
     }
 
@@ -234,6 +250,13 @@ public fun ContactsScreen(
                                 leadingIcon = { Icon(Icons.Filled.Link, contentDescription = null) },
                                 onClick = { menuOpen = false; inviteSheetOpen = true },
                             )
+                            if (onScannedLink != null) {
+                                DropdownMenuItem(
+                                    text = { Text(t("contacts.scan_qr")) },
+                                    leadingIcon = { Icon(Icons.Filled.QrCodeScanner, contentDescription = null) },
+                                    onClick = { menuOpen = false; scanSheetOpen = true },
+                                )
+                            }
                         }
                     }
                 },
@@ -642,10 +665,14 @@ private fun ActiveInvite.toRow(heldUrls: Map<String, String>): InviteLinkRow = I
 @Composable
 private fun InviteLinksSheet(
     state: ContactsUiState,
+    /** The synced record of each row by slug (UX section 9): the pencil and
+     *  the confirmation before Delete. */
+    linkSync: Map<String, InviteLinkSync>,
     onLoad: () -> Unit,
     onCreate: () -> Unit,
-    onCopy: (String) -> Unit,
-    onRevoke: (InviteLinkRow) -> Unit,
+    onSaveEdit: (slug: String, InviteCreateParams, onSaved: () -> Unit) -> Unit,
+    onCopy: (InviteLinkRow, String) -> Unit,
+    onDelete: (InviteLinkRow) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -659,14 +686,40 @@ private fun InviteLinksSheet(
     }
     val now = remember(rows) { System.currentTimeMillis() }
     val language = me.lakko.app.l10n.LocalStrings.current.language
+    // The created fact carries the time too, in the interface language.
     val dateFormat = remember(language) {
-        DateFormat.getDateInstance(DateFormat.MEDIUM, java.util.Locale.forLanguageTag(language))
+        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, java.util.Locale.forLanguageTag(language))
+    }
+    // The link whose terms are open (UX section 9), and the form's state.
+    var editingSlug by remember { mutableStateOf<String?>(null) }
+    var form by remember { mutableStateOf(InviteCreateForm()) }
+    var qrUrl by remember { mutableStateOf<String?>(null) }
+    var confirmDelete by remember { mutableStateOf<InviteLinkRow?>(null) }
+    qrUrl?.let { url -> InviteQrSheet(url = url, onDismiss = { qrUrl = null }) }
+    confirmDelete?.let { row ->
+        // A Lakko dialog, never a system alert (UX section 9).
+        me.lakko.app.ui.components.LakkoModal(
+            onDismissRequest = { confirmDelete = null },
+            title = t("invite.links.delete_confirm_title"),
+            actions = {
+                TextButton(onClick = { confirmDelete = null }) { Text(t("common.cancel")) }
+                TextButton(onClick = {
+                    confirmDelete = null
+                    onDelete(row)
+                }) {
+                    Text(t("common.delete"), color = MaterialTheme.colorScheme.error)
+                }
+            },
+        ) {
+            Text(t("invite.links.delete_confirm_body"), style = MaterialTheme.typography.bodyMedium)
+        }
     }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
+                .imePadding()
                 .padding(horizontal = 24.dp)
                 .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -677,10 +730,39 @@ private fun InviteLinksSheet(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            (state.inviteError ?: state.activeInvitesError)?.let { error ->
+            val error = state.inviteError ?: state.activeInvitesError
+            if (error != null) {
                 Text(error.text(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            } else {
+                state.inviteNotice?.let { notice ->
+                    Text(notice.text(), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
+                }
             }
-            if (state.loadingActiveInvites && rows.isEmpty()) {
+            val editing = editingSlug
+            // While the form is open it takes the list's place, so the whole
+            // form stays on screen above the keyboard.
+            if (editing != null) {
+                InviteCreateFormView(
+                    form = form,
+                    onChange = { form = it },
+                    busy = state.generatingInvite,
+                    onCreate = { params ->
+                        onSaveEdit(editing, params) {
+                            editingSlug = null
+                            form = InviteCreateForm()
+                        }
+                    },
+                    onCancel = {
+                        editingSlug = null
+                        form = InviteCreateForm()
+                    },
+                    modifier = Modifier.weight(1f, fill = false),
+                    title = t("invite.links.edit_title"),
+                    note = t("invite.links.edit_note"),
+                    submitLabel = t("common.save"),
+                    busyLabel = t("common.saving"),
+                )
+            } else if (state.loadingActiveInvites && rows.isEmpty()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(8.dp))
@@ -693,7 +775,7 @@ private fun InviteLinksSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            LazyColumn(
+            if (editing == null) LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f, fill = false),
@@ -710,42 +792,73 @@ private fun InviteLinksSheet(
                     )
                     val share = inviteRowShare(row)
                     val shareUrl = (share as? InviteRowShare.Shareable)?.url
+                    val sync = linkSync[row.slug]
+                    val idle = state.revokingActiveInviteSlug == null && !state.generatingInvite
                     LinkRow(
-                        title = row.label.ifBlank { t("chat.invite_link.label") },
+                        title = inviteRowTitle(row),
                         meta = meta,
                         note = if (share is InviteRowShare.CreatedElsewhere) INVITE_CREATED_ELSEWHERE_COPY.text() else null,
-                        onCopy = shareUrl?.let { url -> { onCopy(url) } },
+                        onCopy = shareUrl?.let { url -> { onCopy(row, url) } },
+                        onShowQr = shareUrl?.let { url -> { qrUrl = url } },
                         trailing = {
-                            val revoking = state.revokingActiveInviteSlug == row.slug
-                            TextButton(
-                                onClick = { onRevoke(row) },
-                                enabled = state.revokingActiveInviteSlug == null,
-                            ) {
-                                Text(
-                                    if (revoking) t("invite.links.revoking") else t("chat.invite_link.revoke"),
-                                    color = MaterialTheme.colorScheme.error,
-                                )
+                            // The pencil only while nobody can hold the link.
+                            if (inviteRowEditable(sync)) {
+                                IconButton(
+                                    onClick = {
+                                        form = inviteFormFromTerms(
+                                            label = row.label,
+                                            expiryMs = row.expiryMs,
+                                            mintedAtMs = row.createdAtMs,
+                                            maxUses = row.maxUses,
+                                        )
+                                        editingSlug = row.slug
+                                    },
+                                    enabled = idle,
+                                ) {
+                                    Icon(Icons.Filled.Edit, contentDescription = t("invite.links.edit"))
+                                }
+                            }
+                            if (state.revokingActiveInviteSlug == row.slug) {
+                                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                }
+                            } else {
+                                IconButton(
+                                    onClick = {
+                                        if (inviteDeleteNeedsConfirmation(sync)) confirmDelete = row else onDelete(row)
+                                    },
+                                    enabled = idle,
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Delete,
+                                        contentDescription = t("invite.links.delete"),
+                                        tint = if (idle) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                         },
                     )
                     HorizontalDivider()
                 }
             }
-            Button(
-                onClick = onCreate,
-                enabled = !state.generatingInvite,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                if (state.generatingInvite) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(t("common.creating"))
-                } else {
-                    Text(t("invite.links.create"))
+            if (editing == null) {
+                // Create link mints at once with the defaults (UX section 9).
+                Button(
+                    onClick = onCreate,
+                    enabled = !state.generatingInvite,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (state.generatingInvite) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(t("common.creating"))
+                    } else {
+                        Text(t("invite.links.create"))
+                    }
                 }
             }
         }
@@ -758,9 +871,12 @@ private fun InviteLinksSheet(
  *  operating-system surface inside a Lakko screen). */
 @Composable
 private fun LinkRow(
-    title: String,
+    /** The label, or `null` for a link without one: the meta line leads. */
+    title: String?,
     meta: String,
     onCopy: (() -> Unit)?,
+    /** Opens the link's QR sheet; `null` when the row has no shareable URL. */
+    onShowQr: (() -> Unit)? = null,
     /** One line shown under the meta line in place of Copy (UX 5.3: a link
      *  created on another device). */
     note: String? = null,
@@ -773,12 +889,15 @@ private fun LinkRow(
             .padding(vertical = 6.dp),
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+            if (title != null) {
+                Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+            }
             if (meta.isNotEmpty()) {
                 Text(
                     meta,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    // With no title the meta line leads the row.
+                    style = if (title == null) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodySmall,
+                    color = if (title == null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             if (note != null) {
@@ -787,6 +906,11 @@ private fun LinkRow(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+        if (onShowQr != null) {
+            IconButton(onClick = onShowQr) {
+                Icon(Icons.Filled.QrCode, contentDescription = t("invite.links.show_qr"))
             }
         }
         if (onCopy != null) {

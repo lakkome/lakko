@@ -6384,7 +6384,7 @@
     },
     "invite.links.created": {
       "text": "Created {date}",
-      "comment": "One of the facts under a link in your list of invite links. {date} is a short date formatted for the interface language, such as \"16 Sep\"."
+      "comment": "One of the facts under a link in your list of invite links. {date} is a short date and time formatted for the interface language, such as \"16 Sep, 14:32\"."
     },
     "invite.links.desc": {
       "text": "Anyone who opens one of your links can send you a contact request until it expires or is used up.",
@@ -6443,10 +6443,6 @@
       "text": "Never",
       "comment": "Option of the Expires field: the link never expires."
     },
-    "invite.links.for_new_user": {
-      "text": "For someone new to Lakko",
-      "comment": "Fact under an invite link made for someone without an account yet (a referral link)."
-    },
     "invite.links.label_field": {
       "text": "Label (optional)",
       "comment": "Field of the new-invite-link form: a name for the link."
@@ -6474,10 +6470,6 @@
     "invite.links.new_badge": {
       "text": "New",
       "comment": "Small badge on the invite link you just created, in your list of invite links."
-    },
-    "invite.links.referral_option": {
-      "text": "For someone without a Lakko account yet",
-      "comment": "Checkbox of the new-invite-link form: the link is for someone who will sign up first."
     },
     "invite.links.revoked": {
       "text": "Link revoked.",
@@ -6536,7 +6528,7 @@
       "comment": "iOS name of the .lakkofeed file type (Info.plist document type), shown in Files and share sheets."
     },
     "ios.permission.camera": {
-      "text": "Lakko uses the camera to scan QR codes from devices you want to link to your account, to capture video for in-call streams, and to record video messages you choose to send. Everything the camera captures is end-to-end encrypted on your device before it is sent.",
+      "text": "Lakko uses the camera to scan QR codes of devices you want to link to your account and of Lakko links, to capture video for in-call streams, and to record video messages you choose to send. Everything the camera captures is end-to-end encrypted on your device before it is sent.",
       "comment": "iOS system permission prompt for camera access (Info.plist usage description). iOS shows it in its own alert, in the language iOS uses for Lakko, the first time Lakko asks. It must say why Lakko needs the access. No placeholders."
     },
     "ios.permission.face_id": {
@@ -8937,6 +8929,114 @@
       "text": "Who can find me",
       "comment": "Title of the Settings > Privacy screen that decides who can find the person by username or name and ask to be their contact.",
       "security_critical": true
+    },
+    "invite.links.show_qr": {
+      "text": "Show QR code",
+      "comment": "Button on a link in your list of invite links: shows the link as a QR code to scan."
+    },
+    "invite.links.qr_hint": {
+      "text": "Whoever scans this code can send you a contact request.",
+      "comment": "Under the QR code of an invite link."
+    },
+    "contacts.scan_qr": {
+      "text": "Scan QR code",
+      "comment": "Contacts action: opens the camera to scan a Lakko link shown as a QR code, such as someone's invite link."
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "This code is not a Lakko link. Try another code.",
+      "comment": "Shown on the scanner when the scanned QR code is not a Lakko invite, group or call link."
+    },
+    "invite.links.expires_option_custom": {
+      "text": "Custom",
+      "comment": "Option of the Expires field of the new-invite-link form: opens a number field and a unit choice."
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Custom",
+      "comment": "Option of the Uses field of the new-invite-link form: opens a number field."
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "Period",
+      "comment": "Number field shown when Expires is Custom: how many hours or days the link works."
+    },
+    "invite.links.unit_hours": {
+      "text": "Hours",
+      "comment": "Unit choice beside the custom period of a new invite link."
+    },
+    "invite.links.unit_days": {
+      "text": "Days",
+      "comment": "Unit choice beside the custom period of a new invite link."
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Number of people",
+      "comment": "Number field shown when Uses is Custom: how many people may use the link."
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "Enter a period from 1 hour to 365 days.",
+      "comment": "Shown under the custom period of a new invite link when the value is out of range."
+    },
+    "invite.links.error.custom_uses": {
+      "text": "Enter a number of people from 1 to {max}.",
+      "comment": "Shown under the custom number of people of a new invite link when the value is out of range. {max} is the largest allowed number, formatted for the interface language."
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} invites you to Lakko",
+      "comment": "Title of the contact invite page for a visitor who is not signed in. {name} is the inviter's display name, else @username, else the invite.contact.page.unnamed text."
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko is a messenger where every chat and call is end-to-end encrypted.",
+      "comment": "One line under the inviter on the contact invite page for a visitor who is not signed in, saying what Lakko is."
+    },
+    "invite.contact.page.create_account": {
+      "text": "Create an account",
+      "comment": "Primary button on the contact invite page for a visitor who is not signed in."
+    },
+    "invite.contact.page.have_account": {
+      "text": "I already have an account",
+      "comment": "Secondary button on the contact invite page for a visitor who is not signed in: goes to sign-in."
+    },
+    "invite.contact.page.dead_title": {
+      "text": "This invite link no longer works",
+      "comment": "Contact invite page, visitor not signed in, when the link was revoked, expired, used up, is unknown or is damaged. The inviter's name is not shown."
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Ask the person who sent it for a new one.",
+      "comment": "Line under 'This invite link no longer works'."
+    },
+    "invite.links.edit": {
+      "text": "Edit link",
+      "comment": "Accessible name of the pencil button on an invite link nobody can hold yet (never copied, never used): opens its terms."
+    },
+    "invite.links.edit_title": {
+      "text": "Link terms",
+      "comment": "Heading of the form that changes an invite link's label, expiry and number of people. Saving makes a new link and removes the old one."
+    },
+    "invite.links.edit_note": {
+      "text": "Saving makes a new link. The old one stops working.",
+      "comment": "One line on the invite link terms form."
+    },
+    "invite.links.delete": {
+      "text": "Delete link",
+      "comment": "Accessible name of the trash button on an invite link."
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Delete this link?",
+      "comment": "Confirmation before deleting an invite link that was copied or used."
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Anyone who already has it will no longer be able to use it.",
+      "comment": "Body of the confirmation before deleting an invite link that was copied or used."
+    },
+    "invite.links.deleted": {
+      "text": "Link deleted.",
+      "comment": "Notice after an invite link was deleted."
+    },
+    "invite.links.error.delete": {
+      "text": "Could not delete the link. Check your connection and try again.",
+      "comment": "Shown when deleting an invite link failed."
+    },
+    "invite.links.error.edit": {
+      "text": "Could not save the link. Check your connection and try again.",
+      "comment": "Shown when saving new terms for an invite link failed; the old link still works."
     }
   }
 }

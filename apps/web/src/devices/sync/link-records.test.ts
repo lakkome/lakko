@@ -25,6 +25,8 @@ function model(over: Partial<LinkRecordModel>): LinkRecordModel {
     maxUses: 0,
     uses: 0,
     revoked: false,
+    shared: false,
+    editable: true,
     mintedAtMs: 10,
     label: "",
     ...over,
@@ -92,6 +94,8 @@ describe("link records (ADR-0079 section 4)", () => {
     const id = new Uint8Array(16).fill(7);
     const bob = new Uint8Array(32).fill(0xb0);
     expect(s.linkAnswerVerdict(id, new Uint8Array(12).fill(8), bob, 0n)).toBe("accept");
+    // UX section 9: editable until copied or used, and a copy is final.
+    expect(readLinkRecords(s, LinkRecordKind.Contact)[0]?.editable).toBe(true);
     // A secret that differs in one byte never accepts.
     const wrong = new Uint8Array(12).fill(8);
     wrong[11] = 0;
@@ -103,6 +107,11 @@ describe("link records (ADR-0079 section 4)", () => {
     expect(read).toHaveLength(1);
     expect(read[0]?.uses).toBe(1);
     expect(read[0]?.label).toBe("home");
+    expect(read[0]?.editable).toBe(false);
+    expect(read[0]?.shared).toBe(false);
+    expect(s.markLinkShared(7n, id)).toBe(true);
+    expect(s.markLinkShared(8n, id)).toBe(false);
+    expect(readLinkRecords(s, LinkRecordKind.Contact)[0]?.shared).toBe(true);
     // A revocation is final: a later live write from another device loses.
     const other = new SyncedState();
     const envelope = s.linkRecordEnvelopeFor(id) as Uint8Array;

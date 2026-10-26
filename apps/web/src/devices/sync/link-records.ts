@@ -45,6 +45,11 @@ export interface LinkRecordModel {
   /** Requests accepted through the link so far. */
   readonly uses: number;
   readonly revoked: boolean;
+  /** Copied on one of the account's devices (final, 2026-10-26). */
+  readonly shared: boolean;
+  /** The link's terms may still be changed: not revoked, never copied,
+   *  never answered. The core's one rule (`LinkRecordEntry::editable`). */
+  readonly editable: boolean;
   readonly mintedAtMs: number;
   readonly label: string;
 }
@@ -96,6 +101,8 @@ export function readLinkRecords(synced: WasmSyncedState, contactKind: number): L
         maxUses: r.maxUses,
         uses: r.uses,
         revoked: r.revoked,
+        shared: r.shared,
+        editable: r.editable,
         mintedAtMs: Number(r.mintedAtMs),
         label: r.label,
       });

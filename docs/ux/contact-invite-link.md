@@ -47,10 +47,26 @@ Shown at `/i/<id>#<secret>` on web, and by the deep link on iOS and Android.
 No fingerprint, no safety number, no expiry, no use count. The safety number
 stays where it is today, on the contact's info screen, for anyone who wants it.
 
-**Signed out** (amended 2026-10-19). No inviter card at all: the first screen
-is the ordinary **Sign in** / **Create an account** choice. After either, the
-link is checked again: if it still works B sees the default page above; if it
-no longer works B lands on the Contacts screen (below).
+**Signed out** (amended 2026-10-26, replacing the 2026-10-19 rule that showed
+no card). A person with no account, or not signed in on this device, must see
+that someone invites them before being asked to sign in:
+
+- Avatar, then the title **Anna invites you to Lakko** (A's display name, else
+  `@username`, else "Someone"), A's `@username` under it when A has one, and
+  the label line when the link has one.
+- One line: **Lakko is a messenger where every chat and call is end-to-end
+  encrypted.**
+- Buttons: **Create an account** (primary) and **I already have an account**
+  (secondary). Both carry the link as the return, so after sign-up or sign-in
+  the link is opened again: still working, the default page above; no longer
+  working, the Contacts screen (below).
+- A link that does not work, opened signed out: title **This invite link no
+  longer works**, line **Ask the person who sent it for a new one.**, and the
+  same two buttons with no return.
+
+The card is built on the device from the link itself (the ledger fetch needs no
+session and the name is sealed under the link's secret); nothing is consumed
+and nothing is sent until Add.
 
 **Adding.** **Add** shows a spinner in place of its label and disables both
 buttons until the request is written. Then the page closes into the chat with A
@@ -189,3 +205,38 @@ The page, the copy and the states are the same on web, iOS and Android. Web
 shows the page as a centred card; iOS and Android as a full-screen sheet opened
 by the deep link. The strings go into the catalog (`l10n/catalog`) once and are
 used by all three.
+
+## 9. A's list of links (2026-10-26)
+
+The Invite links screen (Contacts) lists the account's live links, newest
+first, on every device of the account.
+
+- **Create link** makes a link at once with the default terms (no label,
+  7 days, one person) and puts it at the top of the list. There is no form
+  before it.
+- Each row: the label when there is one (no title line otherwise), then the
+  facts (created date and time, time left, the limit or the uses left), then
+  the link, **Copy**, **QR code** and the trash button **Delete link**.
+- **Edit link** (a pencil) is shown only while nobody can hold the link: it
+  was never copied on any of the account's devices and nobody was accepted
+  through it. One rule decides it for all three clients
+  (`LinkRecordEntry::editable` in `lakko-sync`). Showing the QR code does not
+  end editing; a scan leads to Add, and a use ends it.
+- The pencil opens the link's terms: label, Expires (1 / 7 / 30 days, never,
+  custom 1 hour to 365 days), Uses (one, up to 10, unlimited, custom 1 to
+  10 000), prefilled with the link's terms, and the line **Saving makes a new
+  link. The old one stops working.** **Save** mints a new link with those
+  terms first, then deletes the old one, so a failure leaves the old link
+  working and says **Could not save the link. Check your connection and try
+  again.**; **Cancel** changes nothing.
+- **Copy** marks the link copied in this device's synced state before the
+  text reaches the clipboard; the mark goes to the account's other devices in
+  the background (Copy never waits on the network; a failed send is retried),
+  and from then on no device shows the pencil.
+- **Delete link** removes the link from the list on every device and makes
+  it stop working (the old Revoke). A link that was never copied and never
+  used is deleted at once; a link that was copied or used asks first, in a
+  Lakko dialog: **Delete this link?** / **Anyone who already has it will no
+  longer be able to use it.** / **Delete** / **Cancel**. After it: **Link
+  deleted.**; a failure: **Could not delete the link. Check your connection
+  and try again.**

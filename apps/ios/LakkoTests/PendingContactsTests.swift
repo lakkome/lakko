@@ -243,4 +243,74 @@ final class PendingContactsTests: XCTestCase {
         XCTAssertNil(LinkRecords.effectiveLimit(maxUses: UInt32.max))
         XCTAssertEqual(LinkRecords.effectiveLimit(maxUses: 0), 1)
     }
+
+    // MARK: - Signed out (UX section 3, amended 2026-10-26)
+
+    private func preview(display: String?, username: String?, label: String = "") -> InvitePreview {
+        InvitePreview(displayName: display, username: username, label: label,
+                      ownerSignaturePubkey: Data(repeating: 9, count: 32))
+    }
+
+    /// A live link opened signed out shows the inviter card and keeps the
+    /// link parked, so the session that lands opens the signed-in page.
+    @MainActor
+    func testSignedOutLiveLinkShowsTheInviterAndStaysParked() async {
+        let anna = preview(display: "Anna", username: "anna", label: "Book club")
+        let state = SignedOutInviteViewModel.state(for: .preview(anna))
+        XCTAssertEqual(state, .preview(anna))
+        XCTAssertTrue(state.keepsLinkParked)
+        XCTAssertEqual(anna.statedName, "Anna")
+        XCTAssertEqual(SignedOutInviteViewModel.usernameLine(anna), "@anna")
+
+        var dropped = 0
+        let vm = SignedOutInviteViewModel(slug: "s", preview: { _ in .preview(anna) }, dropLink: { dropped += 1 })
+        await vm.open()
+        XCTAssertEqual(vm.state, .preview(anna))
+        vm.leave()
+        XCTAssertEqual(dropped, 0, "a live link must stay parked for the session that lands")
+    }
+
+    /// The title's name: the display name, else `@username` (with no second
+    /// username line), else nothing (the catalog's "Someone").
+    func testSignedOutTitleNameFallsBackToUsernameThenNothing() {
+        let onlyUsername = preview(display: "  ", username: "anna")
+        XCTAssertEqual(onlyUsername.statedName, "@anna")
+        XCTAssertNil(SignedOutInviteViewModel.usernameLine(onlyUsername))
+        let nameless = preview(display: nil, username: nil)
+        XCTAssertNil(nameless.statedName)
+        XCTAssertNil(SignedOutInviteViewModel.usernameLine(nameless))
+    }
+
+    /// A dead link opened signed out says so, and either button drops it.
+    @MainActor
+    func testSignedOutDeadLinkSaysSoAndIsDropped() async {
+        let state = SignedOutInviteViewModel.state(for: .dead)
+        XCTAssertEqual(state, .dead)
+        XCTAssertFalse(state.keepsLinkParked)
+
+        var dropped = 0
+        let vm = SignedOutInviteViewModel(slug: "s", preview: { _ in .dead }, dropLink: { dropped += 1 })
+        await vm.open()
+        XCTAssertEqual(vm.state, .dead)
+        vm.leave()
+        XCTAssertEqual(dropped, 1)
+    }
+
+    /// A refusal or a network failure uses the signed-in page's states; the
+    /// link is not known dead, so it stays parked.
+    @MainActor
+    func testSignedOutRateLimitAndFailureKeepTheLinkAndRetry() async {
+        XCTAssertEqual(SignedOutInviteViewModel.state(for: .rateLimited), .rateLimited)
+        XCTAssertEqual(SignedOutInviteViewModel.state(for: .failed), .openFailed)
+        XCTAssertTrue(SignedOutInviteViewModel.State.rateLimited.keepsLinkParked)
+        XCTAssertTrue(SignedOutInviteViewModel.State.openFailed.keepsLinkParked)
+
+        let anna = preview(display: "Anna", username: nil)
+        var answers: [InvitePreviewResult] = [.failed, .preview(anna)]
+        let vm = SignedOutInviteViewModel(slug: "s", preview: { _ in answers.removeFirst() }, dropLink: {})
+        await vm.open()
+        XCTAssertEqual(vm.state, .openFailed)
+        await vm.retry()
+        XCTAssertEqual(vm.state, .preview(anna))
+    }
 }

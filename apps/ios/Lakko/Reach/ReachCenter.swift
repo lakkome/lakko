@@ -491,7 +491,7 @@ public final class ReachCenter: ObservableObject {
         record.registeredB64 = diff.add.map { $0.publicKey.base64EncodedString() }
         record.registeredOpen = open
         record.replies.removeAll { $0.expiresAtMs <= now }
-        record.links.removeAll { $0.expiresAtMs <= now }
+        record.links.removeAll { !$0.isLive(nowMs: now) }
         persist()
         status = .applied
         await applyEveryone()
@@ -885,7 +885,8 @@ public final class ReachCenter: ObservableObject {
 
     /// A `link` grant for a new `/i/` or `/c/` link, REGISTERED before it is
     /// returned (a link shared before its key is registered would be refused).
-    public func newLinkGrant(linkId: Data, expiresAtMs: UInt64) async throws -> FfiReachGrant {
+    /// `expiresAtMs` `nil` = the link never expires.
+    public func newLinkGrant(linkId: Data, expiresAtMs: UInt64?) async throws -> FfiReachGrant {
         guard let seed = accountSeed else { throw ReachError.notActive }
         let grant = try deriveReachGrant(
             accountSeed: seed, class: .link, scopeId: linkId, version: ReachRules.initialVersion)

@@ -6078,10 +6078,6 @@
       "text": "Asla",
       "status": "machine"
     },
-    "invite.links.for_new_user": {
-      "text": "Lakko'da yeni olan biri için",
-      "status": "machine"
-    },
     "invite.links.label_field": {
       "text": "Etiket (isteğe bağlı)",
       "status": "machine"
@@ -6108,10 +6104,6 @@
     },
     "invite.links.new_badge": {
       "text": "Yeni",
-      "status": "machine"
-    },
-    "invite.links.referral_option": {
-      "text": "Henüz Lakko hesabı olmayan biri için",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -8396,6 +8388,114 @@
     },
     "invite.contact.page.answer_failed": {
       "text": "{name} ile bağlantı kurulamadı. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "QR kodunu göster",
+      "status": "machine"
+    },
+    "invite.links.qr_hint": {
+      "text": "Bu kodu tarayan herkes size kişi isteği gönderebilir.",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "QR kodu tara",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "Bu kod bir Lakko bağlantısı değil. Başka bir kod deneyin.",
+      "status": "machine"
+    },
+    "invite.links.expires_option_custom": {
+      "text": "Özel",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Özel",
+      "status": "machine"
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "Süre",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "Saat",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "Gün",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Kişi sayısı",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "1 saat ile 365 gün arasında bir süre girin.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "1 ile {max} arasında bir kişi sayısı girin.",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} sizi Lakko'ya davet ediyor",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko, her sohbetin ve aramanın uçtan uca şifrelendiği bir mesajlaşma uygulamasıdır.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Hesap oluştur",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "Zaten bir hesabım var",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Bu davet bağlantısı artık çalışmıyor",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Gönderen kişiden yenisini isteyin.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "Bağlantıyı düzenle",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "Bağlantı koşulları",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "Kaydettiğinizde yeni bir bağlantı oluşur. Eskisi çalışmaz.",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "Bağlantıyı sil",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Bu bağlantı silinsin mi?",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Bağlantıya zaten sahip olan kişi artık onu kullanamaz.",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "Bağlantı silindi.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "Bağlantı silinemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "Bağlantı kaydedilemedi. Bağlantınızı kontrol edip tekrar deneyin.",
       "status": "machine"
     }
   }

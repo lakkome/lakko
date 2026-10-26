@@ -1380,14 +1380,14 @@ public final class ContactsRepository: ObservableObject {
 
     /// Generate a fresh capability-based invite link.
     ///
-    /// 1.14e7 ships with **fixed defaults** matching Android
-    /// 1.15e10: 7-day expiry, single-use (`maxUses = 0`),
-    /// non-bootstrap-referral. A custom-config sheet (user-typed
-    /// label / expiry / max_uses) layers on later when UX pushes
-    /// back.
+    /// The Invite links sheet's create form picks the label, the expiry
+    /// (``InviteExpiry/never`` puts the `NEVER_EXPIRES` sentinel `0` in the
+    /// capability and the ledger row) and `maxUses` (`0` single use,
+    /// `UInt32.max` unlimited). The defaults are 7 days, single use,
+    /// non-bootstrap-referral.
     public func generateInviteLink(
         label: String = "",
-        expiryMillisFromNow: Int64 = ContactsRepository.defaultInviteExpiryMs,
+        expiry: InviteExpiry = .fromNow(ms: ContactsRepository.defaultInviteExpiryMs),
         maxUses: UInt32 = ContactsRepository.singleUse,
         bootstrapReferral: Bool = false
     ) async throws -> GeneratedInvite {
@@ -1399,7 +1399,8 @@ public final class ContactsRepository: ObservableObject {
             )
         }
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        let expiryMs = nowMs + expiryMillisFromNow
+        // UNIX millis, or 0 — the `NEVER_EXPIRES` sentinel.
+        let expiryMs = expiry.expiryMs(nowMs: nowMs)
 
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         // ADR-0060 section 6 — the link carries a `link` grant scoped to this
@@ -1410,7 +1411,7 @@ public final class ContactsRepository: ObservableObject {
         let linkGrant: FfiReachGrant
         do {
             linkGrant = try await ReachCenter.shared.newLinkGrant(
-                linkId: linkId, expiresAtMs: UInt64(expiryMs))
+                linkId: linkId, expiresAtMs: expiryMs == 0 ? nil : UInt64(expiryMs))
         } catch {
             throw ContactsError.wrap(error)
         }
@@ -1527,6 +1528,26 @@ public final class ContactsRepository: ObservableObject {
     /// `DELETE` endpoint, signed by the link's own revocation seed from this
     /// device's record (ADR-0078 section 10), + drop the row from
     /// ``ContactsState/outstandingInvites``.
+    /// The account's synced link records (ADR-0079 section 4) and their
+    /// changes; empty / `nil` while the register is not wired. The Invite
+    /// links sheet reads `shared` and `editable` from them.
+    public var linkRecords: [LinkRecord] { deviceGroupSync?.linkRecords ?? [] }
+    public var linkRecordsPublisher: AnyPublisher<[LinkRecord], Never>? {
+        deviceGroupSync?.$linkRecords.eraseToAnyPublisher()
+    }
+
+    /// Copy (`docs/ux/contact-invite-link.md` section 9): mark the contact
+    /// link at `slug` copied in the synced register before its text reaches
+    /// the clipboard, so no device of the account offers to edit it any more.
+    /// `false` when the register holds no record for it or nothing changed
+    /// (already copied).
+    @discardableResult
+    public func markInviteLinkShared(slug: String) async -> Bool {
+        guard let record = LinkRecords.contactRecord(slug: slug, in: linkRecords),
+              !record.shared else { return false }
+        return await deviceGroupSync?.markLinkShared(linkId: record.linkId) ?? false
+    }
+
     public func revokeInviteLink(blobId: Data) async throws -> RevokeInviteResult {
         guard let secrets = authRepository.identitySecrets else {
             throw ContactsError.wrap(
@@ -1786,7 +1807,9 @@ public final class ContactsRepository: ObservableObject {
                     blobIdSlug: link.slug,
                     expiryMs: UInt64(max(0, link.expiryMs)),
                     maxUses: UInt32(clamping: link.maxUses),
-                    usedCount: 0,
+                    // Not known here: the use count lives in the synced
+                    // register, so the row shows the limit, not uses left.
+                    usedCount: nil,
                     label: link.label,
                     bootstrapReferral: link.bootstrapReferral,
                     createdAt: iso.string(from: Date(timeIntervalSince1970: TimeInterval(link.mintedAtMs) / 1000)))
@@ -1808,10 +1831,14 @@ public final class ContactsRepository: ObservableObject {
 
     /// Default invite expiry — 7 days. Mirrors the Android +
     /// Web sides.
-    public static let defaultInviteExpiryMs: Int64 = 7 * 24 * 60 * 60 * 1000
+    public nonisolated static let defaultInviteExpiryMs: Int64 = 7 * 24 * 60 * 60 * 1000
 
     /// Server-side sentinel for `max_uses = single-use`.
-    public static let singleUse: UInt32 = 0
+    public nonisolated static let singleUse: UInt32 = 0
+
+    /// Wire `expiry_ms` sentinel for a link that never expires
+    /// (`NEVER_EXPIRES`).
+    public nonisolated static let neverExpires: Int64 = 0
 
     /// URL prefix Lakko shares its invite links under: the web origin
     /// of the stack this build talks to plus the web
@@ -1842,27 +1869,16 @@ public final class ContactsRepository: ObservableObject {
         // ADR-0028 amendment 2026-09-28 — `token` is `slug#fragment`; a
         // missing or malformed fragment is a damaged link, which the page
         // shows exactly like one that no longer works.
-        let parts = InviteLinkSecret.split(token)
-        guard let blobId = Self.parseInviteSlug(parts.base),
-              let linkSecret = InviteLinkSecret.read(parts.fragment) else { return .dead }
         let bound = binding.capture()
-        let sealed: Data?
-        do {
-            sealed = try await authenticatedDiscoveryClient().fetchInvite(blobId: blobId)
-        } catch {
-            if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
-            return .failed(message: (error as? LocalizedError)?.errorDescription ?? "fetch failed")
-        }
+        let fetched = await fetchAndOpenLink(token: token, client: authenticatedDiscoveryClient())
         guard bound.isCurrent else { return .requiresReauth }
-        guard let sealed else { return .dead }
-        let capability: InviteCapability
-        do {
-            capability = try InviteCapability.openLink(sealed: sealed, linkSecret: linkSecret)
-        } catch {
-            return .dead
+        let blobId: Data, linkSecret: Data, capability: InviteCapability
+        switch fetched {
+        case .opened(let b, let s, let c): (blobId, linkSecret, capability) = (b, s, c)
+        case .dead: return .dead
+        case .rateLimited: return .rateLimited
+        case .failed(let message): return .failed(message: message)
         }
-        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
-        guard capability.isValidNow(nowMs: nowMs) else { return .dead }
         let ownerAccountId = capability.ownerAccountId()
         let opened = OpenedInvite(
             blobId: blobId,
@@ -1878,6 +1894,57 @@ public final class ContactsRepository: ObservableObject {
             label: capability.label(),
             bootstrapReferral: capability.bootstrapReferral())
         return inviteOpenResult(for: opened)
+    }
+
+    /// The ledger row of an `/i/` link opened under its fragment's secret.
+    private enum LinkFetch {
+        case opened(blobId: Data, linkSecret: Data, capability: InviteCapability)
+        /// Revoked, expired, used up, unknown or damaged.
+        case dead
+        case rateLimited
+        case failed(String)
+    }
+
+    /// Fetch the sealed blob of `token` (`slug#fragment`) and open it under
+    /// the fragment's secret. The ledger GET needs no session; nothing is
+    /// spent and nothing is sent. A missing or malformed fragment is a
+    /// damaged link (ADR-0028 amendment 2026-09-28).
+    private func fetchAndOpenLink(token: String, client: DiscoveryClient) async -> LinkFetch {
+        let parts = InviteLinkSecret.split(token)
+        guard let blobId = Self.parseInviteSlug(parts.base),
+              let linkSecret = InviteLinkSecret.read(parts.fragment) else { return .dead }
+        let sealed: Data?
+        do {
+            sealed = try await client.fetchInvite(blobId: blobId)
+        } catch {
+            if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
+            return .failed((error as? LocalizedError)?.errorDescription ?? "fetch failed")
+        }
+        guard let sealed,
+              let capability = try? InviteCapability.openLink(sealed: sealed, linkSecret: linkSecret),
+              capability.isValidNow(nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+        else { return .dead }
+        return .opened(blobId: blobId, linkSecret: linkSecret, capability: capability)
+    }
+
+    /// The signed-out invite page (`docs/ux/contact-invite-link.md` section
+    /// 3, "Signed out"; ADR-0079 amendment of 2026-10-26): open the link with
+    /// no session, only to say who invites. The ledger serves the sealed blob
+    /// without a session and it is opened on this device; nothing is spent
+    /// and nothing is sent. Signing in or creating an account then lands on
+    /// the default page through the parked link.
+    public func previewInviteLink(slug token: String) async -> InvitePreviewResult {
+        switch await fetchAndOpenLink(token: token, client: discoveryClientFactory()) {
+        case .opened(_, _, let capability):
+            return .preview(InvitePreview(
+                displayName: capability.inviterDisplayName(), username: capability.inviterUsername(),
+                label: capability.label(), ownerSignaturePubkey: capability.ownerSignaturePubkey()))
+        case .dead: return .dead
+        case .rateLimited: return .rateLimited
+        case .failed(let message):
+            NSLog("[invite] signed-out open failed: \(message)")
+            return .failed
+        }
     }
 
     /// The page's state for a link already opened (``InvitePageDecision``),
@@ -2411,6 +2478,28 @@ public enum InviteOpenResult: Equatable {
     case failed(message: String)
 }
 
+/// What the signed-out invite page shows of a link (amended 2026-10-26).
+public struct InvitePreview: Equatable {
+    public let displayName: String?
+    public let username: String?
+    public let label: String
+    public let ownerSignaturePubkey: Data
+
+    /// The name the link states (``OpenedInvite/statedName(displayName:username:)``).
+    public var statedName: String? {
+        OpenedInvite.statedName(displayName: displayName, username: username)
+    }
+}
+
+/// What opening a link with no session gave the signed-out invite page.
+public enum InvitePreviewResult: Equatable {
+    case preview(InvitePreview)
+    /// Revoked, expired, used up, unknown or damaged: one state.
+    case dead
+    case rateLimited
+    case failed
+}
+
 /// What **Add** did.
 /// A step of **Add** that ends it with a result of its own (a refused
 /// consume, a session that moved).
@@ -2679,6 +2768,22 @@ public struct SentContactRequest: Equatable, Codable {
 
 /// An invite link the owner has just generated this session.
 ///
+/// When a new invite link stops working: a period from the moment it is
+/// minted, or never (the wire `NEVER_EXPIRES` sentinel `0`).
+public enum InviteExpiry: Equatable, Sendable {
+    case fromNow(ms: Int64)
+    case never
+
+    /// The wire `expiry_ms` for a link minted at `nowMs`: UNIX millis, or `0`
+    /// for ``never``.
+    public func expiryMs(nowMs: Int64) -> Int64 {
+        switch self {
+        case .fromNow(let ms): return nowMs + ms
+        case .never: return ContactsRepository.neverExpires
+        }
+    }
+}
+
 /// Produced by ``ContactsRepository/generateInviteLink(...)``
 /// and cleared by ``ContactsRepository/revokeInviteLink(blobId:)``
 /// (1.14e7, landed). Surfaced via

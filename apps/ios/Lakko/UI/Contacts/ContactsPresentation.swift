@@ -152,14 +152,20 @@ struct InviteLinkRow: Equatable, Identifiable {
     let expiryMs: UInt64
     /// The limit the link was minted with ("single-use", "up to 5 uses",
     /// "unlimited"), in the interface language of the moment the rows were
-    /// built. ADR-0078 section 10: the list is this device's own records, so
-    /// how many uses are left is not known here.
+    /// built.
     let limit: String
+    /// How many uses a multi-use link has left, when the use count is known
+    /// (the ADR-0079 synced register carries it). `nil` for a single-use or
+    /// unlimited link, and when the count is not known: the row then shows
+    /// ``limit`` instead.
+    var usesLeft: UInt32? = nil
     let origin: Origin
 
     var id: String { slug }
 
-    var title: String { label.isEmpty ? Localization.text("chat.invite_link.label") : label }
+    /// The label the person gave the link, or `nil`: a link without a label
+    /// has no title line, its facts lead the row (no placeholder name).
+    var title: String? { label.isEmpty ? nil : label }
 }
 
 enum InviteLinkRows {
@@ -185,6 +191,7 @@ enum InviteLinkRows {
                 createdAt: parseCreatedAt(invite.createdAt),
                 expiryMs: invite.expiryMs,
                 limit: limitCopy(maxUses: invite.maxUses),
+                usesLeft: usesLeft(maxUses: invite.maxUses, used: invite.usedCount),
                 origin: .server)
         }
         let known = Set(rows.map(\.slug))
@@ -224,6 +231,22 @@ enum InviteLinkRows {
         return InviteLinkSecret.link(base: ContactsRepository.inviteUrlPrefix + slug, secret: secret)
     }
 
+    /// Uses left of a multi-use link, or `nil` when the link is single-use or
+    /// unlimited, or the use count is not known.
+    static func usesLeft(maxUses: UInt32, used: UInt32?) -> UInt32? {
+        guard let used, maxUses > 1, maxUses != UInt32.max else { return nil }
+        return maxUses - min(used, maxUses)
+    }
+
+    /// The use fact under a link: "N uses left" when known, else the limit the
+    /// link was minted with.
+    static func useFact(_ row: InviteLinkRow) -> String {
+        if let left = row.usesLeft {
+            return Localization.text("invite.links.uses_left", counts: ["count": UInt64(left)])
+        }
+        return row.limit
+    }
+
     /// Sentinels as `lakko-contacts` defines them: 0 (or 1) = single use,
     /// `UInt32.max` = unlimited, else up to N uses (the web
     /// `describeInviteLimit`).
@@ -239,17 +262,33 @@ enum InviteLinkRows {
         if expiryMs == 0 { return Localization.text("invite.links.never_expires") }
         let expiry = Date(timeIntervalSince1970: TimeInterval(expiryMs) / 1000)
         if expiry <= now { return Localization.text("invite.links.expired") }
-        let delta = expiry.timeIntervalSince(now)
-        let days = Int(delta / 86_400)
-        if days >= 1 {
-            return Localization.text("invite.links.expires_days", counts: ["count": UInt64(days)])
+        switch remaining(expiry.timeIntervalSince(now)) {
+        case .days(let n):
+            return Localization.text("invite.links.expires_days", counts: ["count": UInt64(n)])
+        case .hours(let n):
+            return Localization.text("invite.links.expires_hours", counts: ["count": UInt64(n)])
+        case .minutes(let n):
+            return Localization.text("invite.links.expires_minutes", counts: ["count": UInt64(n)])
         }
-        let hours = Int(delta / 3_600)
-        if hours >= 1 {
-            return Localization.text("invite.links.expires_hours", counts: ["count": UInt64(hours)])
-        }
-        let minutes = max(1, Int(delta / 60))
-        return Localization.text("invite.links.expires_minutes", counts: ["count": UInt64(minutes)])
+    }
+
+    /// The time left until a link expires, in the one unit a row shows.
+    enum Remaining: Equatable {
+        case minutes(Int)
+        case hours(Int)
+        case days(Int)
+    }
+
+    /// The rule all three clients share: minutes rounded up while under an
+    /// hour; past that, hours rounded half up while under a day; then days
+    /// rounded half up. A 7-day link made an hour ago reads 7d, not 6d.
+    /// `delta` is in seconds and positive.
+    static func remaining(_ delta: TimeInterval) -> Remaining {
+        let minutes = max(1, Int((delta / 60).rounded(.up)))
+        if minutes < 60 { return .minutes(minutes) }
+        let hours = Int((delta / 3_600 + 0.5).rounded(.down))
+        if hours < 24 { return .hours(hours) }
+        return .days(Int((delta / 86_400 + 0.5).rounded(.down)))
     }
 
     /// The server's `created_at` string: ISO 8601 with or without fractional

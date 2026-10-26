@@ -78,6 +78,7 @@ import me.lakko.app.auth.SessionAccount
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.contacts.InviteIntake
+import me.lakko.app.contacts.publishLink
 import me.lakko.app.feed.reporting
 import me.lakko.app.push.LakkoMessagingService
 import me.lakko.app.push.PushIntake
@@ -103,6 +104,7 @@ import me.lakko.app.ui.contacts.ContactsScreen
 import me.lakko.app.ui.contacts.ContactsViewModel
 import me.lakko.app.ui.contacts.InviteLandingScreen
 import me.lakko.app.ui.contacts.InviteLandingViewModel
+import me.lakko.app.ui.contacts.keepsLinkParked
 import me.lakko.app.transport.AntiCensorshipManager
 import me.lakko.app.ui.devices.DevicesScreen
 import me.lakko.app.ui.settings.SettingsScreen
@@ -295,9 +297,7 @@ class MainActivity : ComponentActivity() {
         // notification carries the wake extras
         // (EXTRA_WAKE_GROUP / EXTRA_WAKE_POINTER). `onNewIntent`
         // below handles the warm-start variants of both.
-        handleInviteIntent(intent)
-        handleGroupJoinIntent(intent)
-        handleCallJoinIntent(intent)
+        handleLakkoLinkIntent(intent)
         handleFeedImportIntent(intent)
         handleFeedFileIntent(intent)
         handleWakeIntent(intent)
@@ -392,9 +392,7 @@ class MainActivity : ComponentActivity() {
         // tree doesn't observe `getIntent()` directly — we
         // publish into the appropriate intake whose StateFlow
         // drives the re-render.
-        handleInviteIntent(intent)
-        handleGroupJoinIntent(intent)
-        handleCallJoinIntent(intent)
+        handleLakkoLinkIntent(intent)
         handleFeedImportIntent(intent)
         handleFeedFileIntent(intent)
         handleWakeIntent(intent)
@@ -403,61 +401,23 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Extract an invite slug from [intent]'s `data` URI when
-     * the URL matches `https?://lakko.me/i/<slug>`, then hand
-     * it to [InviteIntake.publish] so the Compose router can
-     * navigate to the landing screen.
+     * An opened `https?://lakko.me/{i,g,c}/<slug>#<secret>` app link: read by
+     * [me.lakko.app.contacts.lakkoLinkFromPath] and handed to [InviteIntake]
+     * so the Compose router opens the matching landing. A QR code scanned on
+     * the Contacts screen goes through the same two functions.
      *
-     * Defensive against:
-     *   * Non-VIEW intents (LAUNCHER taps land here too on
-     *     every restart with the same Intent stored as the
-     *     "last intent" — those don't carry a `data` URI
-     *     unless the user actually deep-linked in).
-     *   * Wrong-host URLs (the manifest filter narrows to
-     *     `lakko.me`, but if the user opens the same URL on a
-     *     self-hosted mirror that happens to match the http
-     *     filter we still want to handle it).
-     *   * Empty or whitespace slugs (the manifest's
-     *     `pathPrefix="/i/"` allows `/i/` with no slug at all
-     *     — extract to "" + skip).
+     * Non-VIEW intents (a launcher tap re-delivering the last intent) and a
+     * path with an empty slug (the manifest's `pathPrefix` allows `/i/`
+     * alone) are ignored. The `#<link secret>` fragment travels with the
+     * slug; `Uri.fragment` is decoded and never sent. A link that lost it is
+     * refused as damaged on the landing, not here.
      */
-    private fun handleInviteIntent(intent: Intent) {
+    private fun handleLakkoLinkIntent(intent: Intent) {
         if (intent.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
         val path = uri.path ?: return
-        // Manifest filter pinned `pathPrefix="/i/"`; the slug
-        // is everything after that. `substringAfter` returns
-        // the original string when the separator is missing —
-        // guard with a startsWith check first.
-        if (!path.startsWith("/i/")) return
-        val slug = path.removePrefix("/i/").trim().removeSuffix("/")
-        if (slug.isEmpty()) return
-        // Sealed links (2026-09-28): the `#<link secret>` fragment opens the
-        // link, so it travels with the slug as one argument; a link that lost
-        // it is refused as damaged on the landing, before any request.
-        inviteIntake.publish(
-            me.lakko.app.discovery.InviteLinkArgument(slug, uri.fragment?.takeIf { it.isNotBlank() }).encode(),
-        )
-    }
-
-    /**
-     * ADR-0028 (G-3) — extract a group join-ticket slug from [intent]'s `data`
-     * URI when the URL matches `https?://lakko.me/g/<slug>`, then hand it to
-     * [InviteIntake.publishGroupJoin]. Mirror of [handleInviteIntent] for the
-     * `/g/` deep-link.
-     */
-    private fun handleGroupJoinIntent(intent: Intent) {
-        if (intent.action != Intent.ACTION_VIEW) return
-        val uri = intent.data ?: return
-        val path = uri.path ?: return
-        if (!path.startsWith("/g/")) return
-        val slug = path.removePrefix("/g/").trim().removeSuffix("/")
-        if (slug.isEmpty()) return
-        // Sealed links — the `#<link secret>` fragment opens the link and its
-        // preview. It is read here and nowhere else: `Uri.fragment` is decoded
-        // and never sent. A URL that lost it, or carries a wrong one, is
-        // refused as damaged on the landing, not here.
-        inviteIntake.publishGroupJoin(slug, uri.fragment?.takeIf { it.isNotBlank() })
+        val link = me.lakko.app.contacts.lakkoLinkFromPath(path, uri.fragment) ?: return
+        inviteIntake.publishLink(link)
     }
 
     /**
@@ -491,28 +451,6 @@ class MainActivity : ComponentActivity() {
             else -> null
         } ?: return
         me.lakko.app.ui.feed.FeedImportIntake.publishFile(uri)
-    }
-
-    /**
-     * ADR-0032 (G-21/G-22) — extract a multi-joiner call-invite slug from
-     * [intent]'s `data` URI when the URL matches `https?://lakko.me/c/<slug>`,
-     * then hand it to [InviteIntake.publishCallJoin]. Mirror of
-     * [handleInviteIntent] for the `/c/` deep-link. Unlike the other two, the
-     * call-join landing is a PUBLIC route honoured in any auth state (an
-     * anonymous visitor gets the ADR-0032 guest-join path).
-     */
-    private fun handleCallJoinIntent(intent: Intent) {
-        if (intent.action != Intent.ACTION_VIEW) return
-        val uri = intent.data ?: return
-        val path = uri.path ?: return
-        if (!path.startsWith("/c/")) return
-        val slug = path.removePrefix("/c/").trim().removeSuffix("/")
-        if (slug.isEmpty()) return
-        // Sealed links: the fragment opens the capability and travels with
-        // the slug; the landing refuses a link without it as damaged.
-        inviteIntake.publishCallJoin(
-            me.lakko.app.discovery.InviteLinkArgument(slug, uri.fragment?.takeIf { it.isNotBlank() }).encode(),
-        )
     }
 
     /**
@@ -781,15 +719,46 @@ private fun AppRoot(
     when (val current = state) {
         AuthState.Loading -> InsetRoot { LoadingScreen() }
         is AuthState.Anon -> InsetRoot {
-            // ADR-0079 (amended 2026-10-19) - a tapped `/i/` link from a
-            // person who is not signed in shows no inviter card: the ordinary
-            // sign-in screen. The slug stays parked; once a session lands the
-            // link is checked again (live -> the invite page, dead -> Contacts).
-            AnonRoot(
-                repository = authRepository,
-                cachedUsername = current.cachedUsername,
-                startRoute = null,
-            )
+            // ADR-0079 (amended 2026-10-26) - a tapped `/i/` link from a
+            // person who is not signed in shows the inviter card first, with
+            // Create an account / I already have an account. A live link stays
+            // parked, so once a session lands it is opened again (live -> the
+            // invite page, dead -> Contacts); a dead link is dropped.
+            val anonInviteSlug by inviteIntake.pendingInviteSlug.collectAsStateWithLifecycle()
+            // The parked link the visitor already chose an account for, and
+            // the screen chosen (sign up or sign in).
+            var answeredInviteSlug by androidx.compose.runtime.saveable.rememberSaveable {
+                androidx.compose.runtime.mutableStateOf<String?>(null)
+            }
+            var anonStartRoute by androidx.compose.runtime.saveable.rememberSaveable {
+                androidx.compose.runtime.mutableStateOf<String?>(null)
+            }
+            val parkedInvite = anonInviteSlug
+            if (parkedInvite != null && parkedInvite != answeredInviteSlug) {
+                // Back drops the link and leaves the ordinary Welcome screen.
+                androidx.activity.compose.BackHandler { inviteIntake.consume() }
+                val choose = { route: String, page: me.lakko.app.ui.contacts.SignedOutInviteState ->
+                    anonStartRoute = route
+                    if (page.keepsLinkParked) {
+                        answeredInviteSlug = parkedInvite
+                    } else {
+                        answeredInviteSlug = null
+                        inviteIntake.consume()
+                    }
+                }
+                me.lakko.app.ui.contacts.SignedOutInviteScreen(
+                    slug = parkedInvite,
+                    preview = { contactsRepository.previewInviteLink(it) },
+                    onCreateAccount = { page -> choose(AnonRoutes.SIGNUP, page) },
+                    onHaveAccount = { page -> choose(AnonRoutes.LOGIN, page) },
+                )
+            } else {
+                AnonRoot(
+                    repository = authRepository,
+                    cachedUsername = current.cachedUsername,
+                    startRoute = anonStartRoute,
+                )
+            }
         }
         // Signed in, but this device does not hold the account's keys:
         // the restore prompt (another device, a passkey that carries the
@@ -2187,6 +2156,9 @@ private fun SessionRoot(
                         // docs/ux/who-can-find-me.md section 6.1 — the same
                         // people search as the Chats field, people only.
                         peopleSearch = peopleSearch,
+                        // A scanned /i/, /g/ or /c/ link takes the route an
+                        // opened app link takes.
+                        onScannedLink = { link -> inviteIntake.publishLink(link) },
                     )
                 }
                 // docs/ux/navigation.md section 5 — Calls: recent calls across
@@ -2922,13 +2894,23 @@ private fun AnonRoot(
     repository: AuthRepository,
     cachedUsername: String?,
     /** The screen the signed-out invite page chose (sign in or create an
-     *  account), or `null` for Welcome. */
+     *  account), or `null` for Welcome. Opened over Welcome, so Back from it
+     *  returns there. */
     startRoute: String? = null,
 ) {
     val appContext = LocalContext.current.applicationContext
     val nav = rememberNavController()
+    var startRouteOpened by androidx.compose.runtime.saveable.rememberSaveable {
+        androidx.compose.runtime.mutableStateOf(false)
+    }
+    LaunchedEffect(startRoute) {
+        if (startRoute != null && !startRouteOpened) {
+            startRouteOpened = true
+            nav.navigate(startRoute) { launchSingleTop = true }
+        }
+    }
 
-    NavHost(navController = nav, startDestination = startRoute ?: AnonRoutes.WELCOME) {
+    NavHost(navController = nav, startDestination = AnonRoutes.WELCOME) {
         composable(AnonRoutes.WELCOME) {
             me.lakko.app.ui.auth.WelcomeScreen(
                 onCreateAccount = { nav.navigate(AnonRoutes.SIGNUP) { launchSingleTop = true } },

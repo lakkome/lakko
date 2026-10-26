@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   describeInviteCreated,
   describeInviteExpiry,
+  describeInviteLimit,
+  describeInviteUsage,
   describeInviteUses,
   INVITE_USES_UNLIMITED,
   inviteUsesLeft,
@@ -19,6 +21,13 @@ describe("invite expiry", () => {
     expect(describeInviteExpiry(now + 3 * 86_400_000, now)).toBe("Expires in 3d");
     expect(describeInviteExpiry(now + 2 * 3_600_000, now)).toBe("Expires in 2h");
     expect(describeInviteExpiry(now + 10_000, now)).toBe("Expires in 1m");
+  });
+
+  it("rounds to the nearest unit, not down", () => {
+    expect(describeInviteExpiry(now + 6.9 * 86_400_000, now)).toBe("Expires in 7d");
+    expect(describeInviteExpiry(now + 23.6 * 3_600_000, now)).toBe("Expires in 1d");
+    expect(describeInviteExpiry(now + 59.5 * 60_000, now)).toBe("Expires in 1h");
+    expect(describeInviteExpiry(now + 30_000, now)).toBe("Expires in 1m");
   });
 });
 
@@ -39,11 +48,22 @@ describe("invite uses", () => {
   });
 });
 
+describe("invite usage in the own list", () => {
+  it("states the limit until used, then what is left", () => {
+    expect(describeInviteUsage(0, 0)).toBe(describeInviteLimit(0));
+    expect(describeInviteUsage(0, 10)).toBe(describeInviteLimit(10));
+    expect(describeInviteUsage(3, 10)).toBe("7 uses left");
+    expect(describeInviteUsage(5, INVITE_USES_UNLIMITED)).toBe(describeInviteLimit(INVITE_USES_UNLIMITED));
+  });
+});
+
 describe("invite created", () => {
-  it("formats a date and swallows garbage", () => {
-    // "Sep" or "Sept" depending on the ICU data; the day may shift by one
-    // with the runner's time zone.
-    expect(describeInviteCreated("2026-09-16T10:00:00Z", "en-GB")).toMatch(/^Created \d{1,2} Sept?$/);
+  it("formats a date with the time and swallows garbage", () => {
+    // "Sep" or "Sept" depending on the ICU data; the day and hour shift with
+    // the runner's time zone.
+    expect(describeInviteCreated("2026-09-16T10:00:00Z", "en-GB")).toMatch(
+      /^Created \d{1,2} Sept?,? (at )?\d{1,2}:\d{2}$/,
+    );
     expect(describeInviteCreated("not a date")).toBe("");
   });
 });

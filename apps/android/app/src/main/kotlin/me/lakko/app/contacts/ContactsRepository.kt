@@ -1986,6 +1986,46 @@ public class ContactsRepository(
     // ---- ADR-0079: the invite page (B) and the pending contact --------------
 
     /**
+     * The signed-out invite page (`docs/ux/contact-invite-link.md` section 3,
+     * "Signed out", amended 2026-10-26; ADR-0079 amendment of 2026-10-26):
+     * open the link with no session, only to say who invites. The ledger
+     * serves the sealed blob without a session and the name is sealed under
+     * the link's secret, so the card is built on the device. Nothing is
+     * consumed and nothing is sent; signing in or creating an account then
+     * opens the parked link again through [openInviteLink].
+     */
+    public suspend fun previewInviteLink(slug: String): InvitePreviewResult {
+        val link = me.lakko.app.discovery.InviteLinkArgument.decode(slug.trim())
+        val secret = me.lakko.app.discovery.inviteLinkSecretOf(link.fragment) ?: return InvitePreviewResult.Dead
+        // Every link is a ledger pointer; any other slug is a dead link.
+        val blobId = me.lakko.app.discovery.decodeInviteBlobId(link.slug) ?: return InvitePreviewResult.Dead
+        val sealed: ByteArray = try {
+            // Deliberately the bare client: no session token is attached.
+            discoveryClientFactory().use { discovery -> discovery.fetchInvite(blobId) }
+        } catch (e: Throwable) {
+            me.lakko.app.rethrowIfCancelled(e)
+            if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return InvitePreviewResult.RateLimited
+            return InvitePreviewResult.Failed
+        } ?: return InvitePreviewResult.Dead
+        val cap = try {
+            me.lakko.app.discovery.openSealedInviteLink(sealed, secret) { bytes, key ->
+                InviteCapability.openLink(bytes, key)
+            }
+        } catch (_: me.lakko.app.discovery.InviteLinkDamaged) {
+            return InvitePreviewResult.Dead
+        }
+        return cap.use { capability ->
+            if (!capability.isValidNow(System.currentTimeMillis().toULong())) return@use InvitePreviewResult.Dead
+            InvitePreviewResult.Preview(
+                displayName = capability.inviterDisplayName(),
+                username = capability.inviterUsername(),
+                label = capability.label(),
+                ownerAccountId = capability.ownerAccountId(),
+            )
+        }
+    }
+
+    /**
      * Open an `/i/<slug>#<secret>` link for the invite page
      * (`docs/ux/contact-invite-link.md` section 3): fetch the sealed blob,
      * open it under the fragment's secret, and decide the page's state. No
@@ -2797,12 +2837,12 @@ public class ContactsRepository(
      * owner shares via copy-to-clipboard or the Android share
      * sheet.
      *
-     * 1.15e10 ships with **fixed defaults**: 7-day expiry,
-     * single-use (`max_uses = 0`), non-bootstrap-referral
-     * (this flow is for connecting existing users, not new
-     * signups). A custom-config dialog (user-typed label /
-     * expiry / max_uses) layers on as 1.15e10b when the UX
-     * pushes back.
+     * The defaults are 7-day expiry and single-use (`max_uses = 0`);
+     * the Invite links sheet's form passes the owner's choice of label,
+     * expiry and uses. [expiryMillisFromNow] `null` means the link never
+     * expires: the wire expiry is then the `NEVER_EXPIRES` sentinel `0`,
+     * in the composed capability and in the ledger upload alike. Always
+     * non-bootstrap-referral (this flow connects existing users).
      *
      * The new invite is appended to [ContactsState.outstandingInvites]
      * so the UI can render a list of the owner's outstanding
@@ -2814,7 +2854,7 @@ public class ContactsRepository(
      */
     public suspend fun generateInviteLink(
         label: String = "",
-        expiryMillisFromNow: Long = DEFAULT_INVITE_EXPIRY_MS,
+        expiryMillisFromNow: Long? = DEFAULT_INVITE_EXPIRY_MS,
         maxUses: UInt = SINGLE_USE,
         bootstrapReferral: Boolean = false,
     ): GeneratedInvite {
@@ -2824,7 +2864,10 @@ public class ContactsRepository(
                     "no identity secrets — please re-enter your password",
                 ),
             )
-        val expiryMs = (System.currentTimeMillis() + expiryMillisFromNow).toULong()
+        // `0` is the NEVER_EXPIRES sentinel (a never-expiring link).
+        val expiryMs = (
+            if (expiryMillisFromNow == null) 0L else System.currentTimeMillis() + expiryMillisFromNow
+            ).toULong()
 
         val bound = sessionBinding.capture()
         return me.lakko.app.auth.SessionSecretWipe.identity(secrets.accountIdentitySeed).use { identity ->
@@ -2945,6 +2988,8 @@ public class ContactsRepository(
                     mintedAtMs = System.currentTimeMillis().toULong(),
                     label = label,
                     answered = emptyList(),
+                    shared = false,
+                    editable = false,
                 ),
             ) ?: false
             if (!recorded) {
@@ -3043,6 +3088,24 @@ public class ContactsRepository(
             }
         }
     }
+
+    /**
+     * The account's synced link-record register (ADR-0079 section 4), every
+     * device's links with `shared` / `editable`; empty while the device-group
+     * sync is not wired. The Invite links sheet joins its rows with it by
+     * ledger id.
+     */
+    public fun inviteLinkRecords(): kotlinx.coroutines.flow.StateFlow<List<uniffi.lakko_ffi_uniffi.LinkRecord>> =
+        deviceGroupSync?.linkRecords ?: kotlinx.coroutines.flow.MutableStateFlow(emptyList())
+
+    /**
+     * Copy (ADR-0079 amendment 2026-10-26): mark the link [linkId] copied in
+     * the synced state and send its record to the account's other devices,
+     * before the text reaches the clipboard. `false` when nothing changed
+     * (already copied) or the register is not open.
+     */
+    public suspend fun markInviteLinkShared(linkId: ByteArray): Boolean =
+        deviceGroupSync?.markLinkShared(linkId) ?: false
 
     /**
      * The live `/i/` links this device minted and keeps a record of
@@ -3349,6 +3412,31 @@ public data class ContactsState(
      *  [InboxError]). `null` clears on the next successful call. */
     val lastError: InboxError? = null,
 )
+
+/** What opening a link with no session gave the signed-out invite page
+ *  (UX section 3, "Signed out", amended 2026-10-26). */
+public sealed interface InvitePreviewResult {
+    public data class Preview(
+        val displayName: String?,
+        val username: String?,
+        val label: String,
+        val ownerAccountId: ByteArray,
+    ) : InvitePreviewResult {
+        /** The name the link states ([PendingContacts.statedName]). */
+        val statedName: String? get() = PendingContacts.statedName(displayName, username)
+
+        override fun equals(other: Any?): Boolean =
+            other is Preview && displayName == other.displayName && username == other.username &&
+                label == other.label && ownerAccountId.contentEquals(other.ownerAccountId)
+
+        override fun hashCode(): Int = ownerAccountId.contentHashCode()
+    }
+
+    /** Revoked, expired, used up, unknown or damaged: one state. */
+    public data object Dead : InvitePreviewResult
+    public data object RateLimited : InvitePreviewResult
+    public data object Failed : InvitePreviewResult
+}
 
 /** What opening an `/i/` link gave the invite page (ADR-0079). */
 public sealed interface InviteOpenResult {

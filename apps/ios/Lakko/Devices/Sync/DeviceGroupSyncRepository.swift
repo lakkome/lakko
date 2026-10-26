@@ -1930,11 +1930,23 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// Fold a write here at once, persist it, mark it unsent and send the
     /// one record to the account's other devices.
     private func afterLinkRecordWrite(linkId: Data) async {
+        foldLinkRecordWrite()
+        await sendLinkRecord(linkId: linkId)
+    }
+
+    /// The local half of ``afterLinkRecordWrite(linkId:)``: fold, persist and
+    /// mark the register unsent (a start retries it).
+    private func foldLinkRecordWrite() {
         stateChanged()
         persistSyncState()
         guard let account = activeAccountIdB64 else { return }
+        UserDefaults.standard.set(true, forKey: Self.linkRecordsUnsentKey(accountIdB64: account))
+    }
+
+    /// The network half: send the one record, then clear the unsent mark.
+    private func sendLinkRecord(linkId: Data) async {
+        guard let account = activeAccountIdB64 else { return }
         let key = Self.linkRecordsUnsentKey(accountIdB64: account)
-        UserDefaults.standard.set(true, forKey: key)
         do {
             if let envelope = try syncedState.linkRecordEnvelopeFor(linkId: linkId) {
                 try await sendLineageEnvelopes([envelope])
@@ -1968,6 +1980,23 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         let written = (try? syncedState.revokeLinkRecord(hlc: Hlc.mint(), linkId: linkId)) ?? false
         if written { await afterLinkRecordWrite(linkId: linkId) }
         return written
+    }
+
+    /// Mark a link copied (final; `docs/ux/contact-invite-link.md` section 9):
+    /// from then on no device of the account offers to edit it. Sent to the
+    /// other devices like a revoke. `false` when nothing changed.
+    @discardableResult
+    public func markLinkShared(linkId: Data) async -> Bool {
+        guard ready, !deviceRemoved else { return false }
+        let written = (try? syncedState.markLinkShared(hlc: Hlc.mint(), linkId: linkId)) ?? false
+        guard written else { return false }
+        // Folded and persisted before this returns, so Copy writes the
+        // clipboard only once this device has stopped offering the edit; the
+        // send to the other devices does not hold the clipboard back (an
+        // unsent register is retried at the next start).
+        foldLinkRecordWrite()
+        Task { [weak self] in await self?.sendLinkRecord(linkId: linkId) }
+        return true
     }
 
     /// Count one request accepted through a link, remembering the requester.

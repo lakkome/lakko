@@ -123,6 +123,25 @@ public final class InviteIntake: ObservableObject {
         }
     }
 
+    /// A scanned QR code's text as a Lakko link the app opens, or `nil`.
+    /// Only an `https` link on this build's web origin (or `lakko.me` and
+    /// its subdomains) whose path is `/i/`, `/g/` or `/c/` with a slug
+    /// counts: unlike a tapped Universal Link, no `apple-app-site-association`
+    /// check stands behind a code someone holds up to the camera. The result
+    /// goes through ``handle(_:)``, the same route as an opened link.
+    nonisolated static func scannedLink(_ text: String, webOrigin: String = ApiEndpoints.webOrigin) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased() else { return nil }
+        let originHost = URL(string: webOrigin)?.host?.lowercased()
+        let hostOk = host == originHost || host == "lakko.me" || host.hasSuffix(".lakko.me")
+        guard hostOk else { return nil }
+        let path = url.path
+        let isLink = ["/i/", "/g/", "/c/"].contains { slug(from: path, prefix: $0) != nil }
+        return isLink ? url : nil
+    }
+
     /// Extract + trim the slug after `prefix`, or `nil` if the path
     /// doesn't start with `prefix` / the slug is empty. Strips any
     /// trailing slash so `…/<slug>/` works the same as `…/<slug>`.
@@ -130,7 +149,7 @@ public final class InviteIntake: ObservableObject {
     /// validates a PASTED link with the same rule a TAPPED one goes through —
     /// two spellings of "is this a call link" is how the two paths start
     /// disagreeing about the same string.
-    static func slug(from path: String, prefix: String) -> String? {
+    nonisolated static func slug(from path: String, prefix: String) -> String? {
         guard path.hasPrefix(prefix) else { return nil }
         let trimmed = String(path.dropFirst(prefix.count))
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))

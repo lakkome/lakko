@@ -6078,10 +6078,6 @@
       "text": "Nunca",
       "status": "machine"
     },
-    "invite.links.for_new_user": {
-      "text": "Para alguien nuevo en Lakko",
-      "status": "machine"
-    },
     "invite.links.label_field": {
       "text": "Etiqueta (opcional)",
       "status": "machine"
@@ -6108,10 +6104,6 @@
     },
     "invite.links.new_badge": {
       "text": "Nuevo",
-      "status": "machine"
-    },
-    "invite.links.referral_option": {
-      "text": "Para alguien que aún no tiene cuenta de Lakko",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -8396,6 +8388,114 @@
     },
     "invite.contact.page.answer_failed": {
       "text": "No se pudo contactar con {name}. Revisa tu conexión e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "Mostrar código QR",
+      "status": "machine"
+    },
+    "invite.links.qr_hint": {
+      "text": "Quien escanee este código podrá enviarte una solicitud de contacto.",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "Escanear código QR",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "Este código no es un enlace de Lakko. Prueba con otro código.",
+      "status": "machine"
+    },
+    "invite.links.expires_option_custom": {
+      "text": "Personalizado",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Personalizado",
+      "status": "machine"
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "Periodo",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "Horas",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "Días",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Número de personas",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "Indica un periodo de 1 hora a 365 días.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "Indica un número de personas de 1 a {max}.",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} te invita a Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko es una app de mensajería en la que cada chat y llamada tiene cifrado de extremo a extremo.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Crear una cuenta",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "Ya tengo una cuenta",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Este enlace de invitación ya no funciona",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Pide a quien te lo envió uno nuevo.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "Editar enlace",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "Condiciones del enlace",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "Al guardar se crea un enlace nuevo. El anterior deja de funcionar.",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "Eliminar enlace",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "¿Eliminar este enlace?",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Quien ya lo tenga no podrá usarlo.",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "Enlace eliminado.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "No se pudo eliminar el enlace. Revisa tu conexión e inténtalo de nuevo.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "No se pudo guardar el enlace. Revisa tu conexión e inténtalo de nuevo.",
       "status": "machine"
     }
   }

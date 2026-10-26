@@ -646,3 +646,37 @@ Separately, the person card of a removed person offers **Add to contacts**
 (local, sends nothing); the shared rule `lakko_ui_rules::info` takes
 `is_contact` again for that one case and gains `InfoSection::AddContact`
 (UX `docs/ux/conversation-info.md` section 2.1).
+
+## Amendment (2026-10-26): a signed-out visitor sees who invites
+
+The maintainer reversed rule 3 of the 2026-10-19 amendment: a person with no
+Lakko account who opened a link landed on a sign-in screen with nothing to
+say that anyone invited them. A signed-out visitor now sees an inviter card
+(name, `@username`, the label, one line about Lakko) with **Create an
+account** and **I already have an account**, both returning to the link; a
+dead link opened signed out says so with the same two buttons. Signed in,
+rules 4 and 5 stand (a dead link opens Contacts). The card is opened on the
+device from the ledger's sealed blob, which the ledger serves without a
+session; nothing is consumed before Add. UX spec
+`docs/ux/contact-invite-link.md` section 3, "Signed out".
+
+## Amendment (2026-10-26): a link is created with defaults and edited until shared
+
+Decided by the maintainer. **Create link** mints a link with the default
+terms at once (no form). Its terms can be changed (label, expiry, number of
+people) only while nobody can hold it: never copied on any device of the
+account and never answered. Editing mints a new link with the new terms,
+then revokes the old one (old first would leave nothing on a failure).
+Showing the QR code does not end editing: a scan leads to Add, and a use
+ends it. **Revoke** becomes **Delete link** (a trash button), with a
+confirmation only for a link that was copied or used.
+
+Core: `LinkRecordEntry` gains `shared` (copied), final like `revoked`; the
+fold orders link records by `(revoked, shared, stamp, canonical bytes)`, so
+a copy on one device is never undone by a later unshared write on another
+(a use recorded concurrently with a copy can be lost to it; the use count is
+a courtesy, as before). `LinkRecordEntry::editable()` is the one rule;
+`SyncedState::mark_link_shared`. The link-record envelope is version `0x03`
+and the persisted synced state version `5` (older refused, flag day). On
+UniFFI `LinkRecord.shared` / `.editable` and `markLinkShared`; on wasm the
+`shared` / `editable` getters and `markLinkShared`. UX spec section 9.

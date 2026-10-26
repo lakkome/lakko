@@ -14,11 +14,12 @@ import SwiftUI
 /// closes into the chat with the inviter. No fingerprint, no safety number:
 /// those stay on the contact's info screen.
 ///
-/// A signed-out person sees no inviter card at all (UX section 3, amended
-/// 2026-10-19): the ordinary sign-in screen, with the deep link parked; once a
-/// session lands the link is checked again here. A link that does not work
-/// (revoked, expired, used up, unknown, damaged) has no page: the person is
-/// taken to Contacts, and so is a person whose Add found the link dead.
+/// A signed-out person sees ``SignedOutInviteScreen`` instead (UX section 3,
+/// "Signed out", amended 2026-10-26); the deep link stays parked, and once a
+/// session lands the link is checked again here. Signed in, a link that does
+/// not work (revoked, expired, used up, unknown, damaged) has no page: the
+/// person is taken to Contacts, and so is a person whose Add found the link
+/// dead.
 public struct InviteLandingScreen: View {
 
     @ObservedObject public var viewModel: InviteLandingViewModel
@@ -201,6 +202,209 @@ public struct InviteLandingScreen: View {
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
+    }
+}
+
+/// The invite page for a person who is not signed in
+/// (`docs/ux/contact-invite-link.md` section 3, "Signed out"; ADR-0079
+/// amendment of 2026-10-26): who invites, one line about Lakko, then
+/// **Create an account** and **I already have an account**. Mirror of the
+/// web `Invite.tsx` signed-out state. Opening it spends nothing and sends
+/// nothing. A live link stays parked, so the session that lands opens the
+/// signed-in page; a dead link says so and is dropped on either button.
+public struct SignedOutInviteScreen: View {
+
+    @StateObject private var viewModel: SignedOutInviteViewModel
+    public var onSignIn: () -> Void
+    public var onCreateAccount: () -> Void
+    /// ADR-0061 — every line follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
+
+    public init(
+        slug: String,
+        preview: @escaping (String) async -> InvitePreviewResult,
+        dropLink: @escaping () -> Void,
+        onSignIn: @escaping () -> Void,
+        onCreateAccount: @escaping () -> Void
+    ) {
+        self._viewModel = StateObject(
+            wrappedValue: SignedOutInviteViewModel(slug: slug, preview: preview, dropLink: dropLink))
+        self.onSignIn = onSignIn
+        self.onCreateAccount = onCreateAccount
+    }
+
+    public var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) { content }
+                    .frame(maxWidth: .infinity)
+                    .padding(24)
+            }
+            .background(Color.lakkoBackground.ignoresSafeArea())
+            .navigationTitle(l10n.t("invite.contact.page_title"))
+            .navigationBarTitleDisplayMode(.inline)
+            .task { await viewModel.open() }
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch viewModel.state {
+        case .loading:
+            ProgressView().controlSize(.large).padding(.top, 40)
+
+        case .preview(let preview):
+            InitialsAvatar(
+                name: preview.statedName ?? "",
+                identity: base64Encode(preview.ownerSignaturePubkey),
+                size: 72,
+                placeholderSymbol: "person.fill")
+            Text(l10n.t("invite.contact.page.signed_out_title",
+                        texts: ["name": preview.statedName ?? l10n.t("invite.contact.page.unnamed")]))
+                .font(.title2.weight(.semibold))
+                .multilineTextAlignment(.center)
+            if let username = SignedOutInviteViewModel.usernameLine(preview) {
+                Text(username)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.lakkoTextMuted)
+            }
+            if !preview.label.isEmpty {
+                Text(preview.label)
+                    .font(.body)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .multilineTextAlignment(.center)
+            }
+            Text(l10n.t("invite.contact.page.about"))
+                .font(.body)
+                .multilineTextAlignment(.center)
+            accountButtons
+
+        case .dead:
+            Text(l10n.t("invite.contact.page.dead_title"))
+                .font(.title2.weight(.semibold))
+                .multilineTextAlignment(.center)
+            Text(l10n.t("invite.contact.page.dead_body"))
+                .font(.body)
+                .foregroundStyle(Color.lakkoTextMuted)
+                .multilineTextAlignment(.center)
+            accountButtons
+
+        case .rateLimited:
+            // The signed-in page's line and retry.
+            Text(inviteRateLimitedMessage)
+                .font(.body)
+                .multilineTextAlignment(.center)
+            Button(l10n.t("common.try_again")) {
+                Task { await viewModel.retry() }
+            }
+            .buttonStyle(.bordered)
+            accountButtons
+
+        case .openFailed:
+            Text(l10n.t("invite.contact.result.failed_title"))
+                .font(.title2.weight(.semibold))
+                .multilineTextAlignment(.center)
+            Button(l10n.t("common.try_again")) {
+                Task { await viewModel.retry() }
+            }
+            .buttonStyle(.bordered)
+            accountButtons
+        }
+    }
+
+    /// **Create an account** (primary) and **I already have an account**.
+    @ViewBuilder
+    private var accountButtons: some View {
+        Button {
+            viewModel.leave()
+            onCreateAccount()
+        } label: {
+            Text(l10n.t("invite.contact.page.create_account")).frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        Button {
+            viewModel.leave()
+            onSignIn()
+        } label: {
+            Text(l10n.t("invite.contact.page.have_account")).frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+    }
+}
+
+/// State of ``SignedOutInviteScreen``.
+@MainActor
+public final class SignedOutInviteViewModel: ObservableObject {
+
+    public enum State: Equatable {
+        case loading
+        /// A live link: the inviter card.
+        case preview(InvitePreview)
+        /// Revoked, expired, used up, unknown or damaged: one state.
+        case dead
+        /// The same states as the signed-in page.
+        case rateLimited
+        case openFailed
+
+        /// Whether the link stays parked when the person goes to sign-up or
+        /// sign-in. Only a link known dead is dropped; a link not yet read
+        /// (loading, refused, network failure) is checked again once a
+        /// session lands.
+        public var keepsLinkParked: Bool { self != .dead }
+    }
+
+    @Published public private(set) var state: State = .loading
+    private let slug: String
+    private let preview: (String) async -> InvitePreviewResult
+    private let dropLink: () -> Void
+    private var didOpen = false
+
+    public init(
+        slug: String,
+        preview: @escaping (String) async -> InvitePreviewResult,
+        dropLink: @escaping () -> Void
+    ) {
+        self.slug = slug
+        self.preview = preview
+        self.dropLink = dropLink
+    }
+
+    /// What the page shows for each result of opening the link. Pure.
+    public nonisolated static func state(for result: InvitePreviewResult) -> State {
+        switch result {
+        case .preview(let p): return .preview(p)
+        case .dead: return .dead
+        case .rateLimited: return .rateLimited
+        case .failed: return .openFailed
+        }
+    }
+
+    /// The `@username` line under the title: shown when the inviter has a
+    /// username the title does not already state. Pure.
+    public nonisolated static func usernameLine(_ preview: InvitePreview) -> String? {
+        guard let username = preview.username, !username.isEmpty else { return nil }
+        let line = "@\(username)"
+        return preview.statedName == line ? nil : line
+    }
+
+    /// Open the link once per screen.
+    public func open() async {
+        guard !didOpen else { return }
+        didOpen = true
+        state = Self.state(for: await preview(slug))
+    }
+
+    /// Open again after a refusal or a network failure.
+    public func retry() async {
+        state = .loading
+        state = Self.state(for: await preview(slug))
+    }
+
+    /// Either button: a dead link is dropped, a live one stays parked.
+    public func leave() {
+        if !state.keepsLinkParked { dropLink() }
     }
 }
 

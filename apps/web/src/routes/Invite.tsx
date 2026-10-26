@@ -10,7 +10,8 @@
  * the link states (sealed inside the capability, ADR-0079 section 1) and
  * shows no key material: no fingerprint, no safety number, no expiry and no
  * use count. The states are one pure decision (`contacts/invite-page.ts`):
- * signed out (straight to the sign-in screen, no inviter card), loading,
+ * signed out (who invites, with Create an account / I already have an
+ * account; a dead link says so), loading,
  * rate-limited, own link, already a contact, and the default Add / Not now.
  * A link that does not work (revoked, expired, used up, unknown, damaged)
  * has no page: the visitor lands on the Contacts screen (amended
@@ -43,7 +44,7 @@ import {
   Switch,
   type JSX,
 } from "solid-js";
-import { useLocation, useNavigate, useParams } from "@solidjs/router";
+import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
 import type { InviteCapability as WasmInviteCapability } from "../../wasm/lakko_ffi_wasm";
 import { useAuth } from "../auth/AuthContext";
 import { buildAuthUrlWithReturn } from "../auth/return-url";
@@ -116,9 +117,10 @@ export default function Invite(): JSX.Element {
   onCleanup(subscribeAcceptedChanged(() => setAcceptedVersion((v) => v + 1)));
 
   const signedIn = (): boolean => auth.state().kind === "session" && auth.identitySecrets() !== null;
-  // A signed-out visitor sees no inviter card: the link is opened only once
-  // signed in (amended 2026-10-19).
-  const slugSignal = createMemo(() => (signedIn() ? { slug: params.slug, hash: location.hash } : null));
+  // The link is opened signed out too (amended 2026-10-26): the ledger serves
+  // the sealed blob without a session and the secret opens it here, so a
+  // visitor with no account sees who invites them. Nothing is consumed.
+  const slugSignal = createMemo(() => ({ slug: params.slug, hash: location.hash }));
   const discovery = new DiscoveryClient();
   discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
   const [decoded, { refetch }] = createResource(
@@ -177,14 +179,14 @@ export default function Invite(): JSX.Element {
   };
 
   const view = createMemo((): InvitePageView => {
-    if (!signedIn()) return { kind: "sign-in" };
     const d = decoded();
     if (decoded.loading || d === undefined) return { kind: "loading" };
     if (d === RATE_LIMITED) return { kind: "rate-limited" };
     if (d === OPEN_FAILED) return { kind: "open-failed" };
-    if (d === DEAD) return { kind: "dead" };
+    if (d === DEAD) return signedIn() ? { kind: "dead" } : { kind: "signed-out-dead" };
     const s = auth.state();
-    const own = s.kind === "session" && base64Encode(d.cap.ownerAccountId) === s.account.accountId;
+    const own =
+      signedIn() && s.kind === "session" && base64Encode(d.cap.ownerAccountId) === s.account.accountId;
     acceptedVersion();
     const ownerHex = groupIdHex(d.cap.ownerAccountId);
     return invitePageView({
@@ -249,8 +251,25 @@ export default function Invite(): JSX.Element {
             </div>
           </section>
         </Match>
-        <Match when={view().kind === "sign-in"}>
-          <Redirect to={buildAuthUrlWithReturn(paths.login, returnPath(params.slug, location.hash))} />
+        <Match when={(() => { const v = view(); return v.kind === "signed-out" ? v : undefined; })()}>
+          {(v) => (
+            <InviterCard
+              title={t("invite.contact.page.signed_out_title", { name: nameOr(v().name) })}
+              name={nameOr(v().name)}
+              username={v().username}
+              label={v().label}
+            >
+              <p class="lk-muted">{t("invite.contact.page.about")}</p>
+              <SignedOutActions returnTo={returnPath(params.slug, location.hash)} />
+            </InviterCard>
+          )}
+        </Match>
+        <Match when={view().kind === "signed-out-dead"}>
+          <section class="lk-stack" style={{ gap: "12px", "align-items": "center", "text-align": "center" }}>
+            <h1>{t("invite.contact.page.dead_title")}</h1>
+            <p>{t("invite.contact.page.dead_body")}</p>
+            <SignedOutActions returnTo={null} />
+          </section>
         </Match>
         <Match when={view().kind === "dead"}>
           <Redirect to={paths.contacts} />
@@ -322,6 +341,26 @@ function returnPath(slug: string, hash: string): string {
   return `${paths.invite(slug)}${fragment}`;
 }
 
+/** Create an account (primary) and I already have an account, for a visitor
+ *  who is not signed in. `returnTo` brings them back to the link afterwards;
+ *  `null` for a link that no longer works. */
+function SignedOutActions(props: { returnTo: string | null }): JSX.Element {
+  const href = (path: string): string =>
+    props.returnTo === null ? path : buildAuthUrlWithReturn(path, props.returnTo);
+  return (
+    <div class="lk-actions">
+      <A href={href(paths.signup)}>
+        <button class="primary" type="button">
+          {t("invite.contact.page.create_account")}
+        </button>
+      </A>
+      <A href={href(paths.login)}>
+        <button type="button">{t("invite.contact.page.have_account")}</button>
+      </A>
+    </div>
+  );
+}
+
 function DonePanel(props: { title: string; body: string }): JSX.Element {
   const navigate = useNavigate();
   return (
@@ -343,12 +382,14 @@ function InviterCard(props: {
   name: string;
   username: string | null;
   label: string | null;
+  /** The heading; "Add Anna to your contacts?" when not given. */
+  title?: string;
   children: JSX.Element;
 }): JSX.Element {
   return (
     <section class="lk-stack" style={{ gap: "12px", "align-items": "center", "text-align": "center" }}>
       <Avatar label={props.name} id={props.name} />
-      <h1>{t("invite.contact.page.title", { name: props.name })}</h1>
+      <h1>{props.title ?? t("invite.contact.page.title", { name: props.name })}</h1>
       <Show when={props.username}>{(u) => <p class="lk-row-sub">@{u()}</p>}</Show>
       <Show when={props.label}>{(l) => <p>{l()}</p>}</Show>
       {props.children}

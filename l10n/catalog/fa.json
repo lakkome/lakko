@@ -6078,10 +6078,6 @@
       "text": "هرگز",
       "status": "machine"
     },
-    "invite.links.for_new_user": {
-      "text": "برای کسی که تازه به Lakko آمده",
-      "status": "machine"
-    },
     "invite.links.label_field": {
       "text": "برچسب (اختیاری)",
       "status": "machine"
@@ -6108,10 +6104,6 @@
     },
     "invite.links.new_badge": {
       "text": "جدید",
-      "status": "machine"
-    },
-    "invite.links.referral_option": {
-      "text": "برای کسی که هنوز حساب Lakko ندارد",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -8396,6 +8388,114 @@
     },
     "invite.contact.page.answer_failed": {
       "text": "ارتباط با {name} برقرار نشد. اتصال خود را بررسی کنید و دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "نمایش کد QR",
+      "status": "machine"
+    },
+    "invite.links.qr_hint": {
+      "text": "هر کسی این کد را اسکن کند می‌تواند برایتان درخواست مخاطب بفرستد.",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "اسکن کد QR",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "این کد پیوند Lakko نیست. کد دیگری را امتحان کنید.",
+      "status": "machine"
+    },
+    "invite.links.expires_option_custom": {
+      "text": "سفارشی",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "سفارشی",
+      "status": "machine"
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "مدت",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "ساعت",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "روز",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "تعداد افراد",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "مدتی بین ۱ ساعت تا ۳۶۵ روز وارد کنید.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "تعداد افراد را بین ۱ تا {max} وارد کنید.",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} شما را به Lakko دعوت می‌کند",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko پیام‌رسانی است که هر گفتگو و تماس در آن رمزنگاری سرتاسری دارد.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "ساخت حساب",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "از قبل حساب دارم",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "این پیوند دعوت دیگر کار نمی‌کند",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "از فرستنده بخواهید پیوند تازه‌ای بفرستد.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "ویرایش پیوند",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "شرایط پیوند",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "با ذخیره، پیوند تازه‌ای ساخته می‌شود و پیوند قبلی کار نمی‌کند.",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "حذف پیوند",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "این پیوند حذف شود؟",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "کسی که آن را دارد دیگر نمی‌تواند از آن استفاده کند.",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "پیوند حذف شد.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "حذف پیوند ممکن نشد. اتصال را بررسی کنید و دوباره امتحان کنید.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "ذخیرهٔ پیوند ممکن نشد. اتصال را بررسی کنید و دوباره امتحان کنید.",
       "status": "machine"
     }
   }

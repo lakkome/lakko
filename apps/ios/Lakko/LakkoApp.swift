@@ -730,6 +730,8 @@ struct AppRoot: View, Equatable {
     /// section 3, "Signed out"): the sign-in or sign-up screen it opened.
     /// `nil` while that page is shown. The link stays parked either way, so
     /// the session that lands opens the invite page in its default state.
+    /// A dead link is dropped instead (amended 2026-10-26).
+    @State private var signedOutInviteChoice: AnonRoute?
 
     /// Mirror of ``DeviceGroupSyncRepository/deviceRemoved`` (UX spec
     /// second-device section 3.1). Received rather than observed: observing
@@ -883,15 +885,35 @@ struct AppRoot: View, Equatable {
                         ),
                         onDone: {}
                     )
+                } else if let inviteSlug = inviteIntake.pendingSlug, signedOutInviteChoice == nil {
+                    // ADR-0079 amendment of 2026-10-26 — a tapped `/i/` link
+                    // from a person who is not signed in: who invites, with
+                    // Create an account / I already have an account. A live
+                    // link stays parked; the session that lands opens the
+                    // signed-in page. A dead link is dropped on either button.
+                    SignedOutInviteScreen(
+                        slug: inviteSlug,
+                        preview: { [contacts = services.contactsRepository] in
+                            await contacts.previewInviteLink(slug: $0)
+                        },
+                        dropLink: { inviteIntake.clear() },
+                        onSignIn: { signedOutInviteChoice = .login },
+                        onCreateAccount: { signedOutInviteChoice = .signup }
+                    )
+                    .id(inviteSlug)
                 } else {
                     AnonRoot(
                         repository: authRepository,
                         cachedUsername: cachedUsername,
                         accountProtection: services.accountProtection,
                         onSignedUp: { pendingSignupProtect = true },
-                        initialRoute: nil
+                        initialRoute: signedOutInviteChoice
                     )
                 }
+            }
+            // A new link tapped while signed out shows its card again.
+            .onChange(of: inviteIntake.pendingSlug) { _, slug in
+                if slug != nil { signedOutInviteChoice = nil }
             }
             // Pending contact / group invites land in
             // `InviteIntake` but cannot consume in the anon state —
@@ -1451,7 +1473,8 @@ private struct SessionRoot: View, Equatable {
                 ContactsScreen(
                     viewModel: contactsVM,
                     peopleSearch: models.contactsPeopleSearch,
-                    onOpenPerson: { openFoundPerson($0, on: .contacts) })
+                    onOpenPerson: { openFoundPerson($0, on: .contacts) },
+                    onOpenLink: { inviteIntake.handle($0) })
                     .navigationDestination(for: TabRoute.self) { routeView($0, tab: .contacts) }
             }
             .tabItem { Label(l10n.t("nav.contacts"), systemImage: "person.crop.circle") }

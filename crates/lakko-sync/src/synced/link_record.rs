@@ -21,12 +21,24 @@
 //! 2026-10-17). Like the link secret it is SECRET and travels end to end
 //! encrypted to the account's own devices only.
 //!
-//! It is last-writer-wins per entry on the stamp, with one exception that
-//! makes a revocation final: **a revoked entry beats a live one whatever the
-//! stamps** ([`super::state::SyncedState`] orders link records by
-//! `(revoked, stamp, canonical bytes)`). That order is total, so the fold
-//! stays commutative, associative and idempotent, and an entry revoked on
-//! one device can never come back live.
+//! It is last-writer-wins per entry on the stamp, with two exceptions that
+//! make a flag final: **a revoked entry beats a live one, and a shared entry
+//! beats an unshared one, whatever the stamps** ([`super::state::SyncedState`]
+//! orders link records by `(revoked, shared, stamp, canonical bytes)`). That
+//! order is total, so the fold stays commutative, associative and idempotent,
+//! an entry revoked on one device can never come back live, and a link copied
+//! on one device can never become editable again. A use recorded on one
+//! device at the same time as a copy on another can be lost to the copy; the
+//! use count is a courtesy (below), and a shared link is not editable either
+//! way.
+//!
+//! ## Editing (2026-10-26)
+//!
+//! A link is created with the default terms and may be edited (its terms
+//! changed, which mints a new link and revokes this one) only while nobody
+//! can hold it: never copied (`shared`) and never answered
+//! ([`LinkRecordEntry::editable`]). Showing the link's QR code does not mark
+//! it shared: a scan leads to a use, which ends editing by itself.
 //!
 //! Two devices that accept two different requests through one multi-use link
 //! at the same time both write `uses + 1`; one write wins, so the count can
@@ -41,7 +53,7 @@
 //!
 //! ```text
 //! domain(26) "lakko/sync/link-record/v1\0"
-//! version(1) = 0x02
+//! version(1) = 0x03
 //! count(2, BE)              1..=LINK_RECORD_ENVELOPE_MAX_ENTRIES
 //! count × {
 //!     hlc(8, BE)            the register's ORIGINAL stamp
@@ -71,10 +83,11 @@ use super::entry::{take_n, take_u32, take_u64, take_u8, BoundsError, CodecError,
 pub const LINK_RECORD_ENVELOPE_DOMAIN_V1: &[u8] = b"lakko/sync/link-record/v1\0";
 
 /// The version byte this build writes and accepts. `0x02` since the record
-/// carries the ledger row's revocation seed; `0x01` is refused (no dual
-/// format, nothing is deployed). The constant keeps its name: it is the
-/// version of the `v1` domain.
-pub const LINK_RECORD_ENVELOPE_VERSION_V1: u8 = 0x02;
+/// carried the ledger row's revocation seed, `0x03` since it carries the
+/// `shared` flag (2026-10-26); older versions are refused (no dual format,
+/// nothing is deployed). The constant keeps its name: it is the version of
+/// the `v1` domain.
+pub const LINK_RECORD_ENVELOPE_VERSION_V1: u8 = 0x03;
 
 /// The most registers one envelope carries. A state holding more is sent as
 /// several envelopes.
@@ -234,6 +247,10 @@ pub struct LinkRecordEntry {
     pub uses: u32,
     /// Revoked. Final: a revoked entry beats any live one.
     pub revoked: bool,
+    /// The link was copied on one of the account's devices, so someone may
+    /// hold it. Final like `revoked`: a shared entry beats an unshared one.
+    /// A shared link is never edited ([`Self::editable`]).
+    pub shared: bool,
     /// UNIX millis at which the link was minted.
     pub minted_at_ms: u64,
     /// The owner's label (at most [`LINK_RECORD_LABEL_MAX_BYTES`]), or empty.
@@ -253,6 +270,7 @@ impl core::fmt::Debug for LinkRecordEntry {
             .field("max_uses", &self.max_uses)
             .field("uses", &self.uses)
             .field("revoked", &self.revoked)
+            .field("shared", &self.shared)
             .field("has_revocation_seed", &!self.revocation_seed.is_empty())
             .field("answered", &self.answered.len())
             .finish_non_exhaustive()
@@ -361,6 +379,15 @@ impl LinkRecordEntry {
         }
     }
 
+    /// Whether the link's terms may still be changed (2026-10-26): it is not
+    /// revoked, was never copied, and nobody was ever accepted through it.
+    /// Editing mints a new link and revokes this one, so it must only happen
+    /// to a link nobody can hold.
+    #[must_use]
+    pub fn editable(&self) -> bool {
+        !self.revoked && !self.shared && self.uses == 0 && self.answered.is_empty()
+    }
+
     /// This record after one more accepted request from `requester_key`:
     /// `uses + 1` (saturating), the key appended (once; the oldest dropped
     /// past [`LINK_RECORD_ANSWERED_MAX`]).
@@ -376,12 +403,13 @@ impl LinkRecordEntry {
         next
     }
 
-    /// The body: everything but the stamp. `revoked` follows the link id so
-    /// the canonical bytes of the two states of one register differ there
-    /// first.
+    /// The body: everything but the stamp. `revoked` and `shared` follow the
+    /// link id so the canonical bytes of the states of one register differ
+    /// there first.
     pub(crate) fn encode_body(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.link_id);
         out.push(u8::from(self.revoked));
+        out.push(u8::from(self.shared));
         out.extend_from_slice(&self.link_secret);
         out.push(self.kind.to_wire());
         // Validated: 6 bytes, a seed of 32, a label of at most 64, at most 16 keys.
@@ -407,6 +435,11 @@ impl LinkRecordEntry {
         let mut link_id = [0u8; LINK_RECORD_ID_LEN];
         link_id.copy_from_slice(take_n(cur, LINK_RECORD_ID_LEN)?);
         let revoked = match take_u8(cur)? {
+            0 => false,
+            1 => true,
+            _ => return Err(CodecError::BadBool),
+        };
+        let shared = match take_u8(cur)? {
             0 => false,
             1 => true,
             _ => return Err(CodecError::BadBool),
@@ -454,6 +487,7 @@ impl LinkRecordEntry {
             max_uses,
             uses,
             revoked,
+            shared,
             minted_at_ms,
             label,
             answered,
@@ -608,6 +642,7 @@ mod tests {
             max_uses: 0,
             uses: 0,
             revoked: false,
+            shared: false,
             minted_at_ms: 10,
             label: "home".into(),
             answered: vec![],
@@ -722,8 +757,9 @@ mod tests {
             decode_link_record_envelope(&zero),
             Err(LinkRecordEnvelopeError::Count)
         );
-        // The kind byte sits after hlc(8) + id(16) + revoked(1) + secret(12).
-        let kind_at = header + 3 + 8 + 16 + 1 + 12;
+        // The kind byte sits after hlc(8) + id(16) + revoked(1) + shared(1)
+        // + secret(12).
+        let kind_at = header + 3 + 8 + 16 + 1 + 1 + 12;
         let mut kind = good.clone();
         kind[kind_at] = 9;
         assert_eq!(
@@ -734,6 +770,12 @@ mod tests {
         revoked[header + 3 + 8 + 16] = 2;
         assert_eq!(
             decode_link_record_envelope(&revoked),
+            Err(LinkRecordEnvelopeError::Entry)
+        );
+        let mut shared = good.clone();
+        shared[header + 3 + 8 + 16 + 1] = 2;
+        assert_eq!(
+            decode_link_record_envelope(&shared),
             Err(LinkRecordEnvelopeError::Entry)
         );
         // Descending ids.
@@ -748,6 +790,19 @@ mod tests {
             decode_link_record_envelope(&swapped),
             Err(LinkRecordEnvelopeError::NotCanonical)
         );
+    }
+
+    #[test]
+    fn a_link_is_editable_only_while_nobody_can_hold_it() {
+        let r = record(1);
+        assert!(r.editable());
+        let mut shared = r.clone();
+        shared.shared = true;
+        assert!(!shared.editable());
+        assert!(!r.with_use(&[3; LINK_RECORD_REQUESTER_KEY_LEN]).editable());
+        let mut revoked = r;
+        revoked.revoked = true;
+        assert!(!revoked.editable());
     }
 
     #[test]
@@ -823,6 +878,7 @@ mod tests {
             prop::sample::select(vec![0u32, 1, 3, LINK_RECORD_UNLIMITED]),
             0u32..5,
             any::<bool>(),
+            any::<bool>(),
             prop::collection::btree_set(any::<[u8; 32]>(), 0..4),
             any::<[u8; LINK_RECORD_REVOCATION_SEED_LEN]>(),
         )
@@ -835,6 +891,7 @@ mod tests {
                     max_uses,
                     uses,
                     revoked,
+                    shared,
                     answered,
                     seed,
                 )| {
@@ -848,6 +905,7 @@ mod tests {
                         max_uses,
                         uses,
                         revoked,
+                        shared,
                         minted_at_ms: 0,
                         label: String::new(),
                         answered: answered.into_iter().collect(),

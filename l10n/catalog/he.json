@@ -6078,10 +6078,6 @@
       "text": "אף פעם",
       "status": "machine"
     },
-    "invite.links.for_new_user": {
-      "text": "למישהו חדש ב-Lakko",
-      "status": "machine"
-    },
     "invite.links.label_field": {
       "text": "תווית (לא חובה)",
       "status": "machine"
@@ -6108,10 +6104,6 @@
     },
     "invite.links.new_badge": {
       "text": "חדש",
-      "status": "machine"
-    },
-    "invite.links.referral_option": {
-      "text": "למישהו שעדיין אין לו חשבון Lakko",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -8396,6 +8388,114 @@
     },
     "invite.contact.page.answer_failed": {
       "text": "לא ניתן היה להגיע אל {name}. כדאי לבדוק את החיבור ולנסות שוב.",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "הצגת קוד QR",
+      "status": "machine"
+    },
+    "invite.links.qr_hint": {
+      "text": "כל מי שסורק את הקוד הזה יכול לשלוח לך בקשת קשר.",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "סריקת קוד QR",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "הקוד הזה אינו קישור של Lakko. נסו קוד אחר.",
+      "status": "machine"
+    },
+    "invite.links.expires_option_custom": {
+      "text": "מותאם אישית",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "מותאם אישית",
+      "status": "machine"
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "תקופה",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "שעות",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "ימים",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "מספר אנשים",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "יש להזין תקופה משעה אחת עד 365 ימים.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "יש להזין מספר אנשים מ-1 עד {max}.",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} מזמין/ה אותך ל-Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko היא אפליקציית מסרים שבה כל צ'אט ושיחה מוצפנים מקצה לקצה.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "יצירת חשבון",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "כבר יש לי חשבון",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "קישור ההזמנה הזה כבר לא עובד",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "אפשר לבקש מהשולח/ת קישור חדש.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "עריכת קישור",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "תנאי הקישור",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "השמירה יוצרת קישור חדש. הקישור הישן יפסיק לעבוד.",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "מחיקת קישור",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "למחוק את הקישור הזה?",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "מי שכבר קיבל אותו לא יוכל להשתמש בו.",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "הקישור נמחק.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "לא ניתן למחוק את הקישור. יש לבדוק את החיבור ולנסות שוב.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "לא ניתן לשמור את הקישור. יש לבדוק את החיבור ולנסות שוב.",
       "status": "machine"
     }
   }

@@ -1924,8 +1924,10 @@ public struct ActiveInvite: Equatable {
     /// Wire-format `max_uses` sentinel: `0` = SINGLE_USE,
     /// `0xFFFFFFFF` = unlimited, any other N = N consumes allowed.
     public let maxUses: UInt32
-    /// Server-counted consumes.
-    public let usedCount: UInt32
+    /// How many times the link has been used, or `nil` when this device
+    /// does not know (its own records only, before the synced register is
+    /// ready: ADR-0079 section 4 carries the counts).
+    public let usedCount: UInt32?
     /// Owner-supplied free-text label; empty string when not set.
     public let label: String
     /// `true` if the capability flags the link as a referral
@@ -1938,7 +1940,7 @@ public struct ActiveInvite: Equatable {
         blobIdSlug: String,
         expiryMs: UInt64,
         maxUses: UInt32,
-        usedCount: UInt32,
+        usedCount: UInt32?,
         label: String,
         bootstrapReferral: Bool,
         createdAt: String

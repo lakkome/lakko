@@ -6078,10 +6078,6 @@
       "text": "Ніколи",
       "status": "machine"
     },
-    "invite.links.for_new_user": {
-      "text": "Для новачка в Lakko",
-      "status": "machine"
-    },
     "invite.links.label_field": {
       "text": "Мітка (необов’язково)",
       "status": "machine"
@@ -6108,10 +6104,6 @@
     },
     "invite.links.new_badge": {
       "text": "Нове",
-      "status": "machine"
-    },
-    "invite.links.referral_option": {
-      "text": "Для того, хто ще не має облікового запису Lakko",
       "status": "machine"
     },
     "invite.links.revoked": {
@@ -8396,6 +8388,114 @@
     },
     "invite.contact.page.answer_failed": {
       "text": "Не вдалося зв’язатися з {name}. Перевірте з’єднання й спробуйте ще раз.",
+      "status": "machine"
+    },
+    "invite.links.show_qr": {
+      "text": "Показати QR-код",
+      "status": "machine"
+    },
+    "invite.links.qr_hint": {
+      "text": "Хто відсканує цей код, зможе надіслати вам запит у контакти.",
+      "status": "machine"
+    },
+    "contacts.scan_qr": {
+      "text": "Сканувати QR-код",
+      "status": "machine"
+    },
+    "contacts.scan_qr.not_a_link": {
+      "text": "Це не посилання Lakko. Спробуйте інший код.",
+      "status": "machine"
+    },
+    "invite.links.expires_option_custom": {
+      "text": "Власний",
+      "status": "machine"
+    },
+    "invite.links.uses_option_custom": {
+      "text": "Власний",
+      "status": "machine"
+    },
+    "invite.links.custom_expiry_amount": {
+      "text": "Термін",
+      "status": "machine"
+    },
+    "invite.links.unit_hours": {
+      "text": "Години",
+      "status": "machine"
+    },
+    "invite.links.unit_days": {
+      "text": "Дні",
+      "status": "machine"
+    },
+    "invite.links.custom_uses_count": {
+      "text": "Кількість людей",
+      "status": "machine"
+    },
+    "invite.links.error.custom_expiry": {
+      "text": "Укажіть термін від 1 години до 365 днів.",
+      "status": "machine"
+    },
+    "invite.links.error.custom_uses": {
+      "text": "Укажіть кількість людей від 1 до {max}.",
+      "status": "machine"
+    },
+    "invite.contact.page.signed_out_title": {
+      "text": "{name} запрошує вас до Lakko",
+      "status": "machine"
+    },
+    "invite.contact.page.about": {
+      "text": "Lakko — месенджер, у якому кожен чат і дзвінок захищені наскрізним шифруванням.",
+      "status": "machine"
+    },
+    "invite.contact.page.create_account": {
+      "text": "Створити акаунт",
+      "status": "machine"
+    },
+    "invite.contact.page.have_account": {
+      "text": "У мене вже є акаунт",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_title": {
+      "text": "Посилання-запрошення більше не працює",
+      "status": "machine"
+    },
+    "invite.contact.page.dead_body": {
+      "text": "Попросіть відправника надіслати нове.",
+      "status": "machine"
+    },
+    "invite.links.edit": {
+      "text": "Змінити посилання",
+      "status": "machine"
+    },
+    "invite.links.edit_title": {
+      "text": "Умови посилання",
+      "status": "machine"
+    },
+    "invite.links.edit_note": {
+      "text": "Після збереження з'явиться нове посилання. Старе перестане працювати.",
+      "status": "machine"
+    },
+    "invite.links.delete": {
+      "text": "Видалити посилання",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_title": {
+      "text": "Видалити це посилання?",
+      "status": "machine"
+    },
+    "invite.links.delete_confirm_body": {
+      "text": "Той, у кого воно вже є, більше не зможе ним скористатися.",
+      "status": "machine"
+    },
+    "invite.links.deleted": {
+      "text": "Посилання видалено.",
+      "status": "machine"
+    },
+    "invite.links.error.delete": {
+      "text": "Не вдалося видалити посилання. Перевірте з'єднання і спробуйте ще раз.",
+      "status": "machine"
+    },
+    "invite.links.error.edit": {
+      "text": "Не вдалося зберегти посилання. Перевірте з'єднання і спробуйте ще раз.",
       "status": "machine"
     }
   }

@@ -154,13 +154,39 @@ final class ContactsPresentationTests: XCTestCase {
                             createdAt: "2026-09-10T10:00:00Z")],
             sessionGenerated: [], now: now, accountIdB64: "someone-else", secrets: secrets)
         XCTAssertNil(otherAccount.first?.url, "the secrets are per account")
-        XCTAssertEqual(rows[0].title, "Invite link")
+        XCTAssertNil(rows[0].title, "a link without a label has no title line, not a placeholder name")
+        XCTAssertEqual(rows[1].usesLeft, 8, "a known use count shows uses left")
+        XCTAssertEqual(InviteLinkRows.useFact(rows[1]), "8 uses left")
+        XCTAssertNil(rows[0].usesLeft, "a session row carries no use count")
+        XCTAssertEqual(InviteLinkRows.useFact(rows[0]), "single-use")
         XCTAssertEqual(rows[0].limit, "single-use")
         if case .session(let blobId) = rows[0].origin {
             XCTAssertEqual(blobId.count, 6)
         } else {
             XCTFail("a session-only link revokes through its blob id")
         }
+    }
+
+    func testUsesLeftOnlyForAMultiUseLinkWithAKnownCount() {
+        XCTAssertEqual(InviteLinkRows.usesLeft(maxUses: 10, used: 3), 7)
+        XCTAssertEqual(InviteLinkRows.usesLeft(maxUses: 10, used: 12), 0)
+        XCTAssertNil(InviteLinkRows.usesLeft(maxUses: 10, used: nil), "unknown count: show the limit")
+        XCTAssertNil(InviteLinkRows.usesLeft(maxUses: 0, used: 0), "single-use")
+        XCTAssertNil(InviteLinkRows.usesLeft(maxUses: 1, used: 0), "single-use")
+        XCTAssertNil(InviteLinkRows.usesLeft(maxUses: UInt32.max, used: 4), "unlimited")
+    }
+
+    func testAScannedCodeOpensOnlyALakkoLink() {
+        let origin = "https://test.lakko.me"
+        XCTAssertNotNil(InviteIntake.scannedLink("https://test.lakko.me/i/AbCdEfGh#secret", webOrigin: origin))
+        XCTAssertNotNil(InviteIntake.scannedLink(" https://lakko.me/g/AbCdEfGh#k\n", webOrigin: origin))
+        XCTAssertNotNil(InviteIntake.scannedLink("https://lakko.me/c/AbCdEfGh#k", webOrigin: origin))
+        XCTAssertNil(InviteIntake.scannedLink("https://evil.example/i/AbCdEfGh#k", webOrigin: origin))
+        XCTAssertNil(InviteIntake.scannedLink("https://notlakko.me/i/AbCdEfGh", webOrigin: origin))
+        XCTAssertNil(InviteIntake.scannedLink("http://lakko.me/i/AbCdEfGh", webOrigin: origin))
+        XCTAssertNil(InviteIntake.scannedLink("https://lakko.me/i/", webOrigin: origin))
+        XCTAssertNil(InviteIntake.scannedLink("https://lakko.me/feed/import#x", webOrigin: origin))
+        XCTAssertNil(InviteIntake.scannedLink("WIFI:S:home;T:WPA;P:pw;;", webOrigin: origin))
     }
 
     /// `docs/ux/client-redesign.md` section 5.3 — a row without a secret on

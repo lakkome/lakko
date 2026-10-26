@@ -143,7 +143,7 @@ public fun removedPeerContact(
 internal const val INVITE_UNLIMITED_USES: Long = 0xFFFF_FFFFL
 
 /** UX 5.3 — the line a row shows in place of Copy and Share when this device
- *  does not hold the link's secret. Revoke stays. */
+ *  does not hold the link's secret. Delete link stays. */
 public val INVITE_CREATED_ELSEWHERE_COPY: UiText = UiText("invite.links.made_elsewhere_hint")
 
 /** One row of the "Invite links" sheet. */
@@ -172,8 +172,12 @@ public data class InviteLinkRow(
     val fromSession: Boolean,
 )
 
+/** The title line of [row]: its label, or `null` for a link without one, so
+ *  the row leads with its meta line instead of a generic "Invite link". */
+public fun inviteRowTitle(row: InviteLinkRow): String? = row.label.trim().ifEmpty { null }
+
 /** What a row offers: Copy and Share with the full URL, or the
- *  [INVITE_CREATED_ELSEWHERE_COPY] line; Revoke is offered either way. */
+ *  [INVITE_CREATED_ELSEWHERE_COPY] line; Delete link is offered either way. */
 public sealed interface InviteRowShare {
     public data class Shareable(val url: String) : InviteRowShare
 
@@ -209,11 +213,19 @@ public fun describeInviteExpiry(expiryMs: Long, nowMs: Long): UiText {
     if (expiryMs == 0L) return UiText("invite.links.never_expires")
     if (expiryMs <= nowMs) return UiText("invite.links.expired")
     val deltaMs = expiryMs - nowMs
-    val days = deltaMs / (24L * 60 * 60 * 1000)
-    if (days >= 1) return UiText("invite.links.expires_days", texts = mapOf("count" to days.toString()))
-    val hours = deltaMs / (60L * 60 * 1000)
-    if (hours >= 1) return UiText("invite.links.expires_hours", texts = mapOf("count" to hours.toString()))
-    val minutes = (deltaMs / (60L * 1000)).coerceAtLeast(1L)
+    // Same rule on all three clients: minutes round up (so "30 s" reads
+    // "1m"), hours and days round half up (so a 7-day link made an hour
+    // ago still reads "7d", not a floored "6d").
+    val minuteMs = 60_000L
+    val hourMs = 60 * minuteMs
+    val dayMs = 24 * hourMs
+    val minutes = (deltaMs + minuteMs - 1) / minuteMs
+    if (minutes >= 60) {
+        val hours = (deltaMs + hourMs / 2) / hourMs
+        if (hours < 24) return UiText("invite.links.expires_hours", texts = mapOf("count" to hours.toString()))
+        val days = (deltaMs + dayMs / 2) / dayMs
+        return UiText("invite.links.expires_days", texts = mapOf("count" to days.toString()))
+    }
     return UiText("invite.links.expires_minutes", texts = mapOf("count" to minutes.toString()))
 }
 
