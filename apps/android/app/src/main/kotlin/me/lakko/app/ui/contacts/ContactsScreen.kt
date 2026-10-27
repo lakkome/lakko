@@ -710,21 +710,18 @@ private fun InviteLinksSheet(
     qrUrl?.let { url -> InviteQrSheet(url = url, onDismiss = { qrUrl = null }) }
     confirmDelete?.let { row ->
         // A Lakko dialog, never a system alert (UX section 9).
-        me.lakko.app.ui.components.LakkoModal(
+        me.lakko.app.ui.components.LakkoDialog(
             onDismissRequest = { confirmDelete = null },
             title = t("invite.links.delete_confirm_title"),
-            actions = {
-                TextButton(onClick = { confirmDelete = null }) { Text(t("common.cancel")) }
-                TextButton(onClick = {
-                    confirmDelete = null
-                    onDelete(row)
-                }) {
-                    Text(t("common.delete"), color = MaterialTheme.colorScheme.error)
-                }
+            body = t("invite.links.delete_confirm_body"),
+            confirm = me.lakko.app.ui.components.LakkoDialogAction(
+                t("common.delete"),
+                me.lakko.app.ui.components.LakkoDialogTone.Danger,
+            ) {
+                confirmDelete = null
+                onDelete(row)
             },
-        ) {
-            Text(t("invite.links.delete_confirm_body"), style = MaterialTheme.typography.bodyMedium)
-        }
+        )
     }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
