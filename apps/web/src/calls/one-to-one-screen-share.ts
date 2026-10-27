@@ -21,6 +21,7 @@ import type {
   VerifiedCallScreenShare,
 } from "../../wasm/lakko_ffi_wasm";
 import type { GroupScreenShareStore } from "./group-screen-share";
+import { ShareStreams } from "./share-streams";
 import { ScreenShareBinding, type ScreenCapture } from "./screen-share-binding";
 import type { ShareFold } from "./screen-share-controller";
 
@@ -63,6 +64,8 @@ export interface OneToOneScreenShareDeps {
   notice(text: string): void;
   readonly store: GroupScreenShareStore;
   readonly capture?: ScreenCapture;
+  /** Builds the stream a share is shown from; left out, `new MediaStream`. */
+  readonly makeStream?: (tracks: MediaStreamTrack[]) => MediaStream;
 }
 
 export class OneToOneScreenShare {
@@ -70,8 +73,16 @@ export class OneToOneScreenShare {
   /** The one-to-one peer id (`p2p`), the core's. */
   readonly peerId: string;
   private disposed = false;
+  /** The stream the other person's share is shown from (`share-streams.ts`). */
+  private readonly streams: ShareStreams;
 
   constructor(private readonly deps: OneToOneScreenShareDeps) {
+    this.streams = new ShareStreams(
+      (peerId, stream, only) => deps.store.setStream(peerId, stream, only),
+      deps.makeStream,
+      // eslint-disable-next-line no-console
+      (line) => console.info(line),
+    );
     this.peerId = deps.wasm.callScreenShareOneToOnePeerId();
     const fold = new deps.wasm.CallScreenShareState(deps.identity.signaturePublicKey);
     this.binding = new ScreenShareBinding<VerifiedCallScreenShare>({
@@ -128,14 +139,12 @@ export class OneToOneScreenShare {
     }
   }
 
-  /** The other person's share stream arrived. */
-  onRemoteStream(stream: MediaStream, track: MediaStreamTrack): void {
+  /** A track of the other person's share arrived. The share is shown from
+   *  a stream of its own, never the browser's stream it came in, which can
+   *  keep an earlier share's track beside it (`share-streams.ts`). */
+  onRemoteTrack(track: MediaStreamTrack): void {
     if (this.disposed) return;
-    this.deps.store.setStream(this.peerId, stream);
-    track.addEventListener("ended", () => {
-      if (stream.getTracks().some((t) => t.readyState === "live")) return;
-      this.deps.store.setStream(this.peerId, null, stream);
-    });
+    this.streams.add(this.peerId, track);
   }
 
   /** Names may have changed. */

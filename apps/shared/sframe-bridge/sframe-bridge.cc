@@ -104,17 +104,26 @@ int LakkoFrameEncryptor::Encrypt(cricket::MediaType media_type,
   }
   *bytes_written = 0;
 
-  // How many leading bytes of this frame stay in the clear (ADR-0071).
-  // Audio never keeps any, whatever codec was set: the media type is the
-  // one thing libwebrtc does say here. For video the codec comes from
-  // `SetCodec`; until the shim has called it the value is OTHER and
-  // nothing is clear. For VP8 the Rust side reads the frame's own tag to
-  // tell a key frame (10 bytes) from any other frame (3 bytes).
-  const uint8_t codec = media_type == cricket::MEDIA_TYPE_AUDIO
-                            ? static_cast<uint8_t>(LAKKO_SFRAME_MEDIA_CODEC_OPUS)
-                            : codec_.load(std::memory_order_acquire);
-  const std::size_t clear_prefix_len =
-      lakko_sframe_media_clear_prefix_len(codec, frame.data(), frame.size());
+  // The frame's codec decides how many leading bytes stay in the clear
+  // (ADR-0071) and what the trailer says the frame holds. Audio is Opus,
+  // or a RED container of Opus when the shim said the sender negotiated
+  // RED: libwebrtc builds that container before this encryptor runs, and a
+  // receiver without RED needs the trailer to say so (it takes the primary
+  // frame out after opening). Neither keeps any byte clear. For video the
+  // codec comes from `SetCodec`; until the shim has called it the value is
+  // OTHER and nothing is clear. For VP8 the Rust side reads the frame's own
+  // tag to tell a key frame (10 bytes) from any other frame (3 bytes).
+  // A video encryptor told RED seals as OTHER: video RED wraps the RTP
+  // packet outside this frame, so a video frame is never a RED container.
+  const uint8_t set_codec = codec_.load(std::memory_order_acquire);
+  const bool red = set_codec == LAKKO_SFRAME_MEDIA_CODEC_RED_OPUS;
+  uint8_t codec = set_codec;
+  if (media_type == cricket::MEDIA_TYPE_AUDIO) {
+    codec = red ? static_cast<uint8_t>(LAKKO_SFRAME_MEDIA_CODEC_RED_OPUS)
+                : static_cast<uint8_t>(LAKKO_SFRAME_MEDIA_CODEC_OPUS);
+  } else if (red) {
+    codec = static_cast<uint8_t>(LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+  }
 
   // Seal into `clear_prefix || ciphertext_and_tag || sframe_header ||
   // trailer` in one call. The header carries KID = (local_leaf << 8) |
@@ -134,9 +143,9 @@ int LakkoFrameEncryptor::Encrypt(cricket::MediaType media_type,
   lakko_sframe_status_t status;
   {
     std::lock_guard<std::mutex> guard(seal_mutex_);
-    status = lakko_sframe_seal_media_frame(participant_key_, frame.data(),
-                                           frame.size(), clear_prefix_len,
-                                           &wire_ptr, &wire_len);
+    status = lakko_sframe_seal_media_frame_for_codec(
+        participant_key_, frame.data(), frame.size(), codec, &wire_ptr,
+        &wire_len);
   }
   if (status != LAKKO_SFRAME_STATUS_T_OK) {
     return -1;
@@ -175,6 +184,10 @@ uint8_t LakkoFrameEncryptor::CodecFromName(const char* name) {
   if (EqualsIgnoreAsciiCase(name, "opus") ||
       EqualsIgnoreAsciiCase(name, "audio/opus")) {
     return LAKKO_SFRAME_MEDIA_CODEC_OPUS;
+  }
+  if (EqualsIgnoreAsciiCase(name, "red") ||
+      EqualsIgnoreAsciiCase(name, "audio/red")) {
+    return LAKKO_SFRAME_MEDIA_CODEC_RED_OPUS;
   }
   return LAKKO_SFRAME_MEDIA_CODEC_OTHER;
 }

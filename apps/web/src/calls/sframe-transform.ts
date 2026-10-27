@@ -159,6 +159,24 @@ export interface SFrameTransformOptions {
    * codec; an audio sender's frames keep nothing.
    */
   readonly mediaKind?: "audio" | "video";
+  /**
+   * `"decrypt"` only: whether this browser decodes `audio/red` itself. A
+   * frame marked as a RED container goes to an Opus decoder as its primary
+   * frame when the frame's metadata does not name the codec and this is
+   * `false` (ADR-0071, amended 2026-10-26).
+   */
+  readonly redDecodes?: boolean;
+}
+
+/** Whether this browser decodes `audio/red` (RFC 2198) itself. Read on the
+ *  main thread, since a worker has no `RTCRtpReceiver`. */
+export function browserDecodesRed(): boolean {
+  try {
+    const codecs = RTCRtpReceiver.getCapabilities?.("audio")?.codecs ?? [];
+    return codecs.some((c) => c.mimeType.toLowerCase() === "audio/red");
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -427,6 +445,7 @@ export function attachReceiverSFrame(
     operation: "decrypt",
     id,
     seed: opts.seed,
+    redDecodes: browserDecodesRed(),
     // No stream index on the receive side: each inbound frame's header carries
     // the whole KID `(sender_leaf << 8) | stream_index`, which the worker reads
     // per frame to select (and lazily derive) the right per-stream key. One

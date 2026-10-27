@@ -641,11 +641,11 @@ pub struct SimulcastLayout {
 ///   destination peer now has a send stream for
 ///   `local_mid` and the fanout can write packets to it.
 ///
-/// The two `ToStop` / `NegotiatingStop` states mirror
-/// chat.rs's cleanup path but are deferred — the
-/// current SFU drops the entire `MediaPeer` on
-/// disconnect, so per-track stop renegotiation is not
-/// needed today.
+/// A track the publisher stops (a port-0 line in its offer: a screen share
+/// that ended, ADR-0083) has no state here: its entry is removed outright
+/// and the local mid it had is stopped by the subscriber's next
+/// renegotiation ([`MediaPeer::retire_track_out`]). A peer that leaves
+/// stops nothing: its `MediaPeer` is dropped whole.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackOutState {
     /// Track registered; SDP renegotiation not started.
@@ -1218,6 +1218,10 @@ pub struct MediaPeer {
     /// concurrent change without applying the first
     /// would tangle str0m's internal SDP state.
     pending_offer: Option<SdpPendingOffer>,
+    /// Local mids of downstream lines whose source track the publisher
+    /// stopped ([`Self::retire_track_out`]): stopped (port 0) by the next
+    /// renegotiation, so the subscriber's track ends.
+    pending_stops: Vec<Mid>,
     /// Latest egress bandwidth estimate (bits/second) str0m produced for
     /// SENDING to this peer, from `Event::EgressBitrateEstimate`. `None` until
     /// BWE converges. Read by [`drive_layer_selection`] as this subscriber's
@@ -1675,6 +1679,26 @@ fn red_negotiated(
         .is_some_and(|media| media.remote_pts().contains(&matched.pt()));
     let inner = |params: &PayloadParams| params.spec().format.red.map(|red| red.pt);
     on_track && inner(matched).is_some() && inner(matched) == inner(source)
+}
+
+/// The Opus payload type a subscriber's track `local_mid` negotiated, when
+/// that track negotiated no `red` (the subscriber's `red` entry `red` is not
+/// among its payload types): where an audio RED packet goes to it, sealed
+/// whole and marked as RED by its trailer, for the subscriber's client to
+/// take the primary frame out. `None` when the track did negotiate `red`
+/// (then [`red_negotiated`] decides alone) or has no Opus.
+fn opus_for_red_without_red(
+    rtc: &Rtc,
+    local_mid: Mid,
+    red: &PayloadParams,
+) -> Option<str0m::media::Pt> {
+    let pts = rtc.media(local_mid)?.remote_pts();
+    if pts.contains(&red.pt()) {
+        return None;
+    }
+    rtc.codec_config()
+        .find(|p| p.spec().codec == Codec::Opus && pts.contains(&p.pt()))
+        .map(PayloadParams::pt)
 }
 
 /// The `red` and `ulpfec` payload types of this peer for the track
@@ -3634,6 +3658,7 @@ impl MediaPeer {
             tracks_in: Vec::new(),
             tracks_out: Vec::new(),
             pending_offer: None,
+            pending_stops: Vec::new(),
             egress_estimate_bps: None,
             layer_meters: HashMap::new(),
             last_keyframe_request: HashMap::new(),
@@ -3743,6 +3768,48 @@ impl MediaPeer {
     #[must_use]
     pub fn tracks_out(&self) -> &[TrackOutEntry] {
         &self.tracks_out
+    }
+
+    /// The upstream tracks whose media line this peer stopped in its
+    /// latest offer (a port-0 m-line: a screen share that ended,
+    /// ADR-0083), removed from [`Self::tracks_in`] and returned so the
+    /// router can stop the lines that carry them on every subscriber
+    /// ([`retire_tracks_out`]). A line merely set `inactive` stays: the
+    /// peer may send on it again, and nothing announces it a second time.
+    pub fn retire_stopped_tracks_in(&mut self) -> Vec<TrackIn> {
+        let rtc = &self.rtc;
+        let (retired, kept): (Vec<TrackIn>, Vec<TrackIn>) = self
+            .tracks_in
+            .iter()
+            .copied()
+            .partition(|t| rtc.media(t.mid).map_or(true, str0m::media::Media::stopped));
+        self.tracks_in = kept;
+        retired
+    }
+
+    /// The publisher `source` stopped the track it sent on `source_mid`:
+    /// nothing is forwarded on its downstream line here from now on, and
+    /// the line is stopped by the next renegotiation
+    /// ([`Self::negotiate_if_needed`]), so this peer's track ends instead
+    /// of standing beside a later share of the same publisher under the
+    /// same stream id. A line not negotiated yet is dropped outright.
+    /// Returns whether this peer had such a line.
+    pub fn retire_track_out(&mut self, source: &MediaPeerId, source_mid: Mid) -> bool {
+        let mut found = false;
+        let mut stops = Vec::new();
+        self.tracks_out.retain(|t| {
+            if t.source_peer != *source || t.source_mid != source_mid {
+                return true;
+            }
+            found = true;
+            match t.state {
+                TrackOutState::ToOpen => {},
+                TrackOutState::Negotiating(mid) | TrackOutState::Open(mid) => stops.push(mid),
+            }
+            false
+        });
+        self.pending_stops.extend(stops);
+        found
     }
 
     /// Record an upstream track this peer just announced
@@ -4273,6 +4340,8 @@ impl MediaPeer {
         if self.pending_offer.is_some() {
             return Ok(None);
         }
+        // Lines whose source the publisher stopped are stopped here too.
+        let stops = std::mem::take(&mut self.pending_stops);
         // Snapshot the indices of ToOpen entries — we
         // mutate `state` after the change-apply step
         // and a simultaneous iter+mut on the Vec would
@@ -4284,11 +4353,14 @@ impl MediaPeer {
             .filter(|(_, t)| matches!(t.state, TrackOutState::ToOpen))
             .map(|(i, _)| i)
             .collect();
-        if to_open.is_empty() {
+        if to_open.is_empty() && stops.is_empty() {
             return Ok(None);
         }
 
         let mut change = self.rtc.sdp_api();
+        for mid in stops {
+            change.stop_media(mid);
+        }
         // Allocate one outgoing media line per ToOpen
         // entry. `Direction::SendOnly` — the SFU's job
         // is to forward RTP **to** this peer, not to
@@ -5450,10 +5522,21 @@ impl MediaPeer {
         let Some(matched) = self.rtc.codec_config().match_params(packet.params).copied() else {
             return MediaForward::NoCodecMatch;
         };
+        // The payload type an unwrapped packet goes out under.
+        let mut out_pt = matched.pt();
         if packet.params.spec().codec == Codec::Red
             && !red_negotiated(&self.rtc, local_mid, &matched, &packet.params)
         {
-            return MediaForward::NoCodecMatch;
+            // A subscriber whose track negotiated no `red` at all (Firefox
+            // has none) is sent the sealed container under its Opus payload
+            // type: the frame's own trailer says it is RED, and that
+            // subscriber's client takes the primary frame out after opening
+            // (ADR-0071, amended 2026-10-26). One that negotiated `red` over
+            // another Opus number cannot be helped, as before.
+            let Some(opus_pt) = opus_for_red_without_red(&self.rtc, local_mid, &matched) else {
+                return MediaForward::NoCodecMatch;
+            };
+            out_pt = opus_pt;
         }
         let (pt, payload) = match packet.red {
             // Not RED-wrapped: the payload goes out as it came. A bare
@@ -5463,7 +5546,7 @@ impl MediaPeer {
                 if packet.params.spec().codec == Codec::RedVideo && fec_pts.is_none() {
                     return MediaForward::NoCodecMatch;
                 }
-                (matched.pt(), packet.payload.clone())
+                (out_pt, packet.payload.clone())
             },
             // `matched` is the peer's entry for the media codec inside.
             Some(RedBody::Media) => {
@@ -8565,9 +8648,10 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             // been announced yet (str0m announces a track at the next
             // poll), so this is the moment a declared light track is
             // told from a main one.
-            if res.is_ok() {
-                declare_offer_lines(peer, &light_mids, &middle_mids, &screen_mids);
-            }
+            let retired = res.as_ref().map_or_else(
+                |_| Vec::new(),
+                |_| settle_offer_lines(peer, &light_mids, &middle_mids, &screen_mids),
+            );
             // Lifecycle point 0. The four downstream lines describe how the
             // SFU routes tracks BETWEEN peers; they say nothing about the
             // answer to a peer's own offer — and that answer alone can hand
@@ -8596,7 +8680,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             // only ever propagates FORWARD — see `backfill_existing_tracks`
             // for why that leaves a late joiner with nothing.
             if ok {
-                backfill_existing_tracks(router, &peer_id_for_backfill);
+                after_accepted_offer(router, &peer_id_for_backfill, &retired);
             }
         },
         MediaCommand::AddRemoteCandidate {
@@ -11558,6 +11642,62 @@ fn note_uplink_fallback_states(router: &MediaRouter, ledger: &mut FanoutLedger) 
             }
         }
     }
+}
+
+/// `source` stopped the lines of `retired` (ADR-0083: a screen share that
+/// ended): every other peer stops forwarding them and stops its own lines
+/// for them at its next renegotiation ([`MediaPeer::retire_track_out`]).
+/// Returns how many downstream lines were retired.
+pub(crate) fn retire_tracks_out(
+    router: &mut MediaRouter,
+    source: &MediaPeerId,
+    retired: &[TrackIn],
+) -> usize {
+    let mut n = 0;
+    for peer in router.peers_mut() {
+        if peer.id() == source {
+            continue;
+        }
+        for track in retired {
+            if peer.retire_track_out(source, track.mid) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// After a peer's offer is accepted: declare the lines it names as its
+/// camera copies and screen ([`declare_offer_lines`]), and take out of its
+/// announced set the tracks whose line the offer stops (port 0), which carry
+/// nothing any more; the caller stops every subscriber's line for them
+/// ([`after_accepted_offer`]).
+fn settle_offer_lines(
+    peer: &mut MediaPeer,
+    light_mids: &[String],
+    middle_mids: &[String],
+    screen_mids: &[String],
+) -> Vec<TrackIn> {
+    declare_offer_lines(peer, light_mids, middle_mids, screen_mids);
+    peer.retire_stopped_tracks_in()
+}
+
+/// After `source`'s offer was accepted: every subscriber stops its lines for
+/// the tracks the offer stopped ([`retire_tracks_out`], said in one line when
+/// there were any), then `source` is given the tracks the call already has
+/// ([`backfill_existing_tracks`]).
+fn after_accepted_offer(router: &mut MediaRouter, source: &MediaPeerId, retired: &[TrackIn]) {
+    if !retired.is_empty() {
+        let lines = retire_tracks_out(router, source, retired);
+        tracing::info!(
+            peer = %source.log_tag(),
+            tracks = retired.len(),
+            screen = retired.iter().filter(|t| t.screen).count(),
+            downstream_lines = lines,
+            "media: publisher stopped tracks; stopping them on subscribers"
+        );
+    }
+    backfill_existing_tracks(router, source);
 }
 
 /// Walk `new_tracks` and push a matching

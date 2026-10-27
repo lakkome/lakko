@@ -23,6 +23,7 @@ import type { CallScreenShareState, VerifiedCallScreenShare } from "../../wasm/l
 import { bytesOfHex, type PeerAnnouncer } from "./call-relay";
 import { ScreenShareBinding, type ScreenCapture, type ScreenShareStoreWriter } from "./screen-share-binding";
 import type { ShareFold } from "./screen-share-controller";
+import { ShareStreams } from "./share-streams";
 import { screenStreamPeerOf } from "./screen-share-tracks";
 
 /** The session, as the share needs it. `SfuCallSession` satisfies it. */
@@ -46,6 +47,8 @@ export interface GroupScreenShareDeps {
   notice(text: string): void;
   readonly store: GroupScreenShareStore;
   readonly capture?: ScreenCapture;
+  /** Builds the stream a share is shown from; left out, `new MediaStream`. */
+  readonly makeStream?: (tracks: MediaStreamTrack[]) => MediaStream;
 }
 
 /** The wasm the share builds its fold with. */
@@ -61,8 +64,17 @@ export class GroupScreenShare {
   private readonly held = new Map<string, Uint8Array>();
   private connected = false;
   private disposed = false;
+  /** The stream each received share is shown from (`share-streams.ts`). */
+  private readonly streams: ShareStreams;
 
-  constructor(private readonly deps: GroupScreenShareDeps) {}
+  constructor(private readonly deps: GroupScreenShareDeps) {
+    this.streams = new ShareStreams(
+      (peerId, stream, only) => deps.store.setStream(peerId, stream, only),
+      deps.makeStream,
+      // eslint-disable-next-line no-console
+      (line) => console.info(line),
+    );
+  }
 
   /**
    * The wasm is loaded: build the fold. A call whose announcer cannot sign
@@ -143,7 +155,7 @@ export class GroupScreenShare {
     this.held.delete(peerId);
     const key = this.signerKeys.get(peerId);
     this.signerKeys.delete(peerId);
-    this.deps.store.setStream(peerId, null);
+    this.streams.drop(peerId);
     if (key !== undefined) this.binding?.participantLeft(key);
   }
 
@@ -159,16 +171,14 @@ export class GroupScreenShare {
 
   /**
    * A remote track: `true` when it is a share's, which goes to the store and
-   * nowhere else.
+   * nowhere else. The share is shown from a stream of its own, not from the
+   * browser's stream for `<peer>~screen`, which keeps an earlier share's
+   * track beside a later one (`share-streams.ts`).
    */
-  onRemoteTrack(streamId: string, track: MediaStreamTrack, stream: MediaStream): boolean {
+  onRemoteTrack(streamId: string, track: MediaStreamTrack): boolean {
     const peerId = screenStreamPeerOf(streamId);
     if (peerId === null) return false;
-    this.deps.store.setStream(peerId, stream);
-    track.addEventListener("ended", () => {
-      if (stream.getTracks().some((t) => t.readyState === "live")) return;
-      this.deps.store.setStream(peerId, null, stream);
-    });
+    this.streams.add(peerId, track);
     return true;
   }
 

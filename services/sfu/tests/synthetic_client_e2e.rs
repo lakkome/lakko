@@ -2835,6 +2835,174 @@ async fn a_declared_screen_line_reaches_a_subscriber_as_a_screen_track_verbatim(
     );
 }
 
+/// **ADR-0083, a screen share that ends** — when the publisher stops its
+/// screen line (a port-0 m-line in its next offer, what a browser sends
+/// after `RTCRtpTransceiver.stop()`), the SFU stops the subscriber's line
+/// for it too, so the subscriber's track ends. Before, the line stayed open
+/// forever, and a second share of the same publisher arrived under the same
+/// stream id beside the dead track of the first: a browser that played that
+/// stream showed nothing ("Waiting for ...'s screen"), seen on the test
+/// stack with Safari sharing to Chrome.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_stopped_screen_line_is_stopped_on_the_subscriber() {
+    let peers = PeerRegistry::new();
+    let b_id = fresh_peer_id();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    assert!(
+        peers
+            .register(Peer {
+                id: b_id.clone(),
+                room: "screen-stop-test".to_owned(),
+                outbound: Some(b_tx),
+            })
+            .await,
+        "fresh PeerId must register cleanly"
+    );
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new_with_frame_descriptor().await;
+    let mut b = SyntheticClient::new_with_frame_descriptor().await;
+    let a_id = fresh_peer_id();
+
+    let (b_offer, b_pending) = b.create_video_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), "screen-stop-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's subscriber offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+
+    // A sends a microphone beside its screen, as a browser does: a line
+    // that stays when the screen line stops keeps the BUNDLE group.
+    let (a_offer, a_pending, screen_mid) = {
+        let mut change = a.rtc.sdp_api();
+        let _audio = change.add_media(
+            MediaKind::Audio,
+            Direction::SendOnly,
+            Some("screen-stop-publisher".to_owned()),
+            None,
+            None,
+        );
+        let mid = change.add_media(
+            MediaKind::Video,
+            Direction::SendOnly,
+            Some("screen-stop-publisher-screen".to_owned()),
+            None,
+            None,
+        );
+        let (offer, pending) = change.apply().expect("two lines are a change");
+        (offer.to_sdp_string(), pending, mid)
+    };
+    let a_answer = media
+        .accept_offer_with_screen(
+            a_id.clone(),
+            "screen-stop-call".to_owned(),
+            a_offer,
+            Vec::new(),
+            Vec::new(),
+            vec![screen_mid.to_string()],
+        )
+        .await
+        .expect("SFU accepts A's screen-share offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
+    // Phase 1: B is offered A's screen and answers. Phase 2: A stops the
+    // line; B must then be offered a stop of its own line, and accept it.
+    let mut opened = false;
+    let mut open_offer: Option<String> = None;
+    let mut stopped_by_a = false;
+    let mut stop_offer: Option<String> = None;
+    let mut stop_answered = false;
+    let msid_of_screen = format!("a=msid:{a_id}~screen ");
+
+    while Instant::now() < deadline && !stop_answered {
+        let _ = a.drain().await;
+        let _ = b.drain().await;
+        while let Ok(frame) = b_rx.try_recv() {
+            if let ServerFrame::SdpOffer { sdp } = frame {
+                if !opened && sdp.contains(&msid_of_screen) {
+                    open_offer = Some(sdp);
+                } else if stopped_by_a && sdp.contains("m=video 0 ") {
+                    stop_offer = Some(sdp);
+                }
+            }
+        }
+        if b.is_connected() {
+            if let Some(sdp) = open_offer.take() {
+                let answer = b
+                    .answer_renegotiation(&sdp)
+                    .expect("B answers the screen offer");
+                media
+                    .accept_renegotiation_answer(b_id.clone(), answer)
+                    .await
+                    .expect("SFU applies B's answer");
+                opened = true;
+            }
+        }
+        if opened && !stopped_by_a && a.is_connected() {
+            let mut change = a.rtc.sdp_api();
+            change.stop_media(screen_mid);
+            let (offer, pending) = change.apply().expect("stopping a line is a change");
+            let answer = media
+                .accept_offer_with_screen(
+                    a_id.clone(),
+                    "screen-stop-call".to_owned(),
+                    offer.to_sdp_string(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .await
+                .expect("SFU accepts A's offer that stops its screen");
+            a.accept_answer(pending, &answer)
+                .expect("A applies the SFU's answer");
+            stopped_by_a = true;
+        }
+        if let Some(sdp) = stop_offer.take() {
+            let answer = b.answer_renegotiation(&sdp).expect("B accepts the stop");
+            media
+                .accept_renegotiation_answer(b_id.clone(), answer)
+                .await
+                .expect("SFU applies B's answer to the stop");
+            stop_answered = true;
+        }
+
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        let mut abuf = [0u8; 2048];
+        let mut bbuf = [0u8; 2048];
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((n, src)) = r {
+                    a.feed_receive(&abuf[..n], src, sfu_addr);
+                }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((n, src)) = r {
+                    b.feed_receive(&bbuf[..n], src, sfu_addr);
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {
+                a.feed_timeout();
+                b.feed_timeout();
+            }
+        }
+    }
+
+    assert!(opened, "B was never offered A's screen");
+    assert!(stopped_by_a, "A never stopped its screen line");
+    assert!(
+        stop_answered,
+        "after A stopped its screen line, B was never offered a stop of its own \
+         line for it (a `m=video 0` line) within {CROSS_FANOUT_DEADLINE:?}"
+    );
+}
+
 /// **The case the live failure was, and the harness did not cover** — a
 /// subscriber that joined a call **audio-only**, and later has a video track
 /// renegotiated onto it by the SFU.
@@ -3732,8 +3900,9 @@ fn audio_m_line(sdp: &str) -> Option<&str> {
 }
 
 /// Redundant audio (RED, RFC 2198, ADR-0067 step 3) crosses the SFU as it
-/// was sent, to the subscribers that can take it, and plain Opus still
-/// reaches everyone.
+/// was sent, to the subscribers that can take it, and reaches a subscriber
+/// without RED under that subscriber's Opus payload type (ADR-0071,
+/// amended 2026-10-26).
 ///
 /// A client builds the RED container before SFrame seals the frame, so what
 /// the SFU sees under the `red` payload type is ciphertext it can neither
@@ -3745,15 +3914,19 @@ fn audio_m_line(sdp: &str) -> Option<&str> {
 ///   what libwebrtc does when a packet's redundancy does not fit.
 /// - B subscribes and negotiated `red`: it gets every packet, each under the
 ///   payload type it was sent with, payload bytes verbatim.
-/// - C subscribes and knows Opus alone: it gets the Opus packets and none of
-///   the RED ones.
+/// - C subscribes and knows Opus alone (Firefox has no `audio/red`): it gets
+///   every packet too, the RED ones under its Opus payload type, payload
+///   bytes verbatim. The sealed frame's trailer says which are RED
+///   containers; C's client takes the primary frame out after opening. Before
+///   the amendment C was sent no RED packet, so a Firefox participant heard
+///   nobody whose browser sends RED.
 ///
 /// The SDP side is asserted too: the SFU's answer to A and its offer to B
 /// list `red` before `opus` (libwebrtc sends RED only then), and its offer
 /// to C is the same offer, which C narrows to Opus.
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn red_audio_reaches_only_the_subscribers_that_negotiated_it() {
+async fn red_audio_reaches_red_subscribers_as_red_and_others_as_opus() {
     const RED_PT: u8 = 63;
     const OPUS_PT: u8 = 111;
     const PACKETS: u64 = 12;
@@ -3910,23 +4083,13 @@ async fn red_audio_reaches_only_the_subscribers_that_negotiated_it() {
         "the red subscriber gets every packet, each under the payload type it was \
          sent with, payload verbatim"
     );
-    let opus_only: Vec<(u8, Vec<u8>)> = sent
-        .iter()
-        .filter(|(pt, _)| *pt == OPUS_PT)
-        .cloned()
-        .collect();
+    let as_opus: Vec<(u8, Vec<u8>)> = sent.iter().map(|(_, p)| (OPUS_PT, p.clone())).collect();
     assert_eq!(
-        c.rtp_packets, opus_only,
-        "the subscriber without red gets the Opus packets and no RED packet"
+        c.rtp_packets, as_opus,
+        "the subscriber without red gets every packet under its Opus payload type, \
+         payload verbatim"
     );
-    // On the wire, not only in what C's own stack accepted: C would discard
-    // a payload type it does not know, so count the media datagrams the SFU
-    // actually sent it.
-    assert_eq!(
-        c.rtp_in.len(),
-        opus_only.len(),
-        "the SFU sends a subscriber without red no RED packet at all"
-    );
+    assert_eq!(c.rtp_in.len(), sent.len());
     assert_eq!(b.rtp_in.len(), sent.len());
 }
 

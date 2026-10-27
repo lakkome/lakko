@@ -881,7 +881,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         oneToOneShare = { session, share };
         const held = heldOneToOneScreen;
         heldOneToOneScreen = null;
-        if (held !== null && held.session === session) share.onRemoteStream(held.stream, held.track);
+        if (held !== null && held.session === session) share.onRemoteTrack(held.track);
         if (session.getState() === "connected") share.onConnected();
       })
       .catch(() => {
@@ -1003,7 +1003,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       },
       onRemoteScreenStream: (stream, track) => {
         if (slotSession !== session) return;
-        if (oneToOneShare?.session === session) oneToOneShare.share.onRemoteStream(stream, track);
+        if (oneToOneShare?.session === session) oneToOneShare.share.onRemoteTrack(track);
         else heldOneToOneScreen = { session, stream, track };
       },
       onVideoPublishState: (s) => {

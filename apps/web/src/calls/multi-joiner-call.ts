@@ -894,7 +894,7 @@ export class MultiJoinerCall {
     // own map and touches nothing else: no roster entry, no camera flag, no
     // entry in `remoteStreams`. Mirrors `sfu-call-ui.ts` `addCopyStream`.
     // A shared screen (ADR-0083) goes to the share's store, likewise.
-    if (this.share.onRemoteTrack(rt.streamId, rt.track, rt.stream)) return;
+    if (this.share.onRemoteTrack(rt.streamId, rt.track)) return;
     const id = splitStreamId(rt.streamId);
     if (id.role !== "main") {
       if (rt.track.kind !== "video") return;

@@ -152,6 +152,7 @@ import {
   describeDeltas,
   describeOutboundSenders,
   describeGivenChanges,
+  describeScreenSender,
   describeSender,
   describeShownPeers,
   readMedia,
@@ -596,6 +597,9 @@ export class SfuCallSession {
     light: new Set<string>(),
     middle: new Set<string>(),
   };
+  /** The ids of the remote tracks that are shared screens (ADR-0083), for
+   *  the same reason. */
+  private readonly screenTrackIds = new Set<string>();
   private lastInboundMs = 0;
   private lastPingMs = 0;
   private pingNonce = 0;
@@ -1745,6 +1749,24 @@ export class SfuCallSession {
    * camera sender. Empty without that sender or when the browser does not
    * answer.
    */
+  /** The stats ids of this device's screen-share picture sender, the same
+   *  way as {@link copyOutboundIds}. */
+  private async screenOutboundIds(): Promise<Set<string>> {
+    const ids = new Set<string>();
+    const sender = this.screen?.video ?? null;
+    if (sender === null) return ids;
+    try {
+      const report = await sender.getStats();
+      for (const e of report.values() as Iterable<Record<string, unknown>>) {
+        const id = e["id"];
+        if (e["type"] === "outbound-rtp" && typeof id === "string") ids.add(id);
+      }
+    } catch {
+      // The screen sender then reads as a camera sender in the log.
+    }
+    return ids;
+  }
+
   private async copyOutboundIds(kind: CameraCopyKind): Promise<Set<string>> {
     const ids = new Set<string>();
     const copy = this.copies[kind].sender;
@@ -1894,6 +1916,7 @@ export class SfuCallSession {
       // The senders' own reports are only needed to name them in the log.
       const lightOutbound = logCounters ? await this.copyOutboundIds("light") : new Set<string>();
       const middleOutbound = logCounters ? await this.copyOutboundIds("middle") : new Set<string>();
+      const screenOutbound = logCounters ? await this.screenOutboundIds() : new Set<string>();
       const report = await pc.getStats();
       const entries = [...(report.values() as Iterable<Record<string, unknown>>)];
       await this.readAvAlign(pc, entries);
@@ -1909,8 +1932,10 @@ export class SfuCallSession {
         lightOutbound,
         this.copyTrackIds.middle,
         middleOutbound,
+        this.screenTrackIds,
+        screenOutbound,
       );
-      sender = readSender(entries, lightOutbound, middleOutbound);
+      sender = readSender(entries, lightOutbound, middleOutbound, screenOutbound);
     } catch {
       return;
     }
@@ -1932,6 +1957,10 @@ export class SfuCallSession {
     )) {
       // eslint-disable-next-line no-console
       console.info(line);
+    }
+    if (reading.outboundScreen !== undefined && reading.outboundScreen !== null) {
+      // eslint-disable-next-line no-console
+      console.info(describeScreenSender("call media interval", reading.outboundScreen));
     }
     if (sender !== null) {
       // eslint-disable-next-line no-console
@@ -2051,6 +2080,7 @@ export class SfuCallSession {
       slot.refusalWarned = false;
       this.copyTrackIds[kind].clear();
     }
+    this.screenTrackIds.clear();
     this.videoNeeded = null;
     for (const kind of CAMERA_SENDER_KINDS) this.senderActivity[kind].reset();
     this.publishBudget = null;
@@ -2264,6 +2294,11 @@ export class SfuCallSession {
       // A shared screen (ADR-0083) is not one of the peer's camera pictures
       // nor its voice: decrypted like everything else, then handed over.
       if (screenStreamPeerOf(remoteStream.id) !== null) {
+        const trackId = ev.track.id;
+        this.screenTrackIds.add(trackId);
+        ev.track.addEventListener("ended", () => {
+          this.screenTrackIds.delete(trackId);
+        });
         this.callbacks.onRemoteTrack?.({
           streamId: remoteStream.id,
           track: ev.track,

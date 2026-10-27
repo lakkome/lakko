@@ -388,7 +388,7 @@ export function createSfuCallUi(
     },
     onRemoteTrack: (rt): void => {
       // A shared screen is not a participant (ADR-0083).
-      if (share.onRemoteTrack(rt.streamId, rt.track, rt.stream)) return;
+      if (share.onRemoteTrack(rt.streamId, rt.track)) return;
       addStream(rt);
     },
     onRemoteScreenShareState: (peerId, state): void => {

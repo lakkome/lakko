@@ -293,6 +293,16 @@ public class WebRtcPeerConnection(
      */
     private var videoSenderEncryptor: me.lakko.sframe.LakkoFrameEncryptor? = null
 
+    /**
+     * The encryptor armed on the microphone's sender. Kept so
+     * [syncSenderCodecs] can tell it the negotiated codec: when the SFU's
+     * answer puts `red` first, libwebrtc hands the encryptor RFC 2198 RED
+     * containers, and the frame must say so in its trailer, or a receiver
+     * without RED (Firefox) cannot take the primary frame out (ADR-0071,
+     * amended 2026-10-26). Strongly held by [attachedEncryptors].
+     */
+    private var audioSenderEncryptor: me.lakko.sframe.LakkoFrameEncryptor? = null
+
     /** G3-sframe-native N-5 — the `RtpSender` returned by
      *  `peer.addTrack(audioTrack, ...)`. Captured so SFrame
      *  attachment via [armSFrameEncryptors] can call
@@ -550,6 +560,7 @@ public class WebRtcPeerConnection(
         localVideoTransceiver = null
         videoSenderSealed = false
         videoSenderEncryptor = null
+        audioSenderEncryptor = null
         remoteAudioStreamByTrackId.clear()
         remoteTracks.clear()
         remoteReceivers.clear()
@@ -1125,11 +1136,13 @@ public class WebRtcPeerConnection(
         java.util.EnumMap<CameraSenderKind, RtpActivitySender>(CameraSenderKind::class.java)
 
     /**
-     * Tell every video sender's SFrame encryptor the codec its sender
-     * negotiated (ADR-0071): the first entry of the sender's codecs. The
-     * encryptor leaves that codec's frame header in the clear so a receiver
-     * without the generic frame descriptor still finds key frames; told
-     * nothing (or a codec with no rule) it keeps nothing clear.
+     * Tell every sender's SFrame encryptor the codec its sender negotiated
+     * (ADR-0071): the first entry of the sender's codecs. A video encryptor
+     * leaves that codec's frame header in the clear so a receiver without
+     * the generic frame descriptor still finds key frames; told nothing (or
+     * a codec with no rule) it keeps nothing clear. The microphone's
+     * encryptor keeps nothing clear either way, and told `red` it marks each
+     * frame as a RED container, which a receiver without RED needs.
      *
      * Called after every step that can change a sender's codec or give a
      * sender a new encryptor: the SFU's answer, an answer of this device's to
@@ -1148,6 +1161,9 @@ public class WebRtcPeerConnection(
      * usable, in either order.
      */
     public fun syncSenderCodecs() {
+        val audio = localAudioSender
+        val audioEnc = audioSenderEncryptor
+        if (audio != null && audioEnc != null) syncSenderCodec(audio, audioEnc)
         val main = localVideoSender
         val mainEnc = videoSenderEncryptor
         if (main != null && mainEnc != null) syncSenderCodec(main, mainEnc)
@@ -1352,6 +1368,7 @@ public class WebRtcPeerConnection(
                 videoSenderSealed = true
                 videoSenderEncryptor = enc
             }
+            if (streamIndex == SFRAME_STREAM_AUDIO) audioSenderEncryptor = enc
             Log.i(
                 TAG,
                 "sframe arm (connect): leaf=$localLeaf stream=$streamIndex " +

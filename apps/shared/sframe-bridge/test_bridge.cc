@@ -115,12 +115,16 @@ struct Trailer {
   std::size_t clear_len;
   std::size_t header_len;
   uint8_t version;
+  // What the frame holds: 0 the codec's own frame, 1 a RED container of
+  // Opus (the high three bits of the trailer's first byte).
+  uint8_t content;
 };
 
 Trailer trailer_of(const std::vector<uint8_t>& wire) {
   assert(wire.size() >= kTrailerBytes + 1 + kTagBytes);
-  return Trailer{wire[wire.size() - 3], wire[wire.size() - 2],
-                 wire[wire.size() - 1]};
+  const uint8_t first = wire[wire.size() - 3];
+  return Trailer{static_cast<std::size_t>(first & 0x1f), wire[wire.size() - 2],
+                 wire[wire.size() - 1], static_cast<uint8_t>(first >> 5)};
 }
 
 // Read the KID and the counter out of a sealed frame's SFrame header, which
@@ -866,10 +870,54 @@ void test_codec_decides_the_clear_prefix() {
   assert(Enc::CodecFromName("H264") == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
   assert(Enc::CodecFromName("VP9") == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
   assert(Enc::CodecFromName("VP80") == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
-  assert(Enc::CodecFromName("red") == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+  assert(Enc::CodecFromName("red") == LAKKO_SFRAME_MEDIA_CODEC_RED_OPUS);
+  assert(Enc::CodecFromName("audio/red") == LAKKO_SFRAME_MEDIA_CODEC_RED_OPUS);
   assert(Enc::CodecFromName("rtx") == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
   assert(Enc::CodecFromName("") == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
   assert(Enc::CodecFromName(nullptr) == LAKKO_SFRAME_MEDIA_CODEC_OTHER);
+
+  enc->Release();
+  dec->Release();
+  std::printf("ok\n");
+}
+
+// An audio encryptor the shim told RED (the sender negotiated `audio/red`,
+// so libwebrtc hands over RED containers) marks each frame as RED in its
+// trailer, keeps nothing clear, and the frame opens whole; told anything
+// else, audio is sealed as Opus. A video encryptor told RED seals as the
+// codec's own frame, since RED is an audio container.
+void test_audio_red_is_marked() {
+  std::printf("test_audio_red_is_marked ... ");
+
+  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
+      kTestSeed.data(), kTestSeed.size(), /*local_leaf=*/4, /*stream_index=*/0);
+  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+                                                         kTestSeed.size());
+  assert(enc != nullptr && dec != nullptr);
+  enc->AddRef();
+  dec->AddRef();
+
+  const std::vector<uint8_t> container{0xef, 0x0f, 0x00, 0x02, 0x6f,
+                                       0xaa, 0xbb, 'n',  'o',  'w'};
+
+  enc->SetCodec(LAKKO_SFRAME_MEDIA_CODEC_RED_OPUS);
+  std::vector<uint8_t> wire = seal_frame(enc, cricket::MEDIA_TYPE_AUDIO, container);
+  Trailer t = trailer_of(wire);
+  assert(t.version == 0x01 && t.content == 1 && t.clear_len == 0);
+  auto opened = open_frame(dec, cricket::MEDIA_TYPE_AUDIO, wire);
+  assert(opened.first == DecryptStatus::kOk);
+  assert(opened.second == container);
+
+  wire = seal_frame(enc, cricket::MEDIA_TYPE_VIDEO, container);
+  assert(trailer_of(wire).content == 0);
+
+  for (uint8_t codec : {LAKKO_SFRAME_MEDIA_CODEC_OPUS, LAKKO_SFRAME_MEDIA_CODEC_OTHER,
+                        LAKKO_SFRAME_MEDIA_CODEC_VP8}) {
+    enc->SetCodec(codec);
+    wire = seal_frame(enc, cricket::MEDIA_TYPE_AUDIO, container);
+    t = trailer_of(wire);
+    assert(t.content == 0 && t.clear_len == 0);
+  }
 
   enc->Release();
   dec->Release();
@@ -1219,6 +1267,7 @@ int main() {
   test_payload_size_extremes();
   test_media_frame_golden_vector();
   test_codec_decides_the_clear_prefix();
+  test_audio_red_is_marked();
   test_every_byte_is_authenticated();
   test_header_first_layout_is_refused();
   test_set_codec_races_encrypt();

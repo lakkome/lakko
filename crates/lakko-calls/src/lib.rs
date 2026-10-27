@@ -79,8 +79,8 @@ pub use group_call::{GroupCallScope, GroupCallSession, Participant, SignalingOut
 pub use header::{HeaderError, SframeHeader, MAX_HEADER_LEN};
 pub use link_invite::{accept_call_invite, AcceptedCallInvite};
 pub use media_frame::{
-    clear_prefix_len, vp8_is_key_frame, MediaCodec, MediaFrameError, MediaFrameParts,
-    MAX_CLEAR_PREFIX_LEN, MEDIA_FRAME_VERSION,
+    clear_prefix_len, red_primary, vp8_is_key_frame, MediaCodec, MediaContent, MediaFrameError,
+    MediaFrameParts, MAX_CLEAR_PREFIX_LEN, MEDIA_FRAME_VERSION,
 };
 pub use quality::{
     estimate_quality, recommend_bitrate, AudioCodec, QualityLevel, QualitySample, QualitySampler,

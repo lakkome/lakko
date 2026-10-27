@@ -85,6 +85,7 @@ function setup(): {
       macOs: () => false,
       now: () => 0,
     },
+    makeStream: (tracks) => ({ getTracks: () => tracks }) as unknown as MediaStream,
   });
   share.init(wasmNs);
   const compose = (seq: bigint, sharing: boolean): Uint8Array =>
@@ -92,13 +93,12 @@ function setup(): {
   return { alice, share, store, sent, compose };
 }
 
-function fakeTrackAndStream(): { track: MediaStreamTrack; stream: MediaStream } {
-  const track = {
+function fakeTrack(kind: "video" | "audio" = "video"): MediaStreamTrack {
+  return {
+    kind,
     readyState: "live",
     addEventListener: () => {},
   } as unknown as MediaStreamTrack;
-  const stream = { getTracks: () => [track] } as unknown as MediaStream;
-  return { track, stream };
 }
 
 describe("GroupScreenShare", () => {
@@ -135,11 +135,20 @@ describe("GroupScreenShare", () => {
 
   it("keeps a share track out of the roster, in the store", () => {
     const { share, store } = setup();
-    const { track, stream } = fakeTrackAndStream();
-    expect(share.onRemoteTrack("peer-a~screen", track, stream)).toBe(true);
-    expect(store.streams.get("peer-a")).toBe(stream);
-    expect(share.onRemoteTrack("peer-a", track, stream)).toBe(false);
-    expect(share.onRemoteTrack("peer-a~light", track, stream)).toBe(false);
+    const track = fakeTrack();
+    expect(share.onRemoteTrack("peer-a~screen", track)).toBe(true);
+    expect(store.streams.get("peer-a")?.getTracks()).toEqual([track]);
+    expect(share.onRemoteTrack("peer-a", track)).toBe(false);
+    expect(share.onRemoteTrack("peer-a~light", track)).toBe(false);
+  });
+
+  it("shows a share started again from its new track, not the old one", () => {
+    const { share, store } = setup();
+    const first = fakeTrack();
+    share.onRemoteTrack("peer-a~screen", first);
+    const second = fakeTrack();
+    share.onRemoteTrack("peer-a~screen", second);
+    expect(store.streams.get("peer-a")?.getTracks()).toEqual([second]);
   });
 
   it("offers the button once connected", () => {

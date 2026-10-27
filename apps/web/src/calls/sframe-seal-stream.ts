@@ -125,9 +125,24 @@ export interface FrameOpener {
   openMediaFrameWithOverlap(wire: Uint8Array): Uint8Array;
 }
 
-/** Reads the KID off a sealed frame without a key; throws when the bytes are
- *  not a well-formed sealed media frame. */
-export type FrameKidReader = (wire: Uint8Array) => bigint;
+/** What a sealed frame says of itself without a key: the KID, and whether
+ *  its trailer marks it as an RFC 2198 RED container of Opus (ADR-0071
+ *  amendment of 2026-10-26). Throws when the bytes are not a well-formed
+ *  sealed media frame. */
+export type FrameInfoReader = (wire: Uint8Array) => { readonly kid: bigint; readonly isRedOpus: boolean };
+
+/**
+ * A receiver that may be handed RED containers its decoder cannot read: a
+ * browser without `audio/red` (Firefox) is sent a RED publisher's audio
+ * under its Opus payload type, sealed whole, and must decode the primary
+ * frame alone.
+ */
+export interface RedReceive {
+  /** Whether this opened RED frame goes to a decoder that expects Opus. */
+  wantsPrimary(frame: object): boolean;
+  /** The primary frame of a container, or `undefined` when it is not one. */
+  primary(container: Uint8Array): Uint8Array | undefined;
+}
 
 /** What became of one received frame. */
 export type OpenOutcome =
@@ -150,13 +165,15 @@ function reasonOf(err: unknown): string {
  */
 export function openFrame(
   ring: FrameOpener,
-  readKid: FrameKidReader,
+  readInfo: FrameInfoReader,
   frame: { data: ArrayBuffer },
+  red?: RedReceive,
 ): OpenOutcome {
   const wire = new Uint8Array(frame.data);
   let kid: bigint;
+  let isRedOpus: boolean;
   try {
-    kid = readKid(wire);
+    ({ kid, isRedOpus } = readInfo(wire));
   } catch (err) {
     return { what: "badHeader", reason: reasonOf(err) };
   }
@@ -165,6 +182,17 @@ export function openFrame(
     opened = ring.openMediaFrameWithOverlap(wire);
   } catch (err) {
     return { what: "openFailed", kid, reason: reasonOf(err) };
+  }
+  // The trailer is authenticated now (it is additional data): a frame it
+  // marks as RED is one. Where the decoder expects Opus, it gets the primary
+  // frame; a container that does not parse is dropped like a frame that does
+  // not open.
+  if (isRedOpus && red !== undefined && red.wantsPrimary(frame)) {
+    const primary = red.primary(opened);
+    if (primary === undefined) {
+      return { what: "openFailed", kid, reason: "a RED container that does not parse" };
+    }
+    opened = primary;
   }
   frame.data = toArrayBuffer(opened);
   return { what: "opened", kid };

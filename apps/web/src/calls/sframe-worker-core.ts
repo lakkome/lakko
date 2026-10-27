@@ -57,7 +57,13 @@ import type {
 } from "./sframe-transform";
 import type { CallKeyRing, ParticipantKey } from "../../wasm/lakko_ffi_wasm";
 import { createCodecResolver, type CodecResolver, type SenderCodecEntry } from "./sframe-codec";
-import { openFrame, sealingStream, type SealableFrame } from "./sframe-seal-stream";
+import {
+  openFrame,
+  sealingStream,
+  type FrameInfoReader,
+  type RedReceive,
+  type SealableFrame,
+} from "./sframe-seal-stream";
 import { ReceiveLedger, receivedFrameInfo, type InfoFrame } from "./sframe-receive-ledger";
 
 /** A single encoded media frame the transform rewrites in place: an
@@ -79,7 +85,46 @@ export interface SFrameWorkerWasm {
   readonly MediaCodec: { readonly Vp8: number };
   mediaCodecFromMime(mime: string): number;
   vp8IsKeyFrame(firstBytes: Uint8Array): boolean | undefined;
-  parseMediaFrame(wire: Uint8Array): { readonly kid: bigint };
+  parseMediaFrame(wire: Uint8Array): { readonly kid: bigint; readonly isRedOpus: boolean };
+  redPrimary(container: Uint8Array): Uint8Array | undefined;
+}
+
+/**
+ * How a receive transform treats a frame its sender marked as an RFC 2198
+ * RED container of Opus (the ADR-0071 trailer, amended 2026-10-26).
+ *
+ * A browser that negotiated `audio/red` decodes the container itself, and
+ * the frame is handed on whole. One that did not (Firefox has no RED) is
+ * sent the container under its Opus payload type, because the SFU cannot
+ * unwrap a sealed frame, and its decoder must be given the primary frame
+ * alone. Which of the two a frame goes to is read off the frame's own
+ * metadata where the browser names the codec; else from whether this
+ * browser decodes RED at all (`browserDecodesRed`, which the main thread
+ * reads, as a worker has no `RTCRtpReceiver`).
+ */
+export function redReceive(
+  wasm: Pick<SFrameWorkerWasm, "redPrimary">,
+  browserDecodesRed: boolean,
+): RedReceive {
+  return {
+    wantsPrimary(frame): boolean {
+      const mime = frameMimeType(frame);
+      if (mime !== undefined) return mime.toLowerCase() !== "audio/red";
+      return !browserDecodesRed;
+    },
+    primary: (container) => wasm.redPrimary(container),
+  };
+}
+
+function frameMimeType(frame: object): string | undefined {
+  const getMetadata = (frame as { getMetadata?: () => unknown }).getMetadata;
+  if (typeof getMetadata !== "function") return undefined;
+  try {
+    const meta = getMetadata.call(frame) as { mimeType?: unknown } | null;
+    return typeof meta?.mimeType === "string" && meta.mimeType !== "" ? meta.mimeType : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** What the engine needs from its host (the worker, or a test). */
@@ -295,7 +340,8 @@ export function createSFrameWorkerCore(deps: SFrameWorkerDeps): SFrameWorkerCore
    *  are (`./sframe-receive-ledger.ts`). */
   function decryptStream(
     state: TransformState,
-    readKid: (wire: Uint8Array) => bigint,
+    readInfo: FrameInfoReader,
+    red: RedReceive,
   ): TransformStream<EncodedFrame, EncodedFrame> {
     return new TransformStream<EncodedFrame, EncodedFrame>({
       transform(frame, controller): void {
@@ -306,7 +352,7 @@ export function createSFrameWorkerCore(deps: SFrameWorkerDeps): SFrameWorkerCore
         // Anything but "opened" is a drop: a malformed frame, or one that
         // authenticates under neither the current nor the overlap-window
         // previous key, is never forwarded (invariant #4).
-        const outcome = openFrame(state.ring, readKid, frame);
+        const outcome = openFrame(state.ring, readInfo, frame, red);
         let line: string | null;
         if (outcome.what === "opened") {
           controller.enqueue(frame);
@@ -452,7 +498,14 @@ export function createSFrameWorkerCore(deps: SFrameWorkerDeps): SFrameWorkerCore
       // (ADR-0035), a bigint; it sits in the SFrame header at the end of the
       // frame. `parseMediaFrame` throws on anything that is not a well-formed
       // sealed media frame.
-      stream = decryptStream(state, (wire) => wasm.parseMediaFrame(wire).kid);
+      stream = decryptStream(
+        state,
+        (wire) => {
+          const info = wasm.parseMediaFrame(wire);
+          return { kid: info.kid, isRedOpus: info.isRedOpus };
+        },
+        redReceive(wasm, opts.redDecodes === true),
+      );
     }
 
     transforms.set(opts.id, state);

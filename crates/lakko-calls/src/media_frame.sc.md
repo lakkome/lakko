@@ -21,24 +21,26 @@ The keys, the nonce and the counter are untouched (ADR-0035, ADR-0069). The seal
 clear_prefix || ciphertext_and_tag || sframe_header || trailer
 0..=16 B        >= 16 B               1..=17 B         3 B
 
-trailer = clear_prefix_len (1 B) || sframe_header_len (1 B) || version (1 B) = 0x01
+trailer = content << 5 | clear_prefix_len (1 B) || sframe_header_len (1 B) || version (1 B) = 0x01
 ```
 
 - `clear_prefix` — the first bytes of the encoded frame, unchanged.
 - `ciphertext_and_tag` — ChaCha20-Poly1305 over the rest of the frame; the 16-byte tag is its end.
 - `sframe_header` — the RFC 9605 section 4.3 header of `header.rs` (KID, CTR), byte for byte.
-- `trailer` — fixed size, last in the frame, so a receiver reads it first.
+- `trailer` — fixed size, last in the frame, so a receiver reads it first. Its first byte holds the clear prefix length in the low five bits and the `MediaContent` in the high three (amendment of 2026-10-26): 0 the codec's own frame, 1 an RFC 2198 RED container of Opus. Before the amendment those bits were always 0, and a value above 16 in the byte was refused as a clear prefix too long, so a frame from a build that never sets them reads exactly as before.
 
 AEAD additional data: `sframe_header || clear_prefix || trailer`, taken from the wire bytes. Plaintext: the frame after the clear prefix.
 
 ## Public contract
 
-- `MediaFrameParts::split(wire)` — read the trailer and return the four regions as borrowed slices plus the decoded `SframeHeader`. Needs no key and no codec. Total on any input. Checks, in order: minimum length (20), version, clear length <= 16, header length in 1..=17, total length >= what the two lengths imply, that the header bytes decode, and that the header decodes to exactly the declared length. Every slice is taken only after the check that covers it. The four regions always add up to the whole input.
+- `MediaFrameParts::split(wire)` — read the trailer and return the four regions as borrowed slices plus the decoded `SframeHeader` and the `MediaContent`. Needs no key and no codec. Total on any input. Checks, in order: minimum length (20), version, a known content value, clear length <= 16, header length in 1..=17, total length >= what the two lengths imply, that the header bytes decode, and that the header decodes to exactly the declared length. Every slice is taken only after the check that covers it. The four regions always add up to the whole input.
 - `MediaFrameParts::aad()` / `media_frame_aad(header, clear, trailer)` — the additional data, in the one order both sides use.
-- `media_frame_trailer(clear_len, header_len)` — build the trailer; refuses any length `split` would refuse, so a sender cannot emit a frame its peers reject.
-- `MediaCodec { Other = 0, Vp8 = 1, Opus = 2 }` — what the sender states. `from_mime` maps `video/VP8` and `audio/opus` (any case), everything else is `Other`; `from_u8` maps the frozen FFI values, an unknown value is `Other`.
+- `media_frame_trailer(clear_len, header_len, content)` — build the trailer; refuses any length `split` would refuse, so a sender cannot emit a frame its peers reject.
+- `MediaContent { Codec = 0, RedOpus = 1 }` — what a sealed frame holds; `from_u8` is `None` for any other value.
+- `MediaCodec { Other = 0, Vp8 = 1, Opus = 2, RedOpus = 3 }` — what the sender states. `from_mime` maps `video/VP8`, `audio/opus` and `audio/red` (any case), everything else (video RED, RTX) is `Other`; `from_u8` maps the frozen FFI values, an unknown value is `Other`; `content()` is `RedOpus` for `RedOpus` and `Codec` otherwise.
+- `red_primary(container)` — the primary frame of an RFC 2198 container: skip the 4-byte headers of the redundant blocks (F=1, PT, 14-bit offset, 10-bit length) and the 1-byte final header (F=0, PT), then the redundant blocks, and return the rest. `None` when a header runs past the end or the blocks claim more than is there. Borrows from the input; total.
 - `vp8_is_key_frame(frame)` — the low bit of the first byte is 0 for a key frame; `None` for an empty frame.
-- `clear_prefix_len(codec, frame)` — VP8: 10 for a key frame (3-byte frame tag, 3-byte start code, 4 bytes of width and height), 3 for any other frame (the frame tag). Opus and `Other`: 0. Never more than `frame.len()`.
+- `clear_prefix_len(codec, frame)` — VP8: 10 for a key frame (3-byte frame tag, 3-byte start code, 4 bytes of width and height), 3 for any other frame (the frame tag). Opus, RED and `Other`: 0. Never more than `frame.len()`.
 - Constants: `MEDIA_FRAME_VERSION` (0x01), `MEDIA_FRAME_TRAILER_LEN` (3), `MAX_CLEAR_PREFIX_LEN` (16; chosen as the power of two above VP8's 10, not measured), `MEDIA_FRAME_TAG_LEN` (16), `MIN_MEDIA_FRAME_LEN` (20), `MAX_MEDIA_FRAME_OVERHEAD` (36), `VP8_KEY_FRAME_CLEAR_LEN` (10), `VP8_DELTA_FRAME_CLEAR_LEN` (3).
 
 ## The sender's rule
@@ -47,6 +49,7 @@ AEAD additional data: `sframe_header || clear_prefix || trailer`, taken from the
 - For VP8 the frame's own tag bit decides whether it is a key frame, not what the platform reported about the frame. The prefix exists for a receiver that reads these bytes, so the bytes are what it has to agree with: a frame the tag calls a key frame gets the 10 bytes its reader will parse, and a frame the tag calls a delta frame exposes 3 whatever else was claimed. A client may compare the platform's flag against the tag and report a disagreement; it does not change the prefix.
 - An unknown or undetermined codec is `Other`: nothing is clear. Such a frame is as secret as under ADR-0013 and will not decode on a receiver without the frame descriptor. VP8 is never assumed.
 - A frame shorter than its codec's prefix is left clear whole; its ciphertext is the tag over an empty plaintext.
+- A RED container (`audio/red` negotiated, which libwebrtc builds before the frame encryptor or the encoded transform) is sealed whole and marked `RedOpus`. The mark is for a receiver whose decoder expects Opus, which the SFU sends the container to under its Opus payload type because it cannot unwrap a sealed frame: after the open it decodes `red_primary` of the frame. A receiver that negotiated RED hands the container on whole. Which receiver is which is the client's decision, not this module's.
 
 ## Invariants upheld
 
@@ -56,6 +59,8 @@ AEAD additional data: `sframe_header || clear_prefix || trailer`, taken from the
 - **The two layouts never open as each other.** The additional data of the header-first layout is an SFrame header alone; here it is a header followed by at least the 3-byte trailer, so the two are never equal. Tests `the_header_first_layout_is_refused_by_the_new_open` (2000 frames, so tag bytes that happen to pass the trailer checks are covered), `the_new_layout_is_refused_by_the_header_first_open`, `the_two_layouts_never_share_additional_data`.
 - **C-5 / ADR-0035 / ADR-0069 unchanged:** one counter value per sealed frame, distinct keys per `(leaf, stream)`. Tests `counters_advance_once_per_sealed_frame`, `counter_exhaustion_seals_nothing`, `two_streams_of_one_leaf_seal_under_distinct_keys`.
 - **ADR-0029 overlap unchanged.** Tests `the_ring_opens_old_and_new_epoch_frames_inside_the_window`, `the_ring_refuses_garbage_and_a_foreign_seed`.
+- **The content is authenticated.** It sits in the trailer, which is additional data, so an SFU cannot make a receiver read an Opus frame as a RED container or the reverse. Test `the_content_is_authenticated`; `a_red_frame_says_so_in_its_trailer_and_opens_whole`, `an_unknown_content_is_refused`.
+- **`red_primary` is total and returns a suffix of its input.** Proptests `red_primary_is_total_and_a_suffix`, `red_primary_recovers_the_primary`; tests `red_primary_is_the_last_block` (built from containers as Chrome's encoder handed them to an encoded transform, measured 2026-10-26), `red_primary_refuses_what_is_not_a_container`.
 - **Invariant #4:** a frame that does not split or does not authenticate yields an error and none of its bytes.
 - **Pinned bytes.** `GOLDEN_MEDIA_FRAME_HEX` (seed `0x42` x 32, leaf 3, stream 1, counter 1, a VP8 key frame) is sealed here with the counter forced by the test-only setter and opened by the key and by the ring; the wasm surface and the C ABI open the same bytes.
 
@@ -64,6 +69,7 @@ AEAD additional data: `sframe_header || clear_prefix || trailer`, taken from the
 `MediaFrameError`, every variant a refusal:
 
 - `TooShort { needed, had }` — under 20 bytes, or shorter than the trailer's lengths imply.
+- `UnknownContent(c)` — the high three bits of the trailer's first byte name no `MediaContent`.
 - `UnknownVersion(v)` — the last byte is not `0x01`. A header-first frame ends in a tag byte and usually stops here; when its last bytes happen to pass every check, the AEAD refuses it.
 - `ClearPrefixTooLong { len, max }` — a trailer claiming, or a sender asking for, more than 16.
 - `BadHeaderLength(n)` — header length 0 or above 17.
@@ -75,17 +81,17 @@ No panics: no `unwrap` / `expect` / indexing without a preceding bound in the mo
 ## What this module does NOT do
 
 - **No keys, no AEAD.** It never sees a key; `sframe.rs` runs the seal and the open over the regions defined here.
-- **No codec parsing beyond one bit.** It reads the VP8 frame tag's low bit and nothing else. It does not validate the VP8 start code or dimensions, and it has no rule for H.264, VP9 or AV1: those are `Other`.
+- **No codec parsing beyond one bit and RED's headers.** It reads the VP8 frame tag's low bit and, in `red_primary` on an opened frame, the RFC 2198 block headers, and nothing else. It does not validate the VP8 start code or dimensions, and it has no rule for H.264, VP9 or AV1: those are `Other`.
 - **No decision for the receiver.** A receiver never states a codec and never trusts the clear prefix for anything before the open succeeds.
 - **No replay protection**, like the rest of the crate: opening is stateless.
 
 ## What an SFU sees that it did not
 
-For a VP8 frame: whether it is a key frame, the other fields of the 3-byte frame tag (version, show-frame flag, first-partition size), and for a key frame the width and height with their scale bits. It cannot change any of them unnoticed. Picture data, audio and every other codec stay sealed. Before ADR-0071 a sender that negotiated the generic frame descriptor already told the SFU the frame type and resolution through it; a sender that did not negotiate it told the SFU neither.
+For any frame: whether it holds a RED container of Opus (the trailer's content bits). A RED container is already visible to the SFU from its RTP payload type. For a VP8 frame: whether it is a key frame, the other fields of the 3-byte frame tag (version, show-frame flag, first-partition size), and for a key frame the width and height with their scale bits. It cannot change any of them unnoticed. Picture data, audio and every other codec stay sealed. Before ADR-0071 a sender that negotiated the generic frame descriptor already told the SFU the frame type and resolution through it; a sender that did not negotiate it told the SFU neither.
 
 ## Attacker exposure
 
-`MediaFrameParts::split` runs on bytes from an untrusted SFU or peer before anything is authenticated: two attacker-chosen length bytes, a version byte, and the header bytes they point at. The bound is the checks listed under the public contract. Fuzz target `media_frame_open` (`crates/lakko-calls/fuzz/fuzz_targets/media_frame_open.rs`; compile-checked, not run) drives the split, the ring's open with and without a previous key, and the seal-then-open round trip on arbitrary input. Proptests `open_never_panics_and_never_accepts_arbitrary_bytes`, `open_never_panics_behind_a_plausible_trailer` and test `every_truncation_of_a_sealed_frame_is_refused` cover the same in `cargo test`.
+`MediaFrameParts::split` runs on bytes from an untrusted SFU or peer before anything is authenticated: two attacker-chosen length bytes, a version byte, and the header bytes they point at. The bound is the checks listed under the public contract. Fuzz target `media_frame_open` (`crates/lakko-calls/fuzz/fuzz_targets/media_frame_open.rs`; compile-checked, not run) drives the split, the ring's open with and without a previous key, the seal-then-open round trip on arbitrary input (with the content the codec implies), and `red_primary` on the raw input. Proptests `open_never_panics_and_never_accepts_arbitrary_bytes`, `open_never_panics_behind_a_plausible_trailer` and test `every_truncation_of_a_sealed_frame_is_refused` cover the same in `cargo test`.
 
 The layout departs from RFC 9605's on-the-wire shape (header first, nothing clear). It is Lakko's own and part of what the G-39 external review has to read.
 

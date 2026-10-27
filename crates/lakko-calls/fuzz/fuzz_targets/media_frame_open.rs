@@ -20,13 +20,17 @@
 //!      never panics and never accepts (the fuzzer cannot forge a tag), with
 //!      and without a retained previous key;
 //!   4. the sender's prefix rule never asks for more than the frame holds or
-//!      than the bound, and sealing the input as a frame opens back to it.
+//!      than the bound, and sealing the input as a frame opens back to it,
+//!      with the trailer stating the content the codec implies;
+//!   5. the RFC 2198 reader a receiver without RED runs on an opened frame
+//!      (`red_primary`) never panics and returns the end of its input. The
+//!      container is authenticated before it is read, but a peer chooses it.
 
 #![no_main]
 
 use lakko_calls::media_frame::{
-    clear_prefix_len, MediaCodec, MediaFrameParts, MAX_CLEAR_PREFIX_LEN, MEDIA_FRAME_TAG_LEN,
-    MEDIA_FRAME_TRAILER_LEN,
+    clear_prefix_len, red_primary, MediaCodec, MediaFrameParts, MAX_CLEAR_PREFIX_LEN,
+    MEDIA_FRAME_TAG_LEN, MEDIA_FRAME_TRAILER_LEN,
 };
 use lakko_calls::{CallKeyRing, SframeHeader, MAX_HEADER_LEN};
 use libfuzzer_sys::fuzz_target;
@@ -69,8 +73,19 @@ fuzz_target!(|data: &[u8]| {
         .seal_media_frame_for_codec(data, codec)
         .expect("a fresh key seals");
     assert_eq!(&wire[..clear], &data[..clear]);
+    assert_eq!(
+        MediaFrameParts::split(&wire)
+            .expect("a sealed frame splits")
+            .content,
+        codec.content()
+    );
     let opened = ring
         .try_open_media_frame_with_overlap(&wire)
         .expect("a frame this ring sealed opens");
     assert_eq!(opened, data);
+
+    // (5) The RED reader on attacker-chosen bytes.
+    if let Some(primary) = red_primary(data) {
+        assert!(data.ends_with(primary));
+    }
 });
