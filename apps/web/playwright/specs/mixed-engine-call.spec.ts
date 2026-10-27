@@ -5,17 +5,28 @@
  * A group call between DIFFERENT engines, one page each, through a real SFU
  * (`sfu-stack.ts`): what the one-engine spec cannot see.
  *
- * The case it exists for is redundant audio (ADR-0071 amendment of
- * 2026-10-26). Chromium and WebKit send their microphone as an RFC 2198 RED
+ * Two cases. A screen shared, stopped and shared again from one engine and
+ * watched from another (ADR-0083): the reported defect was Safari sharing to
+ * Chrome, where the second share never appeared. The viewer must end up
+ * showing the second share, with frames, and the first share's track must
+ * have been ended by the SFU (a stopped line is stopped on every subscriber).
+ * With the SFU's line stop disabled the first of these tests fails on "the
+ * second share shows no picture" (checked when it was written). The tile
+ * replacing a still-live earlier share (`ShareStreams`) is NOT exercised
+ * here: with the SFU stopping lines the old track has ended before the new
+ * one arrives, even when the share is stopped and started at once, so that
+ * path is covered by `share-streams.test.ts` alone.
+ *
+ * And redundant audio (ADR-0071 amendment of 2026-10-26). Chromium and WebKit send their microphone as an RFC 2198 RED
  * container, sealed whole; Firefox has no `audio/red`, so the SFU forwards
  * those packets to it under its Opus payload type and its receiving worker
  * must take the primary frame out of the opened container. Before that, a
  * Firefox participant received every packet and decoded nothing: it heard no
  * one in Chrome or Safari, and a one-engine call never shows it.
  *
- * Each test first checks that the sender really sent RED, so a change that
- * quietly stops RED being negotiated fails here instead of passing a test that
- * no longer exercises the path.
+ * Each audio test first checks that the sender really sent RED, so a change
+ * that quietly stops RED being negotiated fails here instead of passing a test
+ * that no longer exercises the path.
  *
  * Runs once, in the `chromium` project: the Chromium participant is the
  * project's own page (its fake microphone plays `fixtures/mic.wav`), and the
@@ -28,7 +39,17 @@ import { mintTokens, startSfuStack, type SfuStack } from "./sfu-stack";
 interface FromPeer {
   audioPackets: number;
   audioConcealedRatio: number;
+  screenVideoTracks: number;
+  screenVideoTracksEnded: number;
+  screenShownIndex: number;
+  screenShownFrames: number;
 }
+type Step =
+  | { do: "wait"; ms: number }
+  | { do: "screen"; who: number }
+  | { do: "unscreen"; who: number }
+  | { do: "untilHeard"; peers: number; ms: number }
+  | { do: "untilShare"; nth: number; frames: number; ms: number };
 interface ParticipantReport {
   state: string;
   peerId: string;
@@ -38,6 +59,9 @@ interface ParticipantReport {
 
 /** How long every participant stays in the call once connected. */
 const IN_CALL_MS = 10_000;
+
+/** Enough decoded frames that a picture was shown. */
+const SHOWN = 10;
 
 let stack: SfuStack | null = null;
 const launched: Browser[] = [];
@@ -87,8 +111,9 @@ async function enginePage(engine: "firefox" | "webkit", baseURL: string | undefi
   return harnessPage(await context.newPage());
 }
 
-/** One participant per page, all in one call, microphones only. */
-async function call(pages: Page[]): Promise<ParticipantReport[]> {
+/** One participant per page, all in one call, microphones only; each page
+ *  runs its own steps (all the same when one list is given). */
+async function call(pages: Page[], steps: Step[] | Step[][] = [{ do: "wait", ms: IN_CALL_MS }]): Promise<ParticipantReport[]> {
   const jwts = mintTokens(pages.length);
   const sfuBaseUrl = stack?.sfuBaseUrl ?? "";
   const reports = await Promise.all(
@@ -98,7 +123,7 @@ async function call(pages: Page[]): Promise<ParticipantReport[]> {
         jwts: [jwts[i]],
         video: [false],
         firstLeaf: i,
-        steps: [{ do: "wait", ms: IN_CALL_MS }],
+        steps: Array.isArray(steps[0]) ? (steps as Step[][])[i] : steps,
       };
       const [r] = await page.evaluate(
         async (x) =>
@@ -135,4 +160,44 @@ test("WebKit and Firefox hear each other, WebKit sending redundant audio", async
   expect(safari.audioSendCodec, "WebKit did not send RED, so the strip is not exercised").toBe("audio/red");
   expectHears(fox, safari, "Firefox from WebKit");
   expectHears(safari, fox, "WebKit from Firefox");
+});
+
+/** The sharer stops and shares again once it hears the viewer, so the viewer
+ *  is in the call for both shares; the viewer leaves once the second share
+ *  shows. */
+async function reshare(sharer: Page, viewer: Page): Promise<void> {
+  const [shared, watched] = await call(
+    [sharer, viewer],
+    [
+      [
+        { do: "untilHeard", peers: 1, ms: 30_000 },
+        { do: "screen", who: 0 },
+        { do: "wait", ms: 5_000 },
+        { do: "unscreen", who: 0 },
+        { do: "wait", ms: 2_000 },
+        { do: "screen", who: 0 },
+        { do: "wait", ms: 12_000 },
+      ],
+      [{ do: "untilShare", nth: 1, frames: SHOWN + 20, ms: 60_000 }],
+    ],
+  );
+  if (shared === undefined || watched === undefined) throw new Error("a participant did not report");
+  expect([shared.state, watched.state]).toEqual(["connected", "connected"]);
+  const got = watched.from[shared.peerId];
+  expect(got?.screenVideoTracks ?? 0, "the viewer did not receive both shares").toBe(2);
+  expect(got?.screenShownIndex ?? -1, "the viewer does not show the second share").toBe(1);
+  expect(got?.screenShownFrames ?? 0, "the second share shows no picture").toBeGreaterThan(SHOWN);
+  expect(got?.screenVideoTracksEnded ?? 0, "the first share's line was not stopped").toBe(1);
+}
+
+test("WebKit shares, stops and shares again: Chromium shows the second share", async ({ page, baseURL }) => {
+  await reshare(await enginePage("webkit", baseURL), await harnessPage(page));
+});
+
+test("Chromium shares, stops and shares again: Firefox shows the second share", async ({ page, baseURL }) => {
+  await reshare(await harnessPage(page), await enginePage("firefox", baseURL));
+});
+
+test("Firefox shares, stops and shares again: WebKit shows the second share", async ({ baseURL }) => {
+  await reshare(await enginePage("firefox", baseURL), await enginePage("webkit", baseURL));
 });

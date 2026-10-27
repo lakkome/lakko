@@ -74,10 +74,15 @@ async function waitForHealth(url: string, ms: number): Promise<void> {
 
 /** Builds (a no-op when fresh) and starts the SFU with its JWKS server. */
 export async function startSfuStack(): Promise<SfuStack> {
-  execFileSync("cargo", ["build", "-q", "-p", "lakko-svc-sfu", "-p", "lakko-call-jwt", "--example", "mint_test_jwt"], {
-    cwd: REPO,
-    stdio: "inherit",
-  });
+  // Two builds, not one: `--example` is a target selection, and with it
+  // cargo builds only the example, so a combined command left the SFU binary
+  // as it last was and the specs ran an SFU older than the tree.
+  for (const args of [
+    ["build", "-q", "-p", "lakko-svc-sfu"],
+    ["build", "-q", "-p", "lakko-call-jwt", "--example", "mint_test_jwt"],
+  ]) {
+    execFileSync("cargo", args, { cwd: REPO, stdio: "inherit" });
+  }
   const jwks = readFileSync(resolve(REPO, "ci/sfu-e2e/test-jwks/jwks.json"), "utf8");
   const jwksPort = await freePort();
   const jwksServer: Server = createServer((_req, res) => {

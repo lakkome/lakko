@@ -70,7 +70,14 @@ only place redundant audio crosses to a browser without `audio/red`; it runs
 once, from the `chromium` project, and launches Firefox and WebKit itself. It
 first checks that the sender sent RED, so it fails rather than passes when RED
 stops being negotiated. With the worker's RED strip disabled it fails on "Firefox
-from Chromium" (checked when it was written).
+from Chromium" (checked when it was written). It also shares a screen, stops and
+shares again from one engine to another (Safari to Chrome, Chrome to Firefox,
+Firefox to Safari); with the SFU's line stop disabled that fails on "the second
+share shows no picture".
+
+`sfu-stack.ts` builds the SFU and the token minter in two cargo calls: one
+command with `--example` builds only the example, which left the specs running
+whatever SFU binary was last built.
 
 Both devices are granted in `playwright.config.ts`, and the camera grant is not
 decoration: a permission the browser reports as `prompt` means the gesture would
