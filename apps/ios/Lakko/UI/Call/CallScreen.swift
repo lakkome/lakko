@@ -1421,17 +1421,11 @@ public struct CallScreen: View {
             // call's UI on the way into the bar.
             if !collapsing { state.reset() }
         }
-        .alert(
-            l10n.t("call.permission.camera.title"),
-            isPresented: Binding(
-                get: { permissionMessage != nil },
-                set: { if !$0 { permissionMessage = nil } }
-            ),
-            presenting: permissionMessage
-        ) { _ in
-            Button(l10n.t("common.ok"), role: .cancel) { permissionMessage = nil }
-        } message: { message in
-            Text(message.text)
+        .lakkoDialog(item: $permissionMessage) { message in
+            LakkoDialogContent(
+                title: l10n.t("call.permission.camera.title"),
+                message: message.text,
+                actions: [.primary(l10n.t("common.ok")) { permissionMessage = nil }])
         }
         // `Invite contacts`, when this call has a link to offer.
         .modifier(CallInvitePicker(offer: invite))

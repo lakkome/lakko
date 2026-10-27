@@ -216,12 +216,9 @@ struct AddDeviceScreen: View {
                         .foregroundStyle(Color.lakkoTextMuted)
                 } else if let session = DeviceSession.current(authRepository),
                           let handle = session.loginHandle {
-                    Picker("", selection: $side) {
-                        ForEach(Side.allCases) { s in
-                            Text(l10n.t(s.labelKey)).tag(s)
-                        }
-                    }
-                    .pickerStyle(.segmented)
+                    LakkoSegmentedPicker(
+                        selection: $side,
+                        options: Side.allCases.map { LakkoPickerOption(value: $0, label: l10n.t($0.labelKey)) })
                     Text(l10n.t(side.explanationKey))
                         .font(.footnote)
                         .foregroundStyle(Color.lakkoTextMuted)

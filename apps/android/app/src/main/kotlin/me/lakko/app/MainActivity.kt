@@ -1068,7 +1068,7 @@ private fun AppRoot(
     }
     val rollbackAlert by authRepository.rollbackAlert.collectAsState()
     rollbackAlert?.let {
-        me.lakko.app.ui.auth.BackupRollbackAlertDialog(
+        me.lakko.app.ui.auth.BackupRollbackRefusedDialog(
             onDismiss = { authRepository.dismissRollbackAlert() },
         )
     }

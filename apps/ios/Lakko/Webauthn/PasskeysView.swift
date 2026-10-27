@@ -186,21 +186,16 @@ public struct PasskeysView: View {
         }
         .navigationTitle(l10n.t("settings.passkeys.title"))
         .navigationBarTitleDisplayMode(.inline)
-        .confirmationDialog(
-            l10n.t("settings.passkeys.stop_restoring.title"),
-            isPresented: Binding(
-                get: { stoppingKeysFor != nil },
-                set: { if !$0 { stoppingKeysFor = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: stoppingKeysFor
-        ) { cred in
-            Button(l10n.t("settings.passkeys.stop_restoring.action"), role: .destructive) {
-                Task { await viewModel.stopRestoringKeys(cred) }
-            }
-            Button(l10n.t("common.cancel"), role: .cancel) {}
-        } message: { _ in
-            Text(l10n.t("settings.passkeys.stop_restoring.body"))
+        .lakkoDialog(item: $stoppingKeysFor) { cred in
+            LakkoDialogContent(
+                title: l10n.t("settings.passkeys.stop_restoring.title"),
+                message: l10n.t("settings.passkeys.stop_restoring.body"),
+                actions: [
+                    .danger(l10n.t("settings.passkeys.stop_restoring.action")) {
+                        Task { await viewModel.stopRestoringKeys(cred) }
+                    },
+                    .cancel(),
+                ])
         }
         // UX 17.3 — the app's own dialog: it carries the proof block.
         .sheet(isPresented: $confirmingDelete) {

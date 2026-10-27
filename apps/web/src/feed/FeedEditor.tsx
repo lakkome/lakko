@@ -27,6 +27,7 @@ import {
 import { FEED_ICONS, feedIconName } from "./feed-icons";
 import { feedSourceKey, type FeedSource } from "./feed-model";
 import { Icon } from "../ui/icons";
+import { LakkoPicker } from "../ui/LakkoPicker";
 import { t } from "../l10n";
 
 /** One line of the preview. */
@@ -72,8 +73,12 @@ const SUGGESTIONS: ReadonlyArray<{ readonly key: SuggestionsKey; readonly labelK
 
 type Membership = "any" | "only" | "never";
 
+/** Where a new feed's rules start from (an action: picking one resets them). */
+type StartPoint = "blank" | "latest" | "popular" | "for-me";
+
 export function FeedEditor(props: FeedEditorProps): JSX.Element {
   const [draft, setDraft] = createSignal<FeedDraft>(props.initial);
+  const [startPoint, setStartPoint] = createSignal<StartPoint>("blank");
   const [hideText, setHideText] = createSignal(props.initial.hideWords.join("\n"));
   const [onlyText, setOnlyText] = createSignal(props.initial.onlyWords.join("\n"));
   const maxWeight = props.core.feedMaxWeight();
@@ -189,15 +194,23 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
           </div>
 
           <Show when={props.isNew}>
-            <label class="lk-feed-field">
-              <span>{t("feed.editor.start_from")}</span>
-              <select onChange={(e) => startFrom(e.currentTarget.value)}>
-                <option value="blank">{t("feed.editor.start.blank")}</option>
-                <option value="latest">{t("feed.preset.latest")}</option>
-                <option value="popular">{t("feed.preset.popular")}</option>
-                <option value="for-me">{t("feed.preset.for_me")}</option>
-              </select>
-            </label>
+            <div class="lk-feed-field">
+              <span id="lk-feed-start-from">{t("feed.editor.start_from")}</span>
+              <LakkoPicker<StartPoint>
+                labelledBy="lk-feed-start-from"
+                value={startPoint()}
+                onChange={(v) => {
+                  setStartPoint(v);
+                  startFrom(v);
+                }}
+                options={[
+                  { value: "blank", label: t("feed.editor.start.blank") },
+                  { value: "latest", label: t("feed.preset.latest") },
+                  { value: "popular", label: t("feed.preset.popular") },
+                  { value: "for-me", label: t("feed.preset.for_me") },
+                ]}
+              />
+            </div>
           </Show>
 
           <fieldset class="lk-feed-section">
@@ -246,15 +259,17 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
                   {(s) => (
                     <li>
                       <span class="lk-feed-conv-name">{s.title}</span>
-                      <select
-                        aria-label={t("feed.editor.membership.a11y", { name: s.title })}
+                      <LakkoPicker<Membership>
+                        class="lk-feed-membership"
+                        ariaLabel={t("feed.editor.membership.a11y", { name: s.title })}
                         value={membership(feedSourceKey(s))}
-                        onChange={(e) => setMembership(feedSourceKey(s), e.currentTarget.value as Membership)}
-                      >
-                        <option value="any">—</option>
-                        <option value="only">{t("feed.editor.membership.only")}</option>
-                        <option value="never">{t("feed.editor.membership.never")}</option>
-                      </select>
+                        onChange={(v) => setMembership(feedSourceKey(s), v)}
+                        options={[
+                          { value: "any", label: "—" },
+                          { value: "only", label: t("feed.editor.membership.only") },
+                          { value: "never", label: t("feed.editor.membership.never") },
+                        ]}
+                      />
                     </li>
                   )}
                 </For>
@@ -383,15 +398,15 @@ export function FeedEditor(props: FeedEditorProps): JSX.Element {
 
           <fieldset class="lk-feed-section">
             <legend>{t("feed.editor.suggestions")}</legend>
-            <label class="lk-feed-field">
-              <span>{t("feed.editor.suggestions_rate")}</span>
-              <select
+            <div class="lk-feed-field">
+              <span id="lk-feed-suggestions-rate">{t("feed.editor.suggestions_rate")}</span>
+              <LakkoPicker<SuggestionsKey>
+                labelledBy="lk-feed-suggestions-rate"
                 value={draft().suggestions}
-                onChange={(e) => update({ suggestions: e.currentTarget.value as SuggestionsKey })}
-              >
-                <For each={SUGGESTIONS}>{(s) => <option value={s.key}>{t(s.labelKey)}</option>}</For>
-              </select>
-            </label>
+                onChange={(v) => update({ suggestions: v })}
+                options={SUGGESTIONS.map((s) => ({ value: s.key, label: t(s.labelKey) }))}
+              />
+            </div>
           </fieldset>
 
           <Show when={problem()}>

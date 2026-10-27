@@ -36,6 +36,7 @@ public struct ContactsScreen: View {
 
     @State private var query = ""
     @State private var inviteLinksPresented = false
+    @State private var addMenuOpen = false
     @State private var sentExpanded = false
 
     public init(
@@ -179,6 +180,9 @@ public struct ContactsScreen: View {
                 addMenu
             }
         }
+        .lakkoActionSheet(isPresented: $addMenuOpen) {
+            [.action(l10n.t("contacts.add.share_invite"), systemImage: "link") { inviteLinksPresented = true }]
+        }
         .sheet(isPresented: $inviteLinksPresented) {
             InviteLinksSheet(viewModel: viewModel, onDismiss: { inviteLinksPresented = false })
         }
@@ -210,11 +214,7 @@ public struct ContactsScreen: View {
     /// there — and the LINK belongs inside the call it leads into
     /// (`docs/ux/call-links.md` section 3), not in a menu about contacts.
     private var addMenu: some View {
-        Menu {
-            Button { inviteLinksPresented = true } label: {
-                Label(l10n.t("contacts.add.share_invite"), systemImage: "link")
-            }
-        } label: {
+        Button { addMenuOpen = true } label: {
             Image(systemName: "person.badge.plus")
         }
         .accessibilityLabel(l10n.t("contacts.list.add"))

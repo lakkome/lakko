@@ -33,6 +33,7 @@ import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { DiscoveryClient } from "../discovery/client";
 import { Icon } from "../ui/icons";
+import { LakkoPicker } from "../ui/LakkoPicker";
 import { loadWasm } from "../wasm";
 import { joinFacts, t } from "../l10n";
 import { KeyedError } from "../l10n/keyed-error";
@@ -374,31 +375,35 @@ export function InviteLinksPanel(): JSX.Element {
               disabled={createBusy()}
             />
           </label>
-          <label>
-            {t("invite.links.expires_field")}
-            <select
+          <div class="lk-picker-field">
+            <span id="lk-invite-expires">{t("invite.links.expires_field")}</span>
+            <LakkoPicker<ExpiryPreset>
+              labelledBy="lk-invite-expires"
               value={expiry()}
-              onChange={(e) => setExpiry(e.currentTarget.value as ExpiryPreset)}
+              onChange={setExpiry}
               disabled={createBusy()}
-            >
-              <option value="1d">{t("invite.links.expires_option_days", { count: 1 })}</option>
-              <option value="7d">{t("invite.links.expires_option_days", { count: 7 })}</option>
-              <option value="30d">{t("invite.links.expires_option_days", { count: 30 })}</option>
-              <option value="never">{t("invite.links.expires_option_never")}</option>
-            </select>
-          </label>
-          <label>
-            {t("invite.links.uses_field")}
-            <select
+              options={[
+                { value: "1d", label: t("invite.links.expires_option_days", { count: 1 }) },
+                { value: "7d", label: t("invite.links.expires_option_days", { count: 7 }) },
+                { value: "30d", label: t("invite.links.expires_option_days", { count: 30 }) },
+                { value: "never", label: t("invite.links.expires_option_never") },
+              ]}
+            />
+          </div>
+          <div class="lk-picker-field">
+            <span id="lk-invite-uses">{t("invite.links.uses_field")}</span>
+            <LakkoPicker<MaxUsesPreset>
+              labelledBy="lk-invite-uses"
               value={maxUses()}
-              onChange={(e) => setMaxUses(e.currentTarget.value as MaxUsesPreset)}
+              onChange={setMaxUses}
               disabled={createBusy()}
-            >
-              <option value="single">{t("invite.links.uses_option_one")}</option>
-              <option value="ten">{t("invite.links.uses_option_up_to", { count: 10 })}</option>
-              <option value="unlimited">{t("invite.links.uses_option_unlimited")}</option>
-            </select>
-          </label>
+              options={[
+                { value: "single", label: t("invite.links.uses_option_one") },
+                { value: "ten", label: t("invite.links.uses_option_up_to", { count: 10 }) },
+                { value: "unlimited", label: t("invite.links.uses_option_unlimited") },
+              ]}
+            />
+          </div>
           <label style={{ display: "flex", gap: "8px", "align-items": "center" }}>
             <input
               type="checkbox"

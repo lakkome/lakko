@@ -115,13 +115,11 @@ struct WhoCanFindMeScreen: View {
     var body: some View {
         List {
             Section {
-                Picker(l10n.t("who_can_find_me.title"), selection: mode) {
-                    Text(l10n.t("who_can_find_me.mode.nobody")).tag(FfiVisibilityMode.nobody)
-                    Text(l10n.t("who_can_find_me.mode.some")).tag(FfiVisibilityMode.some)
-                    Text(l10n.t("who_can_find_me.mode.everyone")).tag(FfiVisibilityMode.everyone)
-                }
-                .pickerStyle(.inline)
-                .labelsHidden()
+                LakkoInlinePicker(selection: mode, options: [
+                    LakkoPickerOption(value: FfiVisibilityMode.nobody, label: l10n.t("who_can_find_me.mode.nobody")),
+                    LakkoPickerOption(value: FfiVisibilityMode.some, label: l10n.t("who_can_find_me.mode.some")),
+                    LakkoPickerOption(value: FfiVisibilityMode.everyone, label: l10n.t("who_can_find_me.mode.everyone")),
+                ])
             } header: {
                 statusHeader
             } footer: {
@@ -143,12 +141,10 @@ struct WhoCanFindMeScreen: View {
                 Section {
                     Toggle(l10n.t("who_can_find_me.groups"), isOn: groupsVisible)
                     if setting.groups != nil {
-                        Picker(l10n.t("who_can_find_me.groups"), selection: groupsForm) {
-                            Text(l10n.t("who_can_find_me.groups.all")).tag(FfiGroupsForm.all)
-                            Text(l10n.t("who_can_find_me.groups.chosen")).tag(FfiGroupsForm.chosen)
-                        }
-                        .pickerStyle(.inline)
-                        .labelsHidden()
+                        LakkoInlinePicker(selection: groupsForm, options: [
+                            LakkoPickerOption(value: FfiGroupsForm.all, label: l10n.t("who_can_find_me.groups.all")),
+                            LakkoPickerOption(value: FfiGroupsForm.chosen, label: l10n.t("who_can_find_me.groups.chosen")),
+                        ])
                         if setting.groups == .chosen {
                             Button {
                                 showingList = true

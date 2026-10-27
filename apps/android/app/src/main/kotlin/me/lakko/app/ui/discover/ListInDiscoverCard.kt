@@ -4,20 +4,15 @@
 package me.lakko.app.ui.discover
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -44,6 +39,9 @@ import me.lakko.app.l10n.UiText
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import java.util.Locale
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.ui.components.LakkoPicker
 
 /**
  * "List in Discover" on the channel manage screen (docs/ux/feed.md 6.4,
@@ -196,14 +194,14 @@ public fun ListInDiscoverCard(channelId: String, state: ChannelsUiState, client:
                 if (listed != true) {
                     Picker(
                         label = t("discover.listing.topic"),
-                        value = topicName(topic).text(),
+                        selected = topic,
                         options = topics.map { it to topicName(it).text() },
                         enabled = !busy,
                         onPick = { topic = it },
                     )
                     Picker(
                         label = t("discover.language"),
-                        value = languageLabel(language),
+                        selected = language,
                         options = languageOptions(language).map { it to languageLabel(it) },
                         enabled = !busy,
                         onPick = { language = it },
@@ -218,39 +216,22 @@ public fun ListInDiscoverCard(channelId: String, state: ChannelsUiState, client:
     }
 
     if (confirming) {
-        AlertDialog(
+        LakkoDialog(
             onDismissRequest = { confirming = false },
-            title = { Text(t("discover.listing.confirm_title")) },
-            text = { Text(DiscoverCopy.LISTING_CONFIRM.text()) },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirming = false
-                    turnOn()
-                }) { Text(t("discover.listing.confirm_action")) }
+            title = t("discover.listing.confirm_title"),
+            body = DiscoverCopy.LISTING_CONFIRM.text(),
+            confirm = LakkoDialogAction(t("discover.listing.confirm_action")) {
+                confirming = false
+                turnOn()
             },
-            dismissButton = { TextButton(onClick = { confirming = false }) { Text(t("common.cancel")) } },
         )
     }
 }
 
 @Composable
-private fun <T> Picker(label: String, value: String, options: List<Pair<T, String>>, enabled: Boolean, onPick: (T) -> Unit) {
-    var open by remember { mutableStateOf(false) }
+private fun <T> Picker(label: String, selected: T, options: List<Pair<T, String>>, enabled: Boolean, onPick: (T) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         Text(label, modifier = Modifier.weight(1f))
-        Box {
-            TextButton(onClick = { open = true }, enabled = enabled) { Text(value) }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                for ((key, text) in options) {
-                    DropdownMenuItem(
-                        text = { Text(text) },
-                        onClick = {
-                            open = false
-                            onPick(key)
-                        },
-                    )
-                }
-            }
-        }
+        LakkoPicker(selected = selected, options = options, onPick = onPick, enabled = enabled, heading = label)
     }
 }

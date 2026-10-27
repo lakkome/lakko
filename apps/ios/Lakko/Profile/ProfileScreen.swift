@@ -432,28 +432,3 @@ struct PendingAvatarPicture: View {
         .accessibilityHidden(true)
     }
 }
-
-/// Lakko's own centred dialog over a dimmed screen: never the system alert.
-struct LakkoDialog<Content: View>: View {
-    let onOutside: () -> Void
-    @ViewBuilder let content: () -> Content
-
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.35)
-                .ignoresSafeArea()
-                .onTapGesture(perform: onOutside)
-                .accessibilityHidden(true)
-            VStack(spacing: 12) {
-                content()
-            }
-            .padding(20)
-            .frame(maxWidth: 360)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.lakkoSurface))
-            .padding(.horizontal, 24)
-            .accessibilityAddTraits(.isModal)
-        }
-        .transition(.opacity)
-    }
-}

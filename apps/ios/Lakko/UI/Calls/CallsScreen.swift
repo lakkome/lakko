@@ -56,6 +56,7 @@ struct CallsScreen: View {
     let onOpenLink: (URL) -> Void
 
     @State private var joinByLinkPresented = false
+    @State private var moreMenuOpen = false
     @State private var pastedLink = ""
     @State private var joinError: UiText?
     /// A call is being started. Brief — the press founds the call locally —
@@ -77,11 +78,7 @@ struct CallsScreen: View {
                     // Demoted, not removed: a pasted link is a real case and a
                     // rare one, so it sits behind the one menu this screen has
                     // rather than beside the action it is not.
-                    Menu {
-                        Button { joinByLinkPresented = true } label: {
-                            Label(l10n.t("call.history.join_by_link"), systemImage: "link")
-                        }
-                    } label: {
+                    Button { moreMenuOpen = true } label: {
                         Image(systemName: "ellipsis.circle")
                     }
                     .accessibilityLabel(l10n.t("common.more_options"))
@@ -98,16 +95,17 @@ struct CallsScreen: View {
                     .accessibilityLabel(l10n.t("call.history.new_call"))
                 }
             }
+            .lakkoActionSheet(isPresented: $moreMenuOpen) {
+                [.action(l10n.t("call.history.join_by_link"), systemImage: "link") {
+                    joinByLinkPresented = true
+                }]
+            }
             .sheet(isPresented: $joinByLinkPresented) { joinByLinkSheet }
-            .alert(
-                l10n.t("call.alert.title"),
-                isPresented: Binding(
-                    get: { startError != nil }, set: { if !$0 { startError = nil } }),
-                presenting: startError
-            ) { _ in
-                Button(l10n.t("common.ok"), role: .cancel) { startError = nil }
-            } message: { message in
-                Text(message.text)
+            .lakkoDialog(item: $startError) { message in
+                LakkoDialogContent(
+                    title: l10n.t("call.alert.title"),
+                    message: message.text,
+                    actions: [.primary(l10n.t("common.ok")) { startError = nil }])
             }
     }
 

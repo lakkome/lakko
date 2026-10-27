@@ -142,6 +142,9 @@ public struct ChatListScreen: View {
     @State private var editor: FolderEditorRequest?
     /// The folder whose deletion is being confirmed.
     @State private var deleting: FolderView?
+    @State private var createMenuOpen = false
+    /// The toolbar's create menu carries Saved; the empty state's does not.
+    @State private var createMenuWithSaved = true
 
     public var body: some View {
 #if DEBUG
@@ -180,17 +183,16 @@ public struct ChatListScreen: View {
                     onSave: { changes in try await deviceGroupSync.applyFolderChanges(changes) },
                     onDelete: { folder in deleteFolder(folder) })
             }
-            .alert(
-                deleting.map { l10n.t("folders.delete_confirm.title", texts: ["name": $0.meta.name]) } ?? "",
-                isPresented: Binding(
-                    get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
-                presenting: deleting
-            ) { folder in
-                Button(l10n.t("common.cancel"), role: .cancel) { deleting = nil }
-                Button(l10n.t("common.delete"), role: .destructive) { deleteFolder(folder) }
-            } message: { _ in
-                Text(l10n.t("folders.delete_confirm.body"))
+            .lakkoDialog(item: $deleting) { folder in
+                LakkoDialogContent(
+                    title: l10n.t("folders.delete_confirm.title", texts: ["name": folder.meta.name]),
+                    message: l10n.t("folders.delete_confirm.body"),
+                    actions: [
+                        .cancel { deleting = nil },
+                        .danger(l10n.t("common.delete")) { deleteFolder(folder) },
+                    ])
             }
+            .lakkoActionSheet(isPresented: $createMenuOpen) { createMenuItems(includeSaved: createMenuWithSaved) }
             .navigationTitle(l10n.t("nav.chats"))
             .navigationBarTitleDisplayMode(.large)
             .searchable(text: $searchText, prompt: Text(l10n.t("chats.search.placeholder")))
@@ -229,24 +231,26 @@ public struct ChatListScreen: View {
     /// not a compose action. A bare `+` reads as "add contact", so the icon is
     /// the compose one.
     private var createMenu: some View {
-        Menu {
-            Button { onCreate(.chat) } label: {
-                Label(l10n.t("chats.create.chat"), systemImage: "bubble.left")
-            }
-            Button { onCreate(.group) } label: {
-                Label(l10n.t("chats.create.group"), systemImage: "person.3")
-            }
-            Button { onCreate(.channel) } label: {
-                Label(l10n.t("chats.create.channel"), systemImage: "megaphone")
-            }
-            Divider()
-            Button { onCreate(.saved) } label: {
-                Label(l10n.t("saved.title"), systemImage: "bookmark")
-            }
+        Button {
+            createMenuWithSaved = true
+            createMenuOpen = true
         } label: {
             Image(systemName: "square.and.pencil")
         }
         .accessibilityLabel(l10n.t("chats.create.menu"))
+    }
+
+    /// The create menu's rows (Lakko's own action sheet, never a system menu).
+    private func createMenuItems(includeSaved: Bool) -> [LakkoMenuItem] {
+        var items: [LakkoMenuItem] = [
+            .action(l10n.t("chats.create.chat"), systemImage: "bubble.left") { onCreate(.chat) },
+            .action(l10n.t("chats.create.group"), systemImage: "person.3") { onCreate(.group) },
+            .action(l10n.t("chats.create.channel"), systemImage: "megaphone") { onCreate(.channel) },
+        ]
+        if includeSaved {
+            items.append(.action(l10n.t("saved.title"), systemImage: "bookmark") { onCreate(.saved) })
+        }
+        return items
     }
 
     // MARK: - Rows
@@ -837,16 +841,9 @@ public struct ChatListScreen: View {
                 .foregroundStyle(Color.lakkoTextMuted)
             Text(l10n.t("chats.empty.title"))
                 .font(.headline)
-            Menu {
-                Button { onCreate(.chat) } label: {
-                    Label(l10n.t("chats.create.chat"), systemImage: "bubble.left")
-                }
-                Button { onCreate(.group) } label: {
-                    Label(l10n.t("chats.create.group"), systemImage: "person.3")
-                }
-                Button { onCreate(.channel) } label: {
-                    Label(l10n.t("chats.create.channel"), systemImage: "megaphone")
-                }
+            Button {
+                createMenuWithSaved = false
+                createMenuOpen = true
             } label: {
                 Text(l10n.t("chats.empty.action"))
                     .padding(.horizontal, 16)

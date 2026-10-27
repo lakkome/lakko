@@ -159,15 +159,12 @@ struct ChannelInfoSheet: View {
                     Button(l10n.t("common.done"), action: onDone)
                 }
             }
-            .confirmationDialog(
-                l10n.t("channels.unsubscribe.title_named", texts: ["name": title]),
+            .lakkoDialog(
                 isPresented: $confirmingStopFollowing,
-                titleVisibility: .visible
+                title: l10n.t("channels.unsubscribe.title_named", texts: ["name": title]),
+                message: l10n.t("channels.unsubscribe.body")
             ) {
-                Button(l10n.t("channels.unsubscribe.action"), role: .destructive) { stopFollowing() }
-                Button(l10n.t("common.cancel"), role: .cancel) {}
-            } message: {
-                Text(l10n.t("channels.unsubscribe.body"))
+                [.danger(l10n.t("channels.unsubscribe.action")) { stopFollowing() }, .cancel()]
             }
         }
     }

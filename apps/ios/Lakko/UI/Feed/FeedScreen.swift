@@ -48,6 +48,7 @@ struct FeedScreen: View {
 
     @State private var expanded: Set<String> = []
     @State private var showingHidden = false
+    @State private var moreMenuOpen = false
     /// ADR-0061 — every line follows the interface language.
     @ObservedObject private var l10n = Localization.shared
     private static let topId = "feed-top"
@@ -64,17 +65,20 @@ struct FeedScreen: View {
         .navigationTitle(l10n.t("feed.title"))
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button(l10n.t("feed.new")) { beginNew() }
-                    Button(l10n.t("feed.hidden.title")) { showingHidden = true }
-                    Button(l10n.t("feed.import.title")) {
-                        model.importing = FeedImportRequest(bytes: nil, refused: false)
-                    }
-                } label: {
+                Button { moreMenuOpen = true } label: {
                     Image(systemName: "ellipsis.circle")
                 }
                 .accessibilityLabel(l10n.t("feed.menu.a11y"))
             }
+        }
+        .lakkoActionSheet(isPresented: $moreMenuOpen) {
+            [
+                .action(l10n.t("feed.new")) { beginNew() },
+                .action(l10n.t("feed.hidden.title")) { showingHidden = true },
+                .action(l10n.t("feed.import.title")) {
+                    model.importing = FeedImportRequest(bytes: nil, refused: false)
+                },
+            ]
         }
         .navigationDestination(item: $model.editing) { editing in
             if let initial = model.editorInitial(editing) {

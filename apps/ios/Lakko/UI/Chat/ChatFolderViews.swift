@@ -271,23 +271,26 @@ struct FolderEditorScreen: View {
                 }
             }
             .interactiveDismissDisabled(dirty)
-            .confirmationDialog(
-                l10n.t("folders.editor.discard.title"), isPresented: $confirmingDiscard, titleVisibility: .visible
+            .lakkoDialog(
+                isPresented: $confirmingDiscard, title: l10n.t("folders.editor.discard.title")
             ) {
-                Button(l10n.t("folders.editor.discard.confirm"), role: .destructive) { dismiss() }
-                Button(l10n.t("folders.editor.discard.keep"), role: .cancel) {}
+                [
+                    .danger(l10n.t("folders.editor.discard.confirm")) { dismiss() },
+                    .cancel(l10n.t("folders.editor.discard.keep")),
+                ]
             }
-            .alert(
-                l10n.t("folders.delete_confirm.title", texts: ["name": request.folder?.meta.name ?? ""]),
-                isPresented: $confirmingDelete
+            .lakkoDialog(
+                isPresented: $confirmingDelete,
+                title: l10n.t("folders.delete_confirm.title", texts: ["name": request.folder?.meta.name ?? ""]),
+                message: l10n.t("folders.delete_confirm.body")
             ) {
-                Button(l10n.t("common.cancel"), role: .cancel) {}
-                Button(l10n.t("common.delete"), role: .destructive) {
-                    if let folder = request.folder { onDelete(folder) }
-                    dismiss()
-                }
-            } message: {
-                Text(l10n.t("folders.delete_confirm.body"))
+                [
+                    .cancel(),
+                    .danger(l10n.t("common.delete")) {
+                        if let folder = request.folder { onDelete(folder) }
+                        dismiss()
+                    },
+                ]
             }
             .sheet(item: $picker) { mode in
                 pickerSheet(for: mode)

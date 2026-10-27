@@ -4,7 +4,6 @@
 package me.lakko.app.ui.feed
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,8 +15,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -56,6 +53,7 @@ import uniffi.lakko_ffi_uniffi.FeedPreset
 import uniffi.lakko_ffi_uniffi.FeedRule
 import uniffi.lakko_ffi_uniffi.FeedSuggestions
 import uniffi.lakko_ffi_uniffi.FeedWeights
+import me.lakko.app.ui.components.LakkoPicker
 
 /** One line of the editor's preview. */
 public data class PreviewLine(val key: String, val source: String, val text: String)
@@ -345,7 +343,6 @@ private fun CheckRow(label: String, checked: Boolean, onChange: (Boolean) -> Uni
 
 @Composable
 private fun ConversationMembershipRow(title: String, value: Membership, onChange: (Membership) -> Unit) {
-    var open by remember { mutableStateOf(false) }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         Text(
             title,
@@ -354,20 +351,12 @@ private fun ConversationMembershipRow(title: String, value: Membership, onChange
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
-        Box {
-            TextButton(onClick = { open = true }) { Text(membershipLabel(value)) }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                for (m in Membership.entries) {
-                    DropdownMenuItem(
-                        text = { Text(membershipLabel(m)) },
-                        onClick = {
-                            open = false
-                            onChange(m)
-                        },
-                    )
-                }
-            }
-        }
+        LakkoPicker(
+            selected = value,
+            options = Membership.entries.map { it to membershipLabel(it) },
+            onPick = onChange,
+            heading = title,
+        )
     }
 }
 

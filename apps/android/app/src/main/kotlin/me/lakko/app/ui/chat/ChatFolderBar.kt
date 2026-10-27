@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -23,7 +22,6 @@ import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,6 +42,9 @@ import me.lakko.app.chat.folderRows
 import me.lakko.app.chat.folderUnreadCount
 import me.lakko.app.chat.hasUnread
 import me.lakko.app.l10n.t
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.ui.components.LakkoDialogTone
 
 /**
  * The folder bar, `docs/ux/chat-folders.md` section 2.
@@ -214,16 +215,11 @@ internal fun EmptyFolderPanel(onEdit: () -> Unit) {
 /** UX spec 3.5. */
 @Composable
 internal fun DeleteFolderDialog(folder: ChatFolder, onDismiss: () -> Unit, onConfirm: () -> Unit) {
-    AlertDialog(
+    LakkoDialog(
         onDismissRequest = onDismiss,
-        title = { Text(t("folders.delete_confirm.title", mapOf("name" to folder.name))) },
-        text = { Text(t("folders.delete_confirm.body")) },
-        confirmButton = {
-            TextButton(onClick = onConfirm) {
-                Text(t("common.delete"), color = MaterialTheme.colorScheme.error)
-            }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(t("common.cancel")) } },
+        title = t("folders.delete_confirm.title", mapOf("name" to folder.name)),
+        body = t("folders.delete_confirm.body"),
+        confirm = LakkoDialogAction(t("common.delete"), LakkoDialogTone.Danger, onClick = onConfirm),
     )
 }
 

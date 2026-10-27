@@ -67,7 +67,6 @@ import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Mood
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
@@ -168,6 +167,9 @@ import uniffi.lakko_ffi_uniffi.GroupInfoCapabilities
 import uniffi.lakko_ffi_uniffi.InfoSection
 import uniffi.lakko_ffi_uniffi.callHoldsCapture
 import uniffi.lakko_ffi_uniffi.groupInfoSections
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.ui.components.LakkoDialogTone
 
 /**
  * 1×1 chat screen — `LazyColumn` of messages + composer.
@@ -235,7 +237,7 @@ public fun ChatScreen(
     // 1.19c4 — preview-attachment sheet state. When the user
     // taps "Open" on an image chip we resolve the bytes off
     // the main thread + populate this, which surfaces an
-    // AlertDialog with the decoded bitmap.
+    // dialog with the decoded bitmap.
     var previewImage by remember { mutableStateOf<ImageBitmap?>(null) }
 
     // ADR-0023 — the message being edited (the small pre-filled
@@ -841,19 +843,17 @@ public fun ChatScreen(
         }
 
         callNotice?.let { notice ->
-            AlertDialog(
+            LakkoDialog(
                 onDismissRequest = viewModel::dismissCallNotice,
-                title = { Text(t("chat.call.voice")) },
-                text = { Text(notice.text()) },
-                confirmButton = {
-                    if (callNoticeOffersEnd) {
-                        TextButton(onClick = viewModel::onEndCurrentCall) { Text(t("call.link.end_current")) }
-                    } else {
-                        TextButton(onClick = viewModel::dismissCallNotice) { Text(t("common.ok")) }
-                    }
+                title = t("chat.call.voice"),
+                body = notice.text(),
+                confirm = if (callNoticeOffersEnd) {
+                    LakkoDialogAction(t("call.link.end_current"), onClick = viewModel::onEndCurrentCall)
+                } else {
+                    LakkoDialogAction(t("common.ok"), onClick = viewModel::dismissCallNotice)
                 },
-                dismissButton = if (callNoticeOffersEnd) {
-                    { TextButton(onClick = viewModel::dismissCallNotice) { Text(t("common.cancel")) } }
+                cancel = if (callNoticeOffersEnd) {
+                    LakkoDialogAction(t("common.cancel"), LakkoDialogTone.Ghost, onClick = viewModel::dismissCallNotice)
                 } else {
                     null
                 },
@@ -1188,22 +1188,12 @@ public fun ChatScreen(
     // UX section 8 — "Delete 12 messages?" with a destructive Delete and Cancel.
     val confirmCount = selection?.count ?: 0
     if (confirmBulkDelete && confirmCount > 0) {
-        AlertDialog(
+        LakkoDialog(
             onDismissRequest = { confirmBulkDelete = false },
-            title = { Text(me.lakko.app.chat.confirmDeleteLabel(confirmCount).text()) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        confirmBulkDelete = false
-                        viewModel.onDeleteSelected()
-                    },
-                    colors = ButtonDefaults.textButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error,
-                    ),
-                ) { Text(t("common.delete")) }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmBulkDelete = false }) { Text(t("common.cancel")) }
+            title = me.lakko.app.chat.confirmDeleteLabel(confirmCount).text(),
+            confirm = LakkoDialogAction(t("common.delete"), LakkoDialogTone.Danger) {
+                confirmBulkDelete = false
+                viewModel.onDeleteSelected()
             },
         )
     } else if (confirmBulkDelete) {
@@ -1237,22 +1227,21 @@ public fun ChatScreen(
     }
 
     // Inline image preview — surfaced as a full-screen
-    // AlertDialog with the decoded bitmap. Dismiss via tap
+    // dialog with the decoded bitmap. Dismiss via tap
     // outside or the Close button.
     val preview = previewImage
     if (preview != null) {
-        AlertDialog(
+        LakkoDialog(
             onDismissRequest = { previewImage = null },
-            confirmButton = {
-                TextButton(onClick = { previewImage = null }) { Text(t("common.close")) }
-            },
-            text = {
-                androidx.compose.foundation.Image(
-                    bitmap = preview,
-                    contentDescription = t("chat.attachment.image_alt"),
-                )
-            },
-        )
+            title = null,
+            confirm = LakkoDialogAction(t("common.close")) { previewImage = null },
+            cancel = null,
+        ) {
+            androidx.compose.foundation.Image(
+                bitmap = preview,
+                contentDescription = t("chat.attachment.image_alt"),
+            )
+        }
     }
 
     // ADR-0023 — edit dialog: a small text field pre-filled with
@@ -2570,21 +2559,12 @@ private fun RemoveMemberDialog(
     onRemove: () -> Unit,
 ) {
     val copy = me.lakko.app.chat.removeMemberConfirmation(usesProposalPath)
-    AlertDialog(
+    LakkoDialog(
         onDismissRequest = onCancel,
-        title = { Text(copy.title.text()) },
-        text = copy.body?.let { body -> { Text(body.text()) } },
-        confirmButton = {
-            TextButton(
-                onClick = onRemove,
-                colors = ButtonDefaults.textButtonColors(
-                    contentColor = MaterialTheme.colorScheme.error,
-                ),
-            ) { Text(copy.confirmLabel.text()) }
-        },
-        dismissButton = {
-            TextButton(onClick = onCancel) { Text(copy.cancelLabel.text()) }
-        },
+        title = copy.title.text(),
+        body = copy.body?.text(),
+        confirm = LakkoDialogAction(copy.confirmLabel.text(), LakkoDialogTone.Danger, onClick = onRemove),
+        cancel = LakkoDialogAction(copy.cancelLabel.text(), LakkoDialogTone.Ghost, onClick = onCancel),
     )
 }
 
@@ -2596,30 +2576,25 @@ private fun EditMessageDialog(
     onSave: (String) -> Unit,
 ) {
     var draft by remember { mutableStateOf(initialText) }
-    AlertDialog(
+    LakkoDialog(
         onDismissRequest = onCancel,
-        title = { Text(t("chat.edit.title")) },
-        text = {
-            OutlinedTextField(
-                value = draft,
-                onValueChange = { draft = it },
-                singleLine = false,
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.Sentences,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { onSave(draft) },
-                enabled = draft.trim().isNotEmpty() && draft.trim() != initialText.trim(),
-            ) { Text(t("common.save")) }
-        },
-        dismissButton = {
-            TextButton(onClick = onCancel) { Text(t("common.cancel")) }
-        },
-    )
+        title = t("chat.edit.title"),
+        confirm = LakkoDialogAction(
+            t("common.save"),
+            enabled = draft.trim().isNotEmpty() && draft.trim() != initialText.trim(),
+        ) { onSave(draft) },
+        cancel = LakkoDialogAction(t("common.cancel"), LakkoDialogTone.Ghost, onClick = onCancel),
+    ) {
+        OutlinedTextField(
+            value = draft,
+            onValueChange = { draft = it },
+            singleLine = false,
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.Sentences,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }
 
 /** Single attachment chip rendered inside a bubble. Hosts the
@@ -3184,21 +3159,12 @@ private fun LeaveGroupDialog(
     onCancel: () -> Unit,
     onLeave: () -> Unit,
 ) {
-    AlertDialog(
+    LakkoDialog(
         onDismissRequest = onCancel,
-        title = { Text(t("chat.leave.title")) },
-        text = { Text(t("chat.leave.body")) },
-        confirmButton = {
-            TextButton(
-                onClick = onLeave,
-                colors = ButtonDefaults.textButtonColors(
-                    contentColor = MaterialTheme.colorScheme.error,
-                ),
-            ) { Text(t("chat.leave.confirm")) }
-        },
-        dismissButton = {
-            TextButton(onClick = onCancel) { Text(t("common.cancel")) }
-        },
+        title = t("chat.leave.title"),
+        body = t("chat.leave.body"),
+        confirm = LakkoDialogAction(t("chat.leave.confirm"), LakkoDialogTone.Danger, onClick = onLeave),
+        cancel = LakkoDialogAction(t("common.cancel"), LakkoDialogTone.Ghost, onClick = onCancel),
     )
 }
 
@@ -3221,21 +3187,12 @@ internal fun DeleteChatDialog(
     onCancel: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    AlertDialog(
+    LakkoDialog(
         onDismissRequest = onCancel,
-        title = { Text(me.lakko.app.chat.DELETE_CHAT_TITLE.text()) },
-        text = { Text(me.lakko.app.chat.DELETE_CHAT_BODY.text()) },
-        confirmButton = {
-            TextButton(
-                onClick = onDelete,
-                colors = ButtonDefaults.textButtonColors(
-                    contentColor = MaterialTheme.colorScheme.error,
-                ),
-            ) { Text(t("common.delete")) }
-        },
-        dismissButton = {
-            TextButton(onClick = onCancel) { Text(t("common.cancel")) }
-        },
+        title = me.lakko.app.chat.DELETE_CHAT_TITLE.text(),
+        body = me.lakko.app.chat.DELETE_CHAT_BODY.text(),
+        confirm = LakkoDialogAction(t("common.delete"), LakkoDialogTone.Danger, onClick = onDelete),
+        cancel = LakkoDialogAction(t("common.cancel"), LakkoDialogTone.Ghost, onClick = onCancel),
     )
 }
 

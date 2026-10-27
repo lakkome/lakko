@@ -367,12 +367,11 @@ public struct ChatScreen: View {
         }
         // Section 8 — a bulk delete is irreversible and multiplied, so it
         // confirms where the single delete asks nothing.
-        .alert(
-            MessageSelection.confirmDeleteLabel(selection?.count ?? 0),
-            isPresented: $confirmBulkDelete
+        .lakkoDialog(
+            isPresented: $confirmBulkDelete,
+            title: MessageSelection.confirmDeleteLabel(selection?.count ?? 0)
         ) {
-            Button(l10n.t("common.delete"), role: .destructive) { runBulkDelete() }
-            Button(l10n.t("common.cancel"), role: .cancel) {}
+            [.danger(l10n.t("common.delete")) { runBulkDelete() }, .cancel()]
         }
         // ADR-0052 decision 3 / section 4.1 — the pin sheet: who is this pin
         // for. A row acts at once and dismisses; Cancel does nothing.
@@ -526,12 +525,11 @@ public struct ChatScreen: View {
         // 1.19c3 — Attach action sheet → Photo / Document.
         // Compactly hosts the two picker entry points without
         // crowding the composer toolbar with two buttons.
-        .confirmationDialog(
-            l10n.t("chat.composer.attach"),
+        .lakkoActionSheet(
             isPresented: $attachActionSheetPresented,
-            titleVisibility: .visible
-        ) {
-            Button(l10n.t("chat.composer.photo_library")) {
+            title: l10n.t("chat.composer.attach")
+        ) {[
+            .action(l10n.t("chat.composer.photo_library"), systemImage: "photo.on.rectangle") {
                 // Trigger the PhotosPicker by giving it a fresh
                 // empty selection — the PhotosPicker `Button`
                 // below opens immediately when bound to a
@@ -540,12 +538,11 @@ public struct ChatScreen: View {
                 // show-trigger; we route through a transparent
                 // overlay (`photoPickerTrigger` below).
                 photoPickerOpenRequested = true
-            }
-            Button(l10n.t("chat.media.file")) {
+            },
+            .action(l10n.t("chat.media.file"), systemImage: "doc") {
                 fileImporterPresented = true
-            }
-            Button(l10n.t("common.cancel"), role: .cancel) {}
-        }
+            },
+        ]}
         // PhotosPicker — multi-select, resolved on `.onChange`.
         .photosPicker(
             isPresented: $photoPickerOpenRequested,
@@ -3452,37 +3449,30 @@ struct MembersSheet: View {
             // sentence that tells a user whether the person they are removing
             // can still read their messages. The body is ABSENT on a
             // direct-commit group, where that sentence would be false.
-            .confirmationDialog(
-                removeMemberTitle,
+            .lakkoDialog(
                 isPresented: Binding(
                     get: { removeConfirmLeaf != nil },
                     set: { if !$0 { removeConfirmLeaf = nil } }
                 ),
-                titleVisibility: .visible
+                title: removeMemberTitle,
+                message: removeMemberConfirmation(usesProposalPath: viewModel.usesProposalPath).body
             ) {
-                Button(removeMemberConfirmLabel, role: .destructive) {
-                    if let leaf = removeConfirmLeaf {
-                        removeConfirmLeaf = nil
-                        viewModel.onRemoveMember(leafIndex: leaf)
-                    }
-                }
-                Button(removeMemberCancelLabel, role: .cancel) { removeConfirmLeaf = nil }
-            } message: {
-                if let body = removeMemberConfirmation(
-                    usesProposalPath: viewModel.usesProposalPath
-                ).body {
-                    Text(body)
-                }
+                [
+                    .danger(removeMemberConfirmLabel) {
+                        if let leaf = removeConfirmLeaf {
+                            removeConfirmLeaf = nil
+                            viewModel.onRemoveMember(leafIndex: leaf)
+                        }
+                    },
+                    .cancel(removeMemberCancelLabel) { removeConfirmLeaf = nil },
+                ]
             }
-            .confirmationDialog(
-                l10n.t("chat.leave.title"),
+            .lakkoDialog(
                 isPresented: $leaveConfirmPresented,
-                titleVisibility: .visible
+                title: l10n.t("chat.leave.title"),
+                message: l10n.t("chat.leave.body")
             ) {
-                Button(l10n.t("chat.leave.confirm"), role: .destructive) { viewModel.onLeaveGroup() }
-                Button(l10n.t("common.cancel"), role: .cancel) {}
-            } message: {
-                Text(l10n.t("chat.leave.body"))
+                [.danger(l10n.t("chat.leave.confirm")) { viewModel.onLeaveGroup() }, .cancel()]
             }
             // ADR-0045 UX §6.2.4 — the body is exact rather than sweeping, and
             // the precision is load-bearing: the messages really are gone, and
@@ -3490,12 +3480,12 @@ struct MembersSheet: View {
             // inactive group's state stays in the provider snapshot as inert
             // bytes — inert in the strong sense (it cannot send, decrypt,
             // export or process) but not nothing.
-            .confirmationDialog(
-                deleteChatTitle,
+            .lakkoDialog(
                 isPresented: $deleteConfirmPresented,
-                titleVisibility: .visible
-            ) {
-                Button(l10n.t("common.delete"), role: .destructive) {
+                title: deleteChatTitle,
+                message: deleteChatBody
+            ) {[
+                .danger(l10n.t("common.delete")) {
                     // Close the sheet and leave the thread only when the delete
                     // actually landed; a refusal leaves the panel open with the
                     // error slot filled, rather than dropping the user out of a
@@ -3504,11 +3494,9 @@ struct MembersSheet: View {
                         viewModel.closeConversationInfo()
                         onDeleted()
                     }
-                }
-                Button(l10n.t("common.cancel"), role: .cancel) {}
-            } message: {
-                Text(deleteChatBody)
-            }
+                },
+                .cancel(),
+            ]}
             // Section 2.2 — the panel is the group's info, not only its
             // roster, and it is now only ever opened for a group.
             .navigationTitle(l10n.t("chat.info.group"))

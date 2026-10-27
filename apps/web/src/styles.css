@@ -234,14 +234,12 @@ label {
   color: var(--surface-fg);
 }
 label > input,
-label > textarea,
-label > select {
+label > textarea {
   margin-top: 6px;
   font-weight: 400;
 }
 input,
-textarea,
-select {
+textarea {
   font: inherit;
   min-height: var(--control-h);
   padding: 8px 12px;
@@ -264,12 +262,8 @@ input[type="radio"] {
   min-height: 0;
   accent-color: var(--accent);
 }
-select {
-  max-width: 100%;
-}
 input:focus-visible,
 textarea:focus-visible,
-select:focus-visible,
 button:focus-visible,
 a:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
@@ -6444,9 +6438,7 @@ html[data-call-bar] body {
   color: var(--surface-muted);
 }
 .lk-feed-field input,
-.lk-feed-field select,
 .lk-feed-field textarea,
-.lk-feed-conversations select,
 .lk-feed-share-link {
   min-height: var(--control-h);
   padding: 6px 10px;
@@ -7447,4 +7439,159 @@ button.lk-folder-new {
   border-radius: var(--radius-sm);
   object-fit: cover;
   flex: 0 0 auto;
+}
+
+/* LakkoPicker (design system section 3, "Picker"): a field-shaped button and
+   the app's own list of rows, never the browser's <select>. */
+.lk-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.lk-picker {
+  position: relative;
+  min-width: 0;
+}
+.lk-picker-btn {
+  width: 100%;
+  justify-content: space-between;
+  padding: 0 10px 0 12px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  font-weight: 400;
+  color: var(--surface-fg);
+}
+.lk-picker-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.lk-picker-value {
+  flex: 1 1 auto;
+  text-align: start;
+}
+.lk-picker-chevron {
+  display: inline-flex;
+  color: var(--surface-muted);
+  transform: rotate(90deg);
+  transition: transform 120ms ease;
+}
+.lk-picker-btn[aria-expanded="true"] .lk-picker-chevron {
+  transform: rotate(-90deg);
+}
+.lk-picker-scrim {
+  display: none;
+}
+.lk-picker-list {
+  position: fixed;
+  z-index: 1200;
+  max-width: min(360px, calc(100vw - 16px));
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  outline: none;
+}
+.lk-picker-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+  padding: 0 10px 0 12px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  color: var(--surface-fg);
+  cursor: pointer;
+  user-select: none;
+}
+.lk-picker-option.active {
+  background: var(--surface-hover);
+}
+.lk-picker-option[aria-selected="true"] {
+  font-weight: 600;
+}
+.lk-picker-check {
+  display: inline-flex;
+  flex: 0 0 18px;
+  color: var(--accent);
+}
+.lk-picker-list:focus-visible .lk-picker-option.active {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: -2px;
+}
+@media (max-width: 560px) {
+  .lk-picker-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 1199;
+    background: rgba(0, 0, 0, 0.35);
+  }
+  .lk-picker-list {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    max-width: none;
+    max-height: 70vh;
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+    border-bottom: none;
+  }
+  .lk-picker-option {
+    min-height: 52px;
+    font-size: 15px;
+  }
+}
+/* A labelled picker: the label text above, the field under it, like
+   `label > input`. Not a <label> element, which would forward a click on a
+   list row back to the button. */
+.lk-picker-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--surface-fg);
+}
+.lk-feed-field .lk-picker-btn {
+  background: var(--surface-bg);
+}
+.lk-feed-membership {
+  flex: 0 0 auto;
+  width: 9rem;
+}
+/* The recovery-phrase word suggestions (ui/WordSuggest.tsx), in place of the
+   browser's <datalist>. */
+.lk-word-suggest {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  padding: 4px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-2);
+}
+.lk-word-suggest > [role="option"] {
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+  color: var(--surface-fg);
+  cursor: pointer;
+  user-select: none;
+}
+.lk-word-suggest > [role="option"]:hover,
+.lk-word-suggest > .active {
+  background: var(--surface-hover);
 }

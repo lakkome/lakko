@@ -20,7 +20,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -92,6 +91,9 @@ import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.UiText
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.ui.components.LakkoDialogTone
 
 /*
  * ADR-0075 / `docs/ux/identity-recovery.md` section 19 - the screens of an
@@ -631,25 +633,19 @@ public fun ProtectAccountStep(
     }
 
     if (confirmingSkip) {
-        AlertDialog(
+        LakkoDialog(
             onDismissRequest = { confirmingSkip = false },
-            title = { Text(t("protect.skip.confirm.title")) },
-            text = { Text(t("protect.skip.confirm.body")) },
-            confirmButton = {
-                if (rows.email) {
-                    TextButton(onClick = { confirmingSkip = false; sub = ProtectSub.Email }) {
-                        Text(t("protect.email.title"))
-                    }
-                } else {
-                    TextButton(onClick = { confirmingSkip = false; sub = ProtectSub.Phrase }) {
-                        Text(t("protect.phrase.title"))
-                    }
-                }
+            title = t("protect.skip.confirm.title"),
+            body = t("protect.skip.confirm.body"),
+            confirm = if (rows.email) {
+                LakkoDialogAction(t("protect.email.title")) { confirmingSkip = false; sub = ProtectSub.Email }
+            } else {
+                LakkoDialogAction(t("protect.phrase.title")) { confirmingSkip = false; sub = ProtectSub.Phrase }
             },
-            dismissButton = {
-                TextButton(onClick = { confirmingSkip = false; repository.finishProtectStep() }) {
-                    Text(t("protect.skip.confirm.continue"))
-                }
+            // Not Cancel: the person goes on without protection.
+            cancel = LakkoDialogAction(t("protect.skip.confirm.continue"), LakkoDialogTone.Ghost) {
+                confirmingSkip = false
+                repository.finishProtectStep()
             },
         )
     }
@@ -841,32 +837,26 @@ public fun AccountProtectionSection(
                 }
             }
         }
-        AlertDialog(
+        LakkoDialog(
             onDismissRequest = { if (!removing) confirmingRemove = false },
-            title = { Text(t("recovery_email.remove.confirm.title")) },
-            text = {
-                Column {
-                    Text(t("recovery_email.remove.confirm.body"))
-                    Spacer(Modifier.height(8.dp))
-                    ProofBlock(
-                        controller = proof,
-                        onSubmit = remove,
-                        onPasskey = { scope.launch { proof.provePasskey(context) } },
-                    )
-                }
+            title = t("recovery_email.remove.confirm.title"),
+            body = t("recovery_email.remove.confirm.body"),
+            confirm = LakkoDialogAction(
+                if (removing) t("common.removing") else t("recovery_email.remove"),
+                LakkoDialogTone.Danger,
+                enabled = !removing && proof.view().mainEnabled,
+                onClick = remove,
+            ),
+            cancel = LakkoDialogAction(t("common.cancel"), LakkoDialogTone.Ghost, enabled = !removing) {
+                confirmingRemove = false
             },
-            confirmButton = {
-                TextButton(onClick = remove, enabled = !removing && proof.view().mainEnabled) {
-                    Text(
-                        if (removing) t("common.removing") else t("recovery_email.remove"),
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmingRemove = false }, enabled = !removing) { Text(t("common.cancel")) }
-            },
-        )
+        ) {
+            ProofBlock(
+                controller = proof,
+                onSubmit = remove,
+                onPasskey = { scope.launch { proof.provePasskey(context) } },
+            )
+        }
     }
     HorizontalDivider()
 }
@@ -918,26 +908,18 @@ public fun AccountNoticeHost(repository: AuthRepository, chatRepository: ChatRep
         destination = notMeDestination(notice.kind)
     }
     val alarm = accountNoticeShape(notice.kind) == AccountNoticeShape.Alarm
-    AlertDialog(
+    val bodyKey = accountNoticeBodyKey(notice.kind)
+    LakkoDialog(
         // Answered by one of its two buttons, never by a tap outside.
         onDismissRequest = {},
-        title = if (alarm) ({ Text(t(accountNoticeTitleKey(notice.kind))) }) else null,
-        text = {
-            val bodyKey = accountNoticeBodyKey(notice.kind)
-            Text(
-                if (bodyKey != null) {
-                    t(bodyKey, mapOf("date" to noticeDate(notice.atMs)))
-                } else {
-                    t(accountNoticeTitleKey(notice.kind))
-                },
-            )
+        title = if (alarm) t(accountNoticeTitleKey(notice.kind)) else null,
+        body = if (bodyKey != null) {
+            t(bodyKey, mapOf("date" to noticeDate(notice.atMs)))
+        } else {
+            t(accountNoticeTitleKey(notice.kind))
         },
-        confirmButton = {
-            TextButton(onClick = { repository.dismissAccountNotice(notice.id) }) {
-                Text(t("notice.was_me"))
-            }
-        },
-        dismissButton = { TextButton(onClick = notMe) { Text(t("notice.was_not_me")) } },
+        confirm = LakkoDialogAction(t("notice.was_me")) { repository.dismissAccountNotice(notice.id) },
+        cancel = LakkoDialogAction(t("notice.was_not_me"), LakkoDialogTone.Ghost, onClick = notMe),
     )
 }
 

@@ -33,14 +33,10 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
@@ -124,6 +120,9 @@ import uniffi.lakko_ffi_uniffi.channelRotationPolicyDefault
 import uniffi.lakko_ffi_uniffi.channelRotationStateAfterRotation
 import java.time.ZoneId
 import java.util.Locale
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.ui.components.LakkoDialogTone
 
 /**
  * The Channels screens (docs/ux/client-redesign.md section 5.4): the list,
@@ -1037,23 +1036,13 @@ private fun ChannelInfoSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var confirmingStopFollowing by remember { mutableStateOf(false) }
     if (confirmingStopFollowing) {
-        AlertDialog(
+        LakkoDialog(
             onDismissRequest = { confirmingStopFollowing = false },
-            title = { Text(t("channels.unsubscribe.title_named", mapOf("name" to header.title))) },
-            text = { Text(t("channels.unsubscribe.body")) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        confirmingStopFollowing = false
-                        onStopFollowing()
-                    },
-                    colors = ButtonDefaults.textButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error,
-                    ),
-                ) { Text(t("channels.unsubscribe.action")) }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmingStopFollowing = false }) { Text(t("common.cancel")) }
+            title = t("channels.unsubscribe.title_named", mapOf("name" to header.title)),
+            body = t("channels.unsubscribe.body"),
+            confirm = LakkoDialogAction(t("channels.unsubscribe.action"), LakkoDialogTone.Danger) {
+                confirmingStopFollowing = false
+                onStopFollowing()
             },
         )
     }

@@ -9,12 +9,13 @@
  * server once (an owner-signed read it refuses to a co-publisher).
  */
 
-import { createEffect, createSignal, For, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, onMount, Show, type JSX } from "solid-js";
 
 import { probeChannelOwner } from "../channels/api";
 import type { WasmIdentity } from "../channels/composer";
 import { channelsState } from "../state/channels-state";
 import { requestConfirm } from "../ui/confirm-dialog";
+import { LakkoPicker } from "../ui/LakkoPicker";
 import { loadWasm } from "../wasm";
 import { appLanguage, languageLabel, languageOptions } from "./languages";
 import {
@@ -159,32 +160,30 @@ export function ListInDiscover(props: {
           <span>{listed() === true ? t("discover.listing.listed") : t("discover.listing.not_listed")}</span>
         </label>
         <Show when={listed() !== true}>
-          <label>
-            {t("discover.listing.topic")}
-            <select
+          <div class="lk-picker-field">
+            <span id="lk-listing-topic">{t("discover.listing.topic")}</span>
+            <LakkoPicker
+              labelledBy="lk-listing-topic"
               value={String(topic())}
               disabled={busy()}
-              onChange={(e): void => {
-                setTopic(Number(e.currentTarget.value));
+              options={topics().map((tp) => ({ value: String(tp.id), label: topicLabel(tp.id) }))}
+              onChange={(v): void => {
+                setTopic(Number(v));
               }}
-            >
-              <For each={topics()}>{(tp) => <option value={String(tp.id)}>{topicLabel(tp.id)}</option>}</For>
-            </select>
-          </label>
-          <label>
-            {t("discover.language")}
-            <select
+            />
+          </div>
+          <div class="lk-picker-field">
+            <span id="lk-listing-language">{t("discover.language")}</span>
+            <LakkoPicker
+              labelledBy="lk-listing-language"
               value={language()}
               disabled={busy()}
-              onChange={(e): void => {
-                setLanguage(e.currentTarget.value);
+              options={languageOptions(language()).map((code) => ({ value: code, label: languageLabel(code) }))}
+              onChange={(code): void => {
+                setLanguage(code);
               }}
-            >
-              <For each={languageOptions(language())}>
-                {(code) => <option value={code}>{languageLabel(code)}</option>}
-              </For>
-            </select>
-          </label>
+            />
+          </div>
         </Show>
         <Show when={handle() === undefined}>
           <p class="lk-card-desc">{LISTING_NEEDS_HANDLE()}</p>

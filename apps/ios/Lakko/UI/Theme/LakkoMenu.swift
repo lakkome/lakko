@@ -13,6 +13,8 @@ struct LakkoMenuItem: Identifiable {
         /// A second level of the same sheet: tapping replaces the rows with
         /// `items` and a Back row.
         case submenu(systemImage: String?, items: [LakkoMenuItem])
+        /// One value of a picker: a check mark when it is the current one.
+        case choice(checked: Bool, perform: () -> Void)
     }
 
     let id = UUID()
@@ -33,6 +35,10 @@ struct LakkoMenuItem: Identifiable {
 
     static func submenu(_ title: String, systemImage: String? = nil, items: [LakkoMenuItem]) -> LakkoMenuItem {
         LakkoMenuItem(title: title, kind: .submenu(systemImage: systemImage, items: items))
+    }
+
+    static func choice(_ title: String, checked: Bool, perform: @escaping () -> Void) -> LakkoMenuItem {
+        LakkoMenuItem(title: title, kind: .choice(checked: checked, perform: perform))
     }
 }
 
@@ -62,6 +68,8 @@ struct LakkoMenuSheet: View {
     let dismiss: () -> Void
 
     @State private var stack: [[LakkoMenuItem]] = []
+    /// The measured height of the rows, so a long heading is not clipped.
+    @State private var measured: CGFloat?
 
     private var shown: [LakkoMenuItem] { stack.last ?? items }
 
@@ -81,7 +89,15 @@ struct LakkoMenuSheet: View {
             }
         }
         .padding(.vertical, 12)
-        .presentationDetents([.height(Self.height(rows: shown.count + (stack.isEmpty ? 0 : 1)))])
+        .fixedSize(horizontal: false, vertical: true)
+        .background(GeometryReader { proxy in
+            Color.clear
+                .onAppear { measured = proxy.size.height }
+                .onChange(of: proxy.size.height) { _, height in measured = height }
+        })
+        .frame(maxHeight: .infinity, alignment: .top)
+        .presentationDetents([.height(
+            (measured.map { $0 + 24 }) ?? Self.height(rows: shown.count + (stack.isEmpty ? 0 : 1)))])
         .presentationDragIndicator(.visible)
     }
 
@@ -106,11 +122,35 @@ struct LakkoMenuSheet: View {
                 label(item.title, systemImage: systemImage, tint: Color.lakkoText, trailing: "chevron.forward")
             }
             .buttonStyle(.plain)
+        case let .choice(checked, perform):
+            Button {
+                dismiss()
+                perform()
+            } label: {
+                HStack(spacing: 12) {
+                    Text(item.title)
+                    Spacer()
+                    if checked {
+                        Image(systemName: "checkmark")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(Color.lakkoAccent)
+                    }
+                }
+                .font(.body)
+                .foregroundStyle(Color.lakkoText)
+                .padding(.horizontal, 20)
+                .frame(minHeight: 52)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(checked ? .isSelected : [])
         case .text(let secondary):
             Text(item.title)
-                .font(secondary ? .footnote : .body)
+                .font(secondary ? .footnote : .body.weight(.semibold))
                 .foregroundStyle(secondary ? Color.lakkoTextMuted : Color.lakkoText)
-                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, minHeight: secondary ? 0 : 52, alignment: .leading)
                 .padding(.horizontal, 20)
         }
     }

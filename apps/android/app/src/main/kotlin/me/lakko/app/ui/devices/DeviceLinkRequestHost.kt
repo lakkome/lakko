@@ -3,8 +3,7 @@
 
 package me.lakko.app.ui.devices
 
-import androidx.compose.material3.AlertDialog
-import me.lakko.app.ui.components.LakkoModal
+import me.lakko.app.ui.components.LakkoDialogTone
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -54,6 +53,8 @@ import me.lakko.app.devices.ownPairingHandle
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import uniffi.lakko_ffi_uniffi.DecodedPairingQr
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
 
 /**
  * ADR-0049 section 2 — the OLD device's side of "confirm on another device"
@@ -157,13 +158,12 @@ public fun DeviceLinkRequestHost(
     }
 
     if (keysNotSent) {
-        AlertDialog(
+        LakkoDialog(
             onDismissRequest = { keysNotSent = false },
-            title = { Text(DEVICE_LINK_OLD_TITLE.text()) },
-            text = { Text(t("device_link.keys_not_sent")) },
-            confirmButton = {
-                TextButton(onClick = { keysNotSent = false }) { Text(t("common.close")) }
-            },
+            title = DEVICE_LINK_OLD_TITLE.text(),
+            body = t("device_link.keys_not_sent"),
+            confirm = LakkoDialogAction(t("common.close")) { keysNotSent = false },
+            cancel = null,
         )
     }
 
@@ -211,15 +211,19 @@ public fun DeviceLinkRequestHost(
                     }
                 }
             }
-            LakkoModal(
+            LakkoDialog(
                 onDismissRequest = { if (!midFlow && !working) link.dismiss() },
                 title = DEVICE_LINK_OLD_TITLE.text(),
-                actions = {
-                    TextButton(onClick = { scope.launch { link.decline() } }) { Text(DEVICE_LINK_NOT_ME.text()) }
-                    TextButton(onClick = yes, enabled = proofView.mainEnabled && !working) {
-                        Text(if (working || proofView.working) t("common.checking") else DEVICE_LINK_YES_ITS_ME.text())
-                    }
-                },
+                confirm = LakkoDialogAction(
+                    label = if (working || proofView.working) t("common.checking") else DEVICE_LINK_YES_ITS_ME.text(),
+                    enabled = proofView.mainEnabled && !working,
+                    onClick = yes,
+                ),
+                cancel = LakkoDialogAction(
+                    label = DEVICE_LINK_NOT_ME.text(),
+                    tone = LakkoDialogTone.Ghost,
+                    onClick = { scope.launch { link.decline() } },
+                ),
             ) {
                 Text(DEVICE_LINK_CONSENT_LEAD.text())
                 Text(DEVICE_LINK_CONSENT_QUESTION.text())
@@ -234,12 +238,15 @@ public fun DeviceLinkRequestHost(
                 )
             }
         }
-        is OldDeviceLinkState.ShowCode -> LakkoModal(
+        is OldDeviceLinkState.ShowCode -> LakkoDialog(
             onDismissRequest = {},
             title = DEVICE_LINK_OLD_TITLE.text(),
-            actions = {
-                TextButton(onClick = { scope.launch { link.decline() } }) { Text(DEVICE_LINK_NOT_ME.text()) }
-            },
+            confirm = null,
+            cancel = LakkoDialogAction(
+                label = DEVICE_LINK_NOT_ME.text(),
+                tone = LakkoDialogTone.Ghost,
+                onClick = { scope.launch { link.decline() } },
+            ),
         ) {
             Text(DEVICE_LINK_OLD_LEAD.text())
             val codeA11y = t("device_link.request.code_a11y")
@@ -255,17 +262,17 @@ public fun DeviceLinkRequestHost(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        OldDeviceLinkState.Adding -> LakkoModal(
+        OldDeviceLinkState.Adding -> LakkoDialog(
             onDismissRequest = {},
             title = DEVICE_LINK_OLD_TITLE.text(),
-            actions = {},
+            confirm = null,
+            cancel = null,
         ) { Text(DEVICE_LINK_ADDING_COPY.text()) }
-        is OldDeviceLinkState.Notice -> LakkoModal(
+        is OldDeviceLinkState.Notice -> LakkoDialog(
             onDismissRequest = { link.dismiss() },
             title = DEVICE_LINK_OLD_TITLE.text(),
-            actions = {
-                TextButton(onClick = { link.dismiss() }) { Text(t("common.close")) }
-            },
+            confirm = LakkoDialogAction(label = t("common.close"), onClick = { link.dismiss() }),
+            cancel = null,
         ) { Text(m.message.text()) }
     }
 }

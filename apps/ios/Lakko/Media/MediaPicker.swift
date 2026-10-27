@@ -36,11 +36,11 @@ struct MediaPickerSheet: View {
         NavigationStack {
             VStack(spacing: 0) {
                 if showGifTab {
-                    Picker(Localization.text("chat.composer.emoji_gifs"), selection: $tab) {
-                        Text(Localization.text("chat.emoji.tab")).tag(Tab.emoji)
-                        Text(Localization.text("chat.media.gif")).tag(Tab.gif)
-                    }
-                    .pickerStyle(.segmented)
+                    LakkoSegmentedPicker(selection: $tab, options: [
+                        LakkoPickerOption(value: Tab.emoji, label: Localization.text("chat.emoji.tab")),
+                        LakkoPickerOption(value: Tab.gif, label: Localization.text("chat.media.gif")),
+                    ])
+                    .accessibilityLabel(Localization.text("chat.composer.emoji_gifs"))
                     .padding(.horizontal, 16)
                     .padding(.bottom, 8)
                 }

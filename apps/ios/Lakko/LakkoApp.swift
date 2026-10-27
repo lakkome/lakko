@@ -795,43 +795,35 @@ struct AppRoot: View, Equatable {
             // ADR-0037 §6 (G-11) — a rolled-back / tampered backup was refused
             // at restore. User-visible alarm; the served (older / altered) state
             // was NOT loaded.
-            .alert(
-                l10n.t("backup.rollback_refused.title"),
+            .lakkoDialog(
                 isPresented: Binding(
                     get: { authRepository.backupRollbackAlarm != nil },
                     set: { if !$0 { authRepository.dismissBackupRollbackAlarm() } }
                 ),
-                presenting: authRepository.backupRollbackAlarm
-            ) { _ in
-                Button(l10n.t("common.dismiss"), role: .cancel) {
-                    authRepository.dismissBackupRollbackAlarm()
-                }
-            } message: { _ in
-                Text(l10n.t("backup.rollback_refused.body"))
+                title: l10n.t("backup.rollback_refused.title"),
+                message: l10n.t("backup.rollback_refused.body")
+            ) {
+                [.primary(l10n.t("common.dismiss")) { authRepository.dismissBackupRollbackAlarm() }]
             }
             // ADR-0037 §6 (G-11) — a stale but authentic backup needs an
             // explicit override. The restore flow suspends until the user
             // decides; Cancel (or dismiss) aborts the restore (fail-closed).
-            .confirmationDialog(
-                l10n.t("backup.stale_restore.title"),
-                isPresented: Binding(
-                    get: { authRepository.pendingStaleBackupOverride != nil },
-                    set: { if !$0 { authRepository.resolveStaleBackupOverride(false) } }
-                ),
-                titleVisibility: .visible,
-                presenting: authRepository.pendingStaleBackupOverride
-            ) { _ in
-                Button(l10n.t("backup.stale_restore.confirm"), role: .destructive) {
-                    authRepository.resolveStaleBackupOverride(true)
-                }
-                Button(l10n.t("common.cancel"), role: .cancel) {
-                    authRepository.resolveStaleBackupOverride(false)
-                }
-            } message: { request in
-                Text(l10n.t("backup.stale_restore.body", texts: [
-                    "reason": request.reason,
-                    "consequence": l10n.t("backup.stale_restore.consequence"),
-                ]))
+            .lakkoDialog(item: Binding(
+                get: { authRepository.pendingStaleBackupOverride },
+                set: { if $0 == nil { authRepository.resolveStaleBackupOverride(false) } }
+            )) { request in
+                LakkoDialogContent(
+                    title: l10n.t("backup.stale_restore.title"),
+                    message: l10n.t("backup.stale_restore.body", texts: [
+                        "reason": request.reason,
+                        "consequence": l10n.t("backup.stale_restore.consequence"),
+                    ]),
+                    actions: [
+                        .danger(l10n.t("backup.stale_restore.confirm")) {
+                            authRepository.resolveStaleBackupOverride(true)
+                        },
+                        .cancel { authRepository.resolveStaleBackupOverride(false) },
+                    ])
             }
     }
 

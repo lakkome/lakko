@@ -299,19 +299,17 @@ struct CallHostOverlay: ViewModifier {
                     EmptyView()
                 }
             }
-            .alert(
-                l10n.t("call.alert.title"),
+            .lakkoDialog(
                 isPresented: Binding(
                     get: { errorMessage != nil },
                     set: { presented in
                         if !presented { dismissErrors() }
                     }
                 ),
-                presenting: errorMessage
-            ) { _ in
-                Button(l10n.t("common.ok"), role: .cancel) { dismissErrors() }
-            } message: { message in
-                Text(message)
+                title: l10n.t("call.alert.title"),
+                message: errorMessage
+            ) {
+                [.primary(l10n.t("common.ok")) { dismissErrors() }]
             }
     }
 

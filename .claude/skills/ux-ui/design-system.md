@@ -151,9 +151,31 @@ names; iOS / Android use the same names.
   text field (radius-pill, sunken), mic / send swap depending on content.
 - **Card / section**: elevated surface, radius-md, hairline border, 20px
   padding, a 17px/600 title, optional 13px muted description under it.
-- **Dialog**: radius-md, shadow-2, 440px, title + body + right-aligned
-  actions (ghost cancel, primary or danger confirm). Destructive dialogs
-  spell out the consequence in one sentence.
+- **Dialog** (`LakkoDialog`, one shape on all three): a centred card over
+  a dimmed screen (black 35%), elevated surface, radius-md, shadow-2, max
+  width 440px with a 24px side margin on a phone. Content in order: title
+  (17px/600), optional body (15px muted, one or two sentences), optional
+  field (a text input, never more than one), then the actions. Actions:
+  the confirming action is primary, or danger when it destroys something;
+  Cancel is a ghost button. Two actions sit in one row, right-aligned,
+  Cancel first; three or more stack full width, confirming action on top,
+  Cancel last. A notice with nothing to decide has one primary button
+  ("OK" / "Close"). Tapping the dim, Escape and system back all mean
+  Cancel; initial focus is on Cancel. Destructive dialogs spell out the
+  consequence in one sentence. Never the system alert, `confirm()` or the
+  stock Material `AlertDialog`.
+- **Action sheet** (`LakkoMenu`): a choice among actions with no further
+  input. Phone: an in-app bottom sheet of 52px rows (icon + label,
+  danger rows in danger colour), optional heading row; dismissing it is
+  Cancel, so no Cancel row. Wide web: the same rows in a popover anchored
+  at the control. Replaces `.confirmationDialog` / `.actionSheet` /
+  SwiftUI `Menu` / `.contextMenu`.
+- **Picker** (`LakkoPicker`): one value from a short list. A field-shaped
+  button (40/44px, sunken surface, radius-sm) showing the current value
+  and a chevron; activating it opens the Action-sheet rows with a check
+  mark on the current value; picking closes it. Keyboard on web: Enter /
+  Space opens, arrows move, Enter picks, Escape closes. Replaces the
+  native `<select>` and SwiftUI `Picker`.
 - **Banner**: inline, sunken surface, icon + one sentence + one action.
   Used for the incoming-call prompt, update notice, identity change.
 - **Empty state**: centred, one line of muted text and one primary
@@ -247,8 +269,9 @@ the recovery phrase warning. Everywhere else it is silent.
 | tokens | `styles.css` CSS variables | `Assets.xcassets` colour sets + `LakkoTheme` | `ui/theme/Color.kt` + `LakkoTheme` (Material 3 scheme built from tokens) |
 | top-level nav | nav rail / drawer | `TabView` | `NavigationBar` |
 | list row | `ListRow` | `List` row with `.listRowInsets` | `ListItem` |
-| dialog | `ConfirmDialog` | `.confirmationDialog` / `.alert` | `AlertDialog` |
-| long-press menu | right-click / hover menu | context menu | long-press dropdown |
+| dialog | `ConfirmDialog` / `LakkoDialog` | `LakkoDialog` (`.lakkoDialog`) | `LakkoDialog` |
+| action sheet / long-press menu | `LakkoMenu` popover / sheet | `LakkoMenuSheet` (`.lakkoLongPressMenu`, `.lakkoActionSheet`) | `LakkoMenu` bottom sheet |
+| picker | `LakkoPicker` | `LakkoPicker` | `LakkoPicker` |
 | back nav | breadcrumb / browser back | `NavigationStack` | system back |
 
 Platform-idiomatic divergence is allowed in mechanics (gesture, transition,

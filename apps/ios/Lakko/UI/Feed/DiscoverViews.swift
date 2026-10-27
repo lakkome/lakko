@@ -273,11 +273,11 @@ private struct PickTopicsCard: View {
                 .foregroundStyle(Color.lakkoTextMuted)
                 .fixedSize(horizontal: false, vertical: true)
             FlowChips(items: model.topics.map { (Int($0.id), DiscoverTopics.name(Int($0.id))) }, chosen: $chosen)
-            Picker(l10n.t("discover.language"), selection: $language) {
-                ForEach(DiscoverLanguages.options(language), id: \.self) { code in
-                    Text(DiscoverLanguages.label(code)).tag(code)
-                }
-            }
+            LakkoPicker(
+                l10n.t("discover.language"), selection: $language,
+                options: DiscoverLanguages.options(language).map {
+                    LakkoPickerOption(value: $0, label: DiscoverLanguages.label($0))
+                })
             HStack {
                 Spacer()
                 Button(l10n.t(first ? "common.not_now" : "common.cancel")) {

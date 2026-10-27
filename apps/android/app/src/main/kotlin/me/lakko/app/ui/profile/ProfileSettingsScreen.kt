@@ -99,7 +99,9 @@ import me.lakko.app.ui.auth.ProofBlock
 import me.lakko.app.ui.auth.ProofSurface
 import me.lakko.app.ui.auth.rememberProofController
 import me.lakko.app.ui.components.LakkoAvatar
-import me.lakko.app.ui.components.LakkoModal
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.ui.components.LakkoDialogTone
 
 /**
  * docs/ux/profile-screen.md — Settings > Profile.
@@ -285,18 +287,14 @@ public fun ProfileSettingsScreen(
     }
 
     viewModel.proofRequest?.let {
-        LakkoModal(
+        LakkoDialog(
             onDismissRequest = { viewModel.answerProof(false) },
             title = t("username.change.title"),
-            actions = {
-                TextButton(onClick = { viewModel.answerProof(false) }) { Text(t("common.cancel")) }
-                TextButton(
-                    enabled = proof.view().mainEnabled && !proof.view().working,
-                    onClick = {
-                        scope.launch { if (proof.ensure(context)) viewModel.answerProof(true) }
-                    },
-                ) { Text(t("common.save")) }
-            },
+            confirm = LakkoDialogAction(
+                label = t("common.save"),
+                enabled = proof.view().mainEnabled && !proof.view().working,
+                onClick = { scope.launch { if (proof.ensure(context)) viewModel.answerProof(true) } },
+            ),
         ) {
             ProofBlock(
                 controller = proof,
@@ -307,27 +305,31 @@ public fun ProfileSettingsScreen(
     }
 
     leaveAsk?.let { proceed ->
-        LakkoModal(
+        LakkoDialog(
             onDismissRequest = { leaveAsk = null },
             title = t("profile.unsaved.title"),
-            actions = {
-                TextButton(onClick = { leaveAsk = null }) { Text(t("profile.unsaved.cancel")) }
-                TextButton(onClick = {
+            body = t("profile.unsaved.body"),
+            confirm = LakkoDialogAction(
+                label = t("profile.unsaved.save"),
+                enabled = edit.saveEnabled(),
+                onClick = {
+                    leaveAsk = null
+                    viewModel.save(deps) { outcome -> if (outcome == SaveOutcome.Saved) proceed() }
+                },
+            ),
+            extraActions = listOf(
+                LakkoDialogAction(label = t("profile.unsaved.discard"), tone = LakkoDialogTone.Secondary, onClick = {
                     leaveAsk = null
                     viewModel.discard()
                     proceed()
-                }) { Text(t("profile.unsaved.discard")) }
-                TextButton(
-                    enabled = edit.saveEnabled(),
-                    onClick = {
-                        leaveAsk = null
-                        viewModel.save(deps) { outcome -> if (outcome == SaveOutcome.Saved) proceed() }
-                    },
-                ) { Text(t("profile.unsaved.save")) }
-            },
-        ) {
-            Text(t("profile.unsaved.body"), style = MaterialTheme.typography.bodyMedium)
-        }
+                }),
+            ),
+            cancel = LakkoDialogAction(
+                label = t("profile.unsaved.cancel"),
+                tone = LakkoDialogTone.Ghost,
+                onClick = { leaveAsk = null },
+            ),
+        )
     }
 }
 

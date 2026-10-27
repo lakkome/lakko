@@ -332,11 +332,10 @@ struct AvatarCameraScreen: View {
                         }
                     }
                     Spacer()
-                    Picker("", selection: $mode) {
-                        Text(l10n.t("profile.camera.photo")).tag(Mode.photo)
-                        Text(l10n.t("profile.camera.video")).tag(Mode.video)
-                    }
-                    .pickerStyle(.segmented)
+                    LakkoSegmentedPicker(selection: $mode, options: [
+                        LakkoPickerOption(value: Mode.photo, label: l10n.t("profile.camera.photo")),
+                        LakkoPickerOption(value: Mode.video, label: l10n.t("profile.camera.video")),
+                    ])
                     .frame(maxWidth: 240)
                     .disabled(phase == .recording)
                     Button(action: shutter) {
