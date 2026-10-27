@@ -26,6 +26,12 @@ export interface GroupCallInput {
   /** Which participants publish a camera from the start. */
   readonly video: readonly boolean[];
   readonly steps: readonly GroupStep[];
+  /**
+   * The MLS leaf of the first participant in this page, the others following
+   * it (0 when absent). A call spread over several pages, one engine each,
+   * gives each page its own range so no two senders share a leaf.
+   */
+  readonly firstLeaf?: number;
 }
 
 export type GroupStep =
@@ -66,6 +72,14 @@ export interface ParticipantReport {
   /** The ICE server URLs the session's peer connection was given. */
   readonly iceServerUrls: readonly string[];
   readonly peerId: string;
+  /**
+   * The codec the participant's microphone is sent as (`audio/red`,
+   * `audio/opus`), or null before negotiation: the first codec of the audio
+   * sender's parameters, which is the one the engine sends. Not the outbound
+   * statistics: measured in Chromium 153, they name Opus while the answer put
+   * RED first and RED was sent.
+   */
+  readonly audioSendCodec: string | null;
   /** Keyed by the other participant's SFU peer id. */
   readonly from: Record<string, FromPeer>;
 }
@@ -88,7 +102,7 @@ async function run(input: GroupCallInput): Promise<ParticipantReport[]> {
         sfuBaseUrl: input.sfuBaseUrl,
         jwt: input.jwts[i] as string,
         seed: SEED,
-        localLeaf: i,
+        localLeaf: (input.firstLeaf ?? 0) + i,
         media: { audio: true, video: input.video[i] === true },
       },
       {
@@ -161,7 +175,13 @@ async function run(input: GroupCallInput): Promise<ParticipantReport[]> {
     for (let i = 0; i < sessions.length; i += 1) {
       const pc = (sessions[i] as unknown as { pc: RTCPeerConnection | null }).pc;
       const from: Record<string, { v: number; byTrack: Record<string, number>; a: number; s: number; c: number }> = {};
+      let audioSendCodec: string | null = null;
       if (pc !== null) {
+        for (const sender of pc.getSenders()) {
+          if (sender.track?.kind !== "audio") continue;
+          const mime = sender.getParameters().codecs?.[0]?.mimeType;
+          if (mime !== undefined) audioSendCodec = mime.toLowerCase();
+        }
         (await pc.getStats()).forEach((s: Record<string, unknown>) => {
           if (s["type"] !== "inbound-rtp") return;
           const source = trackPeer[i]?.get(String(s["trackIdentifier"] ?? ""));
@@ -191,7 +211,7 @@ async function run(input: GroupCallInput): Promise<ParticipantReport[]> {
       const iceServerUrls = (pc?.getConfiguration().iceServers ?? []).flatMap((s) =>
         typeof s.urls === "string" ? [s.urls] : [...s.urls],
       );
-      reports.push({ state: states[i] as string, iceServerUrls, peerId: selfIds[i] as string, from: out });
+      reports.push({ state: states[i] as string, iceServerUrls, peerId: selfIds[i] as string, audioSendCodec, from: out });
     }
     return reports;
   }
