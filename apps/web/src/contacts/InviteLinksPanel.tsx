@@ -129,8 +129,11 @@ export function InviteLinksPanel(): JSX.Element {
   const chats = useChats();
   const sync = useDeviceGroupSync();
   const profiles = useProfiles();
-  const discovery = new DiscoveryClient();
-  discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
+  // Read at request time: a token captured when the panel opened is stale
+  // once the access token is refreshed (900 s).
+  const discovery = new DiscoveryClient(undefined, {
+    sessionToken: () => auth.identitySecrets()?.sessionToken ?? null,
+  });
 
   const [links, setLinks] = createSignal<MintedLinkRow[]>([]);
   const [widths, setWidths] = createSignal<InviteLinkWidths | null>(null);

@@ -271,7 +271,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   // this account's keys is spent. The two owed steps of the rotation record
   // (`devices/key-rotation.ts`: `links`, `requests`) run here, where the
   // directory client and the contacts client are.
-  const spentDiscovery = new DiscoveryClient();
+  // The session token is read at request time: the ledger-row deletions this
+  // client makes (`DELETE /discovery/invite/...`) sit behind discovery's
+  // `require_session`, and a tokenless client made every one a 401.
+  const spentDiscovery = new DiscoveryClient(undefined, {
+    sessionToken: () => auth.identitySecrets()?.sessionToken ?? null,
+  });
   installSpentRunners({
     links: async (rotatedAtMs) => {
       const secrets = auth.identitySecrets();

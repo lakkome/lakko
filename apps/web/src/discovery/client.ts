@@ -560,7 +560,7 @@ export class DiscoveryClient {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await sessionFetch(url, {
         method: "DELETE",
         headers: {
           "content-type": "application/json",
@@ -590,7 +590,7 @@ export class DiscoveryClient {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await sessionFetch(url, {
         method: "DELETE",
         headers: {
           "content-type": "application/json",
@@ -618,7 +618,7 @@ export class DiscoveryClient {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await sessionFetch(url, {
         method: "DELETE",
         headers: { ...this.authHeaders() },
       });
@@ -1507,7 +1507,7 @@ export class DiscoveryClient {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await sessionFetch(url, {
         method: "DELETE",
         headers: {
           "content-type": "application/json",
