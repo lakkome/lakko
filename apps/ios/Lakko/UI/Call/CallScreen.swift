@@ -657,7 +657,9 @@ private struct ParticipantTile: View {
                 InitialsAvatar(
                     name: displayLabel, identity: participant.id,
                     size: CallScreenPresentation.tileInitialsDiameter(tileSize: size),
-                    placeholderSymbol: "person.fill")
+                    placeholderSymbol: "person.fill",
+                    photo: participant.isLocal
+                        ? .own : state.personKeys[participant.id].map(AvatarPhoto.person))
                     .padding(.bottom, min(24, size.height * 0.2))
             }
         }
@@ -967,6 +969,9 @@ private struct ParticipantListDrawer: View {
                 VStack(spacing: 0) {
                     ForEach(state.participants) { p in
                         HStack(spacing: 10) {
+                            InitialsAvatar(
+                                name: p.displayName, identity: p.id, size: 28, placeholderSymbol: "person.fill",
+                                photo: p.isLocal ? .own : state.personKeys[p.id].map(AvatarPhoto.person))
                             if CallScreenPresentation.connectionIsWorthShowing(p.quality) {
                                 QualityDot(tier: p.quality, interactive: false, onTap: {})
                             }
@@ -1122,6 +1127,9 @@ public struct CallScreen: View {
     @State private var endedDurationMs: Int64?
     /// The other person's name, resolved by the call's owner.
     private let peerName: String?
+    /// ADR-0084 — the other person's signature key (a 1x1 call), for their
+    /// profile photo where no picture is drawn.
+    private let peerKey: Data?
     /// One plain line about this call's media (today: the no-camera downgrade).
     private let notice: UiText?
     /// The link to THIS call, for `Invite` (`docs/ux/call-links.md` section 3).
@@ -1177,6 +1185,7 @@ public struct CallScreen: View {
     public init(
         session: CallSession? = nil,
         peerName: String? = nil,
+        peerKey: Data? = nil,
         notice: UiText? = nil,
         connectedAt: Date? = nil,
         onCollapse: (() -> Void)? = nil,
@@ -1185,6 +1194,7 @@ public struct CallScreen: View {
         self.session = session
         self.externallyDriven = false
         self.peerName = peerName
+        self.peerKey = peerKey
         self.notice = notice
         self.invite = nil
         self.onEndForEveryone = nil
@@ -1211,6 +1221,7 @@ public struct CallScreen: View {
         self.session = nil
         self.externallyDriven = true
         self.peerName = nil
+        self.peerKey = nil
         self.notice = nil
         self.invite = invite
         self.onEndForEveryone = onEndForEveryone
@@ -1378,6 +1389,7 @@ public struct CallScreen: View {
         .onAppear {
             if let session, sessionBindings.isEmpty {
                 sessionBindings = state.driveFrom(session: session, peerName: peerName)
+                state.setPersonKey(peerKey, forParticipant: "remote")
             }
             if let notice { state.setMediaNotice(notice) }
             // The tone follows the rule from the first moment; no cue is
@@ -1409,17 +1421,11 @@ public struct CallScreen: View {
             // call's UI on the way into the bar.
             if !collapsing { state.reset() }
         }
-        .alert(
-            l10n.t("call.permission.camera.title"),
-            isPresented: Binding(
-                get: { permissionMessage != nil },
-                set: { if !$0 { permissionMessage = nil } }
-            ),
-            presenting: permissionMessage
-        ) { _ in
-            Button(l10n.t("common.ok"), role: .cancel) { permissionMessage = nil }
-        } message: { message in
-            Text(message.text)
+        .lakkoDialog(item: $permissionMessage) { message in
+            LakkoDialogContent(
+                title: l10n.t("call.permission.camera.title"),
+                message: message.text,
+                actions: [.primary(l10n.t("common.ok")) { permissionMessage = nil }])
         }
         // `Invite contacts`, when this call has a link to offer.
         .modifier(CallInvitePicker(offer: invite))
@@ -1778,7 +1784,8 @@ public struct CallScreen: View {
             Spacer(minLength: 0)
             InitialsAvatar(
                 name: state.peerName ?? "", identity: tintIdentity, size: 132,
-                placeholderSymbol: "person.fill")
+                placeholderSymbol: "person.fill",
+                photo: peerKey.map(AvatarPhoto.person))
             CallStatusLine(
                 name: displayName,
                 phase: displayPhase,
@@ -1852,7 +1859,8 @@ public struct CallScreen: View {
                 } else {
                     InitialsAvatar(
                         name: state.peerName ?? "", identity: tintIdentity, size: width * 0.5,
-                        placeholderSymbol: "person.fill")
+                        placeholderSymbol: "person.fill",
+                        photo: peerKey.map(AvatarPhoto.person))
                 }
             }
             .frame(width: width, height: height)

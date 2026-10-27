@@ -289,14 +289,14 @@ public final class DiscoveryClient {
     /// Both requests anonymous; with no session there is no token, and the
     /// lookup fails with ``AnonTokenUnavailable/noSession``.
     /// `POST /discovery/username/replace` (ADR-0076 section 1): the account's
-    /// current name is retired (held for 30 days) and `username` becomes its
-    /// name. Answers the canonical name and the NEW name's certificate.
+    /// current name is retired (the only retired name it keeps; any earlier
+    /// one is freed) and `username` becomes its name. Answers the canonical name and the NEW name's certificate.
     ///
     /// The rename takes the account out of Everyone on the server: the
     /// caller publishes the public record and name terms again.
     ///
-    /// Throws `409 username-taken` / `no-username`, `429 rename-too-soon`
-    /// (with `retry_after_secs`).
+    /// Throws `409 username-taken` / `no-username`. Renames are not limited
+    /// in number (ADR-0076, amended 2026-10-26).
     public func replaceUsername(
         accountId: Data, username: String
     ) async throws -> (normalisedUsername: String, certificate: Data?) {

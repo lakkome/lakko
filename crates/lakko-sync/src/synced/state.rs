@@ -109,11 +109,13 @@ use super::recovery_email::{
 /// state, `3` since the link-record register (ADR-0079 section 4), `4` since
 /// a link record carries its ledger row's revocation seed (ADR-0079 as
 /// reworked 2026-10-17), `5` since a link record carries the `shared` flag
-/// (2026-10-26). Older
+/// (2026-10-26), `6` since a saved-message snapshot carries the message's
+/// own time (`SavedSnapshot::sent_at_ms`; the two branches that made the
+/// last two changes had each called theirs `5`). Older
 /// versions are refused rather than read: nothing is deployed, and a build
 /// that silently accepted an older layout would be a second decoder nobody
 /// tests.
-const STATE_VERSION: u8 = 5;
+const STATE_VERSION: u8 = 6;
 
 /// A stored register value with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1438,6 +1440,7 @@ mod tests {
                     author: "Ada".into(),
                     excerpt: format!("message {message_id}"),
                     attachment_kind: String::new(),
+                    sent_at_ms: 0,
                 },
                 blob_ids: blobs.iter().copied().map(blob).collect(),
             },
@@ -1626,15 +1629,15 @@ mod tests {
         let mut s = SyncedState::new();
         s.apply(3, SyncEntry::FolderRemoved(fid(2))).ok();
         let mut old = s.to_bytes();
-        assert_eq!(old[0], 5);
-        for version in [1u8, 2, 3, 4] {
+        assert_eq!(old[0], 6);
+        for version in [1u8, 2, 3, 4, 5] {
             old[0] = version;
             assert_eq!(
                 SyncedState::from_bytes(&old),
                 Err(CodecError::UnknownVersion)
             );
         }
-        assert_eq!(SyncedState::new().to_bytes(), vec![5, 0, 0, 0, 0]);
+        assert_eq!(SyncedState::new().to_bytes(), vec![6, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -2169,7 +2172,7 @@ mod tests {
         assert_eq!(SyncedState::from_bytes(&bytes), Ok(s));
         assert_eq!(SyncedState::from_bytes(&[]), Err(CodecError::Truncated));
         assert_eq!(
-            SyncedState::from_bytes(&[6, 0, 0, 0, 0]),
+            SyncedState::from_bytes(&[7, 0, 0, 0, 0]),
             Err(CodecError::UnknownVersion)
         );
         let mut trailing = bytes;

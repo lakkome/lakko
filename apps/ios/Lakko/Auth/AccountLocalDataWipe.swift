@@ -314,6 +314,17 @@ enum AccountLocalDataWipe {
         step("link-requests") { LinkRequestInbox.clear(accountIdB64: accountIdB64) }
         step("link-claims") { LinkClaims.Record.clear(accountIdB64: accountIdB64) }
         step("profiles") { ProfileDirectory.shared.forget(accountIdB64: accountIdB64) }
+        // ADR-0084 — the decrypted avatars this device cached (and the
+        // prepared ones waiting for Save).
+        // ADR-0065 — the owed blob deletes and the keep schedule; the passes.
+        step("blob-lifecycle") {
+            BlobLifecycleStore().clear(accountIdB64: accountIdB64)
+            Task { await BlobAccess.shared.clear() }
+        }
+        step("avatars") {
+            AvatarImages.shared.purge()
+            try? FileManager.default.removeItem(at: AvatarMediaFiles.directory)
+        }
         step("contacts-inbox") { ContactsInboxStore().clear(accountIdB64: accountIdB64) }
         // ADR-0073 R.3 — the requests kept waiting for an identity verdict.
         step("contacts-inbox-waiting") { KnownRequestWaitingStore().clear(accountIdB64: accountIdB64) }

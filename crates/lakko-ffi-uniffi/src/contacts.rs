@@ -705,6 +705,118 @@ pub struct FfiProfile {
     /// keep a `Contact` grant ONLY from the other participant of a
     /// one-to-one conversation and drop it anywhere else.
     pub grants: Vec<crate::scoped_discovery::FfiReachGrant>,
+    /// The profile photo (ADR-0084), or `None` for "no photo". Its keys are
+    /// SECRET. Defaults to `None` so existing initialisers compile.
+    #[uniffi(default = None)]
+    pub avatar: Option<FfiAvatar>,
+}
+
+/// A reference to one encrypted avatar blob (ADR-0084): what
+/// `encryptAttachment` returned for it, plus its plaintext size and side.
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
+pub struct FfiAvatarRef {
+    /// 32-byte `SHA-256` of the ciphertext: `PUT` / `GET /blob/{hex}`.
+    pub blob_id: Vec<u8>,
+    /// 32-byte ChaCha20-Poly1305 key. SECRET.
+    pub key: Vec<u8>,
+    /// 12-byte AEAD nonce.
+    pub nonce: Vec<u8>,
+    /// Plaintext size in bytes.
+    pub size: u32,
+    /// Side in pixels (the image or video is square).
+    pub side: u16,
+}
+
+impl core::fmt::Debug for FfiAvatarRef {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FfiAvatarRef")
+            .field("size", &self.size)
+            .field("side", &self.side)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The profile photo (ADR-0084): a square JPEG still and optionally a square
+/// MP4 video (no sound) whose first frame the still is.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiAvatar {
+    /// The still: at most 640 px, at most 256 KiB.
+    pub still: FfiAvatarRef,
+    /// The video: at most 480 px, at most 4 MiB. `None` for a photo.
+    pub video: Option<FfiAvatarRef>,
+    /// The video's length in milliseconds, 1..=10000. Set exactly when
+    /// `video` is.
+    pub video_duration_ms: Option<u16>,
+}
+
+impl From<lakko_contacts::profile::AvatarRef> for FfiAvatarRef {
+    fn from(r: lakko_contacts::profile::AvatarRef) -> Self {
+        Self {
+            blob_id: r.blob_id.to_vec(),
+            key: r.key.to_vec(),
+            nonce: r.nonce.to_vec(),
+            size: r.size,
+            side: r.width,
+        }
+    }
+}
+
+impl From<lakko_contacts::profile::Avatar> for FfiAvatar {
+    fn from(a: lakko_contacts::profile::Avatar) -> Self {
+        let duration = a.video.as_ref().map(|v| v.duration_ms);
+        Self {
+            still: a.still.into(),
+            video: a.video.map(|v| v.reference.into()),
+            video_duration_ms: duration,
+        }
+    }
+}
+
+fn avatar_bytes<const N: usize>(field: &str, bytes: &[u8]) -> Result<[u8; N], FfiError> {
+    <[u8; N]>::try_from(bytes).map_err(|_| {
+        FfiError::Contacts(format!(
+            "profile avatar {field} must be {N} bytes, got {}",
+            bytes.len()
+        ))
+    })
+}
+
+impl TryFrom<FfiAvatarRef> for lakko_contacts::profile::AvatarRef {
+    type Error = FfiError;
+
+    fn try_from(r: FfiAvatarRef) -> Result<Self, FfiError> {
+        Ok(Self {
+            blob_id: avatar_bytes::<32>("blob id", &r.blob_id)?,
+            key: avatar_bytes::<32>("key", &r.key)?,
+            nonce: avatar_bytes::<12>("nonce", &r.nonce)?,
+            size: r.size,
+            width: r.side,
+            height: r.side,
+        })
+    }
+}
+
+impl TryFrom<FfiAvatar> for lakko_contacts::profile::Avatar {
+    type Error = FfiError;
+
+    fn try_from(a: FfiAvatar) -> Result<Self, FfiError> {
+        let video = match (a.video, a.video_duration_ms) {
+            (None, None) => None,
+            (Some(v), Some(duration_ms)) => Some(lakko_contacts::profile::AvatarVideo {
+                reference: v.try_into()?,
+                duration_ms,
+            }),
+            _ => {
+                return Err(FfiError::Contacts(
+                    "profile avatar video and its duration go together".to_string(),
+                ))
+            },
+        };
+        Ok(Self {
+            still: a.still.try_into()?,
+            video,
+        })
+    }
 }
 
 impl From<RustProfile> for FfiProfile {
@@ -716,6 +828,7 @@ impl From<RustProfile> for FfiProfile {
             account_id: p.account_id.map(|id| id.to_vec()),
             username_certificate: p.username_certificate,
             grants: p.grants.into_iter().map(Into::into).collect(),
+            avatar: p.avatar.map(Into::into),
         }
     }
 }
@@ -747,6 +860,7 @@ fn prepare_profile(p: FfiProfile) -> Result<RustProfile, FfiError> {
         .into_iter()
         .map(TryInto::try_into)
         .collect::<Result<Vec<_>, FfiError>>()?;
+    let avatar = p.avatar.map(TryInto::try_into).transpose()?;
     Ok(RustProfile {
         display_name,
         username,
@@ -754,6 +868,7 @@ fn prepare_profile(p: FfiProfile) -> Result<RustProfile, FfiError> {
         account_id,
         username_certificate: p.username_certificate,
         grants,
+        avatar,
     })
 }
 
@@ -4851,6 +4966,7 @@ mod tests {
             account_id: None,
             username_certificate: None,
             grants: Vec::new(),
+            avatar: None,
         }
     }
 
@@ -4862,7 +4978,55 @@ mod tests {
             account_id: None,
             username_certificate: None,
             grants: Vec::new(),
+            avatar: None,
         }
+    }
+
+    fn avatar_ref(byte: u8, side: u16, bytes: u32) -> FfiAvatarRef {
+        FfiAvatarRef {
+            blob_id: vec![byte; 32],
+            key: vec![byte ^ 0xFF; 32],
+            nonce: vec![byte; 12],
+            size: bytes,
+            side,
+        }
+    }
+
+    #[test]
+    fn profile_avatar_round_trips_and_a_lone_video_is_refused() {
+        for avatar in [
+            FfiAvatar {
+                still: avatar_ref(1, 640, 20_000),
+                video: None,
+                video_duration_ms: None,
+            },
+            FfiAvatar {
+                still: avatar_ref(2, 480, 20_000),
+                video: Some(avatar_ref(3, 480, 900_000)),
+                video_duration_ms: Some(8_000),
+            },
+        ] {
+            let mut p = canonical_profile();
+            p.avatar = Some(avatar);
+            let wire = compose_profile_envelope(p.clone()).expect("compose");
+            assert_eq!(decode_profile_envelope(wire).expect("decode"), p);
+        }
+        let mut lone = canonical_profile();
+        lone.avatar = Some(FfiAvatar {
+            still: avatar_ref(1, 480, 1),
+            video: Some(avatar_ref(2, 480, 1)),
+            video_duration_ms: None,
+        });
+        assert!(compose_profile_envelope(lone).is_err());
+        let mut short_key = canonical_profile();
+        let mut still = avatar_ref(1, 480, 1);
+        still.key.pop();
+        short_key.avatar = Some(FfiAvatar {
+            still,
+            video: None,
+            video_duration_ms: None,
+        });
+        assert!(compose_profile_envelope(short_key).is_err());
     }
 
     #[test]
@@ -4884,6 +5048,7 @@ mod tests {
             account_id: None,
             username_certificate: None,
             grants: Vec::new(),
+            avatar: None,
         })
         .expect("compose blank");
         let decoded = decode_profile_envelope(blank).expect("decode blank");

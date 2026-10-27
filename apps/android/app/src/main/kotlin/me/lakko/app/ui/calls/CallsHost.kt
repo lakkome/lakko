@@ -5,11 +5,9 @@ package me.lakko.app.ui.calls
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,6 +25,8 @@ import me.lakko.app.chat.ChatRepository
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.ui.call.rememberCallPermissionGate
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
 
 /**
  * The Calls destination: the history, plus the one action beside it.
@@ -74,12 +74,12 @@ public fun CallsHost(
     }
 
     startMessage?.let { message ->
-        AlertDialog(
+        LakkoDialog(
             onDismissRequest = { startMessage = null },
-            text = { Text(message.text()) },
-            confirmButton = {
-                TextButton(onClick = { startMessage = null }) { Text(t("common.ok")) }
-            },
+            title = null,
+            body = message.text(),
+            confirm = LakkoDialogAction(t("common.ok")) { startMessage = null },
+            cancel = null,
         )
     }
 
@@ -135,10 +135,11 @@ public fun CallsHost(
 private fun JoinByLinkDialog(onDismiss: () -> Unit, onJoin: (slug: String) -> Unit) {
     var input by remember { mutableStateOf("") }
     val slug = remember(input) { callInviteSlugFromInput(input) }
-    AlertDialog(
+    LakkoDialog(
         onDismissRequest = onDismiss,
-        title = { Text(t("call.history.join_by_link")) },
-        text = {
+        title = t("call.history.join_by_link"),
+        confirm = LakkoDialogAction(t("chat.call.join_short"), enabled = slug != null) { slug?.let(onJoin) },
+        content = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 OutlinedTextField(
                     value = input,
@@ -156,12 +157,5 @@ private fun JoinByLinkDialog(onDismiss: () -> Unit, onJoin: (slug: String) -> Un
                 }
             }
         },
-        confirmButton = {
-            TextButton(
-                onClick = { slug?.let(onJoin) },
-                enabled = slug != null,
-            ) { Text(t("chat.call.join_short")) }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(t("common.cancel")) } },
     )
 }

@@ -21,6 +21,8 @@
  */
 
 import { t } from "../l10n";
+import { AttachmentFailureNote } from "./AttachmentFailureNote";
+import { openFailureOf, type AttachmentFailure } from "../chat/attachment-failure";
 import { createEffect, createSignal, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 
@@ -115,6 +117,7 @@ export function PhotoBubble(props: MediaBubbleProps): JSX.Element {
   const [thumbUrl, setThumbUrl] = createSignal<string | null>(null);
   const [fullUrl, setFullUrl] = createSignal<string | null>(null);
   const [status, setStatus] = createSignal<LoadStatus>("idle");
+  const [failure, setFailure] = createSignal<AttachmentFailure>("failed");
   const [viewer, setViewer] = createSignal(false);
   let root: HTMLButtonElement | undefined;
   const hasRemote = (): boolean => props.attachment.blobId.length > 0;
@@ -149,7 +152,8 @@ export function PhotoBubble(props: MediaBubbleProps): JSX.Element {
     try {
       setFullUrl(await props.hub.load(props.attachment));
       setStatus("ready");
-    } catch {
+    } catch (err) {
+      setFailure(openFailureOf(err));
       setStatus("error");
     }
   }
@@ -171,6 +175,8 @@ export function PhotoBubble(props: MediaBubbleProps): JSX.Element {
   );
 
   const label = (): string => {
+    if (status() === "error" && failure() === "gone") return t("chat.attachment.gone.title");
+    if (status() === "error" && failure() === "limit") return t("chat.attachment.limit.open");
     if (status() === "error") return t("chat.photo.load_failed_retry");
     if (status() === "loading") return t("chat.photo.loading");
     return t("chat.media.photo");
@@ -185,8 +191,10 @@ export function PhotoBubble(props: MediaBubbleProps): JSX.Element {
         style={boxStyle(props)}
         aria-label={label()}
         onClick={() => {
-          if (status() === "error") void load();
-          else if (fullUrl() !== null) setViewer(true);
+          // A gone file offers no retry (section 4.1).
+          if (status() === "error") {
+            if (failure() !== "gone") void load();
+          } else if (fullUrl() !== null) setViewer(true);
         }}
       >
         <Show
@@ -206,7 +214,11 @@ export function PhotoBubble(props: MediaBubbleProps): JSX.Element {
         </Show>
         <Show when={status() === "error"}>
           <span class="lk-visual-center">
-            <span class="lk-visual-note">{t("chat.photo.load_failed")}</span>
+            <span class="lk-visual-note">
+              <AttachmentFailureNote failure={failure()} inline>
+                {t("chat.photo.load_failed")}
+              </AttachmentFailureNote>
+            </span>
           </span>
         </Show>
       </button>
@@ -228,6 +240,7 @@ export function VideoBubble(props: MediaBubbleProps): JSX.Element {
   const [posterUrl, setPosterUrl] = createSignal<string | null>(null);
   const [videoUrl, setVideoUrl] = createSignal<string | null>(null);
   const [status, setStatus] = createSignal<LoadStatus>("idle");
+  const [failure, setFailure] = createSignal<AttachmentFailure>("failed");
   const [viewer, setViewer] = createSignal(false);
   let root: HTMLButtonElement | undefined;
   let player: HTMLVideoElement | undefined;
@@ -261,12 +274,15 @@ export function VideoBubble(props: MediaBubbleProps): JSX.Element {
       return;
     }
     if (props.attachment.blobId.length === 0 || status() === "loading") return;
+    // A gone file offers no retry (section 4.1).
+    if (status() === "error" && failure() === "gone") return;
     setStatus("loading");
     try {
       setVideoUrl(await props.hub.load(props.attachment));
       setStatus("idle");
       setViewer(true);
-    } catch {
+    } catch (err) {
+      setFailure(openFailureOf(err));
       setStatus("error");
     }
   }
@@ -284,7 +300,11 @@ export function VideoBubble(props: MediaBubbleProps): JSX.Element {
 
   const size = (): string => formatAttachmentSize(props.attachment.size);
   const label = (): string =>
-    status() === "error"
+    status() === "error" && failure() === "gone"
+      ? t("chat.attachment.gone.title")
+      : status() === "error" && failure() === "limit"
+        ? t("chat.attachment.limit.open")
+        : status() === "error"
       ? t("chat.video.load_failed_retry")
       : status() === "loading"
         ? t("chat.video.loading", { size: size() })
@@ -308,7 +328,11 @@ export function VideoBubble(props: MediaBubbleProps): JSX.Element {
             </Show>
           </span>
           <Show when={status() === "error"}>
-            <span class="lk-visual-note">{t("chat.video.load_failed")}</span>
+            <span class="lk-visual-note">
+              <AttachmentFailureNote failure={failure()} inline>
+                {t("chat.video.load_failed")}
+              </AttachmentFailureNote>
+            </span>
           </Show>
         </span>
         <Show when={props.attachment.size > 0}>

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -24,7 +25,6 @@ import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
@@ -66,6 +66,9 @@ import me.lakko.app.ui.components.LakkoAvatar
 import uniffi.lakko_ffi_uniffi.InfoSection
 import uniffi.lakko_ffi_uniffi.PersonInfoCapabilities
 import uniffi.lakko_ffi_uniffi.personInfoSections
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.ui.components.LakkoDialogTone
 
 /**
  * Contact detail — docs/ux/client-redesign.md section 5.3, and the person a
@@ -285,6 +288,9 @@ private fun ContactDetailBody(
                 name = if (name.isPlaceholder) "?" else name.primary,
                 seed = contactKey,
                 size = 72.dp,
+                personKey = me.lakko.app.ui.components.personKeyBytes(contactKey),
+                // UX §7: a profile video plays in the large views.
+                large = true,
             )
             Spacer(Modifier.height(12.dp))
             Text(name.primary, style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)
@@ -439,28 +445,21 @@ private fun RenameContactDialog(
     onSave: () -> Unit,
 ) {
     if (!open) return
-    AlertDialog(
+    LakkoDialog(
         onDismissRequest = onDismiss,
-        title = { Text(t("contacts.rename.action")) },
-        text = {
-            Column {
-                Text(
-                    t("contacts.rename.placeholder"),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = draft,
-                    onValueChange = onDraftChange,
-                    singleLine = true,
-                    label = { Text(t("contacts.rename.field")) },
-                )
-            }
-        },
-        confirmButton = { TextButton(onClick = onSave) { Text(t("common.save")) } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(t("common.cancel")) } },
-    )
+        title = t("contacts.rename.action"),
+        body = t("contacts.rename.placeholder"),
+        confirm = LakkoDialogAction(t("common.save"), onClick = onSave),
+        cancel = LakkoDialogAction(t("common.cancel"), LakkoDialogTone.Ghost, onClick = onDismiss),
+    ) {
+        OutlinedTextField(
+            value = draft,
+            onValueChange = onDraftChange,
+            singleLine = true,
+            label = { Text(t("contacts.rename.field")) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }
 
 /** Removing a contact, which deliberately leaves any existing chat behind. */
@@ -472,26 +471,17 @@ private fun RemoveContactDialog(
     onRemove: () -> Unit,
 ) {
     if (!open) return
-    AlertDialog(
+    LakkoDialog(
         onDismissRequest = onDismiss,
-        title = { Text(t("contacts.remove.title")) },
-        text = {
-            Text(
-                t(
-                    "common.sentence_pair",
-                    mapOf(
-                        "first" to t("contacts.remove.sub", mapOf("name" to name)),
-                        "second" to t("contacts.remove.body"),
-                    ),
-                ),
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = onRemove) {
-                Text(t("common.remove"), color = MaterialTheme.colorScheme.error)
-            }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(t("common.cancel")) } },
+        title = t("contacts.remove.title"),
+        body = t(
+            "common.sentence_pair",
+            mapOf(
+                "first" to t("contacts.remove.sub", mapOf("name" to name)),
+                "second" to t("contacts.remove.body"),
+            ),
+        ),
+        confirm = LakkoDialogAction(t("common.remove"), LakkoDialogTone.Danger, onClick = onRemove),
     )
 }
 

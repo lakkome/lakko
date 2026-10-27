@@ -684,6 +684,7 @@ final class MultiJoinerCall {
         screenTracks.attach(nil, sharer: id, ui: ui)
         names.peerLeft(peerId)
         ui.participantLeft(id)
+        ui.setPersonKey(nil, forParticipant: id)
         // The committer may have left → the next inbound KP is evaluated against
         // the fresh election (this client might now be it). No action here.
     }

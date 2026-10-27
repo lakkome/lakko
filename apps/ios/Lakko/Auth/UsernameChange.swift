@@ -96,18 +96,6 @@ public enum OwnUsernameRule {
 /// The rename (ADR-0076 section 4), pure.
 public enum UsernameRename {
 
-    /// One rename per 30 days (D2).
-    public static let intervalMs: Int64 = 30 * 24 * 60 * 60 * 1000
-
-    /// When the next change is possible (unix ms), or `nil` when one is
-    /// possible now. The device's own stamp only; the server's `429` is the
-    /// authority.
-    public static func tooSoonUntilMs(lastChangeAtMs: Int64?, nowMs: Int64) -> Int64? {
-        guard let lastChangeAtMs else { return nil }
-        let until = lastChangeAtMs + intervalMs
-        return nowMs < until && nowMs >= lastChangeAtMs ? until : nil
-    }
-
     /// What the screen warns about.
     public struct Warnings: Equatable {
         /// `recovery_email.username_change`: the account has a recovery
@@ -175,8 +163,6 @@ public enum UsernameRename {
         case replaced
         /// `409 username-taken`.
         case taken
-        /// `429 rename-too-soon`.
-        case tooSoon(retryAfterSecs: Int?)
         /// No answer: the replace may or may not have landed.
         case unknown
         case failed
@@ -187,8 +173,6 @@ public enum UsernameRename {
             switch (status, code) {
             case (200..<300, _): return .replaced
             case (409, _): return .taken
-            case (429, "rename-too-soon"):
-                return .tooSoon(retryAfterSecs: (json?["retry_after_secs"] as? NSNumber)?.intValue)
             default: return .failed
             }
         }
@@ -218,7 +202,7 @@ public enum UsernameRename {
     public static func afterReplace(_ outcome: ReplaceOutcome) -> AfterReplace {
         switch outcome {
         case .replaced: return .finalize
-        case .taken, .tooSoon, .failed: return .rollBack
+        case .taken, .failed: return .rollBack
         case .unknown: return .keepOwed
         }
     }
@@ -259,7 +243,6 @@ public enum UsernameRename {
     /// The failure a screen shows.
     public enum Failure: Equatable {
         case taken
-        case tooSoon(untilMs: Int64?)
         case bindLimited(retryAfterSecs: Int?)
         case proofNeeded
         case rule
@@ -271,7 +254,6 @@ public enum UsernameRename {
     public static func failure(_ outcome: ReplaceOutcome, nowMs: Int64) -> Failure {
         switch outcome {
         case .taken: return .taken
-        case .tooSoon(let secs): return .tooSoon(untilMs: secs.map { nowMs + Int64($0) * 1000 })
         case .unknown: return .offline
         case .replaced, .failed: return .failed
         }

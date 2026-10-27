@@ -16,7 +16,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { fingerprintLabel, ownPreviewLabel, resolveDisplay } from "./resolver";
+import { fingerprintLabel, resolveDisplay } from "./resolver";
 
 const KEY = new Uint8Array([0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, ...new Array<number>(26).fill(0)]);
 
@@ -135,12 +135,5 @@ describe("resolveDisplay — a username is shown only when verified", () => {
 describe("fingerprint + own preview", () => {
   it("groups the first four bytes", () => {
     expect(fingerprintLabel(new Uint8Array([0, 1, 0xab, 0xff, 9]))).toBe("0001 abff");
-  });
-
-  it("previews how others see you", () => {
-    expect(ownPreviewLabel("Alice Petrova", "alice")).toBe("Alice Petrova · @alice");
-    expect(ownPreviewLabel(null, "alice")).toBe("@alice");
-    expect(ownPreviewLabel("  Guest ", null)).toBe("Guest");
-    expect(ownPreviewLabel(null, null)).toBeNull();
   });
 });

@@ -135,6 +135,13 @@ public final class ChatMediaController: ObservableObject {
     }
 
     @Published public private(set) var pendingSends: [PendingSend] = []
+    /// ADR-0065 / UX 4.2 — the last media send stopped at the sending limit:
+    /// the composer says so. Cleared by the next send that starts.
+    @Published public private(set) var sendLimited = false
+    /// ADR-0065 section 6 — blobs uploaded for a send that has not gone out
+    /// yet, per job. Read by `deinit` (the chat closed with the send
+    /// abandoned), so it is written on the main actor only.
+    private nonisolated(unsafe) var unsentBlobIds: [Int: [Data]] = [:]
     private var jobs: [Int: SendJob] = [:]
     private var nextSendId = 1
 
@@ -153,6 +160,9 @@ public final class ChatMediaController: ObservableObject {
     }
     @Published public private(set) var loadingKeys: Set<String> = []
     @Published public private(set) var failedKeys: Set<String> = []
+    /// ADR-0065 — why a key in ``failedKeys`` failed (gone, limited, or the
+    /// generic failure), so a bubble shows the one honest state.
+    @Published public private(set) var failureKinds: [String: MediaLoadFailure] = [:]
     @Published public private(set) var playedKeys: Set<String>
     /// The account ``playedKeys`` was loaded for, taken when this controller
     /// was made: its played marks are filed there and nowhere else.
@@ -185,6 +195,12 @@ public final class ChatMediaController: ObservableObject {
     deinit {
         // The whole chat's decrypted media goes with it.
         try? FileManager.default.removeItem(at: tempRoot)
+        // ADR-0065 section 6 — an upload whose message was never sent is
+        // deleted at once where the device still knows the id.
+        let orphans = unsentBlobIds.values.flatMap { $0 }
+        if !orphans.isEmpty {
+            Task { @MainActor in BlobLifecycle.shared.delete(orphans) }
+        }
     }
 
     /// The chat left the screen: stop what plays and what records.
@@ -655,6 +671,7 @@ public final class ChatMediaController: ObservableObject {
             $0.failed = false
             $0.progress = 0
         }
+        sendLimited = false
         do {
             if job.uploaded == nil {
                 if job.fileURL == nil, let gif = job.gif {
@@ -683,6 +700,7 @@ public final class ChatMediaController: ObservableObject {
                             height: side
                         )
                         job.thumb = thumb
+                        unsentBlobIds[job.id, default: []].append(thumb.blobId)
                         // The poster is ours already: file it so the sent
                         // bubble shows it without downloading its own upload.
                         _ = try? temp.write(poster, key: Self.thumbKey(for: thumb), name: "poster.jpg", fallback: "poster.jpg")
@@ -710,7 +728,11 @@ public final class ChatMediaController: ObservableObject {
                 )
             }
             guard let uploaded = job.uploaded else { return }
+            if !(unsentBlobIds[job.id]?.contains(uploaded.blobId) ?? false) {
+                unsentBlobIds[job.id, default: []].append(uploaded.blobId)
+            }
             try await port.sendAttachment(uploaded, job.reply)
+            unsentBlobIds.removeValue(forKey: job.id)
             // File the local bytes under the real blob id before the pending
             // row goes, so the sent bubble plays them without a download.
             temp.alias(Self.key(for: uploaded), to: job.localKey)
@@ -718,6 +740,7 @@ public final class ChatMediaController: ObservableObject {
             pendingSends.removeAll { $0.id == job.id }
         } catch {
             Self.log.warning("media message not sent")
+            if case AttachmentBridgeError.uploadLimited = error { sendLimited = true }
             updatePending(job.id) { $0.failed = true }
         }
     }
@@ -782,11 +805,24 @@ public final class ChatMediaController: ObservableObject {
         loadingKeys.insert(key)
         defer { loadingKeys.remove(key) }
         do {
-            return try await mediaFile(for: ref)
+            let url = try await mediaFile(for: ref)
+            failureKinds.removeValue(forKey: key)
+            return url
         } catch {
             Self.log.warning("video note download failed")
+            failureKinds[key] = MediaLoadFailure.of(error)
             return nil
         }
+    }
+
+    /// ADR-0065 — remember why `key` failed to load (GIF, photo paths that do
+    /// not go through the voice / video-note paths above).
+    public func noteFailure(_ key: String, error: Error) {
+        failureKinds[key] = MediaLoadFailure.of(error)
+    }
+
+    public func failure(_ key: String) -> MediaLoadFailure {
+        failureKinds[key] ?? .failed
     }
 
     /// A local key (an outgoing take not yet uploaded) resolves to its file.
@@ -872,6 +908,7 @@ public final class ChatMediaController: ObservableObject {
     private func startVoice(key: String, ref: AttachmentRef?, fileURL: URL?, from: Int64) async {
         stopPlayback()
         failedKeys.remove(key)
+        failureKinds.removeValue(forKey: key)
         let url: URL
         if let fileURL {
             url = fileURL
@@ -883,6 +920,7 @@ public final class ChatMediaController: ObservableObject {
             do {
                 url = try await mediaFile(for: ref)
             } catch {
+                failureKinds[key] = MediaLoadFailure.of(error)
                 failedKeys.insert(key)
                 return
             }

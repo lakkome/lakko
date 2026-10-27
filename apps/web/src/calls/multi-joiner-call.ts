@@ -96,6 +96,8 @@ import { GroupScreenShare } from "./group-screen-share";
 import { screenShareActions } from "./screen-share-store";
 import { SCREEN_SHARE_NOTICE_MS } from "./screen-share-capability";
 import type { VideoQuality } from "./video-wants";
+import { avatarFromWasm } from "../profile/avatar-model";
+import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 
 /** A profile a member sealed into the call, as the profile store takes it. */
 export type AnnouncedProfile = IncomingProfile;
@@ -1196,6 +1198,8 @@ export class MultiJoinerCall {
         updatedAtMs: decoded.updatedAtMs,
         accountId: decoded.accountId ?? null,
         usernameCertificate: decoded.usernameCertificate ?? null,
+        // ADR-0084 - copied out of the handle (and freed) here.
+        avatar: avatarFromWasm(decoded.avatar),
       };
     } catch {
       return;
@@ -1268,6 +1272,8 @@ export class MultiJoinerCall {
   private renameTile(peerId: string): void {
     if (!this.namingInputs.has(peerId) || !this.current()) return;
     callActions.setParticipantName(`${PEER_PREFIX}${peerId}`, this.nameOf(peerId));
+    // ADR-0084 - the verified person behind the tile, for their photo.
+    callActions.setParticipantPerson(`${PEER_PREFIX}${peerId}`, this.peerPersons.get(peerId) ?? null);
   }
 
   /** Seal the own profile into the call group and relay it to every member.
@@ -1380,6 +1386,7 @@ export class MultiJoinerCall {
       camOn: this.opts.media.video && this.captureFallback === null,
       quality: "good",
       speaking: false,
+      personKeyB64: OWN_AVATAR_KEY,
     };
   }
 

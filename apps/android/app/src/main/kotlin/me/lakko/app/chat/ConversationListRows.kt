@@ -74,6 +74,9 @@ public data class ConversationListRow(
      *  [id] is the conversation id every person-facing store is keyed on.
      *  The same value for a conversation that never moved. */
     val headId: String = id,
+    /** ADR-0084 — for a one-to-one, the other person's signature key
+     *  (standard base64), so the row shows their profile photo. */
+    val peerKeyB64: String? = null,
 )
 
 /** The shared kind a chat-or-group row opens under. */

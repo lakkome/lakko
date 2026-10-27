@@ -247,6 +247,7 @@ import { callBarWouldShow } from "./call-bar-model";
 import { t } from "../l10n";
 import { callFailureReason, callFailureText } from "./call-errors";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
+import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 
 /** A 1x1 call that ended, for the chat view's "Last call ended" line. */
 export interface EndedCallNotice {
@@ -789,6 +790,16 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     });
   }
 
+  /** ADR-0084 - the person a one-to-one call is with (their profile key),
+   *  whose photo the incoming-call screen shows; `null` for a group. */
+  function personKeyFor(groupIdB64: string | null): string | null {
+    if (groupIdB64 === null) return null;
+    const entry = groupEntry(groupIdB64);
+    if (entry === undefined || conversationKindOf(entry.group) === "group") return null;
+    const ownKeyB64 = ownPersonKeyB64(chats.identity());
+    return memberKeysOf(entry.group).find((k) => k !== ownKeyB64) ?? null;
+  }
+
   function publisherFor(groupIdB64: string): (bytes: Uint8Array) => Promise<void> {
     return makeCallSignalingPublisher({
       chat,
@@ -814,6 +825,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     camOn: videoCall(),
     quality: qualityTierForRtt(connStats()?.rttMs ?? null),
     speaking: false,
+    personKeyB64: OWN_AVATAR_KEY,
   });
 
   const remoteParticipant = (): Participant => ({
@@ -824,6 +836,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     camOn: remoteHasVideo(),
     quality: "good",
     speaking: false,
+    personKeyB64: personKeyFor(callGroup()) ?? undefined,
   });
 
   /** The safety number of the live 1x1 call, derived once when its key is
@@ -3002,6 +3015,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     silentRing,
     connStats,
     nameFor,
+    personKeyFor,
     groupNameFor: (groupIdB64: string | null): string | null =>
       groupIdB64 === null ? null : groupNames.nameOf(groupIdB64),
     hangUp,
@@ -3036,6 +3050,8 @@ interface CallHostInternals {
   readonly silentRing: Accessor<boolean>;
   readonly connStats: Accessor<WebConnectionStats | null>;
   nameFor(groupIdB64: string | null): string;
+  /** The other person of a one-to-one call, `null` for a group. */
+  personKeyFor(groupIdB64: string | null): string | null;
   /** The group's shared name (ADR-0051), or `null` when it has none. */
   groupNameFor(groupIdB64: string | null): string | null;
   /**
@@ -3249,6 +3265,7 @@ export function CallHostView(): JSX.Element {
         <IncomingCallScreen
           callerName={internals.nameFor(host.callGroupIdB64())}
           callerId={host.callGroupIdB64()}
+          callerKey={internals.personKeyFor(host.callGroupIdB64())}
           video={internals.remoteWantsVideo()}
           onAccept={(withVideo) => void host.acceptIncomingCall(withVideo)}
           onDecline={() => void host.declineIncomingCall()}

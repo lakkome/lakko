@@ -291,6 +291,7 @@ fn prepare_profile(
     account_id: Option<Vec<u8>>,
     username_certificate: Option<Vec<u8>>,
     grants: Option<Vec<ReachGrant>>,
+    avatar: Option<ProfileAvatar>,
 ) -> Result<RustProfile, JsValue> {
     let account_id = match account_id {
         None => None,
@@ -324,7 +325,155 @@ fn prepare_profile(
             .iter()
             .map(|g| g.rust().clone())
             .collect(),
+        avatar: avatar.map(|a| a.inner),
     })
+}
+
+/// A reference to one encrypted avatar blob (ADR-0084): what
+/// `encryptAttachment` returned for it, plus its plaintext size and side.
+#[wasm_bindgen]
+#[derive(Clone, PartialEq, Eq)]
+pub struct AvatarRef {
+    inner: lakko_contacts::profile::AvatarRef,
+}
+
+impl core::fmt::Debug for AvatarRef {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
+fn avatar_array<const N: usize>(field: &str, bytes: &[u8]) -> Result<[u8; N], JsValue> {
+    <[u8; N]>::try_from(bytes).map_err(|_| {
+        JsValue::from_str(&format!(
+            "profile avatar {field} must be {N} bytes, got {}",
+            bytes.len()
+        ))
+    })
+}
+
+#[wasm_bindgen]
+impl AvatarRef {
+    /// Build a reference: 32-byte blob id, 32-byte key (SECRET), 12-byte
+    /// nonce, plaintext size, and the side in pixels (the media is square).
+    ///
+    /// # Errors
+    ///
+    /// Throws when a byte field has the wrong length.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        blob_id: &[u8],
+        key: &[u8],
+        nonce: &[u8],
+        size: u32,
+        side_px: u16,
+    ) -> Result<AvatarRef, JsValue> {
+        Ok(Self {
+            inner: lakko_contacts::profile::AvatarRef {
+                blob_id: avatar_array::<32>("blob id", blob_id)?,
+                key: avatar_array::<32>("key", key)?,
+                nonce: avatar_array::<12>("nonce", nonce)?,
+                size,
+                width: side_px,
+                height: side_px,
+            },
+        })
+    }
+
+    /// The 32-byte storage address (`SHA-256` of the ciphertext).
+    #[wasm_bindgen(getter, js_name = blobId)]
+    pub fn blob_id(&self) -> Vec<u8> {
+        self.inner.blob_id.to_vec()
+    }
+
+    /// The 32-byte key. SECRET.
+    #[wasm_bindgen(getter)]
+    pub fn key(&self) -> Vec<u8> {
+        self.inner.key.to_vec()
+    }
+
+    /// The 12-byte nonce.
+    #[wasm_bindgen(getter)]
+    pub fn nonce(&self) -> Vec<u8> {
+        self.inner.nonce.to_vec()
+    }
+
+    /// Plaintext size in bytes.
+    #[wasm_bindgen(getter)]
+    pub fn size(&self) -> u32 {
+        self.inner.size
+    }
+
+    /// Side in pixels.
+    #[wasm_bindgen(getter)]
+    pub fn side(&self) -> u16 {
+        self.inner.width
+    }
+}
+
+/// The profile photo (ADR-0084): a square JPEG still and optionally a square
+/// MP4 video without sound whose first frame the still is.
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileAvatar {
+    inner: lakko_contacts::profile::Avatar,
+}
+
+#[wasm_bindgen]
+impl ProfileAvatar {
+    /// A photo (`video` and `videoDurationMs` undefined) or a profile video
+    /// (both given).
+    ///
+    /// # Errors
+    ///
+    /// Throws when exactly one of `video` / `videoDurationMs` is given.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        still: AvatarRef,
+        video: Option<AvatarRef>,
+        video_duration_ms: Option<u16>,
+    ) -> Result<ProfileAvatar, JsValue> {
+        let video = match (video, video_duration_ms) {
+            (None, None) => None,
+            (Some(v), Some(duration_ms)) => Some(lakko_contacts::profile::AvatarVideo {
+                reference: v.inner,
+                duration_ms,
+            }),
+            _ => {
+                return Err(JsValue::from_str(
+                    "profile avatar video and its duration go together",
+                ))
+            },
+        };
+        Ok(Self {
+            inner: lakko_contacts::profile::Avatar {
+                still: still.inner,
+                video,
+            },
+        })
+    }
+
+    /// The still.
+    #[wasm_bindgen(getter)]
+    pub fn still(&self) -> AvatarRef {
+        AvatarRef {
+            inner: self.inner.still.clone(),
+        }
+    }
+
+    /// The video, or `undefined` for a photo.
+    #[wasm_bindgen(getter)]
+    pub fn video(&self) -> Option<AvatarRef> {
+        self.inner.video.as_ref().map(|v| AvatarRef {
+            inner: v.reference.clone(),
+        })
+    }
+
+    /// The video's length in milliseconds, or `undefined` for a photo.
+    #[wasm_bindgen(getter, js_name = videoDurationMs)]
+    pub fn video_duration_ms(&self) -> Option<u16> {
+        self.inner.video.as_ref().map(|v| v.duration_ms)
+    }
 }
 
 // ============================================================================
@@ -731,6 +880,7 @@ pub struct WasmProfile {
     account_id: Option<Vec<u8>>,
     username_certificate: Option<Vec<u8>>,
     grants: Vec<ReachGrant>,
+    avatar: Option<ProfileAvatar>,
 }
 
 impl From<RustProfile> for WasmProfile {
@@ -742,6 +892,7 @@ impl From<RustProfile> for WasmProfile {
             account_id: p.account_id.map(|id| id.to_vec()),
             username_certificate: p.username_certificate,
             grants: p.grants.into_iter().map(ReachGrant::from_rust).collect(),
+            avatar: p.avatar.map(|inner| ProfileAvatar { inner }),
         }
     }
 }
@@ -789,6 +940,12 @@ impl WasmProfile {
     pub fn grants(&self) -> Vec<ReachGrant> {
         self.grants.clone()
     }
+
+    /// The profile photo (ADR-0084), or `undefined`. Its keys are SECRET.
+    #[wasm_bindgen(getter)]
+    pub fn avatar(&self) -> Option<ProfileAvatar> {
+        self.avatar.clone()
+    }
 }
 
 /// Compose a profile envelope (ADR-0048) — the inner plaintext to publish as
@@ -810,6 +967,10 @@ impl WasmProfile {
 /// means none. A group's profile carries `Group` (only where the setting
 /// allows that group) + `Member`; a one-to-one conversation's profile
 /// carries `Contact` + `Member`; a channel card carries `Channel`.
+///
+/// `avatar` (ADR-0084) is optional: `undefined` means no photo. Its bounds
+/// throw `"avatar.notSquare"`, `"avatar.dimensions"`, `"avatar.size"`,
+/// `"avatar.duration"`.
 #[wasm_bindgen(js_name = composeProfileEnvelope)]
 pub fn compose_profile_envelope(
     display_name: Option<String>,
@@ -818,6 +979,7 @@ pub fn compose_profile_envelope(
     account_id: Option<Vec<u8>>,
     username_certificate: Option<Vec<u8>>,
     grants: Option<Vec<ReachGrant>>,
+    avatar: Option<ProfileAvatar>,
 ) -> Result<Vec<u8>, JsValue> {
     let profile = prepare_profile(
         display_name,
@@ -826,6 +988,7 @@ pub fn compose_profile_envelope(
         account_id,
         username_certificate,
         grants,
+        avatar,
     )?;
     rust_compose_profile(&profile).map_err(profile_error_value)
 }
@@ -3986,6 +4149,7 @@ mod tests {
             Some(vec![9; 16]),
             None,
             None,
+            None,
         )
         .unwrap();
         let decoded = decode_profile_envelope(&envelope).unwrap();
@@ -4045,8 +4209,23 @@ mod tests {
             None,
             Some(vec![9; 153]),
             Some(grants.clone()),
+            Some(
+                ProfileAvatar::new(
+                    AvatarRef::new(&[1; 32], &[2; 32], &[3; 12], 500, 320).unwrap(),
+                    Some(AvatarRef::new(&[4; 32], &[5; 32], &[6; 12], 9000, 320).unwrap()),
+                    Some(4000),
+                )
+                .unwrap(),
+            ),
         )
         .unwrap();
+        assert_eq!(
+            decode_profile_envelope(&envelope)
+                .unwrap()
+                .avatar()
+                .and_then(|a| a.video_duration_ms()),
+            Some(4000)
+        );
         let decoded = decode_profile_envelope(&envelope).unwrap();
         assert_eq!(decoded.username_certificate(), Some(vec![9; 153]));
         assert_eq!(decoded.grants(), grants);
@@ -4055,7 +4234,7 @@ mod tests {
         // The ADR-0060 bounds refuse before any bytes exist.
         let mut too_many = grants.clone();
         too_many.push(derive_reach_grant(&[0x42; 32], ReachClass::Channel, &[], 1).unwrap());
-        let p = prepare_profile(None, None, 1, None, None, Some(too_many)).unwrap();
+        let p = prepare_profile(None, None, 1, None, None, Some(too_many), None).unwrap();
         assert!(matches!(
             rust_compose_profile(&p),
             Err(ProfileError::TooManyGrants { count: 3 })

@@ -128,7 +128,7 @@ internal fun ChannelMembersSheet(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.Start,
                         ) {
-                            LakkoAvatar(name = row.name, seed = row.key, size = 40.dp)
+                            LakkoAvatar(name = row.name, seed = row.key, size = 40.dp, avatar = row.avatar)
                             Spacer(Modifier.width(12.dp))
                             Column {
                                 Text(row.name, style = MaterialTheme.typography.bodyLarge)

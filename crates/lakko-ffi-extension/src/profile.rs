@@ -104,6 +104,7 @@ mod tests {
             account_id: None,
             username_certificate: None,
             grants: Vec::new(),
+            avatar: None,
         }
     }
 
@@ -160,12 +161,12 @@ mod tests {
     /// silently narrowing the NSE peek.
     #[test]
     fn golden_pins_the_swift_prefilter_shape() {
-        // Profile v3 (ADR-0060): the certificate and two reach grants widen
-        // the range at both ends.
-        assert_eq!(profile_envelope_min_len(), 31);
-        assert_eq!(profile_envelope_max_len(), 755);
+        // Profile v4 (ADR-0084): v3 plus the avatar length byte and, at most,
+        // a still and a video reference.
+        assert_eq!(profile_envelope_min_len(), 32);
+        assert_eq!(profile_envelope_max_len(), 926);
         let smallest = compose_profile(&profile(None, None)).unwrap();
-        assert_eq!(smallest.len(), 31);
+        assert_eq!(smallest.len(), 32);
         assert_eq!(smallest[0], 0x6c);
         let name = format!("{}\u{20AC}", "\u{1F600}".repeat(63));
         let mut maximal = profile(Some(&name), Some(&"a".repeat(32)));
@@ -180,8 +181,23 @@ mod tests {
                 binding: lakko_contacts::mailbox::MailboxBinding::for_account_seed(&[3; 32]),
             })
             .collect();
+        let reference = |byte: u8, side: u16| lakko_contacts::profile::AvatarRef {
+            blob_id: [byte; 32],
+            key: [byte; 32],
+            nonce: [byte; 12],
+            size: 1,
+            width: side,
+            height: side,
+        };
+        maximal.avatar = Some(lakko_contacts::profile::Avatar {
+            still: reference(1, 480),
+            video: Some(lakko_contacts::profile::AvatarVideo {
+                reference: reference(2, 480),
+                duration_ms: 1,
+            }),
+        });
         let largest = compose_profile(&maximal).unwrap();
-        assert_eq!(largest.len(), 755);
+        assert_eq!(largest.len(), 926);
         decode_profile_envelope(largest).expect("the maximal envelope decodes");
     }
 

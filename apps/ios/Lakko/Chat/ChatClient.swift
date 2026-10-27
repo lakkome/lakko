@@ -1043,7 +1043,9 @@ public final class ChatClient {
             // Envelope v3 (ADR-0060) — the username certificate and the reach
             // grants of this conversation.
             usernameCertificate: decoded.usernameCertificate,
-            grants: decoded.grants
+            grants: decoded.grants,
+            // Envelope v4 (ADR-0084) — the profile photo, or none.
+            avatar: ProfileAvatar(decoded.avatar)
         )
     }
 

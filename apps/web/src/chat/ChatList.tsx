@@ -139,6 +139,12 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
           <Icon name="channels" size={16} />
           {t("chats.create.channel")}
         </button>
+        {/* ADR-0065 section 3 — Saved, from the menu that holds New group. */}
+        <div class="lk-menu-sep" />
+        <button type="button" role="menuitem" onClick={() => go(paths.saved)}>
+          <Icon name="bookmark" size={16} />
+          {t("saved.title")}
+        </button>
       </div>
     </>
   );
@@ -180,7 +186,7 @@ function ChannelRow(props: {
       onPointerLeave={press.onPointerLeave}
       onClick={(e) => press.swallowClick(e)}
     >
-      <Avatar label={props.row.title} id={props.row.id} />
+      <Avatar label={props.row.title} id={props.row.id} personKey={props.row.personKey} />
       <div class="lk-row-body">
         <div class="lk-row-line">
           <span class="lk-row-title" classList={{ unread: props.row.unread > 0 }}>
@@ -537,7 +543,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
             <For each={invitedRows()}>
               {(p) => (
                 <A href={paths.pendingChat(p.accountIdHex)} class="lk-row" activeClass="" inactiveClass="">
-                  <Avatar label={invitedName(p)} id={p.signaturePubkeyB64} />
+                  <Avatar label={invitedName(p)} id={p.signaturePubkeyB64} personKey={p.signaturePubkeyB64} />
                   <div class="lk-row-body">
                     <div class="lk-row-line">
                       <span class="lk-row-title">
@@ -620,7 +626,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                     press.swallowClick(e);
                   }}
                 >
-                  <Avatar label={label()} id={conversationIdB64Of(g)} />
+                  <Avatar label={label()} id={conversationIdB64Of(g)} personKey={row.personKey} />
                   <div class="lk-row-body">
                     <div class="lk-row-line">
                       <span class="lk-row-title" classList={{ unread: unread() > 0 }}>

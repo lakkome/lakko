@@ -98,8 +98,9 @@ import { defaultAnonTokenStore, type AnonTokenStore } from "./anon-token-store";
  * The token contexts, in wire order: the names `anonTokenContexts()` returns
  * (`lakko_anon_token::TokenContext::ALL`, wire bytes 1..=12), pinned against
  * the wasm core by `anon-token-contexts.test.ts`. `channel-subscribe` and
- * `directory-search` are ADR-0059; `vault-claim` is ADR-0064; `blob-upload`
- * and `blob-read` are ADR-0065 (nothing spends those three yet);
+ * `directory-search` are ADR-0059; `vault-claim` is ADR-0064 (nothing spends
+ * it yet); `blob-upload` and `blob-read` are ADR-0065, one per hour-long
+ * blob pass (`storage/blob-access.ts`);
  * `mailbox-write` is ADR-0078 section 1: a mailbox write with no reach proof;
  * `call-join` is ADR-0078 section 2: one SFU call admission.
  */

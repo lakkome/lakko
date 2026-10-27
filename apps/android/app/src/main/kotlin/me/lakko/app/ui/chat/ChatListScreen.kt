@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.chat
 
+import androidx.compose.material.icons.filled.Bookmark
 import android.text.format.DateFormat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -170,6 +171,9 @@ public fun ChatListScreen(
     onNewFolder: (firstRow: ConversationListRow?) -> Unit = {},
     /** UX spec 2.2 — Settings > Chat folders ("Edit folders", "Reorder folders"). */
     onOpenFolderSettings: () -> Unit = {},
+    /** docs/ux/saved-messages-and-file-lifetime.md section 3 — Saved, from
+     *  this screen's menu. `null` hides the entry (tests, previews). */
+    onOpenSaved: (() -> Unit)? = null,
     /**
      * `docs/ux/who-can-find-me.md` section 6.1 — people in the search field:
      * the people this device knows as the person types, and what the network
@@ -318,6 +322,7 @@ public fun ChatListScreen(
                             onNewChat = onNewChat,
                             onCreateGroup = onCreateGroup,
                             onCreateChannel = onCreateChannel,
+                            onOpenSaved = onOpenSaved,
                         )
                     }
                 },
@@ -704,7 +709,12 @@ private fun InvitedChatRow(contact: me.lakko.app.contacts.PendingContact, onClic
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
-        me.lakko.app.ui.components.LakkoAvatar(name = title, seed = contact.accountIdHex, size = 48.dp)
+        me.lakko.app.ui.components.LakkoAvatar(
+            name = title,
+            seed = contact.accountIdHex,
+            size = 48.dp,
+            personKey = me.lakko.app.ui.components.personKeyBytes(contact.signaturePubkeyB64),
+        )
         androidx.compose.foundation.layout.Spacer(Modifier.width(12.dp))
         androidx.compose.foundation.layout.Column {
             androidx.compose.material3.Text(
@@ -754,6 +764,7 @@ private fun CreateMenu(
     onNewChat: () -> Unit,
     onCreateGroup: () -> Unit,
     onCreateChannel: () -> Unit,
+    onOpenSaved: (() -> Unit)? = null,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         DropdownMenuItem(
@@ -771,6 +782,13 @@ private fun CreateMenu(
             leadingIcon = { Icon(Icons.Filled.Campaign, contentDescription = null) },
             onClick = { onDismiss(); onCreateChannel() },
         )
+        if (onOpenSaved != null) {
+            DropdownMenuItem(
+                text = { Text(t("saved.title")) },
+                leadingIcon = { Icon(Icons.Filled.Bookmark, contentDescription = null) },
+                onClick = { onDismiss(); onOpenSaved() },
+            )
+        }
     }
 }
 
@@ -877,6 +895,11 @@ internal fun threadConversationRows(
         archived = flags?.archived == true,
         unreadOverride = flags?.unreadOverride == true && !thread.membershipEnded,
         membershipEnded = thread.membershipEnded,
+        peerKeyB64 = if (kind == ConversationKind.Chat) {
+            repository.oneToOnePeerKey(thread.groupIdHex)?.let { java.util.Base64.getEncoder().encodeToString(it) }
+        } else {
+            null
+        },
     )
 }
 
@@ -1300,6 +1323,7 @@ internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = 
             seed = row.id,
             size = 40.dp,
             group = row.kind != ConversationRowKind.CHAT,
+            personKey = me.lakko.app.ui.components.personKeyBytes(row.peerKeyB64.takeIf { row.kind == ConversationRowKind.CHAT }),
         )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {

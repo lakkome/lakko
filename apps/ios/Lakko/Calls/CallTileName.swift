@@ -93,7 +93,8 @@ enum CallTileName {
             updatedAtMs: profile.updatedAtMs,
             accountId: nil,
             usernameCertificate: nil,
-            grants: profile.grants)
+            grants: profile.grants,
+            avatar: profile.avatar)
     }
 }
 

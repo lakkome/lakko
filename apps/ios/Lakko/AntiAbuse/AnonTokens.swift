@@ -33,9 +33,9 @@ public enum AnonTokenContext: String, CaseIterable, Sendable {
     case directorySearch = "directory-search"
     /// Claiming a conversation-backup vault (ADR-0064). No route spends it yet.
     case vaultClaim = "vault-claim"
-    /// Uploading an attachment blob (ADR-0065). No route spends it yet.
+    /// Buying an upload pass, `POST /blob/pass/upload` (ADR-0065).
     case blobUpload = "blob-upload"
-    /// Reading an attachment blob (ADR-0065). No route spends it yet.
+    /// Buying a read pass, `POST /blob/pass/read` (ADR-0065).
     case blobRead = "blob-read"
     /// A write to someone's mailbox carrying no reach proof (ADR-0078):
     /// to an open (Everyone) mailbox, an unclaimed one, or a closed one.

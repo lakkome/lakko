@@ -26,7 +26,10 @@ enum ChannelMemberCards {
               let (epoch, seed) = state.subscribedSeeds(channelId: channelId).max(by: { $0.key < $1.key }),
               let channelIdBytes = CoPublisher.hexToData(channelId) else { return }
         let grant = ReachCenter.shared.channelGrant(channelId: channelIdBytes)
-        let uploadKey = "\(channelId)|\(epoch)|\(grant.map { String($0.version) } ?? "-")"
+        // The profile's stamp is part of the key: a new name or photo is a new
+        // card for the same epoch (ADR-0084).
+        let stamp = ProfileDirectory.shared.ownProfile?.updatedAtMs ?? 0
+        let uploadKey = "\(channelId)|\(epoch)|\(grant.map { String($0.version) } ?? "-")|\(stamp)"
         guard !uploaded.contains(uploadKey),
               var profile = ProfileDirectory.shared.ownProfileForRequest() else { return }
         profile.grants = grant.map { [$0] } ?? []
@@ -207,7 +210,8 @@ enum ChannelMemberCards {
                 let claim = ProfileClaim(
                     displayName: profile.displayName, username: username,
                     updatedAtMs: profile.updatedAtMs, accountId: profile.accountId,
-                    usernameCertificate: username == nil ? nil : profile.usernameCertificate)
+                    usernameCertificate: username == nil ? nil : profile.usernameCertificate,
+                    avatar: ProfileAvatar(profile.avatar))
                 names.append(claim)
                 if channelGrant != nil {
                     ProfileDirectory.shared.acceptReceived(

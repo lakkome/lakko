@@ -6,8 +6,34 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 # ADR-0065: Attachment files have a lifetime, an owner who can delete them, and a gate
 
 - **Status:** Accepted (maintainer, 2026-10-02). The saved-message register
-  (section 4) and the delete-key derivation (section 6) are built in the core;
-  nothing else is. The maintainer set the direction the same day:
+  (section 4) and the delete-key derivation (section 6) are built in the core.
+  **Sprint 2 (the server) built 2026-10-26, host-tested only, not deployed:**
+  `services/storage` has the blob index (MariaDB via
+  `LAKKO_STORAGE_DATABASE_URL`, migration `0001`, or an append-only index file
+  under the blob root) with the one-time import, last-access accounting, the
+  daily sweep, `POST /blob/pass/{upload,read}`, the pass gate on `PUT` / `GET`
+  / `HEAD`, `POST /blob/keep` and the signed `DELETE`; the contract and every
+  number chosen are in `services/storage/src/blob.rs` and `pass.rs`. The
+  nginx blob locations carry a per-address `limit_req`. Pass budgets are
+  counted in memory per instance (forgotten on restart, multiplied by the
+  instance count). **Sprints 3 and 4 (the clients) built 2026-10-26/27 on web,
+  iOS and Android, host-tested only, never run against the server or on a
+  device:** passes and the delete key on the storage client (iOS uploads
+  through the anti-censorship transport when armed), the gone and limit
+  states, deletes on delete-for-everyone, of unsent uploads and of a replaced
+  profile photo with a durable retry list, the keep tick (foreground, every
+  10 min, at most 4 sets, each every 30 days, first due spread by FNV-1a of
+  the set key `pins:<group hex>` / `saved` / `profile`), Save and the Saved
+  screen. Two decisions made while building: the blob delete key is derived
+  from the account's LINEAGE seed (the one the DeviceGroup id uses), so a key
+  rotation (ADR-0074) does not orphan earlier uploads; and a saved register
+  names a message by the MLS group of the SEGMENT that holds it and its DS id
+  there (maintainer, 2026-10-27), so a message of older history can be saved
+  and a saved message still opens after its conversation moves to a
+  successor group. The snapshot carries the message time (`sent_at_ms`,
+  synced-state version 6: the link record's `shared` flag had taken 5 on
+  main when this branch was merged). The maintainer set the
+  direction the same day:
   - a file nobody accesses for a year is deleted;
   - files of pinned messages and of messages the person **saved** are kept;
     Save is a new feature;

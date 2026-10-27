@@ -70,6 +70,15 @@ struct PendingChatScreen: View {
         .navigationTitle(name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // ADR-0084 — the person's photo beside their name, as in a chat.
+            ToolbarItem(placement: .principal) {
+                HStack(spacing: 8) {
+                    InitialsAvatar(
+                        name: name, identity: accountIdHex, size: 32,
+                        photo: contact.map { AvatarPhoto.person($0.signaturePubkey) })
+                    Text(name).font(.headline).lineLimit(1)
+                }
+            }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 // Disabled until the inviter's app answers; a tap on the
                 // disabled control shows the hint (a disabled Button takes no

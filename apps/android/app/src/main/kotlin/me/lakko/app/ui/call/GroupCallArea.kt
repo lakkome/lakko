@@ -47,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -671,7 +672,25 @@ private fun GroupTile(
                     .padding(top = if (short) 10.dp else 0.dp),
                 contentAlignment = if (short) Alignment.TopCenter else Alignment.Center,
             ) {
-                Text(
+                // ADR-0084 — the person's profile photo when this device holds
+                // it (their still, never a video in a tile), else initials.
+                // The own tile shows the owner's own photo.
+                val ownAvatar = if (participant.isLocal) me.lakko.app.ui.components.rememberOwnAvatar() else null
+                val still = me.lakko.app.ui.components.rememberPersonStill(
+                    me.lakko.app.ui.components.personKeyBytes(participant.personKeyB64),
+                    avatar = ownAvatar,
+                )
+                if (still != null) {
+                    val photo = remember(still) { still.asImageBitmap() }
+                    androidx.compose.foundation.Image(
+                        bitmap = photo,
+                        contentDescription = null,
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        modifier = Modifier
+                            .size(if (short) 44.dp else (minOf(widthDp, heightDp) * 0.5f).dp)
+                            .clip(androidx.compose.foundation.shape.CircleShape),
+                    )
+                } else Text(
                     text = initialsOf(name),
                     color = tint.foreground,
                     // Scaled to the tile, so a strip tile and a full-screen

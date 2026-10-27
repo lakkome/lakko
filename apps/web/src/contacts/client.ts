@@ -73,6 +73,7 @@ import type {
 } from "../../wasm/lakko_ffi_wasm";
 import type { IdentityFetchResponse } from "../discovery/wire";
 import type { ReceivedProfile } from "../profile/profile-envelope";
+import { avatarFromWasm } from "../profile/avatar-model";
 import type { AccountPubkeyPin } from "./local-store";
 import { acceptableBoundKeys, devicesBoundTo, trustedBoundKeys } from "./add-member-key";
 import { contactRequestGate, requestTargetAfterFetch } from "./request-target";
@@ -4874,6 +4875,11 @@ function decodeContactRequestBody(
         // link saw "Username not verified" for anyone who added them by it.
         usernameCertificate:
           p.usernameCertificate === undefined ? null : p.usernameCertificate.slice(),
+        // ADR-0084 - the photo references, copied out before `free()`.
+        ...((): { avatar?: ReturnType<typeof avatarFromWasm> & object } => {
+          const avatar = avatarFromWasm(p.avatar);
+          return avatar === null ? {} : { avatar };
+        })(),
       };
       p.free();
     }

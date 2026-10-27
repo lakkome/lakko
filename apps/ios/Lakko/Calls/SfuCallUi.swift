@@ -187,6 +187,10 @@ final class SfuCallUi {
                 if let name = peerNames?.identify(peerId, personKeyB64: identity.personKeyB64) {
                     ui.setParticipantName(Self.participantId(forPeer: peerId), name)
                 }
+                // ADR-0084 — the same verified key shows their photo.
+                ui.setPersonKey(
+                    Data(base64Encoded: identity.personKeyB64),
+                    forParticipant: Self.participantId(forPeer: peerId))
             },
             onPeerLeft: { peerId in
                 peerNames?.peerLeft(peerId)
@@ -203,6 +207,7 @@ final class SfuCallUi {
                 // ends through the fold (``onScreenShareChanged``).
                 screenTracker.attach(nil, sharer: id, ui: ui)
                 ui.participantLeft(id)
+                ui.setPersonKey(nil, forParticipant: id)
                 Self.refreshSolePicture(ui: ui, tracker: pictureTracker)
             },
             onRemoteVideoTrack: { track, streamId in

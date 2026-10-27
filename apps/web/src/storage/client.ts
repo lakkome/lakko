@@ -11,7 +11,7 @@
  *     stores at that key. 201 on first upload, 200 on re-upload
  *     of identical bytes, 400 on hash mismatch.
  *   * `GET  /blob/<sha256_hex>` — body = ciphertext, streamed.
- *     200 on hit, 404 on miss.
+ *     200 on hit, 404 when the blob is gone.
  *   * `HEAD /blob/<sha256_hex>` — same, with `Content-Length` so
  *     callers can size a download before pulling.
  *
@@ -22,10 +22,13 @@
  * not compute the hash themselves; they hand the bytes from the
  * encryption layer straight through.
  *
- * No auth on this service in Phase 1 — it's a "public CDN for E2EE
- * blobs", content addressing + server-side hash verification gives
- * the integrity property without per-request auth. Per-IP rate
- * limit lives in nginx. Owner tracking + quota land in Phase 2.
+ * Blob requests carry no account (ADR-0065): an upload carries an upload
+ * pass and the blob's public delete key, a download or keep a read pass
+ * (each pass bought with one anonymous token, `blob-access.ts`), and a
+ * delete is signed with the blob's delete key. Content addressing plus the
+ * server's hash check give integrity. nginx adds a per-address limit in
+ * front of the blob routes; its refusal (a 429 with no JSON code) reads as
+ * the generic failure.
  *
  * Errors mirror the auth + discovery client surface:
  *
@@ -36,6 +39,30 @@
  *   * [`StorageNetworkError`] — DNS / TLS / transport failure.
  */
 import { sessionFetch } from "../auth/session-fetch";
+import {
+  BLOB_DELETE_KEY_HEADER,
+  BLOB_PASS_HEADER,
+  StorageLimitError,
+  base64Url,
+  blobAccess,
+  blobRefusalOf,
+  storageErrorCode,
+  type BlobPassKind,
+} from "./blob-access";
+
+export { StorageLimitError } from "./blob-access";
+
+/** At most this many ids per `POST /blob/keep` (the server's bound). */
+export const MAX_KEEP_IDS = 256;
+
+/** One blob request's answer, as `withPass` judges it. */
+type PassAnswer = { readonly ok: true } | { readonly ok: false; readonly status: number; readonly body: string };
+
+function checkBlobId(blobId: Uint8Array): void {
+  if (blobId.length !== BLOB_ID_LEN) {
+    throw new StorageClientArgError(`blobId must be ${BLOB_ID_LEN} bytes (got ${blobId.length})`);
+  }
+}
 
 /** Default base URL — Vite dev proxy (`/api/storage` →
  *  `127.0.0.1:8083`). Production nginx routes the same path. */
@@ -136,74 +163,26 @@ export class StorageClient {
    *         `StorageNetworkError` on transport failure.
    */
   async putBlob(blobId: Uint8Array, ciphertext: Uint8Array): Promise<void> {
-    if (blobId.length !== BLOB_ID_LEN) {
-      throw new StorageClientArgError(
-        `blobId must be ${BLOB_ID_LEN} bytes (got ${blobId.length})`,
-      );
-    }
-    if (ciphertext.length === 0) {
-      throw new StorageClientArgError("ciphertext must be non-empty");
-    }
-    if (ciphertext.length > MAX_BLOB_BYTES) {
-      throw new StorageClientArgError(
-        `ciphertext exceeds the ${MAX_BLOB_BYTES}-byte ceiling ` +
-          `(got ${ciphertext.length} bytes)`,
-      );
-    }
-
-    const hex = blobIdHex(blobId);
-    const endpoint = `/blob/${hex}`;
-    const url = `${this.baseUrl}${endpoint}`;
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: "PUT",
-        headers: { "content-type": "application/octet-stream" },
-        // `fetch` accepts ArrayBufferView; pass the bytes through
-        // as-is so the body is the literal ciphertext, no JSON
-        // wrapping, no base64 inflation. `.slice()` reifies the
-        // backing buffer as a fresh `ArrayBuffer` (vs the generic
-        // `ArrayBufferLike`) so it satisfies TS's `BodyInit`
-        // type — same trick as `ds/client.ts` for the publish
-        // path.
-        body: ciphertext.slice(),
-      });
-    } catch (err) {
-      throw new StorageNetworkError(endpoint, err);
-    }
-    // 200 OK = idempotent re-upload, 201 Created = first upload.
-    // Both are success.
-    if (response.status === 200 || response.status === 201) {
-      // Drain the (empty) body so the connection can be reused.
-      await response.body?.cancel();
-      return;
-    }
-    const text = await safeReadBody(response);
-    throw new StorageHttpError(response.status, endpoint, text);
+    await this.putBlobWithProgress(blobId, ciphertext, undefined);
   }
 
   /**
    * ADR-0047 — [`putBlob`] with upload progress, for the timeline's
    * determinate uploading ring. `fetch` exposes no upload progress, so this
-   * uses `XMLHttpRequest` where the environment has it and falls back to
-   * `putBlob` (reporting only completion) where it does not. Same URL, same
-   * body, same success statuses, same error types.
+   * uses `XMLHttpRequest` where the environment has it and `fetch` (reporting
+   * only completion) where it does not. Same URL, same body, same success
+   * statuses, same error types.
+   *
+   * ADR-0065: the request carries an upload pass and the blob's public
+   * delete key. A refused pass is taken again once; a budget refused twice
+   * is {@link StorageLimitError} `upload` (UX 4.2).
    */
   async putBlobWithProgress(
     blobId: Uint8Array,
     ciphertext: Uint8Array,
     onProgress?: (fraction: number) => void,
   ): Promise<void> {
-    if (onProgress === undefined || typeof XMLHttpRequest === "undefined") {
-      await this.putBlob(blobId, ciphertext);
-      onProgress?.(1);
-      return;
-    }
-    if (blobId.length !== BLOB_ID_LEN) {
-      throw new StorageClientArgError(
-        `blobId must be ${BLOB_ID_LEN} bytes (got ${blobId.length})`,
-      );
-    }
+    checkBlobId(blobId);
     if (ciphertext.length === 0) {
       throw new StorageClientArgError("ciphertext must be non-empty");
     }
@@ -215,93 +194,188 @@ export class StorageClient {
     }
     const endpoint = `/blob/${blobIdHex(blobId)}`;
     const url = `${this.baseUrl}${endpoint}`;
-    await new Promise<void>((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open("PUT", url);
-      xhr.setRequestHeader("content-type", "application/octet-stream");
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable && e.total > 0) {
-          onProgress(Math.min(1, e.loaded / e.total));
+    const access = blobAccess();
+    const deleteKey = access === null ? null : base64Url(await access.deleteKey(blobId));
+    await this.withPass("upload", endpoint, async (pass) => {
+      const headers: Record<string, string> = { "content-type": "application/octet-stream" };
+      if (pass !== null) headers[BLOB_PASS_HEADER] = pass;
+      if (deleteKey !== null) headers[BLOB_DELETE_KEY_HEADER] = deleteKey;
+      if (onProgress === undefined || typeof XMLHttpRequest === "undefined") {
+        let response: Response;
+        try {
+          // `.slice()` reifies the backing buffer as a fresh `ArrayBuffer`
+          // so it satisfies TS's `BodyInit` type.
+          response = await fetch(url, { method: "PUT", headers, body: ciphertext.slice() });
+        } catch (err) {
+          throw new StorageNetworkError(endpoint, err);
         }
-      };
-      xhr.onload = () => {
-        if (xhr.status === 200 || xhr.status === 201) {
-          onProgress(1);
-          resolve();
-        } else {
-          reject(new StorageHttpError(xhr.status, endpoint, String(xhr.responseText ?? "")));
+        if (response.status === 200 || response.status === 201) {
+          await response.body?.cancel();
+          onProgress?.(1);
+          return { ok: true };
         }
-      };
-      xhr.onerror = () => reject(new StorageNetworkError(endpoint, "xhr error"));
-      xhr.onabort = () => reject(new StorageNetworkError(endpoint, "xhr aborted"));
-      xhr.send(new Blob([ciphertext.slice()], { type: "application/octet-stream" }));
+        return { ok: false, status: response.status, body: await safeReadBody(response) };
+      }
+      return new Promise<PassAnswer>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", url);
+        for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable && e.total > 0) {
+            onProgress(Math.min(1, e.loaded / e.total));
+          }
+        };
+        xhr.onload = () => {
+          if (xhr.status === 200 || xhr.status === 201) {
+            onProgress(1);
+            resolve({ ok: true });
+          } else {
+            resolve({ ok: false, status: xhr.status, body: String(xhr.responseText ?? "") });
+          }
+        };
+        xhr.onerror = () => reject(new StorageNetworkError(endpoint, "xhr error"));
+        xhr.onabort = () => reject(new StorageNetworkError(endpoint, "xhr aborted"));
+        xhr.send(new Blob([ciphertext.slice()], { type: "application/octet-stream" }));
+      });
     });
   }
 
   /**
    * `GET /blob/<hex>` — fetch ciphertext. Returns the raw bytes on
-   * 200, `null` on 404 (the typed not-found path so the UI can
-   * surface "attachment missing" without an exception). Throws on
-   * any other non-2xx.
+   * 200, `null` on 404 (the blob is gone, UX 4.1). Throws
+   * {@link StorageLimitError} `read` when opening files is limited (UX 4.2)
+   * and `StorageHttpError` on any other refusal.
    *
    * @param blobId  32-byte SHA-256 of the ciphertext.
    */
   async getBlob(blobId: Uint8Array): Promise<Uint8Array | null> {
-    if (blobId.length !== BLOB_ID_LEN) {
-      throw new StorageClientArgError(
-        `blobId must be ${BLOB_ID_LEN} bytes (got ${blobId.length})`,
-      );
-    }
-    const hex = blobIdHex(blobId);
-    const endpoint = `/blob/${hex}`;
+    checkBlobId(blobId);
+    const endpoint = `/blob/${blobIdHex(blobId)}`;
     const url = `${this.baseUrl}${endpoint}`;
-    let response: Response;
-    try {
-      response = await fetch(url, { method: "GET" });
-    } catch (err) {
-      throw new StorageNetworkError(endpoint, err);
-    }
-    if (response.status === 404) return null;
-    if (!response.ok) {
-      const text = await safeReadBody(response);
-      throw new StorageHttpError(response.status, endpoint, text);
-    }
-    const buf = await response.arrayBuffer();
-    return new Uint8Array(buf);
+    let bytes: Uint8Array | null = null;
+    const found = await this.withPass("read", endpoint, async (pass) => {
+      let response: Response;
+      try {
+        response = await fetch(url, { method: "GET", headers: pass === null ? {} : { [BLOB_PASS_HEADER]: pass } });
+      } catch (err) {
+        throw new StorageNetworkError(endpoint, err);
+      }
+      if (!response.ok) return { ok: false, status: response.status, body: await safeReadBody(response) };
+      bytes = new Uint8Array(await response.arrayBuffer());
+      return { ok: true };
+    });
+    return found ? bytes : null;
   }
 
   /**
    * `HEAD /blob/<hex>` — return the blob's `Content-Length` if it
-   * exists, `null` if not. Used by the UI to size a download
-   * indicator before issuing the GET.
-   *
-   * Throws on any non-200 / non-404 — a 5xx here means the storage
-   * service is sick, not that the blob is missing.
+   * exists, `null` if not. Counts as one download of the read pass.
    */
   async headBlob(blobId: Uint8Array): Promise<number | null> {
-    if (blobId.length !== BLOB_ID_LEN) {
-      throw new StorageClientArgError(
-        `blobId must be ${BLOB_ID_LEN} bytes (got ${blobId.length})`,
-      );
-    }
-    const hex = blobIdHex(blobId);
-    const endpoint = `/blob/${hex}`;
+    checkBlobId(blobId);
+    const endpoint = `/blob/${blobIdHex(blobId)}`;
     const url = `${this.baseUrl}${endpoint}`;
+    let length: number | null = null;
+    const found = await this.withPass("read", endpoint, async (pass) => {
+      let response: Response;
+      try {
+        response = await fetch(url, { method: "HEAD", headers: pass === null ? {} : { [BLOB_PASS_HEADER]: pass } });
+      } catch (err) {
+        throw new StorageNetworkError(endpoint, err);
+      }
+      if (!response.ok) return { ok: false, status: response.status, body: await safeReadBody(response) };
+      const cl = response.headers.get("content-length");
+      const parsed = cl === null ? Number.NaN : Number.parseInt(cl, 10);
+      length = Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+      return { ok: true };
+    });
+    return found ? length : null;
+  }
+
+  /**
+   * ADR-0065 section 3 — `POST /blob/keep`: mark up to 256 blobs as used
+   * (pinned and saved messages, the own profile photo). The server answers
+   * 204 whatever it holds.
+   */
+  async keepBlobs(blobIdsHex: readonly string[]): Promise<void> {
+    if (blobIdsHex.length === 0) return;
+    if (blobIdsHex.length > MAX_KEEP_IDS) {
+      throw new StorageClientArgError(`at most ${MAX_KEEP_IDS} ids per keep`);
+    }
+    const endpoint = "/blob/keep";
+    const url = `${this.baseUrl}${endpoint}`;
+    const body = JSON.stringify({ ids: blobIdsHex });
+    await this.withPass("read", endpoint, async (pass) => {
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...(pass === null ? {} : { [BLOB_PASS_HEADER]: pass }) },
+          body,
+        });
+      } catch (err) {
+        throw new StorageNetworkError(endpoint, err);
+      }
+      if (response.ok) {
+        await response.body?.cancel();
+        return { ok: true };
+      }
+      return { ok: false, status: response.status, body: await safeReadBody(response) };
+    });
+  }
+
+  /**
+   * ADR-0065 section 6 — `DELETE /blob/<hex>`, signed with the blob's
+   * delete key (no pass). Resolves on 204; throws `StorageHttpError` on any
+   * other answer (the server answers every refusal 403
+   * `blob-delete-refused`, which the owed list drops) and
+   * `StorageNetworkError` offline.
+   * Needs the installed account ports (`blobAccess`).
+   */
+  async deleteBlob(blobId: Uint8Array): Promise<void> {
+    checkBlobId(blobId);
+    const access = blobAccess();
+    if (access === null) throw new StorageClientArgError("no account to delete a blob for");
+    const endpoint = `/blob/${blobIdHex(blobId)}`;
+    const [name, value] = await access.signDelete(blobId, endpoint);
     let response: Response;
     try {
-      response = await fetch(url, { method: "HEAD" });
+      response = await fetch(`${this.baseUrl}${endpoint}`, { method: "DELETE", headers: { [name]: value } });
     } catch (err) {
-      throw new StorageNetworkError(endpoint, err);
+      throw new StorageNetworkError(`${endpoint} (DELETE)`, err);
     }
-    if (response.status === 404) return null;
-    if (!response.ok) {
-      const text = await safeReadBody(response);
-      throw new StorageHttpError(response.status, endpoint, text);
+    if (response.ok) {
+      await response.body?.cancel();
+      return;
     }
-    const cl = response.headers.get("content-length");
-    if (cl === null) return null;
-    const parsed = Number.parseInt(cl, 10);
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    throw new StorageHttpError(response.status, `${endpoint} (DELETE)`, await safeReadBody(response));
+  }
+
+  /**
+   * Run one blob request with a pass of `kind`: a refused pass is taken
+   * again once, a budget refused twice is the limit. Resolves `true` on
+   * success and `false` on 404 (gone); throws on everything else. With no
+   * account ports installed the request goes without a pass.
+   */
+  private async withPass(
+    kind: BlobPassKind,
+    endpoint: string,
+    send: (pass: string | null) => Promise<PassAnswer>,
+  ): Promise<boolean> {
+    const access = blobAccess();
+    for (let attempt = 0; ; attempt += 1) {
+      const pass = access === null ? null : await access.passes.get(kind);
+      const answer = await send(pass);
+      if (answer.ok) return true;
+      const refusal = blobRefusalOf(answer.status, storageErrorCode(answer.body));
+      if (refusal === "gone") return false;
+      if ((refusal === "renew-pass" || refusal === "budget") && access !== null && pass !== null) {
+        access.passes.invalidate(kind, pass);
+        if (attempt === 0) continue;
+        if (refusal === "budget") throw new StorageLimitError(kind);
+      }
+      throw new StorageHttpError(answer.status, endpoint, answer.body);
+    }
   }
 
   // ---------------------------------------------------------------

@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.call
 
+import androidx.compose.foundation.layout.width
 import android.content.Context
 import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
@@ -819,10 +820,22 @@ fun JoinCallScreen(
                     me.lakko.app.profile.ProfileDirectory.get(appContext).resolve(decoded.ownerSignatureKey)
                 }
                 if (!decoded.isOwner && !host.isPlaceholder) {
-                    Text(
-                        text = t("call.link.host", mapOf("name" to host.primary)),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    // ADR-0084 — the host's photo beside their name.
+                    androidx.compose.foundation.layout.Row(
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    ) {
+                        me.lakko.app.ui.components.LakkoAvatar(
+                            name = host.primary,
+                            seed = host.primary,
+                            size = 32.dp,
+                            personKey = decoded.ownerSignatureKey,
+                        )
+                        androidx.compose.foundation.layout.Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = t("call.link.host", mapOf("name" to host.primary)),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
                 }
                 ui.busyMessage?.let { message ->
                     Text(text = message.text(), color = MaterialTheme.colorScheme.error)

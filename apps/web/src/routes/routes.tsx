@@ -33,6 +33,7 @@ import Home from "./Home";
 import ChatsLayout from "./ChatsLayout";
 import GroupsLayout, { GroupsIndex } from "./GroupsLayout";
 import NewGroup from "./NewGroup";
+import Saved from "./Saved";
 import Contacts from "./Contacts";
 import Settings from "./Settings";
 import Call from "./Call";
@@ -152,6 +153,8 @@ export const routes: RouteDefinition[] = [
       { path: paths.feed, component: Feed },
       { path: paths.feedImport, component: FeedImport },
       { path: paths.calls, component: Calls },
+      // ADR-0065 — saved messages, from the Chats screen's menu.
+      { path: paths.saved, component: Saved },
       { path: "/settings/:section?", component: Settings },
       // The old profile URL lands on its Settings section.
       { path: "/profile", component: () => <Navigate href={paths.settingsSection("profile")} /> },

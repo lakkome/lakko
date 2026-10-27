@@ -1798,10 +1798,6 @@
       "text": "अटैचमेंट डाउनलोड नहीं हो सका। फिर से कोशिश करें।",
       "status": "machine"
     },
-    "chat.attachment.error.gone": {
-      "text": "यह अटैचमेंट अब सर्वर पर उपलब्ध नहीं है।",
-      "status": "machine"
-    },
     "chat.attachment.error.open_photo": {
       "text": "यह फ़ोटो खुल नहीं सकी। फिर से कोशिश करें।",
       "status": "machine"
@@ -7846,36 +7842,8 @@
       "text": "पासवर्ड",
       "status": "machine"
     },
-    "settings.profile.error.generic": {
-      "text": "आपका नाम सेव नहीं हो सका। फिर से कोशिश करें।",
-      "status": "machine"
-    },
-    "settings.profile.lede": {
-      "text": "आप अपने संपर्कों को कैसे दिखते हैं।",
-      "status": "machine"
-    },
-    "settings.profile.name.hint": {
-      "text": "यह उन लोगों को दिखता है जिनसे आप बात करते हैं। यूनीक होना ज़रूरी नहीं, ज़्यादा से ज़्यादा {count, plural, one {# अक्षर} other {# अक्षर}}।",
-      "status": "machine"
-    },
     "settings.profile.name.label": {
       "text": "आपका नाम",
-      "status": "machine"
-    },
-    "settings.profile.preview.label": {
-      "text": "दूसरे आपको कैसे देखते हैं",
-      "status": "machine"
-    },
-    "settings.profile.preview.no_name": {
-      "text": "जब तक आप नाम सेट नहीं करते, दूसरे आपकी कुंजी का फ़िंगरप्रिंट देखते हैं।",
-      "status": "machine"
-    },
-    "settings.profile.saved": {
-      "text": "आपके संपर्कों के लिए आपका नाम अपडेट हो जाएगा।",
-      "status": "machine"
-    },
-    "settings.profile.username.none": {
-      "text": "कोई नहीं",
       "status": "machine"
     },
     "settings.recovery.devices.title": {
@@ -8126,28 +8094,8 @@
       "text": "यूज़रनेम: {message}",
       "status": "machine"
     },
-    "username.change.body": {
-      "text": "लोग अब आपको {old} से नहीं ढूँढ पाएँगे। 30 दिनों तक कोई और इसे नहीं ले सकता।",
-      "status": "machine"
-    },
-    "username.change.next_change": {
-      "text": "इसके बाद आप इसे 30 दिन बाद फिर से बदल सकते हैं।",
-      "status": "machine"
-    },
-    "username.change.other_devices": {
-      "text": "आपके दूसरे डिवाइस अगली बार ऑनलाइन होने पर नया यूज़रनेम पा लेते हैं।",
-      "status": "machine"
-    },
-    "username.change.save": {
-      "text": "बदलें",
-      "status": "machine"
-    },
     "username.change.title": {
       "text": "यूज़रनेम बदलें",
-      "status": "machine"
-    },
-    "username.change.too_soon": {
-      "text": "आप {date} को अपना यूज़रनेम फिर से बदल सकते हैं।",
       "status": "machine"
     },
     "username.claim.body": {

@@ -78,6 +78,7 @@ fn saved_present(
     ref_id: &[u8],
     message_id: u64,
     saved_at_ms: u64,
+    sent_at_ms: u64,
     author: String,
     excerpt: String,
     attachment_kind: String,
@@ -95,6 +96,7 @@ fn saved_present(
             author,
             excerpt,
             attachment_kind,
+            sent_at_ms,
         },
         &split_blob_ids(blob_ids)?,
     )?;
@@ -281,7 +283,10 @@ impl FolderChangeSet {
     /// message text may be passed as `excerpt`; a blob id named twice is
     /// kept once. `attachmentKind` is a short token, empty when the message
     /// has no attachment. `blobIds` is the 32-byte ids of the message's
-    /// files and thumbnails, flat-concatenated (may be empty).
+    /// files and thumbnails, flat-concatenated (may be empty). `sentAtMs`
+    /// is the message's own time in UNIX millis as this device shows it
+    /// (`0` when unknown), so any device can show the message date on the
+    /// Saved screen before it holds the message.
     ///
     /// Throws when `blobIds` is not a multiple of 32 bytes or names more
     /// than 128 distinct ids, `attachmentKind` is longer than 32 bytes, or
@@ -296,6 +301,7 @@ impl FolderChangeSet {
         ref_id: &[u8],
         message_id: u64,
         saved_at_ms: u64,
+        sent_at_ms: u64,
         author: String,
         excerpt: String,
         attachment_kind: String,
@@ -308,6 +314,7 @@ impl FolderChangeSet {
                 ref_id,
                 message_id,
                 saved_at_ms,
+                sent_at_ms,
                 author,
                 excerpt,
                 attachment_kind,
@@ -505,6 +512,13 @@ impl SavedMessageView {
     #[wasm_bindgen(getter, js_name = attachmentKind)]
     pub fn attachment_kind(&self) -> String {
         self.inner.snapshot.attachment_kind.clone()
+    }
+
+    /// The message's own time in UNIX millis as the saving device showed
+    /// it; `0` when unknown.
+    #[wasm_bindgen(getter, js_name = sentAtMs)]
+    pub fn sent_at_ms(&self) -> u64 {
+        self.inner.snapshot.sent_at_ms
     }
 
     /// The blob ids of the message's files and thumbnails,
@@ -1918,6 +1932,7 @@ mod tests {
             &CHAT,
             message_id,
             saved_at_ms,
+            1_000 + message_id,
             "Ada".into(),
             format!("message {message_id}"),
             if ids.is_empty() { "" } else { "photo" }.into(),
@@ -1976,6 +1991,7 @@ mod tests {
         assert_eq!(row.author(), "Ada");
         assert_eq!(row.excerpt(), "message 7");
         assert_eq!(row.attachment_kind(), "photo");
+        assert_eq!(row.sent_at_ms(), 1_007);
         assert_eq!((row.ref_kind(), row.ref_id()), (2, CHAT.to_vec()));
         assert_eq!(row.conversation().kind(), 2);
         assert_eq!(row.blob_ids(), blobs(&[1, 2]));
@@ -2045,6 +2061,7 @@ mod tests {
                             excerpt: "hello".into(),
                             attachment_kind: "voice".into(),
                             blob_ids: vec![vec![4; 32]],
+                            sent_at_ms: 800,
                         },
                         pb::SavedMessage {
                             hlc: 51,
@@ -2068,6 +2085,7 @@ mod tests {
         assert_eq!(listed(&late), vec![21]);
         assert!(!is_saved(&late, 7));
         assert_eq!(late.saved().unwrap_or_default()[0].hlc(), 50);
+        assert_eq!(late.saved().unwrap_or_default()[0].sent_at_ms(), 800);
         assert_eq!(late.saved_blob_ids().unwrap_or_default(), blobs(&[4]));
     }
 
@@ -2081,6 +2099,7 @@ mod tests {
             &CHAT,
             7,
             5,
+            0,
             long.clone(),
             long.clone(),
             "file".into(),
@@ -2103,6 +2122,7 @@ mod tests {
                 id,
                 7,
                 5,
+                0,
                 String::new(),
                 String::new(),
                 attachment_kind.into(),

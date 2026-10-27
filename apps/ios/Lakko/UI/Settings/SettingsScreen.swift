@@ -105,7 +105,8 @@ struct SettingsScreen: View {
                             name: displayName,
                             // Hashed for the tint only; the id itself is never shown.
                             identity: account.accountIdB64,
-                            size: 56
+                            size: 56,
+                            photo: .own
                         )
                         VStack(alignment: .leading, spacing: 2) {
                             Text(displayName)
@@ -183,13 +184,12 @@ struct SettingsScreen: View {
             }
 
             Section(l10n.t("settings.section.appearance")) {
-                Picker(selection: appearance) {
-                    ForEach(AppearanceSetting.allCases) { setting in
-                        Text(l10n.t(setting.labelKey)).tag(setting)
-                    }
-                } label: {
-                    Label(l10n.t("settings.appearance.theme"), systemImage: "circle.lefthalf.filled")
-                }
+                LakkoPicker(
+                    l10n.t("settings.appearance.theme"), systemImage: "circle.lefthalf.filled",
+                    selection: appearance,
+                    options: AppearanceSetting.allCases.map {
+                        LakkoPickerOption(value: $0, label: l10n.t($0.labelKey))
+                    })
             }
 
             // UX spec `docs/ux/localization.md` section 1: a top-level row
@@ -295,25 +295,19 @@ struct SettingsScreen: View {
         .id(l10n.layoutDirection)
         .navigationTitle(l10n.t("nav.settings"))
         .navigationBarTitleDisplayMode(.large)
-        .confirmationDialog(
-            l10n.t("settings.account.log_out.title"),
+        .lakkoDialog(
             isPresented: $confirmingLogout,
-            titleVisibility: .visible
+            title: l10n.t("settings.account.log_out.title"),
+            message: l10n.t("settings.account.log_out.body")
         ) {
-            Button(l10n.t("settings.account.log_out"), role: .destructive, action: onLogout)
-            Button(l10n.t("common.cancel"), role: .cancel) {}
-        } message: {
-            Text(l10n.t("settings.account.log_out.body"))
+            [.danger(l10n.t("settings.account.log_out"), perform: onLogout), .cancel()]
         }
-        .confirmationDialog(
-            l10n.t("settings.account.forget_device.title"),
+        .lakkoDialog(
             isPresented: $confirmingForget,
-            titleVisibility: .visible
+            title: l10n.t("settings.account.forget_device.title"),
+            message: l10n.t("settings.account.forget_device.body_device")
         ) {
-            Button(l10n.t("settings.account.forget_device.confirm"), role: .destructive, action: onForgetDevice)
-            Button(l10n.t("common.cancel"), role: .cancel) {}
-        } message: {
-            Text(l10n.t("settings.account.forget_device.body_device"))
+            [.danger(l10n.t("settings.account.forget_device.confirm"), perform: onForgetDevice), .cancel()]
         }
         // UX 17.3 — the app's own dialog: it carries the proof block.
         .sheet(isPresented: $confirmingDelete) {

@@ -540,6 +540,17 @@ public final class CallUiState: ObservableObject {
         self.e2ee = state
     }
 
+    /// ADR-0084 — the signature key of the person behind each tile, so a tile
+    /// without a picture can show their profile photo. `"remote"` is the
+    /// other person of a 1x1 call; a group tile is keyed by its participant
+    /// id once its announcement verified.
+    @Published public private(set) var personKeys: [String: Data] = [:]
+
+    public func setPersonKey(_ key: Data?, forParticipant id: String) {
+        guard personKeys[id] != key else { return }
+        personKeys[id] = key
+    }
+
     /// `docs/ux/calls.md` section 4 — name the other person on the call.
     public func setPeerName(_ name: String?) {
         guard self.peerName != name else { return }
@@ -820,6 +831,7 @@ public final class CallUiState: ObservableObject {
     public func reset() {
         self.phase = .preparing
         self.participants = []
+        self.personKeys = [:]
         self.pinnedId = nil
         self.layoutChoice = nil
         self.speech = .none

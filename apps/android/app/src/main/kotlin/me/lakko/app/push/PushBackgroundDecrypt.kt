@@ -337,7 +337,7 @@ private class RealThrowawayGroup(
         ) {
             BackgroundPayloadKind.SERVICE_ENVELOPE -> return null
             BackgroundPayloadKind.CALL_SIGNALING ->
-                return callSignalingRow(app.data, senderNameOf(app.senderLeaf))
+                return callSignalingRow(app.data, senderNameOf(app.senderLeaf), senderKeyOf(app.senderLeaf))
                     ?.copy(senderAccountB64 = senderAccountOf(app))
             BackgroundPayloadKind.MESSAGE -> Unit
         }
@@ -386,6 +386,19 @@ private class RealThrowawayGroup(
      * epoch the message was sealed at, C-68), then looked up in the read-only
      * snapshot. A fingerprint-only result is not a name worth a title.
      */
+    /** ADR-0084 — the sender's signature key (standard base64), resolved at
+     *  the same point as [senderNameOf]. Carried to the ring only; nothing
+     *  here downloads a photo (the ring screen does, in the foreground). */
+    private fun senderKeyOf(senderLeaf: UInt?): String? {
+        val leaf = senderLeaf ?: return null
+        return try {
+            group.members().firstOrNull { it.leafIndex == leaf }
+                ?.let { java.util.Base64.getEncoder().encodeToString(it.signaturePublicKey) }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     private fun senderNameOf(senderLeaf: UInt?): String? {
         val lookup = names ?: return null
         val leaf = senderLeaf ?: return null
@@ -431,7 +444,7 @@ private class RealThrowawayGroup(
  * in the pure core; a frame that will not parse is dropped (fail-closed,
  * invariant #4), never guessed at.
  */
-private fun callSignalingRow(payload: ByteArray, senderName: String?): ProcessedRow? {
+private fun callSignalingRow(payload: ByteArray, senderName: String?, senderKeyB64: String? = null): ProcessedRow? {
     val body = try {
         parseCallSignaling(payload)
     } catch (_: Throwable) {
@@ -445,6 +458,7 @@ private fun callSignalingRow(payload: ByteArray, senderName: String?): Processed
             // the caller started ringing, not from when this device woke up.
             offeredAtMs = body.createdAtMs.toLong(),
             callerName = senderName,
+            callerKeyB64 = senderKeyB64,
         )
         is FfiCallSignalingBody.End ->
             me.lakko.app.calls.CallRingSignal.End(me.lakko.app.calls.callIdHexOf(body.callId))

@@ -360,6 +360,11 @@ public object AccountLocalWipe {
                 File(ctx.cacheDir, dir).deleteRecursively()
             }
         },
+        // ADR-0084 — the decrypted profile photos (sealed, device-wide, keyed
+        // by blob id) and the profile-video files written for playback.
+        Step("avatar-cache") { ctx, _ -> me.lakko.app.avatar.AvatarImages.clear(ctx) },
+        // ADR-0065 — the blob deletes still owed and the keep stamps.
+        Step("blob-lifetime") { ctx, acct -> me.lakko.app.storage.BlobLifetime.forgetAccount(ctx, acct) },
 
         // ---- the backstop ---------------------------------------------------
         // Walk the whole no-backup directory and delete any file named by the

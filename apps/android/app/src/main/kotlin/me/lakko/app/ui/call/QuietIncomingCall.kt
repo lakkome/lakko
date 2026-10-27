@@ -70,6 +70,8 @@ public fun QuietIncomingCallPanel(
     onAccept: (withVideo: Boolean) -> Unit,
     onDecline: () -> Unit,
     modifier: Modifier = Modifier,
+    /** ADR-0084 — the caller's signature key, for their profile photo. */
+    personKey: ByteArray? = null,
 ) {
     val permissions = rememberCallPermissionGate()
     // The same two lines the ring screen and the call notification use, from
@@ -87,7 +89,7 @@ public fun QuietIncomingCallPanel(
     ) {
         Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                LakkoAvatar(name = content.title, seed = offer.groupIdHex, size = 36.dp)
+                LakkoAvatar(name = content.title, seed = offer.groupIdHex, size = 36.dp, personKey = personKey)
                 Spacer(Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(

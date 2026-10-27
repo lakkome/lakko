@@ -33,8 +33,9 @@
 use libfuzzer_sys::fuzz_target;
 
 use lakko_contacts::profile::{
-    compose_profile, decode_profile, is_profile_grant_class, profile_is_newer, MAX_PROFILE_GRANTS,
-    PROFILE_ENVELOPE_MAX_LEN, PROFILE_ENVELOPE_MIN_LEN, USERNAME_CERT_LEN,
+    compose_profile, decode_profile, is_profile_grant_class, profile_is_newer, AVATAR_STILL_MAX_PX,
+    AVATAR_VIDEO_MAX_PX, MAX_PROFILE_GRANTS, PROFILE_ENVELOPE_MAX_LEN, PROFILE_ENVELOPE_MIN_LEN,
+    USERNAME_CERT_LEN,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -47,19 +48,39 @@ fuzz_target!(|data: &[u8]| {
     // decoded.
     if let Some(cert) = &profile.username_certificate {
         assert_eq!(cert.len(), USERNAME_CERT_LEN);
-        assert!(profile.username.is_some(), "a certificate never without a username");
+        assert!(
+            profile.username.is_some(),
+            "a certificate never without a username"
+        );
     }
     assert!(profile.grants.len() <= MAX_PROFILE_GRANTS);
     for (i, grant) in profile.grants.iter().enumerate() {
         assert!(is_profile_grant_class(grant.class));
         assert!(profile.grants[..i].iter().all(|g| g.class != grant.class));
     }
+    // v4 (ADR-0084): the avatar bounds hold on anything decoded.
+    if let Some(avatar) = &profile.avatar {
+        assert!(avatar.validate().is_ok());
+        assert_eq!(avatar.still.width, avatar.still.height);
+        assert!(avatar.still.width <= AVATAR_STILL_MAX_PX);
+        if let Some(video) = &avatar.video {
+            assert!(video.reference.width <= AVATAR_VIDEO_MAX_PX);
+            assert!(video.duration_ms >= 1);
+        }
+    }
 
     let recomposed = compose_profile(&profile).expect("compose must accept what decode accepted");
-    assert_eq!(recomposed.as_slice(), data, "the encoding must be canonical");
+    assert_eq!(
+        recomposed.as_slice(),
+        data,
+        "the encoding must be canonical"
+    );
     let again = decode_profile(&recomposed).expect("a composed profile must decode");
     assert_eq!(again, profile);
 
-    assert!(!profile_is_newer(profile.updated_at_ms, profile.updated_at_ms));
+    assert!(!profile_is_newer(
+        profile.updated_at_ms,
+        profile.updated_at_ms
+    ));
     let _ = profile_is_newer(profile.updated_at_ms, u64::MAX);
 });

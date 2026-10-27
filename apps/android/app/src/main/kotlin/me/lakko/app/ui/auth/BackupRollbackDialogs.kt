@@ -3,13 +3,14 @@
 
 package me.lakko.app.ui.auth
 
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import me.lakko.app.backup.RestoreReason
 import me.lakko.app.l10n.t
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.ui.components.LakkoDialogTone
 
 /**
  * ADR-0037 §6 (G-11) — the destructive stale-backup override dialog.
@@ -27,31 +28,19 @@ public fun StaleBackupOverrideDialog(
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
 ) {
-    AlertDialog(
+    LakkoDialog(
         // Dismiss-outside / back = Cancel — never a silent accept.
         onDismissRequest = onCancel,
-        title = { Text(t("backup.stale_restore.title")) },
-        text = {
-            Text(
-                t(
-                    "backup.stale_restore.body",
-                    mapOf(
-                        "reason" to t(reason.staleKey ?: "common.unknown"),
-                        "consequence" to t("backup.stale_restore.consequence"),
-                    ),
-                ),
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = onConfirm) {
-                Text(t("backup.stale_restore.confirm"), color = MaterialTheme.colorScheme.error)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onCancel) {
-                Text(t("common.cancel"))
-            }
-        },
+        title = t("backup.stale_restore.title"),
+        body = t(
+            "backup.stale_restore.body",
+            mapOf(
+                "reason" to t(reason.staleKey ?: "common.unknown"),
+                "consequence" to t("backup.stale_restore.consequence"),
+            ),
+        ),
+        confirm = LakkoDialogAction(t("backup.stale_restore.confirm"), LakkoDialogTone.Danger, onClick = onConfirm),
+        cancel = LakkoDialogAction(t("common.cancel"), LakkoDialogTone.Ghost, onClick = onCancel),
     )
 }
 
@@ -64,19 +53,16 @@ public fun StaleBackupOverrideDialog(
  * only.
  */
 @Composable
-public fun BackupRollbackAlertDialog(
+public fun BackupRollbackRefusedDialog(
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LakkoDialog(
         onDismissRequest = onDismiss,
         // The reason is diagnostic; AuthRepository has logged it. The person
         // reads what happened and that the account is safe.
-        title = { Text(t("backup.rollback_refused.title")) },
-        text = { Text(t("backup.rollback_refused.body")) },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text(t("common.dismiss"))
-            }
-        },
+        title = t("backup.rollback_refused.title"),
+        body = t("backup.rollback_refused.body"),
+        confirm = LakkoDialogAction(t("common.dismiss"), onClick = onDismiss),
+        cancel = null,
     )
 }

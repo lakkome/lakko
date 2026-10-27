@@ -148,7 +148,9 @@ struct VoiceBubble: View {
             if upload == .failed {
                 NotSentButton(onRetry: onRetry)
             } else if media.failedKeys.contains(mediaKey) {
-                CouldNotPlay { toggle() }
+                MediaFailureLine(failure: media.failure(mediaKey), onRetry: toggle) {
+                    CouldNotPlay { toggle() }
+                }
             }
         }
         // The row is in a LazyVStack, so this runs as the bubble scrolls into
@@ -599,10 +601,13 @@ struct VideoNoteBubble: View {
             if upload == .failed {
                 NotSentButton(onRetry: onRetry).foregroundStyle(.red)
             } else if model.failed {
-                CouldNotPlay {
+                let retry: () -> Void = {
                     Task { await model.tap(ref: ref, key: mediaKey, pending: upload != nil, media: media) }
                 }
-                .foregroundStyle(.secondary)
+                MediaFailureLine(failure: media.failure(mediaKey), onRetry: retry) {
+                    CouldNotPlay { retry() }
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .task(id: mediaKey) {
@@ -640,6 +645,7 @@ struct GifBubble: View {
     @EnvironmentObject private var media: ChatMediaController
     @State private var fileURL: URL?
     @State private var failed = false
+    @State private var failure: MediaLoadFailure = .failed
     @State private var fullScreen = false
 
     private var size: CGSize {
@@ -683,7 +689,9 @@ struct GifBubble: View {
             if upload == .failed {
                 NotSentButton(onRetry: onRetry)
             } else if failed {
-                CouldNotPlay { Task { await load() } }
+                MediaFailureLine(failure: failure, onRetry: { Task { await load() } }) {
+                    CouldNotPlay { Task { await load() } }
+                }
             }
         }
         // A pending GIF's bytes arrive after the row appears (the proxy
@@ -724,6 +732,7 @@ struct GifBubble: View {
         do {
             fileURL = try await media.mediaFile(for: ref)
         } catch {
+            failure = MediaLoadFailure.of(error)
             failed = true
         }
     }

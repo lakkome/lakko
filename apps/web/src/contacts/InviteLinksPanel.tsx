@@ -35,6 +35,7 @@ import { useChats } from "../chat/ChatContext";
 import { DiscoveryClient } from "../discovery/client";
 import { Icon } from "../ui/icons";
 import { requestConfirm } from "../ui/confirm-dialog";
+import { LakkoPicker } from "../ui/LakkoPicker";
 import { loadWasm } from "../wasm";
 import { currentLanguage, joinFacts, t } from "../l10n";
 import { KeyedError } from "../l10n/keyed-error";
@@ -465,20 +466,22 @@ export function InviteLinksPanel(): JSX.Element {
               disabled={saveBusy()}
             />
           </label>
-          <label>
-            {t("invite.links.expires_field")}
-            <select
+          <div class="lk-picker-field">
+            <span id="lk-invite-expires">{t("invite.links.expires_field")}</span>
+            <LakkoPicker<ExpiryPreset | "custom">
+              labelledBy="lk-invite-expires"
               value={expiry()}
-              onChange={(e) => setExpiry(e.currentTarget.value as ExpiryPreset | "custom")}
+              onChange={setExpiry}
               disabled={saveBusy()}
-            >
-              <option value="1d">{t("invite.links.expires_option_days", { count: 1 })}</option>
-              <option value="7d">{t("invite.links.expires_option_days", { count: 7 })}</option>
-              <option value="30d">{t("invite.links.expires_option_days", { count: 30 })}</option>
-              <option value="never">{t("invite.links.expires_option_never")}</option>
-              <option value="custom">{t("invite.links.expires_option_custom")}</option>
-            </select>
-          </label>
+              options={[
+                { value: "1d", label: t("invite.links.expires_option_days", { count: 1 }) },
+                { value: "7d", label: t("invite.links.expires_option_days", { count: 7 }) },
+                { value: "30d", label: t("invite.links.expires_option_days", { count: 30 }) },
+                { value: "never", label: t("invite.links.expires_option_never") },
+                { value: "custom", label: t("invite.links.expires_option_custom") },
+              ]}
+            />
+          </div>
           <Show when={expiry() === "custom"}>
             <div class="lk-invite-custom">
               <label>
@@ -493,17 +496,16 @@ export function InviteLinksPanel(): JSX.Element {
                   disabled={saveBusy()}
                 />
               </label>
-              <label>
-                <span class="lakko-visually-hidden">{t("invite.links.custom_expiry_amount")}</span>
-                <select
-                  value={customExpiryUnit()}
-                  onChange={(e) => setCustomExpiryUnit(e.currentTarget.value as ExpiryUnit)}
-                  disabled={saveBusy()}
-                >
-                  <option value="hours">{t("invite.links.unit_hours")}</option>
-                  <option value="days">{t("invite.links.unit_days")}</option>
-                </select>
-              </label>
+              <LakkoPicker<ExpiryUnit>
+                ariaLabel={t("invite.links.custom_expiry_amount")}
+                value={customExpiryUnit()}
+                onChange={setCustomExpiryUnit}
+                disabled={saveBusy()}
+                options={[
+                  { value: "hours", label: t("invite.links.unit_hours") },
+                  { value: "days", label: t("invite.links.unit_days") },
+                ]}
+              />
             </div>
             <Show
               when={
@@ -514,19 +516,21 @@ export function InviteLinksPanel(): JSX.Element {
               <div class="form-error">{t("invite.links.error.custom_expiry")}</div>
             </Show>
           </Show>
-          <label>
-            {t("invite.links.uses_field")}
-            <select
+          <div class="lk-picker-field">
+            <span id="lk-invite-uses">{t("invite.links.uses_field")}</span>
+            <LakkoPicker<MaxUsesPreset | "custom">
+              labelledBy="lk-invite-uses"
               value={maxUses()}
-              onChange={(e) => setMaxUses(e.currentTarget.value as MaxUsesPreset | "custom")}
+              onChange={setMaxUses}
               disabled={saveBusy()}
-            >
-              <option value="single">{t("invite.links.uses_option_one")}</option>
-              <option value="ten">{t("invite.links.uses_option_up_to", { count: 10 })}</option>
-              <option value="unlimited">{t("invite.links.uses_option_unlimited")}</option>
-              <option value="custom">{t("invite.links.uses_option_custom")}</option>
-            </select>
-          </label>
+              options={[
+                { value: "single", label: t("invite.links.uses_option_one") },
+                { value: "ten", label: t("invite.links.uses_option_up_to", { count: 10 }) },
+                { value: "unlimited", label: t("invite.links.uses_option_unlimited") },
+                { value: "custom", label: t("invite.links.uses_option_custom") },
+              ]}
+            />
+          </div>
           <Show when={maxUses() === "custom"}>
             <label>
               {t("invite.links.custom_uses_count")}

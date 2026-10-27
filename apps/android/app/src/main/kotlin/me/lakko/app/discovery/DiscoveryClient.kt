@@ -562,13 +562,13 @@ public class DiscoveryClient(
     /**
      * ADR-0076 - replace the account's current username with [username]:
      * OPRF, then `POST /discovery/username/replace`. The old name is retired
-     * (nobody finds the account by it; nobody else takes it for 30 days), and
+     * (nobody finds the account by it; the account holds at most one retired
+     * name, and the server frees older ones on each rename; no minimum interval), and
      * the account leaves Everyone on the server until the client publishes
      * its public record again. Returns the claimed name and the NEW
      * username certificate.
      *
-     * @throws DiscoveryHttpError `409 no-username`, `409 username-taken`,
-     *   `429 rename-too-soon` (with `retry_after_secs`).
+     * @throws DiscoveryHttpError `409 no-username`, `409 username-taken`.
      */
     public suspend fun replaceUsername(accountId: ByteArray, username: String): RegisterResult {
         require(accountId.size == 16) { "accountId must be 16 bytes (got ${accountId.size})" }

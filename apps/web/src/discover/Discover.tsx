@@ -57,6 +57,7 @@ import { t } from "../l10n";
 import { createLiveText } from "../l10n/live-text";
 import { aggregateShared, type SharedChannelsRow } from "./shared-channels";
 import { screenAnchor } from "../ui/screen-anchor";
+import { LakkoPicker } from "../ui/LakkoPicker";
 
 // ----- Copy (UX spec sections 6 and 7) ---------------------------------------
 
@@ -588,17 +589,17 @@ function PickTopics(props: { readonly model: DiscoverModel; readonly onDone: () 
           )}
         </For>
       </div>
-      <label>
-        {t("discover.language")}
-        <select
+      <div class="lk-picker-field">
+        <span id="lk-discover-pick-language">{t("discover.language")}</span>
+        <LakkoPicker
+          labelledBy="lk-discover-pick-language"
           value={lang()}
-          onChange={(e): void => {
-            setLang(e.currentTarget.value);
+          options={languageOptions(lang()).map((code) => ({ value: code, label: languageLabel(code) }))}
+          onChange={(code): void => {
+            setLang(code);
           }}
-        >
-          <For each={languageOptions(lang())}>{(code) => <option value={code}>{languageLabel(code)}</option>}</For>
-        </select>
-      </label>
+        />
+      </div>
       <div class="lk-actions lk-row-end">
         <button
           type="button"

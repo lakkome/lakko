@@ -77,6 +77,10 @@ public class CallUiState(
          *  Never in [participants]: the screen adds it where tiles are laid
          *  out ([withShareTile]). */
         val isScreen: Boolean = false,
+        /** ADR-0084 — the person behind a remote tile once their
+         *  announcement verified (base64 of the account key), so a tile
+         *  without video shows their profile photo. */
+        val personKeyB64: String? = null,
     )
 
     public sealed class CallPhase {
@@ -445,6 +449,13 @@ public class CallUiState(
     public fun setParticipantName(id: String, name: String) {
         if (_participants.value.none { it.id == id && it.displayName != name }) return
         patch(id) { it.copy(displayName = name) }
+    }
+
+    /** ADR-0084 — bind one tile to the person it is (their key, standard
+     *  base64). No-op on an unknown id or an unchanged key. */
+    public fun setParticipantPersonKey(id: String, personKeyB64: String?) {
+        if (_participants.value.none { it.id == id && it.personKeyB64 != personKeyB64 }) return
+        patch(id) { it.copy(personKeyB64 = personKeyB64) }
     }
 
     public fun participantLeft(id: String) {

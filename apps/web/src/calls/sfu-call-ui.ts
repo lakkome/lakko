@@ -51,6 +51,7 @@ import { t } from "../l10n";
 import { GroupScreenShare } from "./group-screen-share";
 import { screenShareActions } from "./screen-share-store";
 import { SCREEN_SHARE_NOTICE_MS } from "./screen-share-capability";
+import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 
 /** Options that shape the roster presentation. */
 export interface SfuCallUiOptions {
@@ -228,6 +229,7 @@ export function createSfuCallUi(
     camOn: config.media.video && captureFallback === null,
     quality: "good",
     speaking: false,
+    personKeyB64: OWN_AVATAR_KEY,
   });
 
   // The roster participant id for a peer is `peer-<peerId>`, and the SFU
@@ -373,6 +375,7 @@ export function createSfuCallUi(
       if (peerPersons.get(id) === identity.personKeyB64) return;
       peerPersons.set(id, identity.personKeyB64);
       callActions.setParticipantName(id, nameOf(identity.personKeyB64));
+      callActions.setParticipantPerson(id, identity.personKeyB64);
     },
     onPeerLeft: (peerId): void => {
       const id = peerParticipantId(peerId);

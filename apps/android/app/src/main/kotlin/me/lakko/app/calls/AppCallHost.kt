@@ -373,6 +373,12 @@ public class ChatRepositoryCallPort(
             )
         }
 
+    override fun peerKeyB64(groupIdHex: String): String? = try {
+        repository.oneToOnePeerKey(groupIdHex)?.let { java.util.Base64.getEncoder().encodeToString(it) }
+    } catch (_: Throwable) {
+        null
+    }
+
     override fun peerName(groupIdHex: String): String? = try {
         repository.oneToOnePeerKey(groupIdHex)?.let { key ->
             val resolved = me.lakko.app.profile.ProfileDirectory.get(applicationContext).resolve(key)

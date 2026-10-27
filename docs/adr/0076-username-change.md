@@ -50,6 +50,15 @@ and be mistaken for the person; held forever, names are burnt.
 
 So an account holds at most one retired name at a time and cannot churn.
 
+**Amended 2026-10-26 (maintainer): D2 is removed.** Renames are not limited
+in number or frequency. The property D2 bought, at most one retired name per
+account, is kept directly: a rename deletes every earlier retired name of
+the account (free at once) and retires only the name it leaves. Discovery
+drops `username_renames` (migration `0033`), `LAKKO_DISCOVERY_RENAME_INTERVAL_SECS`
+and `429 rename-too-soon`; the clients drop the 30-day line and the
+"too soon" state. Cost: a name an account renamed away from and then
+left again is free at once rather than after 30 days.
+
 ### 1. Discovery
 
 - `usernames` gains `retired_at TIMESTAMP NULL`. A row with it set is

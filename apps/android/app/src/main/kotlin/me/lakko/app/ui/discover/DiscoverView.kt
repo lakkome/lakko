@@ -5,7 +5,6 @@ package me.lakko.app.ui.discover
 
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -22,8 +21,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -60,6 +57,7 @@ import me.lakko.app.l10n.joinFacts
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
 import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.ui.components.LakkoPicker
 
 /**
  * The Discover chip of the Feed (docs/ux/feed.md section 6, ADR-0059). Mirror
@@ -287,7 +285,6 @@ private fun DiscoverSettings(model: DiscoverModel, mixRandom: Boolean, onEditTop
 private fun PickTopicsCard(model: DiscoverModel, first: Boolean, onDone: () -> Unit) {
     var chosen by remember { mutableStateOf(model.prefs.value.topics.toSet()) }
     var lang by remember { mutableStateOf(model.language()) }
-    var langMenu by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -314,20 +311,12 @@ private fun PickTopicsCard(model: DiscoverModel, first: Boolean, onDone: () -> U
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(t("discover.language"), modifier = Modifier.weight(1f))
-                Box {
-                    TextButton(onClick = { langMenu = true }) { Text(languageLabel(lang)) }
-                    DropdownMenu(expanded = langMenu, onDismissRequest = { langMenu = false }) {
-                        for (code in languageOptions(lang)) {
-                            DropdownMenuItem(
-                                text = { Text(languageLabel(code)) },
-                                onClick = {
-                                    lang = code
-                                    langMenu = false
-                                },
-                            )
-                        }
-                    }
-                }
+                LakkoPicker(
+                    selected = lang,
+                    options = languageOptions(lang).map { it to languageLabel(it) },
+                    onPick = { lang = it },
+                    heading = t("discover.language"),
+                )
             }
             Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {

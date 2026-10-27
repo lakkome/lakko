@@ -458,8 +458,8 @@ export class DiscoveryClient {
    * Change this account's `@username` at discovery (ADR-0076): OPRF blind,
    * evaluate, finalize, then `username/replace`. Returns the canonical name
    * and the new certificate. Throws `DiscoveryHttpError`: `409
-   * username-taken`, `409 no-username`, `429 rename-too-soon` (with
-   * `retry_after_secs` in the body).
+   * username-taken`, `409 no-username`. There is no minimum interval between
+   * renames (ADR-0076, amended 2026-10-26).
    *
    * A rename takes the account out of Everyone at the server; the caller's
    * publishers put it back.

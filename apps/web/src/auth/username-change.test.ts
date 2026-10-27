@@ -7,50 +7,36 @@ import { MemoryStorage } from "../test/fake-storage";
 import {
   bindFailure,
   clearRenameStores,
-  readRenamedAt,
   readRenameOwed,
-  renameAllowedAtMs,
   renameEmail,
   renameResume,
   renameSealsVault,
-  renameWarningKeys,
-  RENAME_INTERVAL_MS,
   replaceFailure,
   rollbackRename,
   runRename,
-  tooSoonUntilMs,
-  writeRenamedAt,
   writeRenameOwed,
   type Answer,
   type RenameOwed,
   type RenamePorts,
 } from "./username-change";
 
-const NOW = 1_800_000_000_000;
 const answer = (status: number | null, errorCode: string | null = null, retryAfterSecs: number | null = null): Answer => ({
   status,
   errorCode,
   retryAfterSecs,
 });
 
-describe("what the screen shows", () => {
-  it("no recovery email: the two lines about the name", () => {
+describe("how the recovery email fares", () => {
+  it("no recovery email", () => {
     expect(renameEmail(false, false)).toBe("none");
-    expect(renameWarningKeys("none")).toEqual(["username.change.body", "username.change.next_change"]);
   });
 
-  it("a recovery email and the address on this device: it moves with the name, nothing more is said", () => {
+  it("a recovery email and the address on this device: it moves with the name", () => {
     expect(renameEmail(true, true)).toBe("kept");
-    expect(renameWarningKeys("kept")).toEqual(["username.change.body", "username.change.next_change"]);
   });
 
-  it("a recovery email and no address here: the rename turns it off, and the screen says so", () => {
+  it("a recovery email and no address here: the rename turns it off", () => {
     expect(renameEmail(true, false)).toBe("dropped");
-    expect(renameWarningKeys("dropped")).toEqual([
-      "username.change.body",
-      "username.change.next_change",
-      "recovery_email.username_change",
-    ]);
   });
 
   it("a vault is sealed only when the email is kept and no phrase is saved", () => {
@@ -58,33 +44,6 @@ describe("what the screen shows", () => {
     expect(renameSealsVault("kept", true)).toBe(false);
     expect(renameSealsVault("dropped", false)).toBe(false);
     expect(renameSealsVault("none", false)).toBe(false);
-  });
-});
-
-describe("too soon", () => {
-  it("a change under thirty days ago names when the next is allowed", () => {
-    expect(renameAllowedAtMs(NOW - 1_000, NOW)).toBe(NOW - 1_000 + RENAME_INTERVAL_MS);
-    expect(renameAllowedAtMs(NOW - RENAME_INTERVAL_MS, NOW)).toBeNull();
-    expect(renameAllowedAtMs(null, NOW)).toBeNull();
-    // A stamp in the future is not trusted.
-    expect(renameAllowedAtMs(NOW + 5_000, NOW)).toBeNull();
-    expect(RENAME_INTERVAL_MS).toBe(30 * 24 * 60 * 60 * 1000);
-  });
-
-  it("the server's answer names the date", () => {
-    expect(tooSoonUntilMs(3_600, NOW)).toBe(NOW + 3_600_000);
-    expect(replaceFailure(answer(429, "rename-too-soon", 86_400), NOW)).toEqual({
-      kind: "too-soon",
-      untilMs: NOW + 86_400_000,
-    });
-  });
-
-  it("the stamp is kept per account", () => {
-    const local = new MemoryStorage();
-    expect(readRenamedAt(local, "acct")).toBeNull();
-    writeRenamedAt(local, "acct", NOW);
-    expect(readRenamedAt(local, "acct")).toBe(NOW);
-    expect(readRenamedAt(local, "other")).toBeNull();
   });
 });
 
@@ -99,9 +58,9 @@ describe("reading the answers", () => {
   });
 
   it("of the replace", () => {
-    expect(replaceFailure(answer(409, "username-taken"), NOW)).toEqual({ kind: "taken" });
-    expect(replaceFailure(answer(null), NOW)).toEqual({ kind: "offline" });
-    expect(replaceFailure(answer(409, "no-username"), NOW)).toEqual({ kind: "error" });
+    expect(replaceFailure(answer(409, "username-taken"))).toEqual({ kind: "taken" });
+    expect(replaceFailure(answer(null))).toEqual({ kind: "offline" });
+    expect(replaceFailure(answer(409, "no-username"))).toEqual({ kind: "error" });
   });
 });
 
@@ -149,7 +108,6 @@ function harness(script: {
       calls.push(`finish:${username}`);
       finished.push(username);
     },
-    nowMs: () => NOW,
   };
   return { ports, calls, binds, owed, finished };
 }
@@ -223,16 +181,6 @@ describe("the rollback", () => {
     expect(last(h.owed)).toBeNull();
   });
 
-  it("too soon rolls back too, and names the date", async () => {
-    const h = harness({ replace: answer(429, "rename-too-soon", 3_600) });
-    const out = await runRename(h.ports, input());
-    expect(out).toEqual({
-      kind: "failed",
-      failure: { kind: "too-soon", untilMs: NOW + 3_600_000 },
-      rolledBack: true,
-    });
-  });
-
   it("a rollback that did not go through is owed to the person", async () => {
     const h = harness({ replace: answer(409, "username-taken"), bind: [null, answer(429, "handle-bind-limited", 60)] });
     const out = await runRename(h.ports, input());
@@ -267,7 +215,6 @@ describe("the owed record", () => {
     local.setItem("lakko:username-change-owed:acct", "{nope");
     expect(readRenameOwed(local, "acct")).toBeNull();
     writeRenameOwed(local, "acct", record);
-    writeRenamedAt(local, "acct", NOW);
     clearRenameStores(local, "acct");
     expect(local.entries()).toEqual([]);
   });

@@ -97,6 +97,10 @@ export interface ConfirmRequest {
   readonly cancelLabel: string;
   /** {@link ConfirmTone}. */
   readonly tone: ConfirmTone;
+  /** A notice with nothing to decide (design system: "A notice with nothing
+   *  to decide has one primary button"): only `confirmLabel` is shown, and
+   *  the answer carries no meaning. */
+  readonly notice?: boolean;
 }
 
 /** A question currently on screen, and the promise waiting on its answer. */

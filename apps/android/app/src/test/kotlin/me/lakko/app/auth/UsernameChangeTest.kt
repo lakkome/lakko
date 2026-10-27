@@ -182,30 +182,6 @@ class UsernameChangeTest {
         assertEquals(OwnUsernameSync.Nothing, sync(register("alice"), "alice", parked = "alice"))
     }
 
-    // ---- too soon, and what the screen shows --------------------------------
-
-    @Test
-    fun `one rename per 30 days by the device's own stamp`() {
-        val day = 24L * 60L * 60L * 1000L
-        val changed = 100L * day
-        assertNull(renameAllowedAtMs(lastChangedAtMs = null, nowMs = changed))
-        assertEquals(changed + 30 * day, renameAllowedAtMs(changed, changed + day))
-        assertEquals(changed + 30 * day, renameAllowedAtMs(changed, changed + 30 * day - 1))
-        assertNull(renameAllowedAtMs(changed, changed + 30 * day))
-        // A clock set back never keeps the form closed.
-        assertNull(renameAllowedAtMs(changed, changed - day))
-        // The server's answer names the date.
-        assertEquals(1_000L + 60_000L, renameAllowedAfterSecs(retryAfterSecs = 60L, nowMs = 1_000L))
-    }
-
-    @Test
-    fun `the recovery email warning shows only without a held address`() {
-        assertEquals(RenameWarnings(standard = true, recoveryEmailTurnsOff = false), renameWarnings(true, true))
-        assertEquals(RenameWarnings(standard = true, recoveryEmailTurnsOff = true), renameWarnings(true, false))
-        assertEquals(RenameWarnings(standard = true, recoveryEmailTurnsOff = false), renameWarnings(false, false))
-        assertEquals(RenameWarnings(standard = true, recoveryEmailTurnsOff = false), renameWarnings(false, true))
-    }
-
     @Test
     fun `the bind carries the address, and a vault only while no phrase is saved`() {
         assertEquals(RenameRecoveryEmail.AddressAndVault, renameRecoveryEmail(true, addressHeld = true, phraseSaved = false))
@@ -241,7 +217,7 @@ class UsernameChangeTest {
     }
 
     private fun runner(ports: Ports, storage: MapStorage = MapStorage()) =
-        UsernameRenameRunner("acct", UsernameRenameStore(storage), ports, nowMs = { 5_000L })
+        UsernameRenameRunner("acct", UsernameRenameStore(storage), ports)
 
     private fun discovery(status: Int, body: String) = DiscoveryHttpError(status, "/discovery/username/replace", body)
 
@@ -265,17 +241,6 @@ class UsernameChangeTest {
         assertEquals(listOf("bind:alice>bob", "replace:bob", "bind:bob>alice"), ports.calls)
         assertNull(ports.adopted)
         assertTrue("rolled back: nothing is owed", storage.rows.isEmpty())
-    }
-
-    @Test
-    fun `too soon rolls back and names the date`() = runTest {
-        val ports = Ports().apply {
-            replace = { throw discovery(429, """{"error":"rename-too-soon","retry_after_secs":120}""") }
-        }
-        val result = runner(ports).start("alice", "alicia") as RenameResult.Refused
-        assertEquals(UiText("username.change.too_soon"), result.line)
-        assertEquals(5_000L + 120_000L, result.allowedAtMs)
-        assertEquals("bind:alicia>alice", ports.calls.last())
     }
 
     @Test
@@ -371,26 +336,18 @@ class UsernameChangeTest {
         assertTrue(isUsernameTaken(DiscoveryHttpError(409, "/discovery/register", "username already registered")))
         assertTrue(isUsernameTaken(AuthHttpError(409, "/auth/login-handle", "", code = "handle-taken")))
         assertFalse(isUsernameTaken(AuthHttpError(409, "/auth/login-handle", "", code = "handle-mismatch")))
-        assertEquals(
-            120L,
-            renameTooSoonSecs(DiscoveryHttpError(429, "/x", """{"error":"rename-too-soon","retry_after_secs":120}""")),
-        )
-        assertNull(renameTooSoonSecs(DiscoveryHttpError(429, "/x", """{"error":"rate-limited"}""")))
     }
 
     @Test
-    fun `the store keeps the record and the stamp per account`() {
+    fun `the store keeps the record per account`() {
         val storage = MapStorage()
         val store = UsernameRenameStore(storage)
         assertNull(store.load("a"))
-        assertNull(store.lastChangedAtMs("a"))
         store.save("a", UsernameRenameOwed("alice", "alicia", bindSent = true))
-        store.markChanged("a", 77L)
         assertEquals(UsernameRenameOwed("alice", "alicia", bindSent = true), UsernameRenameStore(storage).load("a"))
-        assertEquals(77L, store.lastChangedAtMs("a"))
         assertNull(store.load("b"))
         store.clearAccount("a")
         assertNull(store.load("a"))
-        assertNull(store.lastChangedAtMs("a"))
+        assertTrue(storage.rows.isEmpty())
     }
 }

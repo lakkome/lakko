@@ -1922,10 +1922,6 @@
       "text": "Could not download the attachment. Try again.",
       "comment": "Downloading or decrypting an attachment failed."
     },
-    "chat.attachment.error.gone": {
-      "text": "The attachment is no longer available on the server.",
-      "comment": "Downloading an attachment failed because the server no longer holds it."
-    },
     "chat.attachment.error.open_photo": {
       "text": "Couldn't open this photo. Try again.",
       "comment": "A photo picked from the library to send could not be read."
@@ -1954,6 +1950,14 @@
       "text": "Could not upload \"{name}\". Try again.",
       "comment": "Encrypting or uploading an attached file failed; {name} is the file."
     },
+    "chat.attachment.gone.body": {
+      "text": "Files nobody opens for a year are removed. Save or pin a message to keep its files.",
+      "comment": "Second line under a no-longer-available attachment, secondary style."
+    },
+    "chat.attachment.gone.title": {
+      "text": "This file is no longer available.",
+      "comment": "Shown in place of an attachment the server no longer holds. First line."
+    },
     "chat.attachment.hide": {
       "text": "Hide",
       "comment": "Button on an attached picture shown inside the message: stop showing it."
@@ -1961,6 +1965,14 @@
     "chat.attachment.image_alt": {
       "text": "image attachment",
       "comment": "Alternative text of an attached picture that has no file name."
+    },
+    "chat.attachment.limit.open": {
+      "text": "Too many files opened. Try again later.",
+      "comment": "Shown in place of media whose download was refused for the limit, with Try again."
+    },
+    "chat.attachment.limit.send": {
+      "text": "You have reached the limit for sending files. Try again later.",
+      "comment": "Composer note when an upload was refused for the limit; the message text stays."
     },
     "chat.attachment.open": {
       "text": "Open",
@@ -2292,6 +2304,10 @@
     "chat.error.revoke_link": {
       "text": "Could not revoke the invite link. Try again.",
       "comment": "Revoking a group invite link failed."
+    },
+    "chat.error.save": {
+      "text": "Couldn't save the message. Try again.",
+      "comment": "Saving or removing a saved message failed."
     },
     "chat.error.transfer": {
       "text": "Could not transfer ownership. Try again.",
@@ -2822,6 +2838,14 @@
       "text": "Reply",
       "comment": "Message menu item: answer this message with a quote of it."
     },
+    "chat.message.save": {
+      "text": "Save",
+      "comment": "Message menu row under Pin: add the message to the account's saved list."
+    },
+    "chat.message.saved_mark": {
+      "text": "Saved",
+      "comment": "Accessibility label of the small mark beside the time of a saved message."
+    },
     "chat.message.select": {
       "text": "Select",
       "comment": "Message menu item: start selecting several messages, this one first."
@@ -2837,6 +2861,10 @@
     "chat.message.unpin": {
       "text": "Unpin",
       "comment": "Message menu item: remove the pin from the message."
+    },
+    "chat.message.unsave": {
+      "text": "Remove from saved",
+      "comment": "Message menu row on a saved message; also the long-press action on a Saved screen row."
     },
     "chat.message.unsupported": {
       "text": "This message needs a newer version of Lakko.",
@@ -3258,6 +3286,10 @@
     "chat.select.forwarded_of": {
       "text": "Forwarded {done} of {total}.",
       "comment": "Shown when forwarding several selected messages stopped at a failure; the rest stay selected."
+    },
+    "chat.select.save": {
+      "text": "Save",
+      "comment": "Select mode action beside Delete and Forward: save every selected message."
     },
     "chat.select.state_not_selected": {
       "text": "Not selected",
@@ -6726,6 +6758,126 @@
       "text": "New message",
       "comment": "Notification text when a new message arrived but its content could not be shown on this device."
     },
+    "profile.avatar.change": {
+      "text": "Change photo",
+      "comment": "Accessible label of the pencil button on the profile photo in Settings > Profile."
+    },
+    "profile.avatar.menu.camera": {
+      "text": "Camera",
+      "comment": "Menu item under the profile photo: take a photo or video with Lakko's camera."
+    },
+    "profile.avatar.menu.library": {
+      "text": "Photo or video",
+      "comment": "Menu item under the profile photo: pick a photo or video from the device's library."
+    },
+    "profile.avatar.menu.remove": {
+      "text": "Remove photo",
+      "comment": "Destructive menu item under the profile photo: go back to initials."
+    },
+    "profile.camera.close": {
+      "text": "Close",
+      "comment": "Close button of the profile camera screen."
+    },
+    "profile.camera.denied": {
+      "text": "Lakko can't use the camera. Allow it in your settings.",
+      "comment": "Shown on the profile camera screen when camera permission is denied."
+    },
+    "profile.camera.photo": {
+      "text": "Photo",
+      "comment": "Mode toggle on Lakko's camera screen for the profile photo."
+    },
+    "profile.camera.shutter": {
+      "text": "Take",
+      "comment": "Accessible label of the shutter button on the profile camera screen."
+    },
+    "profile.camera.switch": {
+      "text": "Switch camera",
+      "comment": "Accessible label of the switch-camera button on the profile camera screen."
+    },
+    "profile.camera.video": {
+      "text": "Video",
+      "comment": "Mode toggle on Lakko's camera screen for the profile photo."
+    },
+    "profile.crop.cancel": {
+      "text": "Cancel",
+      "comment": "Cancel button of the crop screen."
+    },
+    "profile.crop.start": {
+      "text": "Start",
+      "comment": "Accessible label of the strip that chooses where the 10-second profile video starts."
+    },
+    "profile.crop.title": {
+      "text": "Choose the square",
+      "comment": "Title of the screen where the person moves and zooms a picked photo or video inside the circle."
+    },
+    "profile.crop.use": {
+      "text": "Use",
+      "comment": "Confirm button of the crop screen."
+    },
+    "profile.crop.zoom": {
+      "text": "Zoom",
+      "comment": "Accessible label of the zoom slider on the crop screen."
+    },
+    "profile.name.add": {
+      "text": "Add your name",
+      "comment": "Shown in place of the name in Settings > Profile when the person has none."
+    },
+    "profile.name.change": {
+      "text": "Change name",
+      "comment": "Accessible label of the pencil button beside the name in Settings > Profile."
+    },
+    "profile.save.done": {
+      "text": "Saved. Your contacts will see the change.",
+      "comment": "Shown under Save in Settings > Profile after a successful save."
+    },
+    "profile.save.error.generic": {
+      "text": "Couldn't save. Try again.",
+      "comment": "Saving the profile failed for another reason."
+    },
+    "profile.save.error.upload": {
+      "text": "Couldn't upload the photo. Check your connection and try again.",
+      "comment": "Saving the profile failed while uploading the photo."
+    },
+    "profile.save.saving": {
+      "text": "Saving…",
+      "comment": "The Save button of Settings > Profile while it saves."
+    },
+    "profile.unsaved.body": {
+      "text": "Your changes to your profile will be lost if you don't save them.",
+      "comment": "Body of the unsaved-changes dialog of Settings > Profile."
+    },
+    "profile.unsaved.cancel": {
+      "text": "Cancel",
+      "comment": "Button of the unsaved-changes dialog: stay on the screen."
+    },
+    "profile.unsaved.discard": {
+      "text": "Don't save",
+      "comment": "Button of the unsaved-changes dialog: drop the changes and leave."
+    },
+    "profile.unsaved.save": {
+      "text": "Save",
+      "comment": "Button of the unsaved-changes dialog: save, then leave."
+    },
+    "profile.unsaved.title": {
+      "text": "Save changes?",
+      "comment": "Title of the dialog shown when leaving Settings > Profile with unsaved changes."
+    },
+    "profile.username.change": {
+      "text": "Change username",
+      "comment": "Accessible label of the pencil button beside the username in Settings > Profile."
+    },
+    "profile.username.none": {
+      "text": "No username",
+      "comment": "Shown in place of the username in Settings > Profile when this device does not know it."
+    },
+    "profile.username.taken": {
+      "text": "{username} is taken. Choose another username.",
+      "comment": "Save failed because the new username is taken; {username} includes the leading @."
+    },
+    "profile.video.unusable": {
+      "text": "This video can't be used as a profile video. Try a shorter MP4 or a photo.",
+      "comment": "The picked video cannot be turned into a profile video on this device."
+    },
     "proof.add_device.help": {
       "text": "Enter your password to add the device.",
       "comment": "Helper under the password field on a signed-in device that is about to let a new device into the account (the 'Is this you?' prompt and the 'Link this device?' step after scanning a code).",
@@ -7736,6 +7888,38 @@
       "comment": "Title of the screen shown when the person is signed in on a device that does not have the account's keys.",
       "security_critical": true
     },
+    "saved.empty": {
+      "text": "Messages you save appear here.",
+      "comment": "Empty state of the Saved screen."
+    },
+    "saved.kind.file": {
+      "text": "File: {name}",
+      "comment": "Saved row: the message is a file; {name} is its file name."
+    },
+    "saved.kind.gif": {
+      "text": "GIF",
+      "comment": "Saved row: the message is a GIF."
+    },
+    "saved.kind.photo": {
+      "text": "Photo",
+      "comment": "Saved row: the message is a photo."
+    },
+    "saved.kind.video": {
+      "text": "Video",
+      "comment": "Saved row: the message is a video."
+    },
+    "saved.kind.video_note": {
+      "text": "Video message",
+      "comment": "Saved row: the message is a round video message."
+    },
+    "saved.kind.voice": {
+      "text": "Voice message",
+      "comment": "Saved row: the message is a voice message."
+    },
+    "saved.title": {
+      "text": "Saved",
+      "comment": "Title of the Saved screen, and its row in the Chats screen menu."
+    },
     "search.people.add_contact": {
       "text": "Add contact",
       "comment": "Button on a person found by search: sends them a contact request at once."
@@ -7756,10 +7940,6 @@
       "text": "No one found. Check the spelling, or ask them for an invite link.",
       "comment": "Shown when Search people found nobody. Must read the same whether the person does not exist or does not let the searcher find them."
     },
-    "search.people.request_refused": {
-      "text": "Couldn't send the request. They may have changed who can find them.",
-      "comment": "Shown when a contact request to a person found by search was refused because they changed who can find them since."
-    },
     "search.people.out_of_searches": {
       "text": "Too many searches for now. Try again later.",
       "comment": "Shown under People in the search field when the device has no search allowance left for now. Local results stay."
@@ -7767,6 +7947,10 @@
     "search.people.request_failed": {
       "text": "Couldn't send the request. Try again.",
       "comment": "Shown on a found person's row when sending the contact request failed for a reason other than their setting."
+    },
+    "search.people.request_refused": {
+      "text": "Couldn't send the request. They may have changed who can find them.",
+      "comment": "Shown when a contact request to a person found by search was refused because they changed who can find them since."
     },
     "search.people.request_sent": {
       "text": "Request sent",
@@ -8416,37 +8600,9 @@
       "comment": "Line under the Show my city to my other devices switch.",
       "security_critical": true
     },
-    "settings.profile.error.generic": {
-      "text": "Could not save your name. Try again.",
-      "comment": "Saving the display name failed."
-    },
-    "settings.profile.lede": {
-      "text": "How you appear to your contacts.",
-      "comment": "Line under the Profile title in Settings."
-    },
-    "settings.profile.name.hint": {
-      "text": "Shown to the people you talk to. Not unique, at most {count, plural, one {# character} other {# characters}}.",
-      "comment": "Note under the name field in Settings, Profile."
-    },
     "settings.profile.name.label": {
       "text": "Your name",
       "comment": "Label of the display-name field in Settings > Profile."
-    },
-    "settings.profile.preview.label": {
-      "text": "How others see you",
-      "comment": "Caption above the live preview of the name and username as contacts see them."
-    },
-    "settings.profile.preview.no_name": {
-      "text": "Others see your key fingerprint until you set a name.",
-      "comment": "Preview text when the person has neither a name nor a username."
-    },
-    "settings.profile.saved": {
-      "text": "Your name will update for your contacts.",
-      "comment": "Confirmation after the name is saved; contacts see it on their next message."
-    },
-    "settings.profile.username.none": {
-      "text": "None",
-      "comment": "Shown in place of the username when the account has none."
     },
     "settings.recovery.devices.title": {
       "text": "Other devices",
@@ -8713,30 +8869,9 @@
       "text": "Username: {message}",
       "comment": "Spoken by the screen reader for the reason under a username field. {message} is the reason, like 'At least 3 characters'."
     },
-    "username.change.body": {
-      "text": "People will no longer find you by {old}. Nobody else can take it for 30 days.",
-      "comment": "Warning on the change-username screen; {old} is the current username with its leading @.",
-      "security_critical": true
-    },
-    "username.change.next_change": {
-      "text": "After this you can change it again in 30 days.",
-      "comment": "Second warning line on the change-username screen."
-    },
-    "username.change.other_devices": {
-      "text": "Your other devices pick up the new username the next time they are online.",
-      "comment": "Note under the done line after a change."
-    },
-    "username.change.save": {
-      "text": "Change",
-      "comment": "Main button of the change-username screen."
-    },
     "username.change.title": {
       "text": "Change username",
       "comment": "Title of the screen where a person changes their username, and label of the button that opens it."
-    },
-    "username.change.too_soon": {
-      "text": "You can change your username again on {date}.",
-      "comment": "Shown instead of the form when the last change was under 30 days ago; {date} is a localized date."
     },
     "username.claim.body": {
       "text": "With a username and a password you can sign in on another device, add a recovery email, and people can find you.",

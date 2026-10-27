@@ -1798,10 +1798,6 @@
       "text": "Não foi possível baixar o anexo. Tente novamente.",
       "status": "machine"
     },
-    "chat.attachment.error.gone": {
-      "text": "O anexo não está mais disponível no servidor.",
-      "status": "machine"
-    },
     "chat.attachment.error.open_photo": {
       "text": "Não foi possível abrir esta foto. Tente novamente.",
       "status": "machine"
@@ -7846,36 +7842,8 @@
       "text": "Senha",
       "status": "machine"
     },
-    "settings.profile.error.generic": {
-      "text": "Não foi possível salvar seu nome. Tente novamente.",
-      "status": "machine"
-    },
-    "settings.profile.lede": {
-      "text": "Como seus contatos veem você.",
-      "status": "machine"
-    },
-    "settings.profile.name.hint": {
-      "text": "Aparece para as pessoas com quem você conversa. Não precisa ser único, no máximo {count, plural, one {# caractere} other {# caracteres}}.",
-      "status": "machine"
-    },
     "settings.profile.name.label": {
       "text": "Seu nome",
-      "status": "machine"
-    },
-    "settings.profile.preview.label": {
-      "text": "Como os outros veem você",
-      "status": "machine"
-    },
-    "settings.profile.preview.no_name": {
-      "text": "Os outros veem a impressão digital da sua chave até você definir um nome.",
-      "status": "machine"
-    },
-    "settings.profile.saved": {
-      "text": "Seu nome vai ser atualizado para seus contatos.",
-      "status": "machine"
-    },
-    "settings.profile.username.none": {
-      "text": "Nenhum",
       "status": "machine"
     },
     "settings.recovery.devices.title": {
@@ -8126,28 +8094,8 @@
       "text": "Nome de usuário: {message}",
       "status": "machine"
     },
-    "username.change.body": {
-      "text": "As pessoas não vão mais encontrar você por {old}. Ninguém mais pode ficar com ele por 30 dias.",
-      "status": "machine"
-    },
-    "username.change.next_change": {
-      "text": "Depois disso, você poderá alterá-lo de novo em 30 dias.",
-      "status": "machine"
-    },
-    "username.change.other_devices": {
-      "text": "Seus outros dispositivos recebem o novo nome de usuário na próxima vez que estiverem online.",
-      "status": "machine"
-    },
-    "username.change.save": {
-      "text": "Alterar",
-      "status": "machine"
-    },
     "username.change.title": {
       "text": "Alterar nome de usuário",
-      "status": "machine"
-    },
-    "username.change.too_soon": {
-      "text": "Você poderá alterar seu nome de usuário de novo em {date}.",
       "status": "machine"
     },
     "username.claim.body": {

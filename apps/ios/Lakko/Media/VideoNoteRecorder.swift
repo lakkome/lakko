@@ -48,6 +48,18 @@ public final class VideoNoteRecorder: NSObject, AVCaptureVideoDataOutputSampleBu
     private var recording = false
     private var fileURL: URL?
     private var position: AVCaptureDevice.Position = .front
+    /// ADR-0084 — the profile camera records no sound (a profile video never
+    /// keeps it) and asks for no microphone.
+    private let includeAudio: Bool
+    /// A still asked for by ``captureStill()``, answered by the next frame.
+    private var stillRequest: CheckedContinuation<CGImage?, Never>?
+
+    /// `includeAudio: false` is the profile camera (UX `profile-screen.md`
+    /// section 2.3): the same capture, no microphone, no audio track.
+    public init(includeAudio: Bool = true) {
+        self.includeAudio = includeAudio
+        super.init()
+    }
 
     /// Called on the main actor when capture fails mid-take (an interruption,
     /// a runtime error, a writer failure).
@@ -57,7 +69,7 @@ public final class VideoNoteRecorder: NSObject, AVCaptureVideoDataOutputSampleBu
 
     /// Configure the session and start the preview + the take. Blocking work
     /// runs off the main actor.
-    public func start(directory: URL) async throws {
+    public func start(directory: URL, recordImmediately: Bool = true) async throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent("video-note-\(UUID().uuidString).mp4")
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
@@ -69,7 +81,7 @@ public final class VideoNoteRecorder: NSObject, AVCaptureVideoDataOutputSampleBu
                     self.lastVideoTime = nil
                     self.poster = nil
                     self.writer = nil
-                    self.recording = true
+                    self.recording = recordImmediately
                     self.session.startRunning()
                     cont.resume()
                 } catch {
@@ -90,6 +102,36 @@ public final class VideoNoteRecorder: NSObject, AVCaptureVideoDataOutputSampleBu
         }
     }
 
+    /// Start writing a take on a session already previewing (the profile
+    /// camera's Video mode: the preview runs before the shutter).
+    public func beginTake() {
+        queue.async {
+            self.cancelWriterKeepingSession()
+            self.firstVideoTime = nil
+            self.lastVideoTime = nil
+            self.poster = nil
+            self.recording = true
+        }
+    }
+
+    /// The next camera frame as an upright image (the profile camera's Photo
+    /// mode), or `nil` when no frame arrives.
+    public func captureStill() async -> CGImage? {
+        await withCheckedContinuation { (cont: CheckedContinuation<CGImage?, Never>) in
+            queue.async {
+                if let previous = self.stillRequest { previous.resume(returning: nil) }
+                self.stillRequest = cont
+            }
+        }
+    }
+
+    private func cancelWriterKeepingSession() {
+        if let writer, writer.status == .writing { writer.cancelWriting() }
+        writer = nil
+        videoInput = nil
+        audioInput = nil
+    }
+
     private func configure(position: AVCaptureDevice.Position) throws {
         session.beginConfiguration()
         defer { session.commitConfiguration() }
@@ -103,10 +145,12 @@ public final class VideoNoteRecorder: NSObject, AVCaptureVideoDataOutputSampleBu
         guard session.canAddInput(cameraInput) else { throw MediaCaptureError.startFailed }
         session.addInput(cameraInput)
         self.position = camera.position
-        guard let mic = AVCaptureDevice.default(for: .audio) else { throw MediaCaptureError.noMicrophone }
-        let micInput = try AVCaptureDeviceInput(device: mic)
-        guard session.canAddInput(micInput) else { throw MediaCaptureError.startFailed }
-        session.addInput(micInput)
+        if includeAudio {
+            guard let mic = AVCaptureDevice.default(for: .audio) else { throw MediaCaptureError.noMicrophone }
+            let micInput = try AVCaptureDeviceInput(device: mic)
+            guard session.canAddInput(micInput) else { throw MediaCaptureError.startFailed }
+            session.addInput(micInput)
+        }
 
         if !session.outputs.contains(videoOutput) {
             videoOutput.alwaysDiscardsLateVideoFrames = true
@@ -114,7 +158,7 @@ public final class VideoNoteRecorder: NSObject, AVCaptureVideoDataOutputSampleBu
             guard session.canAddOutput(videoOutput) else { throw MediaCaptureError.startFailed }
             session.addOutput(videoOutput)
         }
-        if !session.outputs.contains(audioOutput) {
+        if includeAudio, !session.outputs.contains(audioOutput) {
             audioOutput.setSampleBufferDelegate(self, queue: queue)
             guard session.canAddOutput(audioOutput) else { throw MediaCaptureError.startFailed }
             session.addOutput(audioOutput)
@@ -185,6 +229,10 @@ public final class VideoNoteRecorder: NSObject, AVCaptureVideoDataOutputSampleBu
     /// Stop and delete the take.
     public func discard() {
         queue.async {
+            if let request = self.stillRequest {
+                self.stillRequest = nil
+                request.resume(returning: nil)
+            }
             self.recording = false
             self.session.stopRunning()
             self.cancelWriter()
@@ -213,6 +261,12 @@ public final class VideoNoteRecorder: NSObject, AVCaptureVideoDataOutputSampleBu
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        if output === videoOutput, let request = stillRequest,
+           let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            stillRequest = nil
+            let image = CIImage(cvPixelBuffer: pixels)
+            request.resume(returning: ciContext.createCGImage(image, from: image.extent))
+        }
         guard recording, CMSampleBufferDataIsReady(sampleBuffer) else { return }
         let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if output === videoOutput {
@@ -263,14 +317,16 @@ public final class VideoNoteRecorder: NSObject, AVCaptureVideoDataOutputSampleBu
                 AVEncoderBitRateKey: 64_000,
             ])
             audio.expectsMediaDataInRealTime = true
-            guard writer.canAdd(video), writer.canAdd(audio) else { throw MediaCaptureError.writerFailed }
+            guard writer.canAdd(video), !includeAudio || writer.canAdd(audio) else {
+                throw MediaCaptureError.writerFailed
+            }
             writer.add(video)
-            writer.add(audio)
+            if includeAudio { writer.add(audio) }
             guard writer.startWriting() else { throw MediaCaptureError.writerFailed }
             writer.startSession(atSourceTime: time)
             self.writer = writer
             self.videoInput = video
-            self.audioInput = audio
+            self.audioInput = includeAudio ? audio : nil
             self.firstVideoTime = time
         } catch {
             Self.log.warning("video note writer failed to start")

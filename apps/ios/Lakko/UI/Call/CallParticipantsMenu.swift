@@ -197,7 +197,8 @@ struct CallInviteContactsScreen: View {
                                         name: row.isPlaceholder ? "" : row.name,
                                         identity: row.id,
                                         size: 40,
-                                        placeholderSymbol: "person.fill"
+                                        placeholderSymbol: "person.fill",
+                                        photo: .person(row.key)
                                     )
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(row.name)

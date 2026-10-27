@@ -111,7 +111,8 @@ struct NewGroupScreen: View {
                     InitialsAvatar(
                         name: resolved.name,
                         identity: entry.request.fromPubkey.base64EncodedString(),
-                        size: 40
+                        size: 40,
+                        photo: .person(entry.request.fromPubkey)
                     )
                     VStack(alignment: .leading, spacing: 2) {
                         Text(resolved.listLabel)

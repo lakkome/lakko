@@ -237,6 +237,7 @@ function PersonRow(props: {
           recipientUsername: person.username,
           recipientAccountIdHex: person.accountIdHex,
           sentAtMs: Date.now(),
+          recipientKeyB64: person.keyB64,
         });
       }
       props.onSent?.();
@@ -247,7 +248,7 @@ function PersonRow(props: {
   return (
     <div>
       <div class="lk-row">
-        <Avatar label={props.person.name} id={props.person.keyB64} />
+        <Avatar label={props.person.name} id={props.person.keyB64} personKey={props.person.keyB64} />
         <div class="lk-row-body">
           <div class="lk-row-line">
             <span class="lk-row-title">

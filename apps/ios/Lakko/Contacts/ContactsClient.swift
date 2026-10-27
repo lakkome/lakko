@@ -1341,7 +1341,8 @@ public final class ContactsClient {
                             // Envelope v2 — the requester's account id, or
                             // `nil` when it sent none (ADR-0021 tile match).
                             accountId: $0.accountId,
-                            usernameCertificate: $0.usernameCertificate
+                            usernameCertificate: $0.usernameCertificate,
+                            avatar: ProfileAvatar($0.avatar)
                         )
                     }
                 } catch {

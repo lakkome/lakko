@@ -291,6 +291,8 @@ export function createConversationRows() {
           pinned: f?.pinned === true,
           muted: f?.muted === true,
           archived: f?.archived === true,
+          // ADR-0084 - a one-to-one's circle is the person's photo.
+          ...(kindOf(g) === "chat" ? { personKey: peerKeyOf(g) ?? undefined } : {}),
         };
       }),
       ],

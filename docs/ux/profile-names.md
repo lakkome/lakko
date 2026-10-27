@@ -110,5 +110,7 @@ AppShell menu, iOS settings sheet, Android settings screen).
 
 ## 9. Out of scope
 
-Avatars, bios, per-chat nicknames, name history, and showing names to people you have no
-chat or request with.
+Bios, per-chat nicknames, name history, and showing names to people you have no chat or
+request with. (Avatars were listed here without a reason given; since 2026-10-26 they are
+[`profile-screen.md`](profile-screen.md) and ADR-0084, which also replace the Settings >
+Profile part of section 4.)

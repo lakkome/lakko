@@ -35,6 +35,7 @@ import { RecoveryPage } from "../settings/RecoveryPage";
 import { ProtectionCard } from "../auth/protect/ProtectionCard";
 import { refreshProtection } from "../auth/protect/protection-state";
 import Profile from "./Profile";
+import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { ChatFoldersSection } from "../chat/folders/ChatFoldersSection";
 import { paths } from "./paths";
 
@@ -117,6 +118,7 @@ export default function Settings(): JSX.Element {
             label={displayName().length > 0 ? displayName() : username()}
             id={username()}
             size="md"
+            personKey={OWN_AVATAR_KEY}
           />
           <div>
             <div class="lk-settings-me-name">

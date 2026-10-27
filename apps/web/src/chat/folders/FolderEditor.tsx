@@ -195,7 +195,7 @@ function FolderEditor(props: { request: EditorRequest }): JSX.Element {
           <Show when={row()}>
             {(r) => (
               <div class="lk-folder-hand-row">
-                <Avatar label={r().title} id={r().id} />
+                <Avatar label={r().title} id={r().id} personKey={r().personKey} />
                 <span class="lk-ellipsis">{r().title}</span>
                 <button
                   type="button"
@@ -426,7 +426,7 @@ function ChatPicker(props: {
                     disabled={!isPicked(ref) && atLimit()}
                     onChange={() => toggle(ref)}
                   />
-                  <Avatar label={r.title} id={r.id} />
+                  <Avatar label={r.title} id={r.id} personKey={r.personKey} />
                   <span class="lk-row-title">
                     <span class="lk-ellipsis">{r.title}</span>
                   </span>

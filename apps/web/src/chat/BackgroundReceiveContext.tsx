@@ -143,6 +143,7 @@ import { readVerifiedBinding } from "../contacts/verified-binding";
 import { subscribeResetAccepted } from "../contacts/reset-events";
 import { installScopeLineage } from "../reach/mailbox-write";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
+import { savedEntriesOf, unsaveEdit } from "./saved-messages";
 import { useLineage } from "./use-lineage";
 import { laterSegmentExists, oldSegmentPolled, retiresOldSegmentPush } from "./lineage";
 import { groupIdHex } from "../devices/sync/state";
@@ -2085,6 +2086,15 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         void pins.messageDeleted(entry.groupIdB64, id).catch((err) => {
           // eslint-disable-next-line no-console
           console.warn("background receive: dropping pins of a deleted message failed", err);
+        });
+      }
+      // ADR-0065 section 3 — a message its author deleted for everyone
+      // leaves Saved here too, as it does with the chat open.
+      const unsaved = savedEntriesOf(sync.saved(), hex, newlyDeleted).map((e) => unsaveEdit(e.ref, e.messageId));
+      if (unsaved.length > 0) {
+        void sync.applyFolderEdits(unsaved).catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("background receive: removing a deleted message from Saved failed", err instanceof Error ? err.name : "");
         });
       }
     } catch (err) {

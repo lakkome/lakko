@@ -21,7 +21,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -68,6 +67,9 @@ import me.lakko.app.chat.rowsMatching
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.l10n.t
 import uniffi.lakko_ffi_uniffi.FolderConversationRef
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.ui.components.LakkoDialogTone
 
 /**
  * The folder editor, `docs/ux/chat-folders.md` section 3: the name, what is
@@ -284,15 +286,11 @@ public fun FolderEditorScreen(
     }
 
     if (confirmingDiscard) {
-        AlertDialog(
+        LakkoDialog(
             onDismissRequest = { confirmingDiscard = false },
-            title = { Text(t("folders.editor.discard.title")) },
-            confirmButton = {
-                TextButton(onClick = { confirmingDiscard = false; finish() }) { Text(t("folders.editor.discard.confirm")) }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmingDiscard = false }) { Text(t("folders.editor.discard.keep")) }
-            },
+            title = t("folders.editor.discard.title"),
+            confirm = LakkoDialogAction(t("folders.editor.discard.confirm")) { confirmingDiscard = false; finish() },
+            cancel = LakkoDialogAction(t("folders.editor.discard.keep"), LakkoDialogTone.Ghost) { confirmingDiscard = false },
         )
     }
     if (confirmingDelete && original != null) {

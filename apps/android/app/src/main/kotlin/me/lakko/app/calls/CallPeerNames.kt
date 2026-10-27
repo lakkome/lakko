@@ -74,6 +74,9 @@ public class CallPeerNames(
      *  `null` before it did. */
     public fun memberKeyOf(peerId: String): String? = memberKeys[peerId]
 
+    /** The person (account key, base64) [peerId] verified as, or `null`. */
+    public fun personKeyOf(peerId: String): String? = persons[peerId]
+
     /**
      * A link-call member sealed its profile into the call, relayed by
      * [peerId]. [senderLeafKeyHex] is the leaf key of the MLS-authenticated
@@ -103,7 +106,10 @@ public class CallPeerNames(
     /** Re-run the naming rule for every remote tile on [ui]. [participantIdOf]
      *  maps a peer id to its roster id. */
     public fun reapply(ui: CallUiState, participantIdOf: (peerId: String) -> String) {
-        for (peerId in peers) ui.setParticipantName(participantIdOf(peerId), currentName(peerId))
+        for (peerId in peers) {
+            ui.setParticipantName(participantIdOf(peerId), currentName(peerId))
+            ui.setParticipantPersonKey(participantIdOf(peerId), persons[peerId])
+        }
     }
 
     private fun currentName(peerId: String): String {

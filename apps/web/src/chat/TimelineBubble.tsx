@@ -66,6 +66,11 @@ import { currentLanguage, joinList, t } from "../l10n";
 
 /** The callbacks and reactive reads a bubble needs from the chat view. */
 export interface BubbleHost {
+  /** ADR-0065 section 2 — whether this account saved the message (the mark
+   *  beside the time and the menu's `Remove from saved`). Reactive. */
+  isSavedOf?: (messageId: number) => boolean;
+  /** ADR-0065 section 2 — `Save` / `Remove from saved` was chosen. */
+  onToggleSaved?: (messageId: number) => void;
   onDownload: (ref: AttachmentRefBytes) => void | Promise<void>;
   onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
   onHidePreview: (ref: AttachmentRefBytes) => void;
@@ -122,6 +127,10 @@ export interface BubbleHost {
    *  (`pin-bar.ts` `historyRowOffersUnpin`), whatever `actionsAvailable`
    *  says. */
   unpinOnly?: boolean;
+  /** Whether the pin row is offered (default yes). An older segment's row
+   *  opens the restricted menu for Save (2026-10-27) and offers Unpin only
+   *  when `historyRowOffersUnpin` says so. */
+  pinRowShown?: boolean;
   /** ADR-0047 — the media runtime, this row's upload state and its retry. */
   hub: MediaHub;
   mediaUpload: MediaUpload;
@@ -556,6 +565,12 @@ function ChatBubbleBody(
    */
   const metaLine = (): JSX.Element => (
     <div class="lk-bubble-meta">
+      {/* ADR-0065 section 2 — the saved mark, seen only by this account. */}
+      <Show when={props.messageId !== undefined && props.isSavedOf?.(props.messageId) === true}>
+        <span class="lk-bubble-saved" role="img" aria-label={t("chat.message.saved_mark")} title={t("chat.message.saved_mark")}>
+          <Icon name="bookmark" size={12} />
+        </span>
+      </Show>
       {/* A failed row offers Retry where the message is. The media
           bubbles draw their own, so this is for a row that has none:
           before it, a plain text message that did not send showed the
@@ -661,7 +676,7 @@ function ChatBubbleBody(
       <Show when={props.avatar !== null}>
         <span class="lk-bubble-gutter">
           <Show when={props.avatar !== "gutter" && props.avatar}>
-            {(a) => <Avatar label={a().label} id={a().id} size="sm" />}
+            {(a) => <Avatar label={a().label} id={a().id} size="sm" personKey={a().id} />}
           </Show>
         </span>
       </Show>
@@ -985,12 +1000,25 @@ function ChatBubbleBody(
                  and that is not deleted": the same gate as Forward (the menu
                  never opens on a deleted message). */
               pinLabel={
-                props.messageId !== undefined && props.ack === "sent"
+                props.messageId !== undefined && props.ack === "sent" && props.pinRowShown !== false
                   ? props.pinLabelOf(props.messageId)
                   : null
               }
               onPin={() => {
                 if (props.messageId !== undefined) props.onPin(props.messageId);
+              }}
+              /* ADR-0065 section 2 — under Pin, on a message whose send is
+                 complete and that is not deleted (the menu never opens on a
+                 deleted one). */
+              saveLabel={
+                props.messageId !== undefined && props.ack === "sent" && props.onToggleSaved !== undefined
+                  ? props.isSavedOf?.(props.messageId) === true
+                    ? "unsave"
+                    : "save"
+                  : null
+              }
+              onSave={() => {
+                if (props.messageId !== undefined) props.onToggleSaved?.(props.messageId);
               }}
               /* Nothing is sent and nothing is stored: the text goes from this
                  device's memory to this device's clipboard. */

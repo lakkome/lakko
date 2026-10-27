@@ -273,7 +273,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
         </button>
 
         <header class="lk-contact-head">
-          <Avatar label={name()} id={props.personKeyB64} size="xl" />
+          <Avatar label={name()} id={props.personKeyB64} size="xl" personKey={props.personKeyB64} playVideo />
           <h1>{name()}</h1>
           <Show when={resolved().username}>
             {(u) => <div class="lk-contact-username">{u()}</div>}

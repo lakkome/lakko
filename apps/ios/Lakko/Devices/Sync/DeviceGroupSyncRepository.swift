@@ -71,6 +71,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// ADR-0058 — the person's chat folders, in bar order. Only folders
     /// whose name has arrived, never a deleted one (the fold decides both).
     @Published public private(set) var folders: [FolderView] = []
+    /// ADR-0065 section 4 — the account's saved messages (live entries,
+    /// most recently saved first).
+    @Published public private(set) var saved: [SavedMessageView] = []
 
     /// ADR-0073 R.5 — the conversation lineage registers: which group
     /// continues which conversation. Read through ``ConversationLineage``.
@@ -439,6 +442,8 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         if c != readCursors { readCursors = c }
         if o != order { order = o }
         if folderList != folders { folders = folderList }
+        let savedList = SavedMessages.ordered((try? s.saved()) ?? [])
+        if savedList != saved { saved = savedList }
         if lineageList != lineage { lineage = lineageList }
         let address = (try? s.recoveryEmail()).flatMap { $0 }
         if address != recoveryEmail { recoveryEmail = address }
@@ -580,6 +585,22 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         try await write(.folderChanges(changes: changes))
         markBackupDirty()
     }
+
+    /// ADR-0065 section 4 — publish saves and removals of saved messages, in
+    /// change sets of at most ``savedMaxPerChangeSet()`` (one journal row).
+    public func applySaved(_ registers: [SavedMessageRegister]) async throws {
+        let size = max(1, Int(savedMaxPerChangeSet()))
+        var start = 0
+        while start < registers.count {
+            let chunk = Array(registers[start..<min(registers.count, start + size)])
+            try await applyFolderChanges(FolderChangeSet(
+                metas: [], members: [], pins: [], removed: [], order: nil, saved: chunk))
+            start += size
+        }
+    }
+
+    /// Blob ids of every saved message's files (for the keep tick).
+    public func savedBlobIds() -> [Data] { (try? syncedState.savedBlobIds()) ?? [] }
 
     /// ADR-0058 section 5.2 — the backup carries this state, so a person's
     /// own folder or flag edit is a change worth backing up. Read cursors and

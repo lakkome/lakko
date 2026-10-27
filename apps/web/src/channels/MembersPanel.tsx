@@ -77,7 +77,7 @@ export function MembersPanel(props: {
                   {(row): JSX.Element => (
                     <li class="lk-card-row">
                       <span class="lk-card-row-icon">
-                        <Avatar label={row.name} id={row.key} size="sm" />
+                        <Avatar label={row.name} id={row.key} size="sm" personKey={row.personKeyB64} />
                       </span>
                       <div class="lk-card-row-body">
                         <span class="lk-card-row-title">{row.name}</span>

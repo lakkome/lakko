@@ -1332,6 +1332,7 @@ public class ContactsRepository(
                         messageId = result.messageId,
                         createdAt = result.createdAt,
                         introMessage = introMessage.toByteArray(Charsets.UTF_8),
+                        recipientKeyB64 = result.recipientSignaturePubkey?.let { base64Encode(it) },
                     ),
                 )
             }
@@ -1444,6 +1445,7 @@ public class ContactsRepository(
                     messageId = result.messageId,
                     createdAt = result.createdAt,
                     introMessage = introMessage,
+                    recipientKeyB64 = result.recipientSignaturePubkey?.let { base64Encode(it) },
                 ),
             )
         }
@@ -3632,6 +3634,9 @@ public data class SentContactRequest(
     /** When this device sent it (unix ms). Not part of the entry's
      *  identity: the Delivery Service row id is. */
     val sentAtMs: Long = System.currentTimeMillis(),
+    /** ADR-0084 — the recipient's signature key (standard base64), so the
+     *  Sent row shows their photo when this device holds one. */
+    val recipientKeyB64: String? = null,
 ) {
     override fun equals(other: Any?): Boolean =
         other is SentContactRequest &&

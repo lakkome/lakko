@@ -23,9 +23,9 @@
 //!     binds the first; a second `register` is `409 username-already-set`.
 //!   * `POST /discovery/username/replace` renames: the current row is
 //!     retired and the new hash becomes current, in one transaction under a
-//!     lock on the account's current row. At most one rename per
-//!     [`NamePolicy::rename_interval_secs`] (30 days by default; `429
-//!     rename-too-soon`).
+//!     lock on the account's current row. Renames are not limited in number
+//!     or frequency (the 30-day minimum interval of ADR-0076 D2 was removed
+//!     on 2026-10-26, ADR-0084 amendment).
 //!   * A retired row answers no lookup and no name search, its `is_public`
 //!     is cleared, and it still occupies its hash: nobody else can register
 //!     or rename to it (`409 username-taken`) until the hourly pruner deletes
@@ -33,12 +33,15 @@
 //!     default). Freed at once, a stranger could take the name the same hour
 //!     and be mistaken for the person. The account that retired it may take
 //!     it back with a rename.
+//!   * **An account holds at most one retired name.** A rename frees every
+//!     earlier retired name of the account at once and retires only the name
+//!     it leaves, so renaming in a loop cannot hold a stock of names.
 //!   * First-come-first-served: a hash that is present is `409
 //!     username-taken`, whoever holds it.
 //!   * A rename takes the account out of Everyone (its public record and
 //!     name terms are keyed over the old name): the client publishes again.
 //!
-//! Both intervals are **chosen, not measured**.
+//! The hold is **chosen, not measured**.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -51,14 +54,9 @@ use sqlx::MySqlPool;
 
 use crate::AppState;
 
-/// Default minimum interval between two renames of one account, and default
-/// time a retired name stays unclaimable: 30 days (ADR-0076 D1, D2). Chosen,
-/// not measured.
+/// Default time a retired name stays unclaimable: 30 days (ADR-0076 D1).
+/// Chosen, not measured.
 pub(crate) const DEFAULT_NAME_INTERVAL_SECS: u64 = 30 * 86_400;
-
-/// Env knob: minimum seconds between two renames of one account (0 = no
-/// minimum).
-pub(crate) const RENAME_INTERVAL_VAR: &str = "LAKKO_DISCOVERY_RENAME_INTERVAL_SECS";
 
 /// Env knob: seconds a retired name stays held before the pruner frees it.
 pub(crate) const RETIRED_HOLD_VAR: &str = "LAKKO_DISCOVERY_RETIRED_NAME_HOLD_SECS";
@@ -74,27 +72,23 @@ const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600)
 const CODE_USERNAME_TAKEN: &str = "username-taken";
 const CODE_USERNAME_ALREADY_SET: &str = "username-already-set";
 const CODE_NO_USERNAME: &str = "no-username";
-const CODE_RENAME_TOO_SOON: &str = "rename-too-soon";
 
-/// The rename policy (ADR-0076 D1, D2).
+/// The rename policy (ADR-0076 D1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NamePolicy {
-    /// Minimum seconds between two renames of one account (0 = none).
-    pub(crate) rename_interval_secs: u64,
     /// Seconds a retired name stays unclaimable by others.
     pub(crate) retired_hold_secs: u64,
 }
 
 impl NamePolicy {
-    /// Both intervals at their 30-day default.
+    /// The hold at its 30-day default.
     pub(crate) const fn defaults() -> Self {
         Self {
-            rename_interval_secs: DEFAULT_NAME_INTERVAL_SECS,
             retired_hold_secs: DEFAULT_NAME_INTERVAL_SECS,
         }
     }
 
-    /// Read both knobs; an unset one takes its default.
+    /// Read the knob; unset takes the default.
     ///
     /// # Errors
     ///
@@ -111,7 +105,6 @@ impl NamePolicy {
         }
         let defaults = Self::defaults();
         Ok(Self {
-            rename_interval_secs: read(RENAME_INTERVAL_VAR, defaults.rename_interval_secs)?,
             retired_hold_secs: read(RETIRED_HOLD_VAR, defaults.retired_hold_secs)?,
         })
     }
@@ -270,16 +263,15 @@ pub(crate) async fn register(
 /// of one account run one after the other), in this order:
 ///
 /// 1. the account holds a current name, else `409 no-username`;
-/// 2. its last rename was at least the rename interval ago, else `429
-///    {"error":"rename-too-soon","retry_after_secs":N}` (+ `Retry-After`);
-/// 3. the new hash is free, or is this account's own RETIRED row; a hash
+/// 2. the new hash is free, or is this account's own RETIRED row; a hash
 ///    that is present otherwise (another account's, current or retired, or
 ///    this account's current one) is `409 username-taken`;
+/// 3. every other retired row of the account is deleted (its names are
+///    free at once): an account holds at most one retired name;
 /// 4. the current row is retired (`retired_at` now, `is_public` cleared);
 /// 5. the new hash becomes current: inserted, or the own retired row revived;
 /// 6. the account leaves Everyone (its name terms and public record were
-///    keyed over the old name); the client publishes again;
-/// 7. the time of the rename is recorded.
+///    keyed over the old name); the client publishes again.
 #[allow(clippy::too_many_lines)] // one transaction, its steps numbered as in the doc above
 pub(crate) async fn replace(
     State(state): State<AppState>,
@@ -317,37 +309,7 @@ pub(crate) async fn replace(
         return Err(coded(StatusCode::CONFLICT, CODE_NO_USERNAME));
     };
 
-    // 2. The interval since the last rename.
-    let interval = i64::try_from(state.name_policy.rename_interval_secs).unwrap_or(i64::MAX);
-    let since: Option<(i64,)> = sqlx::query_as(
-        "SELECT CAST(TIMESTAMPDIFF(SECOND, last_rename_at, NOW(3)) AS SIGNED)          FROM username_renames WHERE account_id = ? FOR UPDATE",
-    )
-    .bind(account)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(internal("read last rename"))?;
-    if let Some((elapsed,)) = since {
-        if elapsed < interval {
-            let retry_after_secs = u64::try_from(interval.saturating_sub(elapsed))
-                .unwrap_or(1)
-                .max(1);
-            let mut resp = (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({
-                    "error": CODE_RENAME_TOO_SOON,
-                    "retry_after_secs": retry_after_secs,
-                })),
-            )
-                .into_response();
-            if let Ok(v) = axum::http::HeaderValue::from_str(&retry_after_secs.to_string()) {
-                resp.headers_mut()
-                    .insert(axum::http::header::RETRY_AFTER, v);
-            }
-            return Err(resp);
-        }
-    }
-
-    // 3. The new hash: free, or this account's own retired row.
+    // 2. The new hash: free, or this account's own retired row.
     let existing: Option<(Vec<u8>, bool)> = sqlx::query_as(
         "SELECT account_id, retired_at IS NOT NULL FROM usernames          WHERE oprf_hash = ? FOR UPDATE",
     )
@@ -360,6 +322,16 @@ pub(crate) async fn replace(
         Some((owner, retired)) if retired && owner == account => true,
         Some(_) => return Err(coded(StatusCode::CONFLICT, CODE_USERNAME_TAKEN)),
     };
+
+    // 3. The account keeps one retired name: the one this rename leaves.
+    sqlx::query(
+        "DELETE FROM usernames WHERE account_id = ? AND retired_at IS NOT NULL AND oprf_hash <> ?",
+    )
+    .bind(account)
+    .bind(&new_hash[..])
+    .execute(&mut *tx)
+    .await
+    .map_err(internal("free earlier retired usernames"))?;
 
     // 4. Retire the current row. Before the new one becomes current: the
     //    unique key admits one current row per account.
@@ -407,14 +379,6 @@ pub(crate) async fn replace(
             .map_err(internal("leave Everyone on rename"))?;
     }
 
-    // 7. The rename's time.
-    sqlx::query(
-        "INSERT INTO username_renames (account_id, last_rename_at) VALUES (?, NOW(3))          ON DUPLICATE KEY UPDATE last_rename_at = NOW(3)",
-    )
-    .bind(account)
-    .execute(&mut *tx)
-    .await
-    .map_err(internal("record rename"))?;
     tx.commit().await.map_err(internal("commit rename"))?;
 
     tracing::info!(revived = revive, "username replaced",);
@@ -553,9 +517,8 @@ mod tests {
     }
 
     #[test]
-    fn the_default_policy_is_thirty_days_for_both() {
+    fn the_default_hold_is_thirty_days() {
         let policy = NamePolicy::defaults();
-        assert_eq!(policy.rename_interval_secs, 2_592_000);
         assert_eq!(policy.retired_hold_secs, 2_592_000);
     }
 }
@@ -583,16 +546,17 @@ mod rename_tests {
     struct Client {
         app: axum::Router,
         state: AppState,
+        policy: NamePolicy,
     }
 
     impl Client {
         async fn new(name: &str, policy: NamePolicy) -> Option<Self> {
             let pool = test_pool(name).await?;
-            let mut state = state(pool, true);
-            state.name_policy = policy;
+            let state = state(pool, true);
             Some(Self {
                 app: crate::build_app(state.clone()),
                 state,
+                policy,
             })
         }
 
@@ -758,12 +722,10 @@ mod rename_tests {
             .unwrap()
         }
 
-        /// Move the account's rename and its retired rows `secs` into the
-        /// past: the test's clock.
+        /// Move the account's retired rows `secs` into the past: the test's
+        /// clock.
         async fn age(&self, account: [u8; 16], secs: i64) {
             for sql in [
-                "UPDATE username_renames SET last_rename_at = last_rename_at - INTERVAL ? SECOND \
-                 WHERE account_id = ?",
                 "UPDATE usernames SET retired_at = retired_at - INTERVAL ? SECOND \
                  WHERE account_id = ? AND retired_at IS NOT NULL",
             ] {
@@ -879,12 +841,12 @@ mod rename_tests {
         // Twenty-nine days later the pruner still leaves it; after thirty it
         // frees it and the stranger takes it.
         c.age(account, 29 * DAY).await;
-        prune_retired(&c.state.db, c.state.name_policy.retired_hold_secs)
+        prune_retired(&c.state.db, c.policy.retired_hold_secs)
             .await
             .unwrap();
         assert_eq!(c.rows(account).await.len(), 2);
         c.age(account, 2 * DAY).await;
-        prune_retired(&c.state.db, c.state.name_policy.retired_hold_secs)
+        prune_retired(&c.state.db, c.policy.retired_hold_secs)
             .await
             .unwrap();
         assert_eq!(c.rows(account).await, vec![(new.to_vec(), false, false)]);
@@ -894,9 +856,9 @@ mod rename_tests {
     }
 
     #[tokio::test]
-    async fn one_rename_per_interval_and_the_own_retired_name_can_be_taken_back() {
+    async fn renames_are_unlimited_and_only_the_last_name_left_is_held() {
         let Some(c) = Client::new(
-            "one_rename_per_interval_and_the_own_retired_name_can_be_taken_back",
+            "renames_are_unlimited_and_only_the_last_name_left_is_held",
             NamePolicy::defaults(),
         )
         .await
@@ -904,39 +866,42 @@ mod rename_tests {
             return;
         };
         let account = random::<16>();
-        let (first, second) = (random::<64>(), random::<64>());
+        let (first, second, third) = (random::<64>(), random::<64>(), random::<64>());
         assert_eq!(c.register(account, first).await.0, StatusCode::OK);
         assert_eq!(c.replace(account, second).await.0, StatusCode::OK);
 
-        // A second rename the same day: refused with the wait, nothing moves.
-        for target in [random::<64>(), first] {
-            let (st, body) = c.replace(account, target).await;
-            assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{body}");
-            assert_eq!(code(&body), "rename-too-soon");
-            let wait = body["retry_after_secs"].as_u64().unwrap();
-            assert!((2_591_000..=2_592_000).contains(&wait), "{wait}");
-        }
-        assert_eq!(c.certified(account).await, Some(second));
-
-        // Thirty days later (the retired row not yet pruned): the account
-        // takes its own old name back. The row is revived, not duplicated,
-        // and the name it left is retired in its place.
-        c.age(account, 30 * DAY + 1).await;
-        let (st, body) = c.replace(account, first).await;
+        // A second rename at once is accepted; the first name is freed, the
+        // second is the one held.
+        let (st, body) = c.replace(account, third).await;
         assert_eq!(st, StatusCode::OK, "{body}");
-        assert_eq!(c.hash_of_certificate(&body, account), first);
+        assert_eq!(c.certified(account).await, Some(third));
         assert_eq!(
             c.rows(account).await,
             sorted(vec![
-                (first.to_vec(), false, false),
-                (second.to_vec(), true, false)
+                (second.to_vec(), true, false),
+                (third.to_vec(), false, false)
             ])
         );
-        assert_eq!(c.certified(account).await, Some(first));
+        assert_eq!(c.register(random::<16>(), first).await.0, StatusCode::OK);
+        let (st, body) = c.register(random::<16>(), second).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        assert_eq!(code(&body), "username-taken");
+
+        // The account takes its held name back: the row is revived, not
+        // duplicated, and the name it left is retired in its place.
+        let (st, body) = c.replace(account, second).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(c.hash_of_certificate(&body, account), second);
+        assert_eq!(
+            c.rows(account).await,
+            sorted(vec![
+                (second.to_vec(), false, false),
+                (third.to_vec(), true, false)
+            ])
+        );
 
         // Renaming to the name already held is not a rename.
-        c.age(account, 30 * DAY + 1).await;
-        let (st, body) = c.replace(account, first).await;
+        let (st, body) = c.replace(account, second).await;
         assert_eq!(st, StatusCode::CONFLICT);
         assert_eq!(code(&body), "username-taken");
     }
@@ -999,8 +964,7 @@ mod rename_tests {
         assert_eq!(st, StatusCode::UNAUTHORIZED);
         assert_eq!(c.certified(account).await, Some(first));
 
-        // Account deletion removes every row, the retired one included, and
-        // the rename's time.
+        // Account deletion removes every row, the retired one included.
         assert_eq!(c.replace(account, random::<64>()).await.0, StatusCode::OK);
         assert_eq!(c.rows(account).await.len(), 2);
         let (st, _) = c
@@ -1008,37 +972,8 @@ mod rename_tests {
             .await;
         assert_eq!(st, StatusCode::NO_CONTENT);
         assert!(c.rows(account).await.is_empty());
-        let (renames,): (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM username_renames WHERE account_id = ?")
-                .bind(&account[..])
-                .fetch_one(&c.state.db)
-                .await
-                .unwrap();
-        assert_eq!(renames, 0);
         // The freed name is free at once: the account is gone, nobody can be
         // mistaken for it by its devices' own record.
         assert_eq!(c.register(random::<16>(), first).await.0, StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn the_interval_knob_zero_allows_back_to_back_renames() {
-        let Some(c) = Client::new(
-            "the_interval_knob_zero_allows_back_to_back_renames",
-            NamePolicy {
-                rename_interval_secs: 0,
-                retired_hold_secs: DEFAULT_NAME_INTERVAL_SECS,
-            },
-        )
-        .await
-        else {
-            return;
-        };
-        let account = random::<16>();
-        let (a, b) = (random::<64>(), random::<64>());
-        assert_eq!(c.register(account, a).await.0, StatusCode::OK);
-        assert_eq!(c.replace(account, b).await.0, StatusCode::OK);
-        assert_eq!(c.replace(account, a).await.0, StatusCode::OK);
-        assert_eq!(c.certified(account).await, Some(a));
-        assert_eq!(c.rows(account).await.len(), 2);
     }
 }

@@ -76,12 +76,10 @@ struct FeedEditorScreen: View {
                 TextField(l10n.t("feed.editor.name"), text: $rule.name)
                 iconGrid
                 if isNew {
-                    Picker(l10n.t("feed.editor.start_from"), selection: $startFrom) {
-                        Text(l10n.t("feed.editor.start.blank")).tag("blank")
-                        ForEach(FeedPresetKey.allCases, id: \.self) { key in
-                            Text(key.label).tag(key.rawValue)
-                        }
-                    }
+                    LakkoPicker(
+                        l10n.t("feed.editor.start_from"), selection: $startFrom,
+                        options: [LakkoPickerOption(value: "blank", label: l10n.t("feed.editor.start.blank"))]
+                            + FeedPresetKey.allCases.map { LakkoPickerOption(value: $0.rawValue, label: $0.label) })
                     .onChange(of: startFrom) { _, value in applyStart(value) }
                 }
             }
@@ -91,11 +89,11 @@ struct FeedEditorScreen: View {
             filtersSection
 
             Section(l10n.t("feed.editor.suggestions")) {
-                Picker(l10n.t("feed.editor.suggestions_rate"), selection: $rule.suggestions) {
-                    Text(l10n.t("feed.editor.suggestions.never")).tag(FeedSuggestions.never)
-                    Text(l10n.t("feed.editor.suggestions.rarely")).tag(FeedSuggestions.rarely)
-                    Text(l10n.t("feed.editor.suggestions.sometimes")).tag(FeedSuggestions.sometimes)
-                }
+                LakkoPicker(l10n.t("feed.editor.suggestions_rate"), selection: $rule.suggestions, options: [
+                    LakkoPickerOption(value: FeedSuggestions.never, label: l10n.t("feed.editor.suggestions.never")),
+                    LakkoPickerOption(value: FeedSuggestions.rarely, label: l10n.t("feed.editor.suggestions.rarely")),
+                    LakkoPickerOption(value: FeedSuggestions.sometimes, label: l10n.t("feed.editor.suggestions.sometimes")),
+                ])
             }
 
             if let problem {
@@ -114,10 +112,8 @@ struct FeedEditorScreen: View {
             if !isNew, case .edit(let id) = editing {
                 Section {
                     Button(l10n.t("feed.editor.delete"), role: .destructive) { confirmDelete = true }
-                        .confirmationDialog(
-                            l10n.t("feed.editor.delete_confirm"), isPresented: $confirmDelete, titleVisibility: .visible
-                        ) {
-                            Button(l10n.t("feed.editor.delete"), role: .destructive) { model.deleteSaved(id) }
+                        .lakkoDialog(isPresented: $confirmDelete, title: l10n.t("feed.editor.delete_confirm")) {
+                            [.danger(l10n.t("feed.editor.delete")) { model.deleteSaved(id) }, .cancel()]
                         }
                 }
             }
@@ -218,10 +214,11 @@ struct FeedEditorScreen: View {
 
     private var sourcesSection: some View {
         Section {
-            Picker(l10n.t("feed.editor.sources"), selection: kinds) {
-                ForEach(Kinds.allCases, id: \.self) { Text(l10n.t($0.labelKey)).tag($0) }
-            }
-            .pickerStyle(.segmented)
+            LakkoSegmentedPicker(
+                selection: kinds,
+                options: Kinds.allCases.map { LakkoPickerOption(value: $0, label: l10n.t($0.labelKey)) })
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(l10n.t("feed.editor.sources"))
             Toggle(l10n.t("feed.editor.include_muted"), isOn: $rule.includeMuted)
             if rule.sourcesStripped {
                 Text(l10n.t("feed.editor.stripped_hint"))
@@ -233,9 +230,9 @@ struct FeedEditorScreen: View {
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
                 ForEach(model.sources, id: \.idHex) { source in
-                    Picker(source.title, selection: membership(source.key)) {
-                        ForEach(Membership.allCases, id: \.self) { Text($0.label).tag($0) }
-                    }
+                    LakkoPicker(
+                        source.title, selection: membership(source.key),
+                        options: Membership.allCases.map { LakkoPickerOption(value: $0, label: $0.label) })
                     .accessibilityLabel(l10n.t("feed.editor.membership.a11y", texts: ["name": source.title]))
                 }
             }
@@ -266,12 +263,13 @@ struct FeedEditorScreen: View {
                     }
                 }
             }
-            Picker(l10n.t("feed.editor.fade"), selection: $rule.halfLife) {
-                Text(l10n.t("feed.editor.fade.hours")).tag(FeedHalfLife.fewHours)
-                Text(l10n.t("feed.editor.fade.day")).tag(FeedHalfLife.day)
-                Text(l10n.t("feed.editor.fade.week")).tag(FeedHalfLife.week)
-            }
-            .pickerStyle(.segmented)
+            LakkoSegmentedPicker(selection: $rule.halfLife, options: [
+                LakkoPickerOption(value: FeedHalfLife.fewHours, label: l10n.t("feed.editor.fade.hours")),
+                LakkoPickerOption(value: FeedHalfLife.day, label: l10n.t("feed.editor.fade.day")),
+                LakkoPickerOption(value: FeedHalfLife.week, label: l10n.t("feed.editor.fade.week")),
+            ])
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(l10n.t("feed.editor.fade"))
             Stepper(
                 l10n.t("feed.editor.look_back_count", counts: ["count": UInt64(rule.windowDays)]),
                 value: Binding(

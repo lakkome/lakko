@@ -1798,10 +1798,6 @@
       "text": "לא ניתן היה להוריד את הקובץ המצורף. נסו שוב.",
       "status": "machine"
     },
-    "chat.attachment.error.gone": {
-      "text": "הקובץ המצורף כבר לא זמין בשרת.",
-      "status": "machine"
-    },
     "chat.attachment.error.open_photo": {
       "text": "לא ניתן היה לפתוח את התמונה הזו. נסו שוב.",
       "status": "machine"
@@ -7846,36 +7842,8 @@
       "text": "סיסמה",
       "status": "machine"
     },
-    "settings.profile.error.generic": {
-      "text": "לא ניתן היה לשמור את השם. נסו שוב.",
-      "status": "machine"
-    },
-    "settings.profile.lede": {
-      "text": "איך אנשי הקשר שלכם רואים אתכם.",
-      "status": "machine"
-    },
-    "settings.profile.name.hint": {
-      "text": "מוצג לאנשים שאתם מדברים איתם. לא חייב להיות ייחודי, עד {count, plural, one {תו אחד} two {שני תווים} other {# תווים}}.",
-      "status": "machine"
-    },
     "settings.profile.name.label": {
       "text": "השם שלכם",
-      "status": "machine"
-    },
-    "settings.profile.preview.label": {
-      "text": "איך אחרים רואים אתכם",
-      "status": "machine"
-    },
-    "settings.profile.preview.no_name": {
-      "text": "עד שתגדירו שם, אחרים רואים את טביעת האצבע של המפתח שלכם.",
-      "status": "machine"
-    },
-    "settings.profile.saved": {
-      "text": "השם שלכם יתעדכן אצל אנשי הקשר.",
-      "status": "machine"
-    },
-    "settings.profile.username.none": {
-      "text": "אין",
       "status": "machine"
     },
     "settings.recovery.devices.title": {
@@ -8126,28 +8094,8 @@
       "text": "שם משתמש: {message}",
       "status": "machine"
     },
-    "username.change.body": {
-      "text": "אנשים כבר לא ימצאו אתכם לפי {old}. אף אחד אחר לא יוכל לקחת אותו במשך 30 יום.",
-      "status": "machine"
-    },
-    "username.change.next_change": {
-      "text": "אחרי זה תוכלו לשנות אותו שוב בעוד 30 יום.",
-      "status": "machine"
-    },
-    "username.change.other_devices": {
-      "text": "המכשירים האחרים שלכם יקבלו את שם המשתמש החדש בפעם הבאה שיהיו מחוברים לרשת.",
-      "status": "machine"
-    },
-    "username.change.save": {
-      "text": "שינוי",
-      "status": "machine"
-    },
     "username.change.title": {
       "text": "שינוי שם משתמש",
-      "status": "machine"
-    },
-    "username.change.too_soon": {
-      "text": "תוכלו לשנות שוב את שם המשתמש ב-{date}.",
       "status": "machine"
     },
     "username.claim.body": {

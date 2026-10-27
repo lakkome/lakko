@@ -58,6 +58,10 @@ public struct ConversationListRow: Identifiable, Equatable {
     /// A manual "mark as unread" (the synced `unread_override` flag). Read by
     /// a folder's Read exclude toggle, which means what the badge means.
     public let markedUnread: Bool
+    /// ADR-0084 — the other person's signature key for a one-to-one, so the
+    /// row's circle can show their profile photo. `nil` for a group or a
+    /// channel (their avatars are not profile photos).
+    public let personKey: Data?
 
     public init(
         id: String,
@@ -70,8 +74,10 @@ public struct ConversationListRow: Identifiable, Equatable {
         muted: Bool = false,
         archived: Bool = false,
         endedLine: String? = nil,
-        markedUnread: Bool = false
+        markedUnread: Bool = false,
+        personKey: Data? = nil
     ) {
+        self.personKey = personKey
         self.id = id
         self.kind = kind
         self.title = title

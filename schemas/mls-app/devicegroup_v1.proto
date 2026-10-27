@@ -285,7 +285,11 @@ message SavedMessage {
     // the account can keep them alive. 0..=128 entries of exactly 32
     // bytes, none repeated.
     repeated bytes blob_ids = 9;
-    reserved 10 to 15;
+    // The message's own time in UNIX millis, as the saving device showed
+    // it, so a row can show the message date before the device holds the
+    // message. 0 = unknown. Display only; never orders or decides.
+    uint64 sent_at_ms = 10;
+    reserved 11 to 15;
 }
 
 // A live edit: only the registers that changed, each with its stamp.

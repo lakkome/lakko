@@ -256,6 +256,7 @@ public class ContactsClient(
             recipientAccountId = recipientAccountId,
             messageId = publish.messageId,
             createdAt = publish.createdAt,
+            recipientSignaturePubkey = recipientSignaturePub,
         )
     }
 
@@ -704,6 +705,7 @@ public class ContactsClient(
             recipientAccountId = recipientAccountId,
             messageId = publish.messageId,
             createdAt = publish.createdAt,
+            recipientSignaturePubkey = toSignaturePub,
         )
     }
 
@@ -784,6 +786,7 @@ public class ContactsClient(
             recipientAccountId = recipientAccountId,
             messageId = publish.messageId,
             createdAt = publish.createdAt,
+            recipientSignaturePubkey = signaturePub,
         )
     }
 
@@ -1623,16 +1626,7 @@ public class ContactsClient(
                             // to the verified `from_pubkey`: kept by the
                             // repository for the accept and the ack.
                             replyGrant = opened.replyGrant
-                            senderProfile = opened.profile?.let { p ->
-                                me.lakko.app.profile.PeerProfile(
-                                    displayName = p.displayName,
-                                    username = p.username,
-                                    updatedAtMs = p.updatedAtMs,
-                                    accountIdHex = me.lakko.app.profile.accountIdHexOrNull(p.accountId),
-                    // ADR-0060 §5 — the username shows only on its certificate.
-                    usernameCertificateHex = p.usernameCertificate?.let { me.lakko.app.reach.reachHex(it) },
-                                )
-                            }
+                            senderProfile = opened.profile?.let { me.lakko.app.profile.peerProfileOf(it) }
                             // UTF-8 decode with replacement-on-
                             // error so malformed bytes still
                             // surface as the best-effort string
@@ -1692,6 +1686,9 @@ public data class SendResult(
     val messageId: Long,
     /** ISO-8601 timestamp from the DS. */
     val createdAt: String,
+    /** ADR-0084 — the recipient's verified signature key the request was
+     *  sealed to (the Sent row shows the photo held for it), or `null`. */
+    val recipientSignaturePubkey: ByteArray? = null,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

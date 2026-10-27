@@ -1403,52 +1403,59 @@ private fun RemoveDeviceSheet(
     }
 
     val main: () -> Unit = if (stolen) rotate else remove
-    me.lakko.app.ui.components.LakkoModal(
+    me.lakko.app.ui.components.LakkoDialog(
         onDismissRequest = { if (!working) onClosed(notStarted, false) },
         title = if (stolen) {
             t(me.lakko.app.devices.RotationCopy.TITLE)
         } else {
             t(RemovalCopy.SHEET_TITLE, mapOf("device" to label))
         },
-        actions = {
-            if (notStarted) {
-                // The device was removed; the keys were not changed.
-                TextButton(
-                    enabled = !working,
-                    onClick = {
-                        scope.launch {
-                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                rotationRunner(null)?.abandon()
-                            }
-                            proof.clear()
-                            onClosed(true, false)
+        confirm = if (notStarted) {
+            me.lakko.app.ui.components.LakkoDialogAction(
+                label = t(me.lakko.app.devices.RotationCopy.RETRY),
+                enabled = view.mainEnabled && !working,
+                onClick = rotate,
+            )
+        } else {
+            me.lakko.app.ui.components.LakkoDialogAction(
+                label = when {
+                    removing && !stolen -> t(RemovalCopy.WORKING)
+                    view.working -> t("common.checking")
+                    stolen -> t(me.lakko.app.devices.RotationCopy.CONFIRM)
+                    else -> t(RemovalCopy.CONFIRM)
+                },
+                tone = me.lakko.app.ui.components.LakkoDialogTone.Danger,
+                enabled = reason != null && view.mainEnabled && !working,
+                onClick = main,
+            )
+        },
+        cancel = if (notStarted) {
+            // The device was removed; the keys were not changed.
+            me.lakko.app.ui.components.LakkoDialogAction(
+                label = t(me.lakko.app.devices.RotationCopy.NOT_NOW),
+                tone = me.lakko.app.ui.components.LakkoDialogTone.Ghost,
+                enabled = !working,
+                onClick = {
+                    scope.launch {
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            rotationRunner(null)?.abandon()
                         }
-                    },
-                ) { Text(t(me.lakko.app.devices.RotationCopy.NOT_NOW)) }
-                TextButton(onClick = rotate, enabled = view.mainEnabled && !working) {
-                    Text(t(me.lakko.app.devices.RotationCopy.RETRY))
-                }
-            } else {
-                TextButton(
-                    onClick = {
                         proof.clear()
-                        onClosed(false, false)
-                    },
-                    // UX 18.1: Cancel is disabled from the first step.
-                    enabled = !removing,
-                ) { Text(t("common.cancel")) }
-                TextButton(onClick = main, enabled = reason != null && view.mainEnabled && !working) {
-                    Text(
-                        when {
-                            removing && !stolen -> t(RemovalCopy.WORKING)
-                            view.working -> t("common.checking")
-                            stolen -> t(me.lakko.app.devices.RotationCopy.CONFIRM)
-                            else -> t(RemovalCopy.CONFIRM)
-                        },
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
+                        onClosed(true, false)
+                    }
+                },
+            )
+        } else {
+            me.lakko.app.ui.components.LakkoDialogAction(
+                label = t("common.cancel"),
+                tone = me.lakko.app.ui.components.LakkoDialogTone.Ghost,
+                // UX 18.1: Cancel is disabled from the first step.
+                enabled = !removing,
+                onClick = {
+                    proof.clear()
+                    onClosed(false, false)
+                },
+            )
         },
     ) {
         if (notStarted) {
@@ -1574,17 +1581,21 @@ private fun RemoveAllDevicesSheet(
             }
         }
     }
-    me.lakko.app.ui.components.LakkoModal(
+    me.lakko.app.ui.components.LakkoDialog(
         onDismissRequest = { if (!working) onClosed() },
         title = t("devices.remove_all.title"),
-        actions = {
-            TextButton(onClick = { proof.clear(); onClosed() }, enabled = !working) {
-                Text(t("common.cancel"))
-            }
-            TextButton(onClick = confirm, enabled = view.mainEnabled && !working && !view.working) {
-                Text(t("devices.remove_all.confirm"), color = MaterialTheme.colorScheme.error)
-            }
-        },
+        confirm = me.lakko.app.ui.components.LakkoDialogAction(
+            label = t("devices.remove_all.confirm"),
+            tone = me.lakko.app.ui.components.LakkoDialogTone.Danger,
+            enabled = view.mainEnabled && !working && !view.working,
+            onClick = confirm,
+        ),
+        cancel = me.lakko.app.ui.components.LakkoDialogAction(
+            label = t("common.cancel"),
+            tone = me.lakko.app.ui.components.LakkoDialogTone.Ghost,
+            enabled = !working,
+            onClick = { proof.clear(); onClosed() },
+        ),
     ) {
         Text(t("devices.remove_all.body"))
         me.lakko.app.ui.auth.ProofBlock(

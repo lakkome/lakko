@@ -40,6 +40,7 @@ public struct ContactsScreen: View {
     @State private var query = ""
     @State private var inviteLinksPresented = false
     @State private var scanPresented = false
+    @State private var addMenuOpen = false
     @State private var sentExpanded = false
 
     public init(
@@ -185,6 +186,12 @@ public struct ContactsScreen: View {
                 addMenu
             }
         }
+        .lakkoActionSheet(isPresented: $addMenuOpen) {
+            [
+                .action(l10n.t("contacts.add.share_invite"), systemImage: "link") { inviteLinksPresented = true },
+                .action(l10n.t("contacts.scan_qr"), systemImage: "qrcode.viewfinder") { scanPresented = true },
+            ]
+        }
         .sheet(isPresented: $inviteLinksPresented) {
             InviteLinksSheet(viewModel: viewModel, onDismiss: { inviteLinksPresented = false })
         }
@@ -224,14 +231,7 @@ public struct ContactsScreen: View {
     /// there — and the LINK belongs inside the call it leads into
     /// (`docs/ux/call-links.md` section 3), not in a menu about contacts.
     private var addMenu: some View {
-        Menu {
-            Button { inviteLinksPresented = true } label: {
-                Label(l10n.t("contacts.add.share_invite"), systemImage: "link")
-            }
-            Button { scanPresented = true } label: {
-                Label(l10n.t("contacts.scan_qr"), systemImage: "qrcode.viewfinder")
-            }
-        } label: {
+        Button { addMenuOpen = true } label: {
             Image(systemName: "person.badge.plus")
         }
         .accessibilityLabel(l10n.t("contacts.list.add"))
@@ -359,7 +359,8 @@ private struct InvitedRow: View {
                     name: stated ?? "",
                     identity: base64Encode(contact.signaturePubkey),
                     size: 40,
-                    placeholderSymbol: "person.fill"
+                    placeholderSymbol: "person.fill",
+                    photo: .person(contact.signaturePubkey)
                 )
                 VStack(alignment: .leading, spacing: 2) {
                     Text(stated ?? l10n.t("invite.contact.page.unnamed"))
@@ -389,7 +390,8 @@ private struct ContactRow: View {
                         name: resolved.isPlaceholder ? "" : resolved.name,
                         identity: base64Encode(contact.request.fromPubkey),
                         size: 40,
-                        placeholderSymbol: "person.fill"
+                        placeholderSymbol: "person.fill",
+                        photo: .person(contact.request.fromPubkey)
                     )
                     VStack(alignment: .leading, spacing: 2) {
                         Text(resolved.name)
@@ -423,7 +425,8 @@ private struct IncomingRequestRow: View {
                     name: resolved.isPlaceholder ? "" : resolved.name,
                     identity: base64Encode(request.fromPubkey),
                     size: 40,
-                    placeholderSymbol: "person.fill"
+                    placeholderSymbol: "person.fill",
+                    photo: .person(request.fromPubkey)
                 )
                 VStack(alignment: .leading, spacing: 6) {
                     Text(resolved.isPlaceholder ? l10n.t("contacts.request.someone") : resolved.name)

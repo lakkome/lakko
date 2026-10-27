@@ -17,7 +17,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -51,6 +50,9 @@ import java.util.Locale
 import me.lakko.app.l10n.LocalStrings
 import me.lakko.app.l10n.t
 import me.lakko.app.l10n.text
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
+import me.lakko.app.ui.components.LakkoDialogTone
 
 /**
  * `PasskeysScreen` — manage the user's stored passkeys
@@ -279,43 +281,31 @@ public fun PasskeysScreen(
         )
     }
     stopping?.let { cred ->
-        AlertDialog(
+        LakkoDialog(
             onDismissRequest = { stopping = null },
-            title = { Text(t("settings.passkeys.stop_restoring.title")) },
-            text = { Text(t("settings.passkeys.stop_restoring.body")) },
-            confirmButton = {
-                TextButton(onClick = {
-                    stopping = null
-                    viewModel.stopRestoring(cred.credentialIdB64)
-                }) { Text(t("settings.passkeys.stop_restoring.action")) }
-            },
-            dismissButton = {
-                TextButton(onClick = { stopping = null }) { Text(t("common.cancel")) }
+            title = t("settings.passkeys.stop_restoring.title"),
+            body = t("settings.passkeys.stop_restoring.body"),
+            confirm = LakkoDialogAction(t("settings.passkeys.stop_restoring.action")) {
+                stopping = null
+                viewModel.stopRestoring(cred.credentialIdB64)
             },
         )
     }
     removing?.let { cred ->
-        AlertDialog(
+        LakkoDialog(
             onDismissRequest = { removing = null },
-            title = { Text(t("settings.passkeys.remove.title")) },
-            text = { Text(t("settings.passkeys.remove.body")) },
-            confirmButton = {
-                TextButton(onClick = {
-                    removing = null
-                    viewModel.deleteCredential(context, cred.credentialIdB64, cred.nickname)
-                }) {
-                    Text(
-                        if (cred.nickname.isBlank()) {
-                            t("settings.passkeys.remove.confirm")
-                        } else {
-                            t("settings.passkeys.remove.confirm_named", mapOf("name" to cred.nickname))
-                        },
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { removing = null }) { Text(t("common.cancel")) }
+            title = t("settings.passkeys.remove.title"),
+            body = t("settings.passkeys.remove.body"),
+            confirm = LakkoDialogAction(
+                if (cred.nickname.isBlank()) {
+                    t("settings.passkeys.remove.confirm")
+                } else {
+                    t("settings.passkeys.remove.confirm_named", mapOf("name" to cred.nickname))
+                },
+                LakkoDialogTone.Danger,
+            ) {
+                removing = null
+                viewModel.deleteCredential(context, cred.credentialIdB64, cred.nickname)
             },
         )
     }
@@ -414,7 +404,7 @@ private fun format(ms: Long?, language: String): String? {
 }
 
 /**
- * `Delete your account?` (UX 17.3), drawn by the app ([LakkoModal]): the
+ * `Delete your account?` (UX 17.3), drawn by the app ([me.lakko.app.ui.components.LakkoDialog]): the
  * body, then what the account needs to prove, then the actions.
  *
  *   - An account with a passkey: no field; `You will be asked for your
@@ -466,23 +456,25 @@ private fun DeleteAccountDialog(
             }
         }
     }
-    me.lakko.app.ui.components.LakkoModal(
+    me.lakko.app.ui.components.LakkoDialog(
         onDismissRequest = { if (!working) onClose() },
         title = t("settings.account.delete.title"),
-        actions = {
-            TextButton(onClick = onClose, enabled = !state.busy) { Text(t("common.cancel")) }
-            if (panel != me.lakko.app.ui.auth.DeletePanel.Cannot) {
-                TextButton(
-                    onClick = delete,
-                    enabled = me.lakko.app.ui.auth.deleteButtonEnabled(panel, view, state.busy) && !view.working,
-                ) {
-                    Text(
-                        t(me.lakko.app.ui.auth.deleteButtonLabel(deleting = state.busy, checking = view.working)),
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
+        confirm = if (panel != me.lakko.app.ui.auth.DeletePanel.Cannot) {
+            me.lakko.app.ui.components.LakkoDialogAction(
+                label = t(me.lakko.app.ui.auth.deleteButtonLabel(deleting = state.busy, checking = view.working)),
+                tone = me.lakko.app.ui.components.LakkoDialogTone.Danger,
+                enabled = me.lakko.app.ui.auth.deleteButtonEnabled(panel, view, state.busy) && !view.working,
+                onClick = delete,
+            )
+        } else {
+            null
         },
+        cancel = me.lakko.app.ui.components.LakkoDialogAction(
+            label = t("common.cancel"),
+            tone = me.lakko.app.ui.components.LakkoDialogTone.Ghost,
+            enabled = !state.busy,
+            onClick = onClose,
+        ),
     ) {
         Text(t("settings.account.delete.body"))
         when (panel) {

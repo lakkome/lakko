@@ -256,7 +256,14 @@ private fun Title(text: String) {
 private fun ReadyPanel(state: InviteLandingState.Ready, onAdd: () -> Unit, onNotNow: () -> Unit) {
     val invite = state.invite
     val name = nameOf(invite.statedName)
-    LakkoAvatar(name = invite.statedName.orEmpty(), seed = me.lakko.app.ds.hexOf(invite.ownerAccountId), size = 72.dp)
+    LakkoAvatar(
+        name = invite.statedName.orEmpty(),
+        seed = me.lakko.app.ds.hexOf(invite.ownerAccountId),
+        size = 72.dp,
+        // ADR-0084 — the link's preview carries no photo; one this device
+        // already holds for the inviter shows.
+        personKey = invite.ownerSignaturePubkey,
+    )
     Spacer(Modifier.height(16.dp))
     Title(t("invite.contact.page.title", mapOf("name" to name)))
     val username = invite.username

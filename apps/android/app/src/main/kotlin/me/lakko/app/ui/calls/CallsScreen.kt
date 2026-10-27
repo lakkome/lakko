@@ -209,6 +209,11 @@ public fun CallsScreen(
                             CallHistoryRow(
                                 entry = row,
                                 title = titleOf(context, repository, directory, row, strings),
+                                personKey = if (row.kind == me.lakko.app.chat.ConversationKind.Chat) {
+                                    runCatching { repository.oneToOnePeerKey(row.conversationIdHex) }.getOrNull()
+                                } else {
+                                    null
+                                },
                                 time = formatClockTime(row.startedAtMs, zone, use24h, locale),
                                 onOpen = { onOpenConversation(row.conversationIdHex) },
                                 onCallBack = { onCallBack(row.conversationIdHex, row.video) },
@@ -253,6 +258,7 @@ private fun CallHistoryRow(
     time: String,
     onOpen: () -> Unit,
     onCallBack: () -> Unit,
+    personKey: ByteArray? = null,
 ) {
     val unanswered = callHistoryIsUnanswered(entry.outcome)
     val lineColor = if (unanswered) {
@@ -276,6 +282,7 @@ private fun CallHistoryRow(
                 seed = entry.conversationIdHex,
                 size = 40.dp,
                 group = entry.kind == me.lakko.app.chat.ConversationKind.Group,
+                personKey = personKey,
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {

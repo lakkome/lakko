@@ -1798,10 +1798,6 @@
       "text": "无法下载附件。请重试。",
       "status": "machine"
     },
-    "chat.attachment.error.gone": {
-      "text": "服务器上已不再有该附件。",
-      "status": "machine"
-    },
     "chat.attachment.error.open_photo": {
       "text": "无法打开这张照片。请重试。",
       "status": "machine"
@@ -7846,36 +7842,8 @@
       "text": "密码",
       "status": "machine"
     },
-    "settings.profile.error.generic": {
-      "text": "无法保存你的名字。请重试。",
-      "status": "machine"
-    },
-    "settings.profile.lede": {
-      "text": "你在联系人眼中的样子。",
-      "status": "machine"
-    },
-    "settings.profile.name.hint": {
-      "text": "会显示给与你聊天的人。不必唯一，最多 {count, plural, other {# 个字符}}。",
-      "status": "machine"
-    },
     "settings.profile.name.label": {
       "text": "你的名字",
-      "status": "machine"
-    },
-    "settings.profile.preview.label": {
-      "text": "别人看到的你",
-      "status": "machine"
-    },
-    "settings.profile.preview.no_name": {
-      "text": "在你设置名字之前，别人看到的是你的密钥指纹。",
-      "status": "machine"
-    },
-    "settings.profile.saved": {
-      "text": "你的联系人将看到更新后的名字。",
-      "status": "machine"
-    },
-    "settings.profile.username.none": {
-      "text": "无",
       "status": "machine"
     },
     "settings.recovery.devices.title": {
@@ -8126,28 +8094,8 @@
       "text": "用户名：{message}",
       "status": "machine"
     },
-    "username.change.body": {
-      "text": "别人将无法再通过 {old} 找到你。30 天内其他人无法占用它。",
-      "status": "machine"
-    },
-    "username.change.next_change": {
-      "text": "此后需等 30 天才能再次更改。",
-      "status": "machine"
-    },
-    "username.change.other_devices": {
-      "text": "你的其他设备会在下次联网时获得新用户名。",
-      "status": "machine"
-    },
-    "username.change.save": {
-      "text": "更改",
-      "status": "machine"
-    },
     "username.change.title": {
       "text": "更改用户名",
-      "status": "machine"
-    },
-    "username.change.too_soon": {
-      "text": "你可以在 {date} 再次更改用户名。",
       "status": "machine"
     },
     "username.claim.body": {

@@ -29,7 +29,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -146,6 +145,8 @@ import me.lakko.app.ui.chat.isGroupConversation
 import uniffi.lakko_ffi_uniffi.FeedRule
 import java.time.ZoneId
 import java.util.Locale
+import me.lakko.app.ui.components.LakkoDialog
+import me.lakko.app.ui.components.LakkoDialogAction
 
 /**
  * The Feed destination (`docs/ux/feed.md`, ADR-0063). Mirror of
@@ -1339,7 +1340,19 @@ private fun FeedItemCard(
             }
             // A channel speaks as itself: its name is already the source.
             if (ref.source.kind == FeedSourceKind.GROUP) {
-                Text(author, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                // ADR-0084 — the person's photo beside their name.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val outgoing = ref.message.direction == "outgoing"
+                    me.lakko.app.ui.components.LakkoAvatar(
+                        name = author,
+                        seed = ref.message.authorKeyB64 ?: author,
+                        size = 24.dp,
+                        personKey = if (outgoing) null else me.lakko.app.ui.components.personKeyBytes(ref.message.authorKeyB64),
+                        avatar = if (outgoing) me.lakko.app.ui.components.rememberOwnAvatar() else null,
+                    )
+                    androidx.compose.foundation.layout.Spacer(Modifier.width(8.dp))
+                    Text(author, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                }
             }
             ref.message.forwardAuthor?.let {
                 Text(t("chat.forward.from", mapOf("name" to it)), style = MaterialTheme.typography.labelSmall, color = muted)
@@ -1445,10 +1458,12 @@ private fun ShareFeedDialog(context: Context, core: FeedCore, view: SavedView, o
     val clipboard = LocalClipboardManager.current
     val fileSaver = me.lakko.app.ui.components.rememberFileSaver()
     var copied by remember { mutableStateOf(false) }
-    AlertDialog(
+    LakkoDialog(
         onDismissRequest = onClose,
-        title = { Text(t("feed.share.title", mapOf("name" to view.rule.name))) },
-        text = {
+        title = t("feed.share.title", mapOf("name" to view.rule.name)),
+        confirm = LakkoDialogAction(t("common.close"), onClick = onClose),
+        cancel = null,
+        content = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (link == null) {
                     Text(t("feed.share.unshareable"), color = MaterialTheme.colorScheme.error)
@@ -1472,7 +1487,6 @@ private fun ShareFeedDialog(context: Context, core: FeedCore, view: SavedView, o
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onClose) { Text(t("common.close")) } },
     )
 }
 

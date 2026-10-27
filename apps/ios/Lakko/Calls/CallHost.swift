@@ -65,6 +65,9 @@ final class CallHost: ObservableObject {
         /// through ``CallPeerName``, so it is a name or nothing — never a
         /// placeholder standing in for one.
         var peerName: @MainActor (_ groupIdHex: String) -> String?
+        /// ADR-0084 — the other person's signature key for a 1x1 chat, for
+        /// their profile photo on the call surfaces.
+        var peerKey: @MainActor (_ groupIdHex: String) -> Data? = { _ in nil }
         var mintCallId: () -> Data
         /// `docs/ux/calls.md` section 6 — write the finished call's row into
         /// the conversation. Local to this device; no wire format.
@@ -497,6 +500,11 @@ final class CallHost: ObservableObject {
         activeGroupIdHex.flatMap { ports.peerName($0) }
     }
 
+    /// The other person's signature key, for their photo.
+    var activePeerKey: Data? {
+        activeGroupIdHex.flatMap { ports.peerKey($0) }
+    }
+
     /// The muted conversation's ringing call, as the two quiet surfaces need it
     /// (`docs/ux/calls.md` section 2.1.1), or `nil`.
     ///
@@ -509,7 +517,8 @@ final class CallHost: ObservableObject {
             quiet: incomingQuiet,
             groupIdHex: activeGroupIdHex,
             callerName: activePeerName,
-            video: incomingVideo)
+            video: incomingVideo,
+            callerKey: activePeerKey)
     }
 
     /// Resolves once every publish queued so far has been attempted. Tests.
@@ -788,6 +797,9 @@ extension CallHost {
                 return CallPeerName.resolve(
                     profileName: resolved.flatMap { $0.isPlaceholder ? nil : $0.name },
                     chatTitle: repository.conversationTitle(groupIdHex: groupIdHex))
+            },
+            peerKey: { [weak repository] groupIdHex in
+                repository?.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
             },
             mintCallId: { CallSession.mintCallId() },
             recordCall: { [weak repository] call in

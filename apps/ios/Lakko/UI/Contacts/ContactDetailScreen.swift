@@ -97,7 +97,9 @@ struct ContactDetailScreen: View {
                         name: resolved.isPlaceholder ? "" : resolved.name,
                         identity: base64Encode(contact.request.fromPubkey),
                         size: 72,
-                        placeholderSymbol: "person.fill"
+                        placeholderSymbol: "person.fill",
+                        photo: .person(contact.request.fromPubkey),
+                        playsVideo: true
                     )
                     Text(resolved.name)
                         .font(.title2.weight(.semibold))
@@ -234,53 +236,52 @@ struct ContactDetailScreen: View {
         .listStyle(.insetGrouped)
         .navigationTitle(resolved.name)
         .navigationBarTitleDisplayMode(.inline)
-        .alert(l10n.t("contacts.rename.action"), isPresented: $renaming) {
-            TextField(l10n.t("contacts.rename.placeholder"), text: $draftName)
-            Button(l10n.t("common.save")) {
-                viewModel.onRenameContactClicked(messageId: contact.request.messageId, name: draftName)
-            }
-            Button(l10n.t("common.cancel"), role: .cancel) {}
-        } message: {
-            Text(l10n.t("contacts.rename.sub_local"))
+        .lakkoDialog(
+            isPresented: $renaming,
+            title: l10n.t("contacts.rename.action"),
+            message: l10n.t("contacts.rename.sub_local"),
+            field: LakkoDialogField(placeholder: l10n.t("contacts.rename.placeholder"), text: $draftName)
+        ) {
+            [
+                .primary(l10n.t("common.save")) {
+                    viewModel.onRenameContactClicked(messageId: contact.request.messageId, name: draftName)
+                },
+                .cancel(),
+            ]
         }
         // Local only, and the body says exactly that: the peer is not told,
         // and an existing chat is deliberately left behind, because leaving a
         // conversation is the conversation's own action.
-        .confirmationDialog(
-            l10n.t("contacts.remove.title"),
+        .lakkoDialog(
             isPresented: $confirmingRemove,
-            titleVisibility: .visible
+            title: l10n.t("contacts.remove.title"),
+            message: l10n.t("contacts.remove.body")
         ) {
-            Button(
-                l10n.t("contacts.remove.confirm_named", texts: ["name": resolved.name]),
-                role: .destructive
-            ) {
-                viewModel.onRemoveContactClicked(messageId: contact.request.messageId)
-            }
-            Button(l10n.t("common.cancel"), role: .cancel) {}
-        } message: {
-            Text(l10n.t("contacts.remove.body"))
+            [
+                .danger(l10n.t("contacts.remove.confirm_named", texts: ["name": resolved.name])) {
+                    viewModel.onRemoveContactClicked(messageId: contact.request.messageId)
+                },
+                .cancel(),
+            ]
         }
         // ADR-0045 UX 6.2.4 — the same control, the same words and the same
         // repository call as the group panel's. A second set of words for one
         // act is how the three clients drifted in the first place.
-        .confirmationDialog(
-            deleteChatTitle,
+        .lakkoDialog(
             isPresented: $confirmingDeleteChat,
-            titleVisibility: .visible
-        ) {
-            Button(l10n.t("common.delete"), role: .destructive) {
+            title: deleteChatTitle,
+            message: deleteChatBody
+        ) {[
+            .danger(l10n.t("common.delete")) {
                 // Route away only when the delete actually landed; a refusal
                 // leaves the screen where it is rather than dropping the user
                 // out of a chat that is still there.
                 if let chat, viewModel.onDeleteChatClicked(groupIdHex: chat) {
                     onChatDeleted()
                 }
-            }
-            Button(l10n.t("common.cancel"), role: .cancel) {}
-        } message: {
-            Text(deleteChatBody)
-        }
+            },
+            .cancel(),
+        ]}
     }
 }
 

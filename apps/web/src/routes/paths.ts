@@ -35,6 +35,8 @@ export const paths = {
   recover: "/recover",
   /** Authenticated home / inbox. */
   home: "/",
+  /** ADR-0065 — the account's saved messages. */
+  saved: "/saved",
   /** Group conversations — the second primary destination. */
   groups: "/groups",
   /** New group: name it, pick the first members from your contacts. */

@@ -52,6 +52,8 @@ export interface QuietIncomingCallPanelProps {
   /** Stable id the avatar tint is hashed from, so the colour matches the
    *  conversation's own avatar. */
   readonly callerId: string | null;
+  /** ADR-0084 - the caller's profile key (a one-to-one), for their photo. */
+  readonly callerKey?: string | null;
   /** The kind of call the CALLER placed. */
   readonly video: boolean;
   readonly onAccept: (withVideo: boolean) => void;
@@ -70,7 +72,12 @@ export function QuietIncomingCallPanel(props: QuietIncomingCallPanelProps): JSX.
       role="status"
       aria-label={t("chats.row.call.label", { kind: kindLabel(), name: props.callerName })}
     >
-      <Avatar label={props.callerName} id={props.callerId ?? props.callerName} size="sm" />
+      <Avatar
+        label={props.callerName}
+        id={props.callerId ?? props.callerName}
+        size="sm"
+        personKey={props.callerKey ?? undefined}
+      />
       <div class="lk-quiet-call-who">
         <strong class="lk-ellipsis">{props.callerName}</strong>
         <span class="lk-quiet-call-kind">{kindLabel()}</span>

@@ -1580,7 +1580,6 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(h.repository.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice_b")))
         XCTAssertEqual(written, [], "the synced state was not loaded: the register is owed")
         XCTAssertNil(AccountProtectionStore().renameOwed(accountIdB64: accountIdB64))
-        XCTAssertNotNil(h.repository.renameTooSoonUntilMs, "the next change is 30 days away")
         // e. The re-publish gets the certificate the replace answered.
         XCTAssertEqual(renamed.first?.0.username, "alice_b")
         XCTAssertEqual(renamed.first?.1, Data(repeating: 0xCE, count: 153))
@@ -1595,15 +1594,12 @@ final class RecoveryFlowTests: XCTestCase {
         await h.repository.ownUsernameRegisterChanged("alice_b")
         XCTAssertNil(AccountProtectionStore().usernameRegisterOwed(accountIdB64: accountIdB64))
 
-        // Too soon by the device's own stamp: nothing is sent.
+        // No rename limit (ADR-0076 amended 2026-10-26): a second rename
+        // right after the first goes to the server.
         let before = handleRequests(h).count
-        do {
-            _ = try await h.repository.renameUsername(to: "alice_c")
-            XCTFail("one rename per 30 days")
-        } catch let refused as UsernameRenameFailed {
-            if case .tooSoon = refused.failure {} else { XCTFail("\(refused.failure)") }
-        }
-        XCTAssertEqual(handleRequests(h).count, before)
+        let again = try await h.repository.renameUsername(to: "alice_c")
+        XCTAssertEqual(again, "alice_c")
+        XCTAssertGreaterThan(handleRequests(h).count, before)
         AccountProtectionStore().clear(accountIdB64: accountIdB64)
     }
 
@@ -1630,18 +1626,6 @@ final class RecoveryFlowTests: XCTestCase {
         XCTAssertEqual(h.store.load()?.username, "alice")
         XCTAssertEqual(h.repository.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice")))
         XCTAssertNil(AccountProtectionStore().renameOwed(accountIdB64: accountIdB64))
-        XCTAssertNil(h.repository.renameTooSoonUntilMs)
-
-        // The server's "too soon" names the date.
-        h.directory.replaceError = DiscoveryClientError.http(
-            status: 429, endpoint: "/discovery/username/replace",
-            body: #"{"error":"rename-too-soon","retry_after_secs":86400}"#)
-        do {
-            _ = try await h.repository.renameUsername(to: "bob")
-            XCTFail("too soon")
-        } catch let refused as UsernameRenameFailed {
-            XCTAssertEqual(refused.failure, .tooSoon(untilMs: h.clock.nowMs + 86_400_000))
-        }
         AccountProtectionStore().clear(accountIdB64: accountIdB64)
     }
 

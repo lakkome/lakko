@@ -224,6 +224,9 @@ public fun CallScreen(
      * deliberate and is all a mock has.
      */
     avatarSeed: String? = null,
+    /** ADR-0084 — the other person's signature key in a 1x1 call, so the
+     *  portrait shows their profile photo. */
+    personKey: ByteArray? = null,
     /** The End button for a call the app-level host drives through [state]
      *  alone (a group or call-link call): the host leaves the call and the
      *  session's own closed transition shows the ended state. `null` keeps the
@@ -458,6 +461,7 @@ public fun CallScreen(
             onExit = onExit,
             remoteName = remoteName,
             avatarSeed = avatarSeed,
+            personKey = personKey,
             groupCall = groupCall,
             groupName = groupName,
             invite = invite,
@@ -542,6 +546,7 @@ private fun InCallView(
     onExit: () -> Unit,
     remoteName: String? = null,
     avatarSeed: String? = null,
+    personKey: ByteArray? = null,
     groupCall: Boolean = false,
     groupName: String? = null,
     /** See [CallScreen]'s parameters of the same names. */
@@ -733,6 +738,7 @@ private fun InCallView(
                 phase = phase,
                 name = displayName,
                 seed = seed,
+                personKey = personKey.takeIf { !groupCall },
                 e2ee = e2ee,
                 onEncryptionChip = { encryptionSheetOpen = true },
                 clockOrigin = clockOrigin,
@@ -782,6 +788,7 @@ private fun InCallView(
                     track = remoteVideoTrack.takeIf { soleRemote?.camOn == true },
                     name = displayName,
                     seed = seed,
+                    personKey = personKey.takeIf { !groupCall },
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .windowInsetsPadding(WindowInsets.safeDrawing)
@@ -1150,6 +1157,7 @@ private fun CallPortrait(
     phase: CallUiState.CallPhase,
     name: String,
     seed: String,
+    personKey: ByteArray?,
     e2ee: CallUiState.E2eeState,
     onEncryptionChip: () -> Unit,
     /** The CALL's connect moment — see [callClockOrigin]. */
@@ -1177,7 +1185,7 @@ private fun CallPortrait(
         ) {
             // The upper half: the spec's placement, not a centred block.
             Spacer(Modifier.weight(0.18f))
-            LakkoAvatar(name = name, seed = seed, size = 132.dp)
+            LakkoAvatar(name = name, seed = seed, size = 132.dp, personKey = personKey)
             Spacer(Modifier.height(24.dp))
             CallStatusLine(
                 state = state,
@@ -1261,6 +1269,7 @@ private fun OtherPersonPip(
     track: VideoTrack?,
     name: String,
     seed: String,
+    personKey: ByteArray?,
     modifier: Modifier = Modifier,
 ) {
     val egl = remember { WebRtcPeerConnection.sharedEglContext() }
@@ -1282,7 +1291,7 @@ private fun OtherPersonPip(
                 scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
             )
         } else {
-            LakkoAvatar(name = name, seed = seed, size = 56.dp)
+            LakkoAvatar(name = name, seed = seed, size = 56.dp, personKey = personKey)
         }
     }
 }

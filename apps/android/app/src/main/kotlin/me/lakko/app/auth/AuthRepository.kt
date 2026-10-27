@@ -662,6 +662,20 @@ public class AuthRepository(
                 )
             }
         }
+        // ADR-0065 section 6 - the blob delete keys derive from the ACCOUNT
+        // identity seed the session holds.
+        // ADR-0065 / ADR-0074 - from the account's LINEAGE seed (the one the
+        // DeviceGroup id derives from), so a key rotation does not orphan the
+        // files uploaded before it.
+        me.lakko.app.storage.AccountBlobDeleteKeys.install {
+            identitySecrets.value?.let { secrets ->
+                me.lakko.app.devices.DeviceGroupLifecycle.lineageSeed(
+                    applicationContext,
+                    base64Encode(secrets.accountId),
+                    secrets.accountIdentitySeed,
+                )
+            }
+        }
         // ADR-0078 section 8 - the pool refills on its own schedule from the
         // moment a session is bound, never because something was spent.
         pushScope.launch {
@@ -3251,12 +3265,6 @@ public class AuthRepository(
         }
     }
 
-    /** When this device may rename again by its own stamp, or `null`. */
-    public fun renameAllowedAtMs(): Long? {
-        val accountIdB64 = signedInAccountIdB64() ?: return null
-        return renameAllowedAtMs(renameStore.lastChangedAtMs(accountIdB64), System.currentTimeMillis())
-    }
-
     private fun renameRunner(accountIdB64: String): UsernameRenameRunner =
         UsernameRenameRunner(
             accountIdB64 = accountIdB64,
@@ -3273,7 +3281,6 @@ public class AuthRepository(
                 override suspend fun adopt(newUsername: String, certificate: ByteArray?) {
                     val reach = me.lakko.app.reach.ReachManager.get(applicationContext)
                     if (certificate != null) reach.keepUsernameCertificate(certificate) else reach.dropUsernameCertificate()
-                    renameStore.markChanged(accountIdB64, System.currentTimeMillis())
                     adoptUsername(accountIdB64, newUsername, renamedElsewhere = certificate == null)
                     writeOwnUsername(accountIdB64, newUsername)
                 }
@@ -6256,6 +6263,7 @@ public class AuthRepository(
         // The account's tokens stay on disk for its next sign-in; only the
         // memory goes (the unregister draws its token from disk).
         me.lakko.app.anon.AnonTokens.releaseSession()
+        me.lakko.app.storage.BlobAccess.clear()
         // ADR-0017: drop any parked fresh-device fail-safe context
         // (a NeedsRecoveryPhrase user who backed out via Sign out).
         clearPendingRecovery()
@@ -6321,6 +6329,7 @@ public class AuthRepository(
         // The wipe above removed this account's tokens; this drops only what
         // memory still holds (nothing on disk, no other account's tokens).
         me.lakko.app.anon.AnonTokens.releaseSession()
+        me.lakko.app.storage.BlobAccess.clear()
         // ADR-0017: drop any parked fresh-device fail-safe context.
         clearPendingRecovery()
         mutableProtectStepOwed.value = false
@@ -7385,6 +7394,7 @@ public class AuthRepository(
         clearIdentitySecrets()
         sessionTokenProvider.clear()
         me.lakko.app.anon.AnonTokens.releaseSession()
+        me.lakko.app.storage.BlobAccess.clear()
         clearPendingRecovery()
         pendingFreshPhrase.getAndSet(null)?.seed?.fill(0)
         landedState = AuthState.Anon()

@@ -54,11 +54,12 @@ struct ListInDiscoverPanel: View {
             }
         }
         .task { await load() }
-        .alert(l10n.t("discover.listing.confirm_title"), isPresented: $confirming) {
-            Button(l10n.t("common.cancel"), role: .cancel) {}
-            Button(l10n.t("discover.listing.confirm_action")) { Task { await turnOn() } }
-        } message: {
-            Text(ChannelListing.confirm)
+        .lakkoDialog(
+            isPresented: $confirming,
+            title: l10n.t("discover.listing.confirm_title"),
+            message: ChannelListing.confirm
+        ) {
+            [.cancel(), .primary(l10n.t("discover.listing.confirm_action")) { Task { await turnOn() } }]
         }
     }
 
@@ -88,17 +89,15 @@ struct ListInDiscoverPanel: View {
             }))
             .disabled(busy || listed == nil)
         if listed != true {
-            Picker(l10n.t("discover.listing.topic"), selection: $topic) {
-                ForEach(topics, id: \.id) { t in
-                    Text(DiscoverTopics.name(Int(t.id))).tag(t.id)
-                }
-            }
+            LakkoPicker(
+                l10n.t("discover.listing.topic"), selection: $topic,
+                options: topics.map { LakkoPickerOption(value: $0.id, label: DiscoverTopics.name(Int($0.id))) })
             .disabled(busy)
-            Picker(l10n.t("discover.language"), selection: $language) {
-                ForEach(DiscoverLanguages.options(language), id: \.self) { code in
-                    Text(DiscoverLanguages.label(code)).tag(code)
-                }
-            }
+            LakkoPicker(
+                l10n.t("discover.language"), selection: $language,
+                options: DiscoverLanguages.options(language).map {
+                    LakkoPickerOption(value: $0, label: DiscoverLanguages.label($0))
+                })
             .disabled(busy)
         }
         if !hasHandle {

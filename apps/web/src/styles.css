@@ -234,14 +234,12 @@ label {
   color: var(--surface-fg);
 }
 label > input,
-label > textarea,
-label > select {
+label > textarea {
   margin-top: 6px;
   font-weight: 400;
 }
 input,
-textarea,
-select {
+textarea {
   font: inherit;
   min-height: var(--control-h);
   padding: 8px 12px;
@@ -264,12 +262,8 @@ input[type="radio"] {
   min-height: 0;
   accent-color: var(--accent);
 }
-select {
-  max-width: 100%;
-}
 input:focus-visible,
 textarea:focus-visible,
-select:focus-visible,
 button:focus-visible,
 a:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
@@ -732,6 +726,268 @@ a.lk-row.active {
 .lk-avatar.md { width: 44px; height: 44px; }
 .lk-avatar.lg { width: 56px; height: 56px; font-size: 20px; }
 .lk-avatar.xl { width: 96px; height: 96px; font-size: 32px; }
+/* ADR-0084 - a person's photo fills the circle; the initials stay behind
+   it until it arrives. */
+.lk-avatar { position: relative; overflow: hidden; }
+.lk-avatar.profile { width: 112px; height: 112px; font-size: 38px; }
+.lk-avatar-media {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Settings > Profile (docs/ux/profile-screen.md section 1): one centred
+   column, at most 480 px. */
+.lk-profile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+}
+.lk-profile-avatar {
+  position: relative;
+  margin-bottom: 6px;
+}
+.lk-profile-avatar-edit {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  color: var(--surface-fg);
+  box-shadow: var(--shadow-1);
+}
+.lk-profile-avatar .lk-menu {
+  right: auto;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.lk-profile-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+.lk-profile-row > .lk-profile-value,
+.lk-profile-row > .lk-icon-button {
+  display: inline-flex;
+}
+.lk-profile-name,
+.lk-profile-username {
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px;
+}
+.lk-profile-value {
+  border: none;
+  background: transparent;
+  padding: 2px 4px;
+  min-height: 0;
+  color: var(--surface-fg);
+  font: inherit;
+  cursor: pointer;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.lk-profile-name .lk-profile-value {
+  font-size: 20px;
+  font-weight: 600;
+}
+.lk-profile-username .lk-profile-value {
+  color: var(--surface-muted);
+}
+.lk-profile-value.muted {
+  color: var(--surface-muted);
+  font-weight: 500;
+}
+.lk-profile-field {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lk-profile-field p {
+  margin: 0;
+  font-size: 13px;
+}
+.lk-profile-prefixed {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  padding: 0 10px;
+  background: var(--surface-bg);
+}
+.lk-profile-prefixed > span {
+  color: var(--surface-muted);
+}
+.lk-profile-prefixed > input {
+  border: none;
+  outline: none;
+  flex: 1;
+  padding-inline: 0;
+  background: transparent;
+}
+.lk-profile-save {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.lk-profile-save > button {
+  width: 100%;
+}
+@media (max-width: 600px) {
+  /* A bottom sheet on a phone (section 2.1), never the OS action sheet. */
+  .lk-profile-avatar .lk-menu {
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: auto;
+    bottom: 0;
+    transform: none;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
+  }
+}
+
+/* The crop screen (section 2.2). */
+.lk-avatar-crop {
+  align-items: center;
+}
+.lk-avatar-crop-stage {
+  position: relative;
+  overflow: hidden;
+  touch-action: none;
+  cursor: grab;
+  background: #000;
+  border-radius: var(--radius-md);
+  user-select: none;
+}
+.lk-avatar-crop-media {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  max-width: none;
+  pointer-events: none;
+}
+.lk-avatar-crop-mask {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+.lk-avatar-crop-zoom,
+.lk-avatar-crop-zoom input,
+.lk-avatar-strip,
+.lk-avatar-strip input {
+  width: 100%;
+  max-width: 280px;
+}
+.lk-avatar-strip-frames {
+  position: relative;
+  display: flex;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.lk-avatar-strip-frames img {
+  flex: 1;
+  min-width: 0;
+  object-fit: cover;
+}
+.lk-avatar-strip-window {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border: 2px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+/* The camera (section 2.3). */
+.lk-avatar-camera {
+  align-items: center;
+}
+.lk-avatar-camera-view {
+  width: 280px;
+  height: 280px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: #000;
+}
+.lk-avatar-camera-view video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.lk-avatar-camera-view video.mirrored {
+  transform: scaleX(-1);
+}
+.lk-avatar-mode {
+  width: 100%;
+  max-width: 280px;
+}
+.lk-avatar-mode > button {
+  flex: 1;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  min-height: 0;
+  color: var(--surface-muted);
+  font-size: 14px;
+  font-weight: 500;
+}
+.lk-avatar-mode > button + button {
+  border-inline-start: 1px solid var(--surface-border);
+}
+.lk-avatar-mode > button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.lk-avatar-camera-controls {
+  display: grid;
+  grid-template-columns: 40px 80px 40px;
+  align-items: center;
+  gap: 24px;
+}
+.lk-avatar-shutter {
+  width: 80px;
+  height: 80px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  min-height: 0;
+}
+.lk-avatar-shutter-track {
+  fill: var(--surface-fg);
+  stroke: var(--surface-border);
+  stroke-width: 4;
+}
+.lk-avatar-shutter.video .lk-avatar-shutter-track {
+  fill: var(--danger);
+}
+.lk-avatar-shutter-ring {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 4;
+  transform: rotate(-90deg);
+  transform-origin: 40px 40px;
+}
 
 .lk-section-label {
   padding: 12px 20px 4px;
@@ -4864,6 +5120,20 @@ button.lk-call-chip:focus-visible {
     font-size: 22px;
   }
 }
+/* ADR-0084 - a person's photo in place of their initials while the camera
+   is off. */
+.lk-call-photo {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+.lk-call-portrait-avatar { overflow: hidden; }
+.lk-call-tile-photo {
+  width: clamp(40px, 45cqmin, 160px);
+  height: clamp(40px, 45cqmin, 160px);
+}
 .lk-call-tile[data-tone="2"] .lk-call-tile-avatar { background: var(--av-2-bg); color: var(--av-2-fg); }
 .lk-call-tile[data-tone="3"] .lk-call-tile-avatar { background: var(--av-3-bg); color: var(--av-3-fg); }
 .lk-call-tile[data-tone="4"] .lk-call-tile-avatar { background: var(--av-4-bg); color: var(--av-4-fg); }
@@ -5001,6 +5271,11 @@ button.lk-call-chip:focus-visible {
   justify-content: center;
   filter: blur(72px) saturate(1.3);
   opacity: 0.85;
+}
+.lk-call-portrait-photo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 .lk-call-portrait-blur {
   font-size: 46vmin;
@@ -6029,6 +6304,12 @@ html[data-call-bar] body {
   flex: none;
   color: var(--surface-faint);
 }
+/* ADR-0084 - a person's name with their photo beside it. */
+.lk-person-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
 .lk-feed-author {
   font-size: 14px;
   font-weight: 600;
@@ -6200,9 +6481,7 @@ html[data-call-bar] body {
   color: var(--surface-muted);
 }
 .lk-feed-field input,
-.lk-feed-field select,
 .lk-feed-field textarea,
-.lk-feed-conversations select,
 .lk-feed-share-link {
   min-height: var(--control-h);
   padding: 6px 10px;
@@ -7143,4 +7422,219 @@ button.lk-folder-new {
   background: var(--call-bar-bg);
   color: var(--call-ctl-on-fg);
   font-size: 13px;
+}
+
+/* ADR-0065 - a file that is no longer available, and the limits
+   (docs/ux/saved-messages-and-file-lifetime.md sections 4.1 and 4.2). */
+.lk-attachment-gone {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.8rem;
+  text-align: start;
+}
+.lk-attachment-gone-title {
+  font-weight: 600;
+}
+.lk-attachment-gone-body {
+  color: var(--surface-muted);
+}
+.lk-attachment-limit {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+}
+.lk-attachment-retry {
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  min-height: 0;
+  font-size: inherit;
+  text-decoration: underline;
+}
+/* The saved mark beside a message's time. */
+.lk-bubble-saved {
+  display: inline-flex;
+  align-items: center;
+  color: var(--surface-muted);
+}
+/* The Saved screen (section 3). */
+.lk-saved-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.lk-saved-row {
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: start;
+}
+.lk-saved-row.unheld {
+  cursor: default;
+}
+.lk-saved-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  flex: 0 0 auto;
+}
+
+/* LakkoPicker (design system section 3, "Picker"): a field-shaped button and
+   the app's own list of rows, never the browser's <select>. */
+.lk-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.lk-picker {
+  position: relative;
+  min-width: 0;
+}
+.lk-picker-btn {
+  width: 100%;
+  justify-content: space-between;
+  padding: 0 10px 0 12px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  font-weight: 400;
+  color: var(--surface-fg);
+}
+.lk-picker-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.lk-picker-value {
+  flex: 1 1 auto;
+  text-align: start;
+}
+.lk-picker-chevron {
+  display: inline-flex;
+  color: var(--surface-muted);
+  transform: rotate(90deg);
+  transition: transform 120ms ease;
+}
+.lk-picker-btn[aria-expanded="true"] .lk-picker-chevron {
+  transform: rotate(-90deg);
+}
+.lk-picker-scrim {
+  display: none;
+}
+.lk-picker-list {
+  position: fixed;
+  z-index: 1200;
+  max-width: min(360px, calc(100vw - 16px));
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  outline: none;
+}
+.lk-picker-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+  padding: 0 10px 0 12px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  color: var(--surface-fg);
+  cursor: pointer;
+  user-select: none;
+}
+.lk-picker-option.active {
+  background: var(--surface-hover);
+}
+.lk-picker-option[aria-selected="true"] {
+  font-weight: 600;
+}
+.lk-picker-check {
+  display: inline-flex;
+  flex: 0 0 18px;
+  color: var(--accent);
+}
+.lk-picker-list:focus-visible .lk-picker-option.active {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: -2px;
+}
+@media (max-width: 560px) {
+  .lk-picker-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 1199;
+    background: rgba(0, 0, 0, 0.35);
+  }
+  .lk-picker-list {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    max-width: none;
+    max-height: 70vh;
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+    border-bottom: none;
+  }
+  .lk-picker-option {
+    min-height: 52px;
+    font-size: 15px;
+  }
+}
+/* A labelled picker: the label text above, the field under it, like
+   `label > input`. Not a <label> element, which would forward a click on a
+   list row back to the button. */
+.lk-picker-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--surface-fg);
+}
+.lk-feed-field .lk-picker-btn {
+  background: var(--surface-bg);
+}
+.lk-feed-membership {
+  flex: 0 0 auto;
+  width: 9rem;
+}
+/* The recovery-phrase word suggestions (ui/WordSuggest.tsx), in place of the
+   browser's <datalist>. */
+.lk-word-suggest {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  padding: 4px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-2);
+}
+.lk-word-suggest > [role="option"] {
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+  color: var(--surface-fg);
+  cursor: pointer;
+  user-select: none;
+}
+.lk-word-suggest > [role="option"]:hover,
+.lk-word-suggest > .active {
+  background: var(--surface-hover);
 }
