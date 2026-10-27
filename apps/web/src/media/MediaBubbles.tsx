@@ -13,6 +13,8 @@
  */
 
 import { t } from "../l10n";
+import { AttachmentFailureNote } from "./AttachmentFailureNote";
+import { openFailureOf, type AttachmentFailure } from "../chat/attachment-failure";
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 
 import type { AttachmentRefBytes } from "../chat/attachments";
@@ -174,6 +176,10 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
    * second between pressing play and any sound. Nothing preloaded it, though
    * the photo bubble beside it always has.
    */
+  /** Section 4.1 / 4.2 — why the last download failed. */
+  let lastFailure: AttachmentFailure = "failed";
+  const [failure, setFailure] = createSignal<AttachmentFailure>("failed");
+
   async function prepare(forPress: boolean): Promise<HTMLAudioElement | null> {
     if (sourced) return element();
     // A press landing mid-warm joins the warm-up instead of starting a second
@@ -187,6 +193,7 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
           return a;
         } catch (err) {
           console.warn("[voice] download or decrypt failed", errorName(err) ?? "unnamed");
+          lastFailure = openFailureOf(err);
           return null;
         } finally {
           preparing = null;
@@ -195,7 +202,10 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
     }
     if (forPress) setStatus("loading");
     const a = await preparing;
-    if (forPress) setStatus(a === null ? "error" : "idle");
+    if (forPress) {
+      setFailure(a === null ? lastFailure : "failed");
+      setStatus(a === null ? "error" : "idle");
+    }
     // A warm-up that failed says nothing and caches nothing: the source is
     // still unattached, so the press retries the fetch and is the one that
     // reports it. A background failure must not put "Couldn't play this
@@ -456,16 +466,24 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
         </div>
       </div>
       <Show when={status() === "error"}>
-        <button
-          type="button"
-          onClick={() => {
+        <AttachmentFailureNote
+          failure={failure()}
+          onRetry={() => {
             setStatus("idle");
             void play();
           }}
-          style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "min-height": 0, "font-size": "0.75rem", "text-align": "left", "text-decoration": "underline" }}
         >
-          {t("chat.media.play_failed")}
-        </button>
+          <button
+            type="button"
+            onClick={() => {
+              setStatus("idle");
+              void play();
+            }}
+            style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "min-height": 0, "font-size": "0.75rem", "text-align": "left", "text-decoration": "underline" }}
+          >
+            {t("chat.media.play_failed")}
+          </button>
+        </AttachmentFailureNote>
       </Show>
       <Show when={props.upload === "failed"}>
         <NotSent onRetry={props.onRetry} />
@@ -526,6 +544,9 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
     if (local !== null) setVideoUrl(local);
   });
 
+  /** Section 4.1 / 4.2 — why the download failed (a play error is `failed`). */
+  const [noteFailure, setNoteFailure] = createSignal<AttachmentFailure>("failed");
+
   async function ensureUrl(): Promise<string | null> {
     const have = videoUrl() ?? props.hub.urlFor(props.mediaKey);
     if (have !== null) {
@@ -540,6 +561,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
       return url;
     } catch (err) {
       console.warn("[video-note] download or decrypt failed", errorName(err) ?? "unnamed");
+      setNoteFailure(openFailureOf(err));
       setStatus("error");
       return null;
     }
@@ -554,6 +576,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
     setSoundHint(false);
     setMode("poster");
     setMounted(false);
+    setNoteFailure("failed");
     setStatus("error");
   }
 
@@ -773,16 +796,24 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
         </Show>
       </button>
       <Show when={status() === "error"}>
-        <button
-          type="button"
-          onClick={() => {
+        <AttachmentFailureNote
+          failure={noteFailure()}
+          onRetry={() => {
             setStatus("idle");
             void startPlayback(true);
           }}
-          style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "min-height": 0, "font-size": "0.75rem", "text-decoration": "underline" }}
         >
-          {t("chat.media.play_failed")}
-        </button>
+          <button
+            type="button"
+            onClick={() => {
+              setStatus("idle");
+              void startPlayback(true);
+            }}
+            style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "min-height": 0, "font-size": "0.75rem", "text-decoration": "underline" }}
+          >
+            {t("chat.media.play_failed")}
+          </button>
+        </AttachmentFailureNote>
       </Show>
       <Show when={props.upload === "failed"}>
         <NotSent onRetry={props.onRetry} />
@@ -798,6 +829,7 @@ const GIF_MAX_WIDTH = 260;
 export function GifBubble(props: MediaBubbleProps): JSX.Element {
   const [url, setUrl] = createSignal<string | null>(null);
   const [status, setStatus] = createSignal<"loading" | "ready" | "error">("loading");
+  const [gifFailure, setGifFailure] = createSignal<AttachmentFailure>("failed");
   const [fullScreen, setFullScreen] = createSignal(false);
   const inline = (): "image" | "video" => (props.hub.inlineType(props.attachment.mime) === "video" ? "video" : "image");
   const uploading = (): boolean => typeof props.upload === "number";
@@ -820,7 +852,10 @@ export function GifBubble(props: MediaBubbleProps): JSX.Element {
         setUrl(u);
         setStatus("ready");
       },
-      () => setStatus("error"),
+      (err: unknown) => {
+        setGifFailure(openFailureOf(err));
+        setStatus("error");
+      },
     );
   }
   onMount(load);
@@ -884,13 +919,15 @@ export function GifBubble(props: MediaBubbleProps): JSX.Element {
         </Show>
       </button>
       <Show when={status() === "error"}>
-        <button
-          type="button"
-          onClick={load}
-          style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "min-height": 0, "font-size": "0.75rem", "text-decoration": "underline", "text-align": "left" }}
-        >
-          {t("chat.gif.load_failed")}
-        </button>
+        <AttachmentFailureNote failure={gifFailure()} onRetry={load}>
+          <button
+            type="button"
+            onClick={load}
+            style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "min-height": 0, "font-size": "0.75rem", "text-decoration": "underline", "text-align": "left" }}
+          >
+            {t("chat.gif.load_failed")}
+          </button>
+        </AttachmentFailureNote>
       </Show>
       <Show when={props.upload === "failed"}>
         <NotSent onRetry={props.onRetry} />

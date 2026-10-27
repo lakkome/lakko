@@ -93,6 +93,7 @@ const PATHS = {
   // The feed icons of `docs/ux/feed.md` section 4.1, beside the ones the set
   // already had (`feed`, `chat`, `bell`, `globe`). Index order lives in
   // `feed/feed-icons.ts`, not here.
+  bookmark: '<path d="M6 3.5h12v17l-6-4-6 4z"/>',
   star: `<path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/>`,
   heart: `<path d="M12 19.5s-7.5-4.4-7.5-9.7A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 2.6c0 5.3-7.5 9.7-7.5 9.7z"/>`,
   lightning: `<path d="M13.5 3 5.5 13.5h6l-1 7.5 8-10.5h-6z"/>`,

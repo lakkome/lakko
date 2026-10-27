@@ -123,7 +123,8 @@ private struct FoundPersonRow: View {
             InitialsAvatar(
                 name: person.displayName ?? person.username ?? "?",
                 identity: person.accountKey.base64EncodedString(),
-                size: 40)
+                size: 40,
+                photo: .person(person.accountKey))
             VStack(alignment: .leading, spacing: 2) {
                 Text(person.displayName ?? l10n.t("contacts.request.someone"))
                     .foregroundStyle(Color.lakkoText)

@@ -195,6 +195,7 @@ public fun ContactsScreen(
                 name = stated ?: unnamed,
                 username = p.username.ifEmpty { null },
                 placeholder = stated == null,
+                personKey = p.signaturePubkeyB64,
             )
         }
         contactSections(filterContacts(rows, query))
@@ -458,7 +459,12 @@ private fun ContactRow(row: ContactRowModel, onClick: () -> Unit) {
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
-        LakkoAvatar(name = row.name, seed = row.key, size = 40.dp)
+        LakkoAvatar(
+            name = row.name,
+            seed = row.key,
+            size = 40.dp,
+            personKey = me.lakko.app.ui.components.personKeyBytes(row.personKey ?: row.key),
+        )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(row.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
@@ -492,6 +498,7 @@ private fun RequestRow(
                 name = if (name.isPlaceholder) "?" else name.primary,
                 seed = contactRouteKey(req.fromPubkey),
                 size = 40.dp,
+                personKey = req.fromPubkey,
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -553,7 +560,12 @@ private fun SentRow(s: SentContactRequest) {
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp),
     ) {
-        LakkoAvatar(name = s.recipientUsername, seed = s.recipientAccountIdB64, size = 40.dp)
+        LakkoAvatar(
+            name = s.recipientUsername,
+            seed = s.recipientAccountIdB64,
+            size = 40.dp,
+            personKey = me.lakko.app.ui.components.personKeyBytes(s.recipientKeyB64),
+        )
         Spacer(Modifier.width(12.dp))
         Text(
             "@${s.recipientUsername}",

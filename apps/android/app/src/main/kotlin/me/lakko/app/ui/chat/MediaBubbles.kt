@@ -331,15 +331,24 @@ internal fun VoiceBubble(
                 )
             }
         }
-        if (failed) {
-            Text(
-                text = t(COULD_NOT_PLAY),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.bubbleControl(
-                    onClickLabel = t("common.retry"),
-                    onLongPress = onLongPress,
-                ) { hub.toggleVoice(ref, knownDuration, sentByMe = isOwn) },
+        // UX 4.1 / 4.2 — a gone file says so (also from the prefetch, before
+        // any press) and offers no Retry; a limit offers Try again.
+        val failures by hub.failures.collectAsStateWithLifecycle()
+        val failure = failures[key]
+        if (failed || failure == me.lakko.app.media.MediaFailure.GONE) {
+            val retry = mediaRetryOffered(failure)
+            MediaFailureLabel(
+                failure = failure,
+                generic = t(COULD_NOT_PLAY),
+                onMedia = false,
+                modifier = if (retry) {
+                    Modifier.bubbleControl(
+                        onClickLabel = t("common.retry"),
+                        onLongPress = onLongPress,
+                    ) { hub.toggleVoice(ref, knownDuration, sentByMe = isOwn) }
+                } else {
+                    Modifier
+                },
             )
         }
     }
@@ -581,6 +590,7 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
     }
 
     fun start() {
+        if (failed && !mediaRetryOffered(hub.failureFor(key))) return
         failed = false
         if (video != null) {
             hub.exclusive.claim("video-$key") { playingWithSound = false }
@@ -686,12 +696,10 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress:
             }
         }
         Text(formatTotalClock(duration), style = MaterialTheme.typography.labelSmall)
-        if (failed) {
-            Text(
-                t(COULD_NOT_PLAY),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
-            )
+        val failures by hub.failures.collectAsStateWithLifecycle()
+        val failure = failures[key]
+        if (failed || failure == me.lakko.app.media.MediaFailure.GONE) {
+            MediaFailureLabel(failure, t(COULD_NOT_PLAY), onMedia = false)
         }
     }
 }
@@ -716,6 +724,8 @@ internal fun GifBubble(
             if (f == null) failed = true else file = f
         }
     }
+    val gifFailures by hub.failures.collectAsStateWithLifecycle()
+    val gifFailure = if (failed) gifFailures[key] else null
     val w = ref.width?.toInt()?.takeIf { it > 0 }
     val h = ref.height?.toInt()?.takeIf { it > 0 }
     val ratio = if (w != null && h != null) (w.toFloat() / h).coerceIn(0.4f, 2.5f) else 1f
@@ -730,7 +740,9 @@ internal fun GifBubble(
                 onLongPress = onLongPress,
                 onClickLabel = if (failed) t("common.retry") else t("chat.gif.open_full"),
             ) {
-                if (failed) {
+                if (failed && !mediaRetryOffered(gifFailure)) {
+                    Unit
+                } else if (failed) {
                     failed = false
                     attempt += 1
                 } else if (file != null) {
@@ -740,7 +752,7 @@ internal fun GifBubble(
     ) {
         val f = file
         when {
-            failed -> Text(t(COULD_NOT_PLAY), style = MaterialTheme.typography.labelSmall)
+            failed -> MediaFailureLabel(gifFailure, t(COULD_NOT_PLAY), onMedia = false)
             f == null -> CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
             else -> GifContent(f, inline, Modifier.fillMaxSize()) { failed = true }
         }
@@ -915,6 +927,14 @@ internal fun PendingMediaBubble(
                     }
                 }
             }
+        }
+        if (row.failed && row.limited) {
+            // UX 4.2 — the sending limit, in place of the generic failure.
+            Text(
+                t("chat.attachment.limit.send"),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
         if (row.failed) {
             Row(verticalAlignment = Alignment.CenterVertically) {

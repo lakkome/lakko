@@ -105,7 +105,8 @@ struct SettingsScreen: View {
                             name: displayName,
                             // Hashed for the tint only; the id itself is never shown.
                             identity: account.accountIdB64,
-                            size: 56
+                            size: 56,
+                            photo: .own
                         )
                         VStack(alignment: .leading, spacing: 2) {
                             Text(displayName)

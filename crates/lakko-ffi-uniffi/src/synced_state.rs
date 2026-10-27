@@ -212,6 +212,10 @@ pub enum SavedMessageValue {
         /// Blob ids (32 bytes each) of the message's files and thumbnails.
         /// At most 128, none repeated.
         blob_ids: Vec<Vec<u8>>,
+        /// The message's own time in UNIX millis as the saving device showed
+        /// it; `0` = unknown. Display only.
+        #[uniffi(default = 0)]
+        sent_at_ms: u64,
     },
     /// The message was removed from saved (the tombstone).
     Removed,
@@ -250,6 +254,11 @@ pub struct SavedMessageView {
     pub attachment_kind: String,
     /// Blob ids (32 bytes each) of the message's files and thumbnails.
     pub blob_ids: Vec<Vec<u8>>,
+    /// The message's own time in UNIX millis as the saving device showed
+    /// it, so the row can show the message date before this device holds
+    /// the message; `0` = unknown.
+    #[uniffi(default = 0)]
+    pub sent_at_ms: u64,
 }
 
 fn synced_err(e: core::BoundsError) -> FfiError {
@@ -268,6 +277,7 @@ impl SavedMessageRegister {
                 excerpt,
                 attachment_kind,
                 blob_ids,
+                sent_at_ms,
             } => {
                 if blob_ids.len() > core::SAVED_BLOB_IDS_MAX {
                     return Err(synced_err(core::BoundsError::TooManyBlobIds));
@@ -278,6 +288,7 @@ impl SavedMessageRegister {
                         author,
                         excerpt,
                         attachment_kind,
+                        sent_at_ms,
                     },
                     blob_ids: blob_ids
                         .iter()
@@ -315,6 +326,7 @@ impl SavedMessageRegister {
                     excerpt: snapshot.excerpt,
                     attachment_kind: snapshot.attachment_kind,
                     blob_ids: blob_ids.iter().map(|b| b.to_vec()).collect(),
+                    sent_at_ms: snapshot.sent_at_ms,
                 },
             },
         }
@@ -1387,6 +1399,7 @@ impl SyncedState {
                     excerpt: v.snapshot.excerpt,
                     attachment_kind: v.snapshot.attachment_kind,
                     blob_ids: v.blob_ids.iter().map(|b| b.to_vec()).collect(),
+                    sent_at_ms: v.snapshot.sent_at_ms,
                 })
                 .collect()
         })
@@ -1562,7 +1575,9 @@ pub fn mint_folder_id() -> Vec<u8> {
 /// text may be passed as `excerpt`; a blob id named twice is kept once.
 /// `attachment_kind` is a short token (empty when the message has no
 /// attachment) and `blob_ids` the 32-byte ids of the message's files and
-/// thumbnails.
+/// thumbnails. `sent_at_ms` is the message's own time in UNIX millis as
+/// this device shows it (`0` when unknown), kept so any device can show the
+/// message date on the Saved screen before it holds the message.
 ///
 /// # Errors
 ///
@@ -1576,6 +1591,7 @@ pub fn compose_saved_message(
     conversation: FolderConversationRef,
     message_id: u64,
     saved_at_ms: u64,
+    sent_at_ms: u64,
     author: String,
     excerpt: String,
     attachment_kind: String,
@@ -1589,6 +1605,7 @@ pub fn compose_saved_message(
             author,
             excerpt,
             attachment_kind,
+            sent_at_ms,
         },
         &blob_ids,
     )
@@ -2148,6 +2165,7 @@ mod tests {
                 chat(),
                 message_id,
                 saved_at_ms,
+                1_000 + message_id,
                 "Ada".into(),
                 format!("message {message_id}"),
                 if blobs.is_empty() { "" } else { "photo" }.into(),
@@ -2186,6 +2204,7 @@ mod tests {
         assert_eq!(list[1].author, "Ada");
         assert_eq!(list[1].excerpt, "message 7");
         assert_eq!(list[1].attachment_kind, "photo");
+        assert_eq!(list[1].sent_at_ms, 1_007);
         assert_eq!(list[1].conversation, chat());
         assert_eq!(list[1].blob_ids, vec![vec![1u8; 32], vec![2; 32]]);
         // Each blob id once, across messages.
@@ -2281,6 +2300,7 @@ mod tests {
                             excerpt: "hello".into(),
                             attachment_kind: "voice".into(),
                             blob_ids: vec![vec![4; 32]],
+                            sent_at_ms: 90,
                         },
                         pb::SavedMessage {
                             hlc: 51,
@@ -2310,6 +2330,7 @@ mod tests {
                 chat(),
                 7,
                 100,
+                90,
                 "Ada".into(),
                 "hello".into(),
                 "voice".into(),
@@ -2365,6 +2386,7 @@ mod tests {
             chat(),
             7,
             5,
+            0,
             long.clone(),
             long.clone(),
             "file".into(),
@@ -2401,6 +2423,7 @@ mod tests {
             chat(),
             7,
             5,
+            0,
             String::new(),
             String::new(),
             String::new(),
@@ -2411,6 +2434,7 @@ mod tests {
             chat(),
             7,
             5,
+            0,
             String::new(),
             String::new(),
             "k".repeat(33),
@@ -2421,6 +2445,7 @@ mod tests {
             chat(),
             7,
             5,
+            0,
             String::new(),
             String::new(),
             String::new(),
@@ -2435,6 +2460,7 @@ mod tests {
             no_chat.clone(),
             7,
             5,
+            0,
             String::new(),
             String::new(),
             String::new(),
@@ -2462,6 +2488,7 @@ mod tests {
             excerpt,
             attachment_kind: String::new(),
             blob_ids,
+            sent_at_ms: 0,
         };
         assert!(matches!(
             by_hand(present("e".repeat(513), vec![])),

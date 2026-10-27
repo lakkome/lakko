@@ -79,6 +79,7 @@ export function useOwnMemberCard(source: OwnCardSource): void {
           updatedAtMs: own.updatedAtMs,
           accountId,
           usernameCertificate: profiles.ownUsernameCertificate(),
+          avatar: own.avatar,
         };
         void (async (): Promise<void> => {
           const outcome = await ensureOwnMemberCard(input);

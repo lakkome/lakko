@@ -8,6 +8,8 @@
 
 package me.lakko.app.ui.chat
 
+import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.Bookmark
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -251,6 +253,9 @@ public fun ChatScreen(
     // the selection bar and the composer for the action bar while it is set.
     // Back leaves the mode before it leaves the chat.
     val selection by viewModel.selection.collectAsStateWithLifecycle()
+    // ADR-0065 section 4 — the account's saved messages, for the mark and
+    // the menu row's word.
+    val savedList by viewModel.saved.collectAsStateWithLifecycle()
     val bulkBusy by viewModel.bulkBusy.collectAsStateWithLifecycle()
     val bulkStatus by viewModel.bulkStatus.collectAsStateWithLifecycle()
     val selecting = selection != null
@@ -685,6 +690,8 @@ public fun ChatScreen(
             subtitle = headerSubtitle,
             isGroup = isGroupChat,
             avatarSeed = state.groupIdHex,
+            // ADR-0084 — a one-to-one's header shows the other person's photo.
+            personKey = if (isGroupChat) null else me.lakko.app.ui.components.personKeyBytes(peerRouteKey),
             // ADR-0045 UX §6.2.8 item 4 / §6.2.11 — the call buttons are GONE
             // once this device's membership has ended, not merely failing. The
             // per-call SFrame seed comes from `exportSecret("lakko/call/v1", …)`
@@ -744,6 +751,7 @@ public fun ChatScreen(
                 // cannot name one caller two ways (and fall back to the same
                 // word when this device has never learned a name).
                 callerName = peerName,
+                personKey = me.lakko.app.ui.components.personKeyBytes(peerRouteKey),
                 // The same two entry points the full-screen ring screen drives.
                 onAccept = { withVideo -> viewModel.acceptIncomingCall(withVideo) },
                 onDecline = { viewModel.declineIncomingCall() },
@@ -977,11 +985,9 @@ public fun ChatScreen(
                             readUpToByMember = state.readUpToByMember,
                             onPreview = { ref ->
                                 scope.launch {
-                                    val bytes = withContext(Dispatchers.IO) {
-                                        runCatching {
-                                            AttachmentBridge.downloadAndDecrypt(ref)
-                                        }.getOrNull()
-                                    } ?: return@launch
+                                    // UX 4.1 / 4.2 — the failure is recorded on
+                                    // the hub, so the chip says gone or limited.
+                                    val bytes = mediaHub.loadBytes(ref).getOrNull() ?: return@launch
                                     val bitmap = withContext(Dispatchers.Default) {
                                         decodeImageBitmap(bytes)
                                     }
@@ -993,14 +999,7 @@ public fun ChatScreen(
                                     // A photo or video already opened in this
                                     // chat is in the media cache; reuse it
                                     // instead of downloading it again.
-                                    val cached = mediaHub.fileFor(
-                                        me.lakko.app.media.ChatMediaHub.mediaKey(ref.blobId),
-                                    )
-                                    val bytes = withContext(Dispatchers.IO) {
-                                        runCatching {
-                                            cached?.readBytes() ?: AttachmentBridge.downloadAndDecrypt(ref)
-                                        }.getOrNull()
-                                    } ?: return@launch
+                                    val bytes = mediaHub.loadBytes(ref).getOrNull() ?: return@launch
                                     // A file leaves the app through the
                                     // system's save picker, never a share
                                     // sheet. The name is the sender's, so it
@@ -1061,6 +1060,9 @@ public fun ChatScreen(
                             // one scope acts at once.
                             pinLabel = pinMenu.label.text(),
                             pinUndoes = pinMenu.label.key == "chat.message.unpin",
+                            // ADR-0065 / saved section 2.
+                            savedMessage = viewModel.isSaved(msg, savedList),
+                            onToggleSaved = { viewModel.onToggleSave(msg) },
                             onPin = {
                                 val single = pinMenu.actions.singleOrNull()
                                 if (single != null && pinMenu.label.key == "chat.message.unpin") {
@@ -1138,6 +1140,7 @@ public fun ChatScreen(
                     if (requests.isNotEmpty()) onForwardSelection(requests)
                 },
                 onDelete = { confirmBulkDelete = true },
+                onSave = { viewModel.onSaveSelected() },
             )
                 } else when (val slot = me.lakko.app.chat.composerState(membership, state.draft)) {
             me.lakko.app.chat.ComposerSlot.Composer -> Composer(
@@ -1281,6 +1284,7 @@ private fun Header(
     subtitle: String?,
     isGroup: Boolean,
     avatarSeed: String,
+    personKey: ByteArray? = null,
     callActive: Boolean,
     onNavigateBack: () -> Unit,
     onStartCall: () -> Unit,
@@ -1305,7 +1309,7 @@ private fun Header(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.clickable(onClick = onShowInfo),
             ) {
-                LakkoAvatar(name = title, seed = avatarSeed, size = 32.dp, group = isGroup)
+                LakkoAvatar(name = title, seed = avatarSeed, size = 32.dp, group = isGroup, personKey = personKey)
                 Spacer(Modifier.width(10.dp))
                 Column {
                     Text(
@@ -1453,6 +1457,11 @@ private fun MessageRow(
     pinUndoes: Boolean = false,
     /** UX section 8 — Select was chosen on this message. */
     onSelect: () -> Unit = {},
+    /** ADR-0065 / saved section 2 — the message is saved (the mark, and the
+     *  menu row reads `Remove from saved`). */
+    savedMessage: Boolean = false,
+    /** Saved section 2 — Save / Remove from saved was chosen. */
+    onToggleSaved: () -> Unit = {},
 ) {
     val gapAbove = if (firstInRun) 8.dp else 2.dp
     // UX 3.1 — "the surface tint used for the pressed state": Material's
@@ -1489,6 +1498,8 @@ private fun MessageRow(
                 onJumpToForward = onJumpToForward,
                 onPin = onPin,
                 pinLabel = pinLabel,
+                savedMessage = savedMessage,
+                onToggleSaved = onToggleSaved,
                 pinUndoes = pinUndoes,
                 onSelect = onSelect,
                 // ADR-0024 — own bubble: compute the read tick.
@@ -1525,6 +1536,7 @@ private fun MessageRow(
                         name = authorName ?: "?",
                         seed = msg.authorKey ?: msg.messageId.toString(),
                         size = 28.dp,
+                        personKey = me.lakko.app.ui.components.personKeyBytes(msg.authorKey),
                         modifier = Modifier.padding(bottom = 2.dp),
                     )
                 } else {
@@ -1557,6 +1569,8 @@ private fun MessageRow(
                     onJumpToForward = onJumpToForward,
                     onPin = onPin,
                     pinLabel = pinLabel,
+                    savedMessage = savedMessage,
+                    onToggleSaved = onToggleSaved,
                     pinUndoes = pinUndoes,
                     onSelect = onSelect,
                     // Incoming bubbles never show our read state.
@@ -1828,6 +1842,11 @@ internal fun Bubble(
     pinUndoes: Boolean = false,
     /** UX section 8 — Select was chosen on this message. */
     onSelect: () -> Unit = {},
+    /** ADR-0065 / saved section 2 — the message is saved (the mark, and the
+     *  menu row reads `Remove from saved`). */
+    savedMessage: Boolean = false,
+    /** Saved section 2 — Save / Remove from saved was chosen. */
+    onToggleSaved: () -> Unit = {},
 ) {
     // ADR-0023 — every affordance is gated on the message having a
     // real DS messageId (0 ⇒ a not-yet-acked outgoing row that no
@@ -2013,6 +2032,7 @@ internal fun Bubble(
                                             {
                                                 MediaMetaPill(
                                                     edited = msg.edited,
+                                                    saved = savedMessage,
                                                     time = time,
                                                     readState = if (isOwn) readState else OwnReadState.None,
                                                     modifier = Modifier
@@ -2034,6 +2054,7 @@ internal fun Bubble(
                                             {
                                                 BubbleMeta(
                                                     edited = msg.edited,
+                                                    saved = savedMessage,
                                                     time = time,
                                                     readState = if (isOwn) readState else OwnReadState.None,
                                                     contentColor = contentColor,
@@ -2051,6 +2072,7 @@ internal fun Bubble(
                                     ) {
                                         AttachmentChipRow(
                                             ref = ref,
+                                            hub = mediaHub,
                                             onPreview = { onPreview(ref) },
                                             onSave = { onSave(ref) },
                                         )
@@ -2067,6 +2089,7 @@ internal fun Bubble(
                     if (metaSlot == me.lakko.app.media.BubbleMetaSlot.BUBBLE_ROW) {
                         BubbleMeta(
                             edited = msg.edited && !msg.deleted,
+                            saved = savedMessage && !msg.deleted,
                             time = time,
                             readState = if (isOwn) readState else OwnReadState.None,
                             contentColor = contentColor,
@@ -2091,8 +2114,10 @@ internal fun Bubble(
                     alignEnd = isOwn,
                     actions = if (msg.isHistory) {
                         // ADR-0073 R.5 — a row of an older segment is
-                        // read-only: `Unpin` alone, when it is pinned.
+                        // read-only: `Unpin` alone, when it is pinned; Save,
+                        // which sends nothing to the chat, stays.
                         historyRowActions(rowIsPinned = pinUndoes, pinLabel = pinLabel)
+                            .copy(canSave = !msg.deleted, saved = savedMessage)
                     } else {
                         messageActionsFor(
                             isOwn = isOwn,
@@ -2104,6 +2129,7 @@ internal fun Bubble(
                             sendComplete = msg.ack == Ack.SENT,
                             // UX 4.1 — `Pin` or `Unpin`, decided by the screen.
                             pinLabel = pinLabel,
+                            saved = savedMessage,
                         )
                     },
                     reactions = if (msg.isHistory) emptyList() else REACTION_EMOJIS,
@@ -2128,6 +2154,10 @@ internal fun Bubble(
                     onPin = {
                         menuOpen = false
                         onPin()
+                    },
+                    onSave = {
+                        menuOpen = false
+                        onToggleSaved()
                     },
                     onSelect = {
                         menuOpen = false
@@ -2172,6 +2202,7 @@ internal fun Bubble(
         if (metaSlot == me.lakko.app.media.BubbleMetaSlot.BELOW_BUBBLE) {
             BubbleMeta(
                 edited = msg.edited,
+                saved = savedMessage,
                 time = time,
                 readState = if (isOwn) readState else OwnReadState.None,
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2371,6 +2402,8 @@ private fun BubbleMeta(
     readState: OwnReadState,
     contentColor: Color,
     modifier: Modifier = Modifier,
+    /** Saved section 2 — the saved mark beside the time. */
+    saved: Boolean = false,
     /** `false` inside the §10 media pill, which wraps its content. */
     fillWidth: Boolean = true,
     /** Send this row again. `null` unless this row's send failed - the action
@@ -2378,7 +2411,7 @@ private fun BubbleMeta(
      *  can say WHICH message failed. */
     onRetry: (() -> Unit)? = null,
 ) {
-    if (!edited && time == null && readState == OwnReadState.None && onRetry == null) return
+    if (!edited && time == null && readState == OwnReadState.None && onRetry == null && !saved) return
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -2390,6 +2423,15 @@ private fun BubbleMeta(
                 text = t("chat.message.edited"),
                 style = MaterialTheme.typography.labelSmall,
                 color = contentColor.copy(alpha = 0.7f),
+            )
+        }
+        if (saved) {
+            // Saved section 2 — a small mark, only the person sees it.
+            Icon(
+                imageVector = Icons.Filled.Bookmark,
+                contentDescription = t("chat.message.saved_mark"),
+                tint = contentColor.copy(alpha = 0.7f),
+                modifier = Modifier.size(12.dp),
             )
         }
         if (time != null) {
@@ -2431,8 +2473,9 @@ private fun MediaMetaPill(
     time: String?,
     readState: OwnReadState,
     modifier: Modifier = Modifier,
+    saved: Boolean = false,
 ) {
-    if (!edited && time == null && readState == OwnReadState.None) return
+    if (!edited && time == null && readState == OwnReadState.None && !saved) return
     Box(
         modifier = modifier
             .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(percent = 50))
@@ -2444,6 +2487,7 @@ private fun MediaMetaPill(
             readState = readState,
             contentColor = Color.White,
             fillWidth = false,
+            saved = saved,
         )
     }
 }
@@ -2585,10 +2629,16 @@ private fun EditMessageDialog(
 @Composable
 private fun AttachmentChipRow(
     ref: AttachmentRef,
+    hub: me.lakko.app.media.ChatMediaHub,
     onPreview: () -> Unit,
     onSave: () -> Unit,
 ) {
     val preview = AttachmentBridge.isInlinePreviewable(ref)
+    // UX 4.1 / 4.2 — a file that is gone loses its Open / Save (trying again
+    // cannot help); a limit keeps them as Try again.
+    val failures by hub.failures.collectAsStateWithLifecycle()
+    val failure = failures[me.lakko.app.media.ChatMediaHub.mediaKey(ref.blobId)]
+    val gone = failure == me.lakko.app.media.MediaFailure.GONE
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = Color.White.copy(alpha = 0.12f),
@@ -2609,11 +2659,18 @@ private fun AttachmentChipRow(
                     text = AttachmentBridge.formatSize(ref.size, LocalStrings.current),
                     style = MaterialTheme.typography.labelSmall,
                 )
+                if (failure != null && failure != me.lakko.app.media.MediaFailure.FAILED) {
+                    MediaFailureLabel(failure, generic = "", onMedia = false)
+                }
             }
-            if (preview) {
-                TextButton(onClick = onPreview) { Text(t("chat.attachment.open")) }
+            if (!gone) {
+                if (preview) {
+                    TextButton(onClick = onPreview) { Text(t("chat.attachment.open")) }
+                }
+                TextButton(onClick = onSave) {
+                    Text(if (failure == me.lakko.app.media.MediaFailure.LIMIT) t("common.retry") else t("common.save"))
+                }
             }
-            TextButton(onClick = onSave) { Text(t("common.save")) }
         }
     }
 }
@@ -3829,10 +3886,18 @@ private fun MembersSheet(
                         // fingerprint; a prospective member has no roster entry to
                         // read a display name from), plus the secondary line.
                         waitingAdds.forEach { request ->
-                            Text(
-                                text = viewModel.nameOfKeyB64(request.addSignatureKeyB64),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
+                            val addName = viewModel.nameOfKeyB64(request.addSignatureKeyB64)
+                            // ADR-0084 — the person's photo beside their name.
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                LakkoAvatar(
+                                    name = addName,
+                                    seed = request.addSignatureKeyB64 ?: addName,
+                                    size = 24.dp,
+                                    personKey = me.lakko.app.ui.components.personKeyBytes(request.addSignatureKeyB64),
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(text = addName, style = MaterialTheme.typography.bodySmall)
+                            }
                             Text(
                                 text = t("chat.members.pending.waiting_added"),
                                 style = MaterialTheme.typography.bodySmall,
@@ -3926,6 +3991,15 @@ private fun MembersSheet(
                                 .fillMaxWidth()
                                 .padding(vertical = 2.dp),
                         ) {
+                            // ADR-0084 — the joiner's photo, through the same
+                            // key their name resolves by.
+                            LakkoAvatar(
+                                name = viewModel.pendingJoinLabel(ref),
+                                seed = java.util.Base64.getEncoder().encodeToString(ref),
+                                size = 28.dp,
+                                personKey = viewModel.pendingJoinPersonKey(ref),
+                            )
+                            Spacer(Modifier.width(8.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 // ADR-0048 — a join request names the joiner
                                 // through the one resolver (usually the
@@ -4046,8 +4120,20 @@ private fun MembersSheet(
                                     member.leafIndex,
                                     ownLeaf,
                                 )
+                                // ADR-0084 — a person's photo beside their name;
+                                // the own row shows the owner's own photo.
+                                val memberName = viewModel.memberLabel(member)
+                                val isOwnRow = ownLeaf == member.leafIndex
+                                LakkoAvatar(
+                                    name = memberName,
+                                    seed = java.util.Base64.getEncoder().encodeToString(member.signaturePublicKey),
+                                    size = 32.dp,
+                                    personKey = if (isOwnRow) null else member.signaturePublicKey,
+                                    avatar = if (isOwnRow) me.lakko.app.ui.components.rememberOwnAvatar() else null,
+                                )
+                                Spacer(Modifier.width(10.dp))
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(text = viewModel.memberLabel(member))
+                                    Text(text = memberName)
                                     annotation?.let {
                                         Text(
                                             text = it.text(),
@@ -4440,6 +4526,8 @@ private fun SelectionActionBar(
     status: UiText?,
     onForward: () -> Unit,
     onDelete: () -> Unit,
+    /** Saved section 2 — Select mode's Save, beside Delete and Forward. */
+    onSave: () -> Unit = {},
 ) {
     Surface(color = MaterialTheme.colorScheme.surface) {
         Column(Modifier.fillMaxWidth()) {
@@ -4466,6 +4554,19 @@ private fun SelectionActionBar(
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(t("chat.message.forward"))
+                }
+                TextButton(
+                    onClick = onSave,
+                    enabled = selection.forwardEnabled && !busy,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.BookmarkBorder,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(t("chat.select.save"))
                 }
                 TextButton(
                     onClick = onDelete,

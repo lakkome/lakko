@@ -124,7 +124,7 @@ export function InviteContactsPicker(props: {
                     disabled={busyKey() !== null || done()}
                     onClick={() => void invite(row)}
                   >
-                    <Avatar label={row.name} id={row.keyB64} />
+                    <Avatar label={row.name} id={row.keyB64} personKey={row.keyB64} />
                     <div class="lk-row-body">
                       <div class="lk-row-line">
                         <span class="lk-row-title">

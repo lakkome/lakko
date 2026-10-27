@@ -3,6 +3,8 @@
 
 package me.lakko.app.ui.chat
 
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -156,9 +158,14 @@ internal data class MessageActions(
      *  already selected. Offered where the row could be selected at all:
      *  a completed send that is not deleted. */
     val canSelect: Boolean = false,
+    /** docs/ux/saved-messages-and-file-lifetime.md section 2 — Save sits
+     *  directly under Pin on any message that is not deleted. */
+    val canSave: Boolean = false,
+    /** `Remove from saved` instead of `Save`. */
+    val saved: Boolean = false,
 ) {
     /** Whether the card has anything to draw. */
-    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin || canSelect
+    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin || canSelect || canSave
 }
 
 /**
@@ -176,6 +183,8 @@ internal fun messageActionsFor(
     sendComplete: Boolean = true,
     /** Section 4.1 — the row's word for this message (`Pin` / `Unpin`). */
     pinLabel: String = Localization.strings.value["chat.message.pin"],
+    /** Saved section 2 — the message is in the account's saved list. */
+    saved: Boolean = false,
 ): MessageActions = MessageActions(
     // Copy reads a string this device already holds and sends nothing, so it is
     // the one action that does NOT die with the membership gate. It is still
@@ -201,6 +210,12 @@ internal fun messageActionsFor(
     // Section 8 — the same gates a selectable row has (`canSelectMessage`):
     // the id and deleted gates ride in `menuAvailable`, the send gate here.
     canSelect = menuAvailable && sendComplete,
+    // Saved section 2 — "any message that is not deleted, in any chat the
+    // person can read". It sends nothing to the chat, but the menu is how the
+    // row is reached, so the same id and deleted gates apply; a row still
+    // sending has no id to save under.
+    canSave = !deleted && sendComplete,
+    saved = saved,
 )
 
 /**
@@ -260,6 +275,8 @@ internal fun MessageActionMenuOverlay(
     onPin: () -> Unit = {},
     /** Section 8 — Select was chosen: enter selection mode on this message. */
     onSelect: () -> Unit = {},
+    /** Saved section 2 — Save / Remove from saved was chosen. */
+    onSave: () -> Unit = {},
 ) {
     // The chat window's own height, read OUTSIDE the popup. Inside it,
     // `constraints.maxHeight` is the popup window's height, which the system
@@ -357,6 +374,7 @@ internal fun MessageActionMenuOverlay(
                             onPin = onPin,
                             onCopy = onCopy,
                             onSelect = onSelect,
+                            onSave = onSave,
                             onEdit = onEdit,
                             onDelete = onDelete,
                         )
@@ -459,6 +477,7 @@ internal fun MessageActionCard(
     onForward: () -> Unit = {},
     onPin: () -> Unit = {},
     onSelect: () -> Unit = {},
+    onSave: () -> Unit = {},
 ) {
     Surface(
         modifier = modifier.testTag(ACTION_CARD_TAG),
@@ -527,6 +546,14 @@ internal fun MessageActionCard(
                     onClick = onPin,
                 )
             }
+            if (actions.canSave) {
+                // Saved section 2 — directly under Pin.
+                ActionRow(
+                    label = t(if (actions.saved) "chat.message.unsave" else "chat.message.save"),
+                    icon = if (actions.saved) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                    onClick = onSave,
+                )
+            }
             if (actions.canEdit) {
                 ActionRow(
                     label = t("chat.message.edit"),
@@ -546,7 +573,7 @@ internal fun MessageActionCard(
                         // row gap above it.
                         .padding(top = DESTRUCTIVE_GAP),
                 ) {
-                    if (actions.canReply || actions.canForward || actions.canCopy || actions.canSelect || actions.canPin || actions.canEdit) {
+                    if (actions.canReply || actions.canForward || actions.canCopy || actions.canSelect || actions.canPin || actions.canSave || actions.canEdit) {
                         HorizontalDivider(
                             thickness = CARD_BORDER_WIDTH,
                             color = MaterialTheme.colorScheme.outlineVariant,

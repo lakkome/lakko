@@ -38,7 +38,6 @@ pub(crate) async fn delete_account(
     for sql in [
         // Every row, current and retired (ADR-0076), and the rename time.
         "DELETE FROM usernames WHERE account_id = ?",
-        "DELETE FROM username_renames WHERE account_id = ?",
         "DELETE FROM identity_bundles WHERE account_id = ?",
     ] {
         sqlx::query(sql)

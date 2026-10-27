@@ -82,6 +82,20 @@ import {
   withoutDone,
   type Selection,
 } from "../chat/selection";
+import { blobIdsOfRefs, bytesToHex as blobHex } from "../chat/blob-ids";
+import { goneLines, isSendLimit, openFailureOf, openLimitText, sendLimitText } from "../chat/attachment-failure";
+import {
+  chunkSaveEdits,
+  saveEdit,
+  savedTargetOf,
+  saveRefusal,
+  savedEntryKey,
+  savedKeySet,
+  unsaveEdit,
+  type SaveSource,
+} from "../chat/saved-messages";
+import type { ConversationRef } from "../chat/folders/folder-model";
+import { deleteBlobs } from "../storage/blob-deletes";
 import {
   persistedFromReplyRef,
   replyRefFromPersisted,
@@ -101,7 +115,7 @@ import {
 } from "../chat/person-key";
 import { groupTitle, isUnnamedGroupLabel } from "../chat/group-title";
 import { UNNAMED_MEMBER, memberListLabelOf, memberNameOf } from "../profile/member-label";
-import { pendingJoinLabel } from "../chat/pending-join-label";
+import { pendingJoinLabel, pendingJoinPersonKey } from "../chat/pending-join-label";
 import { JoinAttributionGate } from "../chat/join-attribution-gate";
 import { groupCallsFor } from "../calls/group-call-store";
 import { chatCallAffordance, type ChatCallAffordance } from "../calls/group-call-host";
@@ -247,7 +261,6 @@ import {
   type AttachmentRefBytes,
   type ThumbRefBytes,
   AttachmentSizeError,
-  AttachmentMissingError,
   MAX_ATTACHMENT_BYTES,
 } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
@@ -1616,6 +1629,41 @@ function ChatView(props: {
   const [pendingAttachments, setPendingAttachments] = createSignal<
     AttachmentRefBytes[]
   >([]);
+
+  // ----- ADR-0065: file lifetime and saved messages ---------------------
+
+  /** The signed-in account, for the blob deletes it owes. */
+  const blobAccount = (): string | null => {
+    const s = auth.state();
+    return s.kind === "session" ? s.account.accountId : null;
+  };
+  /** ADR-0065 section 6 — files uploaded and never sent are deleted at once. */
+  function deleteUnsent(refs: readonly AttachmentRefBytes[]): void {
+    const account = blobAccount();
+    if (account === null) return;
+    void deleteBlobs(account, blobIdsOfRefs(refs));
+  }
+  /** The reference a saved message names its conversation by: the group of
+   *  the SEGMENT that holds it (this group, or an older one), with the
+   *  conversation's own kind (rule of 2026-10-27). */
+  const savedRefOf = (groupId: Uint8Array): ConversationRef => ({
+    kind: conversationKind() === "group" ? 2 : 1,
+    id: groupId,
+  });
+  /** The current group's reference (a message of the head segment). */
+  const savedRef = (): ConversationRef => savedRefOf(props.entry.group.groupId);
+  /** The segment and DS id an on-screen row id names. */
+  const savedTarget = (rowId: number): { readonly groupId: Uint8Array; readonly messageId: number } | null =>
+    savedTargetOf(
+      rowId,
+      props.entry.group.groupId,
+      historySegments().map((g) => g.group.groupId),
+    );
+  const savedKeys = createMemo(() => savedKeySet(sync.saved()));
+  const isSavedOf = (rowId: number): boolean => {
+    const target = savedTarget(rowId);
+    return target !== null && savedKeys().has(savedEntryKey(blobHex(target.groupId), target.messageId));
+  };
   const [uploading, setUploading] = createSignal(false);
   /** Per-file upload-progress snapshot — drives the
    *  "Uploading hello.png (2/5)…" indicator in the composer
@@ -3658,8 +3706,9 @@ function ChatView(props: {
       return applyOp(prev, { op: "edit", target: e.target, text: e.text });
     }
     // Section 4.1 — an author-gated delete takes the message's pin records
-    // with it (shared and personal).
+    // with it (shared and personal), and (ADR-0065) it leaves Saved.
     void pins.messageDeleted(props.entry.groupIdB64, e.target);
+    savedMessageDeleted(e.target);
     return applyOp(prev, { op: "delete", target: e.target });
   }
 
@@ -4534,7 +4583,13 @@ function ChatView(props: {
    *  locally, drop its pin records. The single delete and the bulk one both
    *  run this (section 8). A throw means this message was not deleted. */
   async function deleteOne(messageId: number): Promise<void> {
-    if (opRouteNow() === "send") {
+    // ADR-0065 section 6 — the message's files, read BEFORE the tombstone
+    // hides them; deleted from the server once the delete is published.
+    const row = uniqueRows().find((r) => rowMessageId(r) === messageId);
+    const blobIds =
+      row?.kind === "outgoing" ? blobIdsOfRefs(row.attachments) : row?.kind === "incoming" && row.event.kind === "application" ? blobIdsOfRefs(row.event.attachments) : [];
+    const published = opRouteNow() === "send";
+    if (published) {
       const envelopeBytes = await composeDeleteEnvelope(messageId);
       await publishQuiet(envelopeBytes);
     }
@@ -4542,6 +4597,98 @@ function ChatView(props: {
     // Section 4.1 — a deleted message leaves the bar and its pin records
     // go with it.
     void pins.messageDeleted(props.entry.groupIdB64, messageId);
+    savedMessageDeleted(messageId);
+    const account = blobAccount();
+    if (published && account !== null) void deleteBlobs(account, blobIds);
+  }
+
+  /** ADR-0065 section 3 — a message its author deleted for everyone leaves
+   *  Saved, as it leaves the pinned bar. */
+  function savedMessageDeleted(messageId: number): void {
+    if (!isSavedOf(messageId)) return;
+    void sync.applyFolderEdits([unsaveEdit(savedRef(), messageId)]).catch(() => undefined);
+  }
+
+  /** What a Save of `messageId` records, from the row this view holds. */
+  function saveSourceOf(rowId: number): SaveSource | null {
+    const target = savedTarget(rowId);
+    if (target === null) return null;
+    const messageId = target.messageId;
+    const row = uniqueRows().find((r) => rowMessageId(r) === rowId);
+    if (row === undefined) return null;
+    if (row.kind === "outgoing") {
+      return {
+        ref: savedRefOf(target.groupId),
+        messageId,
+        author: profiles.ownProfile().displayName ?? profiles.ownUsername() ?? t("chat.author.you"),
+        text: (msgOps().get(rowId) ?? historyOps().get(rowId))?.editedText ?? row.plaintext,
+        attachments: row.attachments,
+        sentAtMs: row.createdAt === undefined ? 0 : new Date(row.createdAt).getTime(),
+      };
+    }
+    if (row.kind === "incoming" && row.event.kind === "application") {
+      const ev = row.event;
+      return {
+        ref: savedRefOf(target.groupId),
+        messageId,
+        author: ev.senderKey === undefined ? t("chat.members.unnamed") : memberName(ev.senderKey),
+        text: (msgOps().get(rowId) ?? historyOps().get(rowId))?.editedText ?? ev.text,
+        attachments: ev.attachments,
+        sentAtMs: new Date(ev.createdAt).getTime(),
+      };
+    }
+    return null;
+  }
+
+  /** ADR-0065 section 2 — `Save` / `Remove from saved`. */
+  async function onToggleSaved(rowId: number): Promise<void> {
+    setError(null);
+    try {
+      const target = savedTarget(rowId);
+      if (target === null) {
+        setError(() => t("chat.error.save"));
+        return;
+      }
+      if (isSavedOf(rowId)) {
+        await sync.applyFolderEdits([unsaveEdit(savedRefOf(target.groupId), target.messageId)]);
+        return;
+      }
+      const src = saveSourceOf(rowId);
+      if (src === null || saveRefusal(sync.saved().length, 1) !== null) {
+        setError(() => t("chat.error.save"));
+        return;
+      }
+      await sync.applyFolderEdits([saveEdit(src, Date.now())]);
+    } catch (err) {
+      console.warn("[chat] save failed", err instanceof Error ? err.name : "");
+      setError(() => t("chat.error.save"));
+    }
+  }
+
+  /** ADR-0065 section 2 — Select mode's Save: every selected message not
+   *  saved yet, in change sets of at most 32. */
+  async function saveSelection(): Promise<void> {
+    setError(null);
+    const edits = oldestFirst(selection())
+      .filter((id) => !isSavedOf(id))
+      .map((id) => saveSourceOf(id))
+      .filter((src): src is SaveSource => src !== null)
+      .map((src) => saveEdit(src, Date.now()));
+    if (edits.length === 0) {
+      leaveSelectionMode();
+      return;
+    }
+    if (saveRefusal(sync.saved().length, edits.length) !== null) {
+      setError(() => t("chat.error.save"));
+      return;
+    }
+    try {
+      for (const chunk of chunkSaveEdits(edits)) await sync.applyFolderEdits(chunk);
+      leaveSelectionMode();
+    } catch (err) {
+      console.warn("[chat] save failed", err instanceof Error ? err.name : "");
+      setError(() => t("chat.error.save"));
+    }
   }
 
   /** Delete our own message — publish a delete op + tombstone it
@@ -4897,6 +5044,9 @@ function ChatView(props: {
                 limit: formatAttachmentSize(max),
               }),
             );
+          } else if (isSendLimit(err)) {
+            // UX 4.2 — the text stays in the composer.
+            setError(() => sendLimitText());
           } else {
             const name = file.name;
             console.warn("[chat] attachment upload failed", err);
@@ -5017,9 +5167,12 @@ function ChatView(props: {
   }
 
   function removePendingAttachment(index: number): void {
+    const removed = pendingAttachments()[index];
     setPendingAttachments(
       pendingAttachments().filter((_, i) => i !== index),
     );
+    // ADR-0065 section 6 — removed from the composer: never sent, so gone.
+    if (removed !== undefined) deleteUnsent([removed]);
   }
 
   // ----- ADR-0047 media messages ----------------------------------------
@@ -5051,6 +5204,16 @@ function ChatView(props: {
     reply?: ReplyRef;
   }
   const mediaJobs = new Map<number, MediaSendJob>();
+  // ADR-0065 section 6 — leaving the chat abandons what was uploaded and not
+  // sent: the composer's staged files and media takes that never went out.
+  onCleanup(() => {
+    const unsent: AttachmentRefBytes[] = [...pendingAttachments()];
+    for (const job of mediaJobs.values()) {
+      if (job.uploaded === undefined) continue;
+      unsent.push(job.uploaded);
+    }
+    if (unsent.length > 0) deleteUnsent(unsent);
+  });
   const [mediaUploads, setMediaUploads] = createSignal<ReadonlyMap<number, number | "failed">>(new Map());
   function setMediaUpload(tempId: number, value: number | "failed" | null): void {
     const next = new Map(mediaUploads());
@@ -5215,6 +5378,7 @@ function ChatView(props: {
       }
       setMediaUpload(job.tempId, "failed");
       setMediaRowAck(job.tempId, "failed");
+      if (isSendLimit(err)) setError(() => sendLimitText());
       if (err instanceof AttachmentSizeError) {
         const { got, max } = err;
         setError(() =>
@@ -5397,8 +5561,12 @@ function ChatView(props: {
         ref.mime,
       );
     } catch (err) {
-      if (err instanceof AttachmentMissingError) {
-        setError(() => t("chat.attachment.error.gone"));
+      // UX 4.1 / 4.2 — gone, limited, or the generic failure.
+      const failure = openFailureOf(err);
+      if (failure === "gone") {
+        setError(() => `${goneLines().title} ${goneLines().body}`);
+      } else if (failure === "limit") {
+        setError(() => openLimitText());
       } else {
         console.warn("[chat] attachment download failed", err);
         setError(() => t("chat.attachment.error.download"));
@@ -5437,8 +5605,11 @@ function ChatView(props: {
       // when this view unmounts.
       await hub.load(ref);
     } catch (err) {
-      if (err instanceof AttachmentMissingError) {
-        setError(() => t("chat.attachment.error.gone"));
+      const failure = openFailureOf(err);
+      if (failure === "gone") {
+        setError(() => `${goneLines().title} ${goneLines().body}`);
+      } else if (failure === "limit") {
+        setError(() => openLimitText());
       } else {
         console.warn("[chat] attachment preview failed", err);
         setError(() => t("chat.attachment.error.preview"));
@@ -6893,7 +7064,12 @@ function ChatView(props: {
           aria-expanded={infoOpen()}
           onClick={openInfo}
         >
-          <Avatar label={resolvePeerName()} id={props.entry.groupIdB64} size="sm" />
+          <Avatar
+            label={resolvePeerName()}
+            id={props.entry.groupIdB64}
+            size="sm"
+            personKey={isGroupChat() ? undefined : (peerKeyB64() ?? undefined)}
+          />
           <div class="lk-chat-title-text">
             {/* ADR-0021 follow-up: show the linked contact's user-chosen
                 name in the chat header (falls back to the chat label). */}
@@ -7047,6 +7223,7 @@ function ChatView(props: {
           <QuietIncomingCallPanel
             callerName={resolvePeerName()}
             callerId={props.entry.groupIdB64}
+            callerKey={isGroupChat() ? null : peerKeyB64()}
             video={offer().video}
             onAccept={(withVideo) => void callHost.acceptIncomingCall(withVideo)}
             onDecline={() => void callHost.declineIncomingCall()}
@@ -7498,12 +7675,19 @@ function ChatView(props: {
                           gap: "0.5rem",
                         }}
                       >
+                        <Avatar
+                          label={pendingJoinLabel(props.entry.group, ref, base64Encode, (k) => profiles.resolve(k))}
+                          id={pendingJoinPersonKey(props.entry.group, ref, base64Encode)}
+                          size="sm"
+                          personKey={pendingJoinPersonKey(props.entry.group, ref, base64Encode)}
+                        />
                         <div
                           style={{
                             display: "flex",
                             "flex-direction": "column",
                             gap: "0.1rem",
                             overflow: "hidden",
+                            flex: "1",
                           }}
                         >
                           <span class="lk-ellipsis" style={{ "font-size": "0.85rem" }}>
@@ -7810,7 +7994,7 @@ function ChatView(props: {
                       class="lk-row"
                       style={{ padding: "8px 10px", gap: "10px" }}
                     >
-                      <Avatar label={label()} id={memberKeyB64} size="sm" />
+                      <Avatar label={label()} id={memberKeyB64} size="sm" personKey={memberKeyB64} />
                       <span
                         style={{
                           display: "flex",
@@ -8149,6 +8333,7 @@ function ChatView(props: {
                           checked={transferPick() === row.signatureKeyB64}
                           onChange={() => setTransferPick(row.signatureKeyB64)}
                         />
+                        <Avatar label={row.label} id={row.signatureKeyB64} size="sm" personKey={row.signatureKeyB64} />
                         <span aria-hidden="true">{row.label}</span>
                         {/* MARK, do not filter and do not sort. Who is already an
                             admin is information the owner assigned and is worth
@@ -8396,6 +8581,8 @@ function ChatView(props: {
                 onForward={(id) => setForwardingId(id)}
                 pinLabelOf={pinLabelOf}
                 onPin={onPinRow}
+                isSavedOf={isSavedOf}
+                onToggleSaved={(id) => void onToggleSaved(id)}
                 onOpenForwardOrigin={onOpenForwardOrigin}
                 onSaveEdit={onSaveEdit}
                 onDeleteMessage={onDeleteMessage}
@@ -8404,11 +8591,15 @@ function ChatView(props: {
                 // is read-only: no op can name it in this group's journal.
                 actionsAvailable={messageActionsAvailable() && !isHistoryRowId(rowMessageId(row()))}
                 // ...except that a pin of an older segment can be removed.
-                unpinOnly={((): boolean => {
+                // ...and (2026-10-27) saved: an older segment's row opens the
+                // restricted menu for Save, with Unpin only where it is offered.
+                unpinOnly={isHistoryRowId(rowMessageId(row()))}
+                pinRowShown={((): boolean => {
                   const id = rowMessageId(row());
+                  if (!isHistoryRowId(id)) return true;
                   return (
                     id !== undefined &&
-                    historyRowOffersUnpin({ isHistoryRow: isHistoryRowId(id), pinRow: pinLabelOf(id) })
+                    historyRowOffersUnpin({ isHistoryRow: true, pinRow: pinLabelOf(id) })
                   );
                 })()}
                 hub={hub}
@@ -8704,6 +8895,15 @@ function ChatView(props: {
             >
               <Icon name="forward" size={18} />
               <span>{t("chat.message.forward")}</span>
+            </button>
+            <button
+              type="button"
+              class="lk-select-action"
+              disabled={selection().size === 0}
+              onClick={() => void saveSelection()}
+            >
+              <Icon name="bookmark" size={18} />
+              <span>{t("chat.select.save")}</span>
             </button>
             <button
               type="button"

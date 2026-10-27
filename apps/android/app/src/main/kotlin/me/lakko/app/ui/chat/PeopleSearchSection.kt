@@ -186,7 +186,7 @@ private fun PersonRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Start,
         ) {
-            LakkoAvatar(name = person.name, seed = person.keyB64, size = 40.dp)
+            LakkoAvatar(name = person.name, seed = person.keyB64, size = 40.dp, personKey = me.lakko.app.ui.components.personKeyBytes(person.keyB64))
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(person.name, style = MaterialTheme.typography.bodyLarge)

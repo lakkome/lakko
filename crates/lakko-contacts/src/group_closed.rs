@@ -616,6 +616,7 @@ mod tests {
             account_id: None,
             username_certificate: None,
             grants: Vec::new(),
+            avatar: None,
         };
         for sibling in [
             wrap_call_welcome(&[0xAB; 256]),

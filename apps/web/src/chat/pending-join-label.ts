@@ -26,6 +26,25 @@ export interface PendingJoinGroup {
 }
 
 /** The list label for the pending request whose leaf key is `leafKey`. */
+/**
+ * ADR-0084 - the key a pending joiner's photo is looked up under: the
+ * ACCOUNT key the request's device binding names, else the leaf key. The
+ * same choice `pendingJoinLabel` makes for the name.
+ */
+export function pendingJoinPersonKey(
+  group: PendingJoinGroup,
+  leafKey: Uint8Array,
+  encodeB64: (bytes: Uint8Array) => string,
+): string {
+  let accountKey: Uint8Array | undefined;
+  try {
+    accountKey = group.pendingExternalJoinAccountKey(leafKey);
+  } catch {
+    accountKey = undefined;
+  }
+  return encodeB64(accountKey !== undefined && accountKey.length === 32 ? accountKey : leafKey);
+}
+
 export function pendingJoinLabel(
   group: PendingJoinGroup,
   leafKey: Uint8Array,

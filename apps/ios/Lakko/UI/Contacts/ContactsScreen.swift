@@ -342,7 +342,8 @@ private struct InvitedRow: View {
                     name: stated ?? "",
                     identity: base64Encode(contact.signaturePubkey),
                     size: 40,
-                    placeholderSymbol: "person.fill"
+                    placeholderSymbol: "person.fill",
+                    photo: .person(contact.signaturePubkey)
                 )
                 VStack(alignment: .leading, spacing: 2) {
                     Text(stated ?? l10n.t("invite.contact.page.unnamed"))
@@ -372,7 +373,8 @@ private struct ContactRow: View {
                         name: resolved.isPlaceholder ? "" : resolved.name,
                         identity: base64Encode(contact.request.fromPubkey),
                         size: 40,
-                        placeholderSymbol: "person.fill"
+                        placeholderSymbol: "person.fill",
+                        photo: .person(contact.request.fromPubkey)
                     )
                     VStack(alignment: .leading, spacing: 2) {
                         Text(resolved.name)
@@ -406,7 +408,8 @@ private struct IncomingRequestRow: View {
                     name: resolved.isPlaceholder ? "" : resolved.name,
                     identity: base64Encode(request.fromPubkey),
                     size: 40,
-                    placeholderSymbol: "person.fill"
+                    placeholderSymbol: "person.fill",
+                    photo: .person(request.fromPubkey)
                 )
                 VStack(alignment: .leading, spacing: 6) {
                     Text(resolved.isPlaceholder ? l10n.t("contacts.request.someone") : resolved.name)

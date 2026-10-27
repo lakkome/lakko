@@ -23,6 +23,7 @@ import { DeviceAddedWatcher } from "../devices/DeviceAddedNotice";
 import { RemovedDeviceScreen } from "../devices/RemovedDeviceScreen";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { Avatar } from "./Avatar";
+import { OWN_AVATAR_KEY } from "../profile/avatar-runtime";
 import { Icon, type IconName } from "./icons";
 import { t } from "../l10n";
 
@@ -105,7 +106,7 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
           title={username().length > 0 ? `@${username()} · ${t("nav.settings")}` : t("nav.settings")}
           onClick={() => navigate(paths.settingsSection("profile"))}
         >
-          <Avatar label={username().length > 0 ? username() : "?"} id={username()} size="sm" />
+          <Avatar label={username().length > 0 ? username() : "?"} id={username()} size="sm" personKey={OWN_AVATAR_KEY} />
         </button>
       </nav>
       <main>{props.children}</main>

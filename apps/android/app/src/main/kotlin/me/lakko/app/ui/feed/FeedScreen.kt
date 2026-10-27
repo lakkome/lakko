@@ -1339,7 +1339,19 @@ private fun FeedItemCard(
             }
             // A channel speaks as itself: its name is already the source.
             if (ref.source.kind == FeedSourceKind.GROUP) {
-                Text(author, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                // ADR-0084 — the person's photo beside their name.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val outgoing = ref.message.direction == "outgoing"
+                    me.lakko.app.ui.components.LakkoAvatar(
+                        name = author,
+                        seed = ref.message.authorKeyB64 ?: author,
+                        size = 24.dp,
+                        personKey = if (outgoing) null else me.lakko.app.ui.components.personKeyBytes(ref.message.authorKeyB64),
+                        avatar = if (outgoing) me.lakko.app.ui.components.rememberOwnAvatar() else null,
+                    )
+                    androidx.compose.foundation.layout.Spacer(Modifier.width(8.dp))
+                    Text(author, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                }
             }
             ref.message.forwardAuthor?.let {
                 Text(t("chat.forward.from", mapOf("name" to it)), style = MaterialTheme.typography.labelSmall, color = muted)

@@ -49,6 +49,8 @@ export interface IncomingCallScreenProps {
   /** Stable id the avatar tint is chosen from, so the colour matches the
    *  chat list. `null` falls back to the name. */
   readonly callerId: string | null;
+  /** ADR-0084 - the caller's profile key (a one-to-one), for their photo. */
+  readonly callerKey?: string | null;
   /** The kind of call the CALLER placed. */
   readonly video: boolean;
   readonly onAccept: (withVideo: boolean) => void;
@@ -111,6 +113,7 @@ export function IncomingCallScreen(props: IncomingCallScreenProps): JSX.Element 
         <Avatar
           label={props.callerName}
           id={props.callerId ?? props.callerName}
+          personKey={props.callerKey ?? undefined}
 
           size="xl"
         />

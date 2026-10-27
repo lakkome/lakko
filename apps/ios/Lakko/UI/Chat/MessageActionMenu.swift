@@ -81,6 +81,13 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     /// two.
     case unpin
 
+    /// ADR-0065 / UX `saved-messages-and-file-lifetime.md` section 2 —
+    /// keep this message in the account's Saved list (and its files alive).
+    case save
+
+    /// The same row on a message already saved.
+    case unsave
+
     /// Puts the message text on the clipboard. Nothing leaves the device.
     case copy
 
@@ -104,6 +111,8 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .forward: return Localization.text("chat.message.forward")
         case .pin: return Localization.text("chat.message.pin")
         case .unpin: return Localization.text("chat.message.unpin")
+        case .save: return Localization.text("chat.message.save")
+        case .unsave: return Localization.text("chat.message.unsave")
         case .copy: return Localization.text("common.copy")
         case .select: return Localization.text("chat.message.select")
         case .edit: return Localization.text("chat.message.edit")
@@ -117,6 +126,8 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .forward: return "arrowshape.turn.up.right"
         case .pin: return "pin"
         case .unpin: return "pin.slash"
+        case .save: return "bookmark"
+        case .unsave: return "bookmark.slash"
         case .copy: return "doc.on.doc"
         case .select: return "checkmark.circle"
         case .edit: return "pencil"
@@ -144,7 +155,8 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     public static func offered(
         canReply: Bool, canForward: Bool, canEditOrDelete: Bool, hasText: Bool,
         pin: PinMenuState = .unavailable,
-        canSelect: Bool = false
+        canSelect: Bool = false,
+        save: SaveMenuState = .unavailable
     ) -> [MessageMenuAction] {
         var actions: [MessageMenuAction] = []
         // Section 3.1 — any message with an id; a tombstone and a row that
@@ -167,11 +179,30 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .unpin: actions.append(.unpin)
         case .unavailable: break
         }
+        // ADR-0065 — directly under Pin: Save, or Remove from saved.
+        switch save {
+        case .save: actions.append(.save)
+        case .unsave: actions.append(.unsave)
+        case .unavailable: break
+        }
         if canEditOrDelete {
             actions.append(.edit)
             actions.append(.delete)
         }
         return actions
+    }
+}
+
+/// ADR-0065 — which Save word the card shows for a message.
+public enum SaveMenuState: Equatable {
+    case save
+    case unsave
+    /// No row (a tombstone, a message not landed, a read-only history row).
+    case unavailable
+
+    public static func of(isSaved: Bool, available: Bool) -> SaveMenuState {
+        guard available else { return .unavailable }
+        return isSaved ? .unsave : .save
     }
 }
 

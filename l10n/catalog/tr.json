@@ -1798,10 +1798,6 @@
       "text": "Ek indirilemedi. Tekrar deneyin.",
       "status": "machine"
     },
-    "chat.attachment.error.gone": {
-      "text": "Ek artık sunucuda bulunmuyor.",
-      "status": "machine"
-    },
     "chat.attachment.error.open_photo": {
       "text": "Bu fotoğraf açılamadı. Tekrar deneyin.",
       "status": "machine"
@@ -7854,36 +7850,8 @@
       "text": "Şifre",
       "status": "machine"
     },
-    "settings.profile.error.generic": {
-      "text": "Adınız kaydedilemedi. Tekrar deneyin.",
-      "status": "machine"
-    },
-    "settings.profile.lede": {
-      "text": "Kişilerinize nasıl göründüğünüz.",
-      "status": "machine"
-    },
-    "settings.profile.name.hint": {
-      "text": "Konuştuğunuz kişilere gösterilir. Benzersiz olması gerekmez, en fazla {count, plural, one {# karakter} other {# karakter}}.",
-      "status": "machine"
-    },
     "settings.profile.name.label": {
       "text": "Adınız",
-      "status": "machine"
-    },
-    "settings.profile.preview.label": {
-      "text": "Başkaları sizi nasıl görür",
-      "status": "machine"
-    },
-    "settings.profile.preview.no_name": {
-      "text": "Bir ad belirleyene kadar başkaları anahtar parmak izinizi görür.",
-      "status": "machine"
-    },
-    "settings.profile.saved": {
-      "text": "Adınız kişileriniz için güncellenecek.",
-      "status": "machine"
-    },
-    "settings.profile.username.none": {
-      "text": "Yok",
       "status": "machine"
     },
     "settings.recovery.devices.title": {
@@ -8134,28 +8102,8 @@
       "text": "Kullanıcı adı: {message}",
       "status": "machine"
     },
-    "username.change.body": {
-      "text": "İnsanlar sizi artık şu adla bulamaz: {old}. 30 gün boyunca başka kimse bu adı alamaz.",
-      "status": "machine"
-    },
-    "username.change.next_change": {
-      "text": "Bundan sonra 30 gün sonra yeniden değiştirebilirsiniz.",
-      "status": "machine"
-    },
-    "username.change.other_devices": {
-      "text": "Diğer cihazlarınız bir sonraki çevrimiçi olduklarında yeni kullanıcı adını alır.",
-      "status": "machine"
-    },
-    "username.change.save": {
-      "text": "Değiştir",
-      "status": "machine"
-    },
     "username.change.title": {
       "text": "Kullanıcı adını değiştir",
-      "status": "machine"
-    },
-    "username.change.too_soon": {
-      "text": "Kullanıcı adınızı {date} tarihinde yeniden değiştirebilirsiniz.",
       "status": "machine"
     },
     "username.claim.body": {

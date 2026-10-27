@@ -164,6 +164,7 @@ import {
   mergeRestoredFold,
   openPersistedFold,
   projectSyncedState,
+  type SavedEntry,
 } from "./synced-projection";
 import { drainOutbox, type OutboxBatch } from "./folder-outbox";
 import { publishOwnDeviceRoster } from "../own-device-roster";
@@ -238,6 +239,11 @@ export interface DeviceGroupSyncApi {
   /** Reactive: a folder edit made here has not reached the other devices
    *  yet (UX spec section 6). */
   readonly pendingFolderSync: Accessor<boolean>;
+  /** ADR-0065 section 4 — reactive: the account's saved messages, most
+   *  recently saved first, from every device. */
+  readonly saved: Accessor<readonly SavedEntry[]>;
+  /** Reactive: every blob id a saved message names (lower-case hex). */
+  readonly savedBlobIdsHex: Accessor<readonly string[]>;
   /** Reactive: the conversation lineage registers (ADR-0073 R.5): which
    *  group continues which conversation. Read through `chat/lineage.ts`. */
   readonly lineage: Accessor<readonly LineageEntry[]>;
@@ -412,6 +418,8 @@ export function DeviceGroupSyncProvider(props: {
   const [order, setOrder] = createSignal<OrderState | null>(null);
   const [folders, setFolders] = createSignal<readonly FolderModel[]>([]);
   const [lineage, setLineageEntries] = createSignal<readonly LineageEntry[]>([]);
+  const [saved, setSaved] = createSignal<readonly SavedEntry[]>([]);
+  const [savedBlobIdsHex, setSavedBlobIdsHex] = createSignal<readonly string[]>([]);
   const [linkRecords, setLinkRecords] = createSignal<readonly LinkRecordModel[]>([]);
   const [linkClaimsVersion, setLinkClaimsVersion] = createSignal(0);
   const [outbox, setOutbox] = createSignal<readonly OutboxBatch[]>([]);
@@ -627,6 +635,8 @@ export function DeviceGroupSyncProvider(props: {
     setOrder(p.order);
     setFolders(p.folders);
     setLineageEntries(p.lineage);
+    setSaved(p.saved);
+    setSavedBlobIdsHex(p.savedBlobIdsHex);
     if (wasmSync !== null) setLinkRecords(readLinkRecords(synced, wasmSync.LinkRecordKind.Contact));
     // ADR-0075 (amended 2026-10-13): the recovery address the account's
     // devices keep, for the screens above this provider.
@@ -1026,6 +1036,8 @@ export function DeviceGroupSyncProvider(props: {
     setOrder(null);
     setFolders([]);
     setLineageEntries([]);
+    setSaved([]);
+    setSavedBlobIdsHex([]);
     setLinkRecords([]);
     setOutbox([]);
   }
@@ -2685,6 +2697,8 @@ export function DeviceGroupSyncProvider(props: {
     order,
     folders,
     pendingFolderSync: () => outbox().length > 0,
+    saved,
+    savedBlobIdsHex,
     lineage,
     setLineage: setLineageImpl,
     linkRecords,

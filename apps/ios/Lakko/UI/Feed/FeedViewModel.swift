@@ -641,6 +641,13 @@ final class FeedViewModel: ObservableObject {
 
     // MARK: - Words on an item
 
+    /// ADR-0084 — whose photo sits beside the author's name.
+    func authorPhoto(_ ref: FeedCandidateRef) -> AvatarPhoto? {
+        if ref.source.kind == .channel { return nil }
+        if ref.message.direction == .outgoing { return .own }
+        return ref.message.authorKeyB64.flatMap(base64Decode).map(AvatarPhoto.person)
+    }
+
     func author(_ ref: FeedCandidateRef) -> String {
         if ref.source.kind == .channel { return ref.source.title }
         if ref.message.direction == .outgoing { return Localization.text("chat.author.you") }

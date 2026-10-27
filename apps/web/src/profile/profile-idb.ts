@@ -28,6 +28,7 @@
  */
 
 import { accountStoresWritable } from "../auth/account-store-gate";
+import { avatarFromJson } from "./avatar-model";
 import {
   ACCOUNT_ID_HEX_RE,
   type ProfileBackend,
@@ -69,7 +70,7 @@ const VERIFICATION_STATES: ReadonlySet<string> = new Set(["verified", "mismatch"
 
 /** Encode a row (plus the rename mirror) to the payload JSON. */
 export function encodeProfileRow(row: ProfileRow, renames: ReadonlyMap<string, string>): string {
-  const p: Record<string, { d: string | null; u: string | null; t: string; a?: string; c?: string }> = {};
+  const p: Record<string, { d: string | null; u: string | null; t: string; a?: string; c?: string; av?: unknown }> = {};
   for (const [key, prof] of row.profiles) {
     p[key] = {
       d: prof.displayName,
@@ -79,6 +80,9 @@ export function encodeProfileRow(row: ProfileRow, renames: ReadonlyMap<string, s
       ...(prof.usernameCertificateB64 === undefined || prof.usernameCertificateB64 === null
         ? {}
         : { c: prof.usernameCertificateB64 }),
+      // ADR-0084 — the photo references (blob keys inside: this payload is
+      // only ever written encrypted). Absent for no photo.
+      ...(prof.avatar === undefined || prof.avatar === null ? {} : { av: prof.avatar }),
     };
   }
   const vf: Record<string, { s: string; c: number }> = {};
@@ -122,12 +126,15 @@ export function decodeProfileRow(json: string): ProfileRow | null {
       // ADR-0060 — the username certificate; a malformed one drops the field.
       const c = (raw as { c?: unknown }).c;
       const usernameCertificateB64 = typeof c === "string" && /^[A-Za-z0-9+/=]+$/.test(c) ? c : null;
+      // ADR-0084 — a malformed photo drops the field, not the profile.
+      const avatar = avatarFromJson((raw as { av?: unknown }).av);
       profiles.set(key, {
         displayName: d,
         username: u,
         updatedAtMs: BigInt(t),
         accountIdHex,
         usernameCertificateB64,
+        ...(avatar === null ? {} : { avatar }),
       });
     }
   }

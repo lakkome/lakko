@@ -90,16 +90,6 @@ final class UsernameChangeTests: XCTestCase {
 
     // MARK: - The rename
 
-    func testOneRenamePerThirtyDays() {
-        let day: Int64 = 24 * 60 * 60 * 1000
-        XCTAssertEqual(UsernameRename.intervalMs, 30 * day)
-        XCTAssertNil(UsernameRename.tooSoonUntilMs(lastChangeAtMs: nil, nowMs: 1_000))
-        XCTAssertEqual(UsernameRename.tooSoonUntilMs(lastChangeAtMs: 1_000, nowMs: 1_000 + 29 * day), 1_000 + 30 * day)
-        XCTAssertNil(UsernameRename.tooSoonUntilMs(lastChangeAtMs: 1_000, nowMs: 1_000 + 30 * day))
-        // A clock that went backwards does not lock the form; the server decides.
-        XCTAssertNil(UsernameRename.tooSoonUntilMs(lastChangeAtMs: 1_000, nowMs: 500))
-    }
-
     func testWhatTheScreenShowsForTheRecoveryEmail() {
         // The device holds the address: the email is kept, no warning.
         XCTAssertFalse(UsernameRename.warnings(recoveryEmailEnabled: true, addressHeld: true).recoveryEmailTurnedOff)
@@ -109,31 +99,6 @@ final class UsernameChangeTests: XCTestCase {
         XCTAssertFalse(UsernameRename.warnings(recoveryEmailEnabled: false, addressHeld: false).recoveryEmailTurnedOff)
         XCTAssertFalse(UsernameRename.warnings(recoveryEmailEnabled: false, addressHeld: true).recoveryEmailTurnedOff)
 
-        XCTAssertEqual(
-            ChangeUsernameLayout.decide(
-                tooSoonUntilMs: nil, renamedTo: nil, recoveryEmailEnabled: true, addressHeld: false),
-            .form(emailTurnedOff: true))
-        XCTAssertEqual(
-            ChangeUsernameLayout.decide(
-                tooSoonUntilMs: nil, renamedTo: nil, recoveryEmailEnabled: true, addressHeld: true),
-            .form(emailTurnedOff: false))
-        // Too soon: the date instead of the form.
-        XCTAssertEqual(
-            ChangeUsernameLayout.decide(
-                tooSoonUntilMs: 9, renamedTo: nil, recoveryEmailEnabled: false, addressHeld: false),
-            .tooSoon(untilMs: 9))
-        // Done wins: the stamp was just written by this very rename.
-        XCTAssertEqual(
-            ChangeUsernameLayout.decide(
-                tooSoonUntilMs: 9, renamedTo: "alice_b", recoveryEmailEnabled: false, addressHeld: false),
-            .done(newName: "alice_b"))
-
-        typealias L = ChangeUsernameLayout
-        XCTAssertTrue(L.canSubmit(typed: "bob", current: "alice", ruleMessage: nil, busy: false, proofReady: true))
-        XCTAssertFalse(L.canSubmit(typed: "Alice", current: "alice", ruleMessage: nil, busy: false, proofReady: true))
-        XCTAssertFalse(L.canSubmit(typed: "bob", current: "alice", ruleMessage: "x", busy: false, proofReady: true))
-        XCTAssertFalse(L.canSubmit(typed: "bob", current: "alice", ruleMessage: nil, busy: false, proofReady: false))
-        XCTAssertFalse(L.canSubmit(typed: " ", current: "alice", ruleMessage: nil, busy: false, proofReady: true))
     }
 
     func testWhatTheBindCarriesForTheRecoveryEmail() {
@@ -169,8 +134,9 @@ final class UsernameChangeTests: XCTestCase {
         func of(_ status: Int, _ body: String) -> U.ReplaceOutcome { .of(status: status, body: body) }
         XCTAssertEqual(of(200, "{}"), .replaced)
         XCTAssertEqual(of(409, #"{"error":"username-taken"}"#), .taken)
-        XCTAssertEqual(
-            of(429, #"{"error":"rename-too-soon","retry_after_secs":60}"#), .tooSoon(retryAfterSecs: 60))
+        // No rename limit any more (ADR-0076 amended 2026-10-26): a 429 is
+        // simply a failure.
+        XCTAssertEqual(of(429, #"{"error":"rename-too-soon"}"#), .failed)
         XCTAssertEqual(of(500, ""), .failed)
         XCTAssertEqual(
             U.ReplaceOutcome.of(DiscoveryClientError.network(endpoint: "/r", underlying: URLError(.timedOut))),
@@ -180,12 +146,10 @@ final class UsernameChangeTests: XCTestCase {
         // answer: keep the record, the next landing asks again.
         XCTAssertEqual(U.afterReplace(.replaced), .finalize)
         XCTAssertEqual(U.afterReplace(.taken), .rollBack)
-        XCTAssertEqual(U.afterReplace(.tooSoon(retryAfterSecs: 1)), .rollBack)
         XCTAssertEqual(U.afterReplace(.failed), .rollBack)
         XCTAssertEqual(U.afterReplace(.unknown), .keepOwed)
 
         XCTAssertEqual(U.failure(.taken, nowMs: 0), .taken)
-        XCTAssertEqual(U.failure(.tooSoon(retryAfterSecs: 10), nowMs: 1_000), .tooSoon(untilMs: 11_000))
         XCTAssertEqual(U.failure(.unknown, nowMs: 0), .offline)
         // A rollback changes the handle, so it needs the grant.
         XCTAssertTrue(U.canRollBack(holdsGrant: true))
@@ -214,27 +178,21 @@ final class UsernameChangeTests: XCTestCase {
         let store = AccountProtectionStore(defaults: defaults)
         XCTAssertNil(store.renameOwed(accountIdB64: "acct"))
         store.setRenameOwed(record(.bound), accountIdB64: "acct")
-        store.setLastRenameAtMs(42, accountIdB64: "acct")
         store.setUsernameRegisterOwed("alice_b", accountIdB64: "acct")
         XCTAssertEqual(store.renameOwed(accountIdB64: "acct"), record(.bound))
         XCTAssertNil(store.renameOwed(accountIdB64: "other"))
-        XCTAssertEqual(store.lastRenameAtMs(accountIdB64: "acct"), 42)
         XCTAssertEqual(store.usernameRegisterOwed(accountIdB64: "acct"), "alice_b")
         store.clear(accountIdB64: "acct")
         XCTAssertNil(store.renameOwed(accountIdB64: "acct"))
-        XCTAssertNil(store.lastRenameAtMs(accountIdB64: "acct"))
         XCTAssertNil(store.usernameRegisterOwed(accountIdB64: "acct"))
     }
 
     func testTheStringsAndTheProofSurface() {
         for key in [
-            "username.change.title", "username.change.next_change", "username.change.save",
-            "username.change.other_devices", "proof.username.help", "recovery_email.username_change",
+            "proof.username.help", "recovery_email.username_change",
         ] {
             XCTAssertNotEqual(Localization.text(key), key, "\(key) is missing from the catalog")
         }
-        XCTAssertTrue(Localization.text("username.change.body", texts: ["old": "@alice"]).contains("@alice"))
-        XCTAssertTrue(Localization.text("username.change.too_soon", texts: ["date": "D1"]).contains("D1"))
         XCTAssertEqual(FreshAuthSurface.changeUsername.helpKey, "proof.username.help")
     }
 }

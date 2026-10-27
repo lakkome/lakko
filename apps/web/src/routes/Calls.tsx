@@ -89,6 +89,17 @@ export default function Calls(): JSX.Element {
     });
   };
 
+  /** ADR-0084 - the other person of a one-to-one call row, whose photo it
+   *  shows; `undefined` for a group. */
+  const personKeyOf = (groupIdB64: string): string | undefined => {
+    const entry = chats.get(groupIdB64);
+    if (entry === undefined) return undefined;
+    const memberKeysB64 = personKeysOf(entry.group);
+    if (memberKeysB64.length > 2) return undefined;
+    const ownB64 = ownPersonKeyB64(chats.identity());
+    return memberKeysB64.find((k) => k !== ownB64);
+  };
+
   /** The pasted link, while "Join by link" is open. */
   const [joinOpen, setJoinOpen] = createSignal(false);
   const [joinInput, setJoinInput] = createSignal("");
@@ -255,7 +266,7 @@ export default function Calls(): JSX.Element {
                           class="lk-row-open"
                           onClick={() => open(row.groupIdB64)}
                         >
-                          <Avatar label={title()} id={row.groupIdB64} />
+                          <Avatar label={title()} id={row.groupIdB64} personKey={personKeyOf(row.groupIdB64)} />
                           <div class="lk-row-body">
                             <div class="lk-row-line">
                               <span class="lk-row-title">

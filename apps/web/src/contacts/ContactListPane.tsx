@@ -191,7 +191,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
               const r = (): ReturnType<typeof profiles.resolve> => profiles.resolve(req.fromPubkey);
               return (
                 <div class="lk-row lk-request-row">
-                  <Avatar label={memberNameOf(r())} id={base64Encode(req.fromPubkey)} />
+                  <Avatar label={memberNameOf(r())} id={base64Encode(req.fromPubkey)} personKey={base64Encode(req.fromPubkey)} />
                   <div class="lk-row-body">
                     <span class="lk-row-title">{memberNameOf(r())}</span>
                     <Show when={r().username}>{(u) => <span class="lk-row-sub">{u()}</span>}</Show>
@@ -230,7 +230,11 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
               <For each={props.sent()}>
                 {(record) => (
                   <div class="lk-row">
-                    <Avatar label={record.recipientUsername} id={record.recipientAccountIdHex} />
+                    <Avatar
+                      label={record.recipientUsername}
+                      id={record.recipientAccountIdHex}
+                      personKey={record.recipientKeyB64}
+                    />
                     <div class="lk-row-body">
                       <span class="lk-row-title">@{record.recipientUsername}</span>
                       <span class="lk-row-sub">{t("contacts.list.sent_waiting")}</span>
@@ -300,7 +304,7 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
                             }
                           }}
                         >
-                          <Avatar label={row.name} id={key} />
+                          <Avatar label={row.name} id={key} personKey={key} />
                           <div class="lk-row-body">
                             <span class="lk-row-title">{row.name}</span>
                             <Show when={row.username}>

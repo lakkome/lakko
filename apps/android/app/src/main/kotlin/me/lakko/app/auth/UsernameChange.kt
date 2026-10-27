@@ -126,42 +126,6 @@ public fun ownUsernameSync(
     }
 }
 
-// ---------------------------------------------------------------------------
-// The too-soon rule and what the screen shows
-// ---------------------------------------------------------------------------
-
-/** One rename per 30 days (ADR-0076 D2). */
-public const val RENAME_INTERVAL_MS: Long = 30L * 24L * 60L * 60L * 1000L
-
-/**
- * When the next rename is allowed by this device's own stamp of the last one
- * ([lastChangedAtMs], written when a rename finished here), or `null` when
- * the form may open. The server's `429 rename-too-soon` is the authority; a
- * clock set back never keeps the form closed longer than one interval.
- */
-public fun renameAllowedAtMs(lastChangedAtMs: Long?, nowMs: Long): Long? {
-    if (lastChangedAtMs == null) return null
-    val since = nowMs - lastChangedAtMs
-    if (since < 0L || since >= RENAME_INTERVAL_MS) return null
-    return lastChangedAtMs + RENAME_INTERVAL_MS
-}
-
-/** The date `username.change.too_soon` names from a server `retry_after_secs`. */
-public fun renameAllowedAfterSecs(retryAfterSecs: Long, nowMs: Long): Long =
-    nowMs + retryAfterSecs.coerceAtLeast(0L) * 1000L
-
-/** What the change-username screen shows above its field. */
-public data class RenameWarnings(
-    /** `username.change.body` and `username.change.next_change`: always. */
-    val standard: Boolean,
-    /** `recovery_email.username_change`: the account has a recovery email
-     *  and THIS device does not hold the address, so the rename turns it off. */
-    val recoveryEmailTurnsOff: Boolean,
-)
-
-public fun renameWarnings(hasRecoveryEmail: Boolean, addressHeld: Boolean): RenameWarnings =
-    RenameWarnings(standard = true, recoveryEmailTurnsOff = hasRecoveryEmail && !addressHeld)
-
 /** What the bind carries for the recovery email. */
 public enum class RenameRecoveryEmail {
     /** No recovery email, or this device does not hold the address: the
@@ -230,7 +194,7 @@ public sealed interface RenameResult {
     public data class Done(val username: String) : RenameResult
 
     /** Nothing changed (the bind was refused, or it was rolled back). */
-    public data class Refused(val line: UiText, val allowedAtMs: Long? = null, val needsProof: Boolean = false) :
+    public data class Refused(val line: UiText, val needsProof: Boolean = false) :
         RenameResult
 
     /** A step has no answer or could not be undone; the record stays and
@@ -256,12 +220,6 @@ public fun isUsernameTaken(err: Throwable): Boolean = when (err) {
     else -> false
 }
 
-/** `429 rename-too-soon`: the seconds until the next rename, or `null`. */
-public fun renameTooSoonSecs(err: Throwable): Long? =
-    (err as? me.lakko.app.discovery.DiscoveryHttpError)
-        ?.takeIf { it.code == "rename-too-soon" }
-        ?.let { it.retryAfterSecs ?: 0L }
-
 /** Whether a failed request may still have landed (no answer was read). */
 private fun answerLost(err: Throwable): Boolean =
     err is AuthNetworkError || err is me.lakko.app.discovery.DiscoveryNetworkError ||
@@ -278,7 +236,6 @@ public class UsernameRenameRunner(
     private val accountIdB64: String,
     private val store: UsernameRenameStore,
     private val ports: UsernameRenamePorts,
-    private val nowMs: () -> Long = { System.currentTimeMillis() },
     private val log: (String) -> Unit = {},
 ) {
     public fun owed(): UsernameRenameOwed? = store.load(accountIdB64)
@@ -332,12 +289,8 @@ public class UsernameRenameRunner(
                 throw cancel
             } catch (cause: Throwable) {
                 if (answerLost(cause)) return RenameResult.Pending(renameFailureLine(cause))
-                // Refused (taken, too soon, ...): the old handle goes back.
-                val tooSoon = renameTooSoonSecs(cause)
-                val refused = RenameResult.Refused(
-                    line = if (tooSoon != null) UiText("username.change.too_soon") else renameFailureLine(cause),
-                    allowedAtMs = tooSoon?.let { renameAllowedAfterSecs(it, nowMs()) },
-                )
+                // Refused (taken, ...): the old handle goes back.
+                val refused = RenameResult.Refused(line = renameFailureLine(cause))
                 return try {
                     ports.bind(from = owed.newUsername, to = owed.oldUsername)
                     store.clear(accountIdB64)
@@ -373,7 +326,7 @@ public class UsernameRenameRunner(
     }
 }
 
-/** The owed record and the stamp of the last rename, per account. */
+/** The owed record of a rename in progress, per account. */
 public class UsernameRenameStore(private val storage: MarkerStorage) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -399,33 +352,13 @@ public class UsernameRenameStore(private val storage: MarkerStorage) {
         }
     }
 
-    public fun lastChangedAtMs(accountIdB64: String): Long? = try {
-        storage.get(STAMP_PREFIX + accountIdB64)?.toLongOrNull()
-    } catch (_: Throwable) {
-        null
-    }
-
-    public fun markChanged(accountIdB64: String, atMs: Long) {
-        try {
-            me.lakko.app.account.AccountStoreGate.write(accountIdB64) { storage.set(STAMP_PREFIX + accountIdB64, atMs.toString()) }
-        } catch (_: Throwable) {
-            // The form then opens and the server answers.
-        }
-    }
-
     public fun clearAccount(accountIdB64: String) {
         clear(accountIdB64)
-        try {
-            storage.remove(STAMP_PREFIX + accountIdB64)
-        } catch (_: Throwable) {
-            // Nothing to drop.
-        }
     }
 
     public companion object {
         public const val PREFS_NAME: String = "lakko-username-rename"
         private const val OWED_PREFIX: String = "owed:"
-        private const val STAMP_PREFIX: String = "changed-at:"
 
         public fun onDevice(context: Context): UsernameRenameStore =
             UsernameRenameStore(SharedPrefsMarkerStorage(context, PREFS_NAME))

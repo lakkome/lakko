@@ -50,6 +50,8 @@ private data class StoredSentRequest(
     val createdAt: String,
     val introB64: String = "",
     val sentAtMs: Long = 0L,
+    /** ADR-0084; absent before the profile photo. */
+    val recipientKeyB64: String? = null,
 )
 
 private val sentJson = Json { ignoreUnknownKeys = true }
@@ -71,6 +73,7 @@ internal fun encodeSentRequests(sent: List<SentContactRequest>): ByteArray =
                 createdAt = it.createdAt,
                 introB64 = base64Encode(it.introMessage),
                 sentAtMs = it.sentAtMs,
+                recipientKeyB64 = it.recipientKeyB64,
             )
         },
     ).toByteArray(Charsets.UTF_8)
@@ -86,6 +89,7 @@ internal fun decodeSentRequests(bytes: ByteArray): List<SentContactRequest>? =
                 createdAt = it.createdAt,
                 introMessage = base64Decode(it.introB64),
                 sentAtMs = it.sentAtMs,
+                recipientKeyB64 = it.recipientKeyB64,
             )
         }
     } catch (_: Exception) {

@@ -24,7 +24,7 @@ TURN_URIS="${TURN_URIS:-}"
 
 ENV_DIR=/etc/lakko-test
 ENV_FILE=$ENV_DIR/lakko.env
-DBS=(auth ds discovery push_gw channels)
+DBS=(auth ds discovery push_gw channels storage)
 
 id lakkotest >/dev/null 2>&1 || useradd --system --home-dir /var/lib/lakko-test --shell /usr/sbin/nologin lakkotest
 install -d -m 755 -o root -g root /opt/lakko-test /opt/lakko-test/bin
@@ -179,6 +179,18 @@ if ! grep -q '^LAKKO_PUSH_GW_INTERNAL_SECRET=' $ENV_FILE; then
   } >> $ENV_FILE
   unset WAKE_SECRET
   echo "wake forward secret added to the env file"
+fi
+
+# The storage blob index and pass gate (ADR-0065) arrived later: an env file
+# gains the storage database URL and the pass secret here, generated once and
+# then kept (regenerating the secret only invalidates the passes in hand).
+if ! grep -q '^LAKKO_STORAGE_DATABASE_URL=' $ENV_FILE; then
+  echo "LAKKO_STORAGE_DATABASE_URL=mysql://lakko_test:${DB_PASS}@127.0.0.1:3306/lakko_test_storage" >> $ENV_FILE
+  echo "storage database URL added to the env file"
+fi
+if ! grep -q '^LAKKO_STORAGE_PASS_SECRET=' $ENV_FILE; then
+  echo "LAKKO_STORAGE_PASS_SECRET=$(openssl rand -hex 32)" >> $ENV_FILE
+  echo "storage pass secret added to the env file"
 fi
 
 # ADR-0078 retired the DS push bindings: an older env file's pepper is unused

@@ -85,6 +85,8 @@ import me.lakko.app.ui.theme.ThemePreference
 @Composable
 public fun SettingsScreen(
     displayName: String?,
+    /** ADR-0084 — the own profile photo for the header, or `null`. */
+    ownAvatar: me.lakko.app.profile.AvatarRefs? = null,
     username: String?,
     onOpenProfile: () -> Unit,
     onOpenPasskeys: () -> Unit,
@@ -142,7 +144,7 @@ public fun SettingsScreen(
                     .clickable(onClick = onOpenProfile)
                     .padding(horizontal = 16.dp, vertical = 16.dp),
             ) {
-                LakkoAvatar(name = headerName, seed = username ?: headerName, size = 56.dp)
+                LakkoAvatar(name = headerName, seed = username ?: headerName, size = 56.dp, avatar = ownAvatar)
                 Spacer(Modifier.width(16.dp))
                 Column {
                     // A name keeps its own direction (FSI); a bare @username is LTR.

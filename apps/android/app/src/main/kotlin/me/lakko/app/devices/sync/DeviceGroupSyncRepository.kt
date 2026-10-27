@@ -129,6 +129,13 @@ public class DeviceGroupSyncRepository(
      * reached the account's other devices yet. Drives the one quiet line in
      * Settings > Chat folders.
      */
+    private val mutableSaved: MutableStateFlow<List<uniffi.lakko_ffi_uniffi.SavedMessageView>> =
+        MutableStateFlow(emptyList())
+
+    /** ADR-0065 section 4 — the account's saved messages, as the fold holds
+     *  them (every device of the account shows the same list). */
+    public val saved: StateFlow<List<uniffi.lakko_ffi_uniffi.SavedMessageView>> = mutableSaved.asStateFlow()
+
     private val mutablePending: MutableStateFlow<Boolean> = MutableStateFlow(false)
     public val pendingSync: StateFlow<Boolean> = mutablePending.asStateFlow()
 
@@ -609,6 +616,7 @@ public class DeviceGroupSyncRepository(
                     OrderState(groupIds = o.groupIds, updatedAtHlc = o.hlc)
                 }
                 mutableFolders.value = state.folders()
+                mutableSaved.value = state.saved()
                 // A restored or received stamp may be ahead of this device's
                 // clock; the next local write must still out-rank it.
                 Hlc.advancePast(state.maxHlc())
@@ -1320,6 +1328,38 @@ public class DeviceGroupSyncRepository(
      * @throws Exception when the change set breaks a bound (the fold refuses
      *   it whole and nothing is sent).
      */
+    /** ADR-0065 section 3 — every blob id the saved list names, for the keep
+     *  tick; empty before the state is open. */
+    public fun savedBlobIds(): List<ByteArray> = synchronized(stateLock) {
+        try {
+            syncedState?.savedBlobIds().orEmpty()
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "saved blob ids not read", cause)
+            emptyList()
+        }
+    }
+
+    /**
+     * ADR-0065 section 4 — save or remove [registers], in change sets of at
+     * most `savedMaxPerChangeSet()` registers each (one DeviceGroup message
+     * stays small), applied here at once and sent to the other devices.
+     */
+    public suspend fun applySavedChanges(registers: List<uniffi.lakko_ffi_uniffi.SavedMessageRegister>) {
+        val per = uniffi.lakko_ffi_uniffi.savedMaxPerChangeSet().toInt().coerceAtLeast(1)
+        for (chunk in registers.chunked(per)) {
+            applyFolderChanges(
+                FolderChangeSet(
+                    metas = emptyList(),
+                    members = emptyList(),
+                    pins = emptyList(),
+                    removed = emptyList(),
+                    order = null,
+                    saved = chunk,
+                ),
+            )
+        }
+    }
+
     public suspend fun applyFolderChanges(changes: FolderChangeSet) {
         val changed = synchronized(stateLock) {
             val state = syncedState ?: error("DeviceGroupSync not bootstrapped")

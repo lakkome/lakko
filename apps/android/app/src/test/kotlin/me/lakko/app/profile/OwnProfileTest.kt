@@ -40,16 +40,4 @@ class OwnProfileTest {
         assertEquals(null, applyOwnNameChange(current, null, "alice", 20L)?.displayName)
         assertEquals(20L, applyOwnNameChange(current, null, "alice", 20L)?.updatedAtMs)
     }
-
-    @Test
-    fun `the preview shows how others see this account`() {
-        assertEquals("Alice Petrova · @alice", ownProfilePreview(DisplayNameCheck.Valid("Alice Petrova"), "alice"))
-        assertEquals("@alice", ownProfilePreview(DisplayNameCheck.Valid(null), "alice"))
-        assertEquals("Guest", ownProfilePreview(DisplayNameCheck.Valid("Guest"), null))
-        // A refused name will not be sent, so it previews as no name.
-        assertEquals(
-            "@alice",
-            ownProfilePreview(DisplayNameCheck.Invalid(DisplayNameProblem.LINE_BREAK), "alice"),
-        )
-    }
 }

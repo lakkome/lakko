@@ -8,8 +8,9 @@
  * `SyncedState.toBytes()` opens with an encoding version and
  * `SyncedState.fromBytes` reads exactly one: the saved-messages register
  * (ADR-0065) made it version 2, the link records (ADR-0079) version 3 and
- * the revocation seed in a link record (ADR-0079 reworked) version 4; an
- * older blob is refused, with no
+ * the revocation seed in a link record (ADR-0079 reworked) version 4, and
+ * the saved message's own time (ADR-0065, 2026-10-26) version 5; an older
+ * blob is refused, with no
  * migration. Two places read such bytes back: the sync runtime's seed from
  * this device's own row, and the merge of a restored backup. Both go through
  * `openPersistedFold` / `mergeRestoredFoldBytes`, tested here: a refused blob
@@ -95,9 +96,9 @@ function versionOneBlobs(): Uint8Array[] {
 }
 
 describe("the encoding version", () => {
-  it("this build writes version 4", () => {
+  it("this build writes version 5", () => {
     const s = new wasm.SyncedState();
-    expect(s.toBytes()[0]).toBe(0x04);
+    expect(s.toBytes()[0]).toBe(0x05);
     s.free();
   });
 
@@ -110,6 +111,12 @@ describe("the encoding version", () => {
   it("the core refuses the version 3 layout (a link record without its revocation seed)", () => {
     const relabelled = foldWithFolder(F1, "Work");
     relabelled[0] = 0x03;
+    expect(() => wasm.SyncedState.fromBytes(relabelled)).toThrow();
+  });
+
+  it("the core refuses the version 4 label (a saved message without its own time)", () => {
+    const relabelled = foldWithFolder(F1, "Work");
+    relabelled[0] = 0x04;
     expect(() => wasm.SyncedState.fromBytes(relabelled)).toThrow();
   });
 });
@@ -162,7 +169,7 @@ describe("openPersistedFold", () => {
     // The next write is the fresh fold's bytes, which read back.
     const rewritten = decodeSyncState(encodeSyncState({ synced: fold.toBytes(), pending: [] }));
     fold.free();
-    expect(rewritten!.synced[0]).toBe(0x04);
+    expect(rewritten!.synced[0]).toBe(0x05);
     warn.mockClear();
     const reopened = openPersistedFold(wasm, rewritten!.synced, "stored");
     expect(reopened).not.toBeNull();
@@ -212,7 +219,7 @@ describe("mergeRestoredFoldBytes", () => {
       foldWithFolder(F2, "Backup"),
     );
     expect(out).not.toBeNull();
-    expect(out![0]).toBe(0x04);
+    expect(out![0]).toBe(0x05);
     expect(folderNames(out!)).toEqual(["Backup", "Local"]);
     expect(warn).not.toHaveBeenCalled();
   });

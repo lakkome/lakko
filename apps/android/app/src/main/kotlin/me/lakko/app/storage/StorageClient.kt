@@ -12,6 +12,7 @@ import io.ktor.client.plugins.onUpload
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.head
+import io.ktor.client.request.post
 import io.ktor.client.request.header
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
@@ -71,6 +72,13 @@ public class StorageClient(
      *  `MockEngine` for deterministic responses without a
      *  network. */
     engine: HttpClientEngine? = null,
+    /** ADR-0065 section 5 — where the hour's upload / read pass comes from.
+     *  Defaults to the process-wide passes in production and to none with a
+     *  test engine (a mock answers without a pass). */
+    private val passes: BlobPassSource? = if (engine == null) BlobAccess.passes else null,
+    /** ADR-0065 section 6 — the account's delete keys (the upload's delete
+     *  public key, the delete's signature). */
+    private val deleteKeys: BlobDeleteKeys? = if (engine == null) BlobAccess.deleteKeys else null,
 ) : AutoCloseable {
 
     private val client: HttpClient = if (engine != null) {
@@ -141,9 +149,15 @@ public class StorageClient(
         val hex = blobIdHex(blobId)
         val endpoint = "/blob/$hex"
         val url = "$baseUrl$endpoint"
-        val response: HttpResponse = try {
+        // ADR-0065 section 6: only a device of this account can delete it.
+        val deleteKey = deleteKeys?.let { keys ->
+            keys.publicKey(blobId) ?: throw StorageClientArgError("no account to derive the blob's delete key from")
+        }
+        val response = withPass(BlobPassKind.UPLOAD, endpoint) { pass ->
             client.put(url) {
                 contentType(ContentType.Application.OctetStream)
+                pass?.let { header(BLOB_PASS_HEADER, it) }
+                deleteKey?.let { header(BLOB_DELETE_KEY_HEADER, base64UrlNoPad(it)) }
                 setBody(ciphertext)
                 if (onProgress != null) {
                     onUpload { sent, length ->
@@ -151,8 +165,6 @@ public class StorageClient(
                     }
                 }
             }
-        } catch (cause: Throwable) {
-            throw StorageNetworkError(endpoint, cause)
         }
         // 200 OK = idempotent re-upload, 201 Created = first
         // upload. Both are success.
@@ -165,6 +177,100 @@ public class StorageClient(
             endpoint = endpoint,
             body = response.safeReadBody(),
         )
+    }
+
+    /**
+     * Send one blob request under a pass of [kind]: take the cached pass;
+     * on a stale-pass refusal take a new one and send once more; a budget
+     * refusal under a fresh pass is the person's limit ([StorageLimitError]).
+     * Without a pass source the request goes out as is.
+     */
+    private suspend fun withPass(
+        kind: BlobPassKind,
+        endpoint: String,
+        send: suspend (pass: String?) -> HttpResponse,
+    ): HttpResponse {
+        val source = passes
+        if (source == null) {
+            return try {
+                send(null)
+            } catch (cause: Throwable) {
+                throw StorageNetworkError(endpoint, cause)
+            }
+        }
+        var renewed = false
+        var pass = source.pass(kind)
+        while (true) {
+            val response = try {
+                send(pass)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (cause: Throwable) {
+                throw StorageNetworkError(endpoint, cause)
+            }
+            val status = response.status.value
+            if (status in 200..299) return response
+            val body = response.safeReadBody()
+            when (classifyBlobRefusal(status, body, renewed)) {
+                BlobRefusal.RENEW_PASS -> {
+                    source.refused(kind, pass)
+                    pass = source.pass(kind, refresh = true)
+                    renewed = true
+                }
+                BlobRefusal.LIMIT -> {
+                    source.refused(kind, pass)
+                    throw StorageLimitError(kind)
+                }
+                BlobRefusal.GONE -> return response
+                BlobRefusal.OTHER -> throw StorageHttpError(status, endpoint, body)
+            }
+        }
+    }
+
+    /**
+     * ADR-0065 section 3 — `POST /blob/keep`: mark each existing blob in
+     * [blobIds] (at most [KEEP_MAX_IDS]) accessed today. The server answers
+     * `204` whether or not the ids exist.
+     */
+    public suspend fun keep(blobIds: List<ByteArray>) {
+        require(blobIds.size in 1..KEEP_MAX_IDS) { "1..$KEEP_MAX_IDS ids per keep (got ${blobIds.size})" }
+        val endpoint = "/blob/keep"
+        val body = "{\"ids\":[" + blobIds.joinToString(",") { "\"${blobIdHex(it)}\"" } + "]}"
+        withPass(BlobPassKind.READ, endpoint) { pass ->
+            client.post("$baseUrl$endpoint") {
+                pass?.let { header(BLOB_PASS_HEADER, it) }
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+        }
+    }
+
+    /**
+     * ADR-0065 section 6 — `DELETE /blob/<hex>`, signed with the blob's
+     * delete key (no pass). Returns `true` on `204`; `false` on the uniform
+     * `403 blob-delete-refused` (not this account's file, or already gone).
+     * Throws on anything else, so the caller keeps it for a retry.
+     */
+    public suspend fun deleteBlob(blobId: ByteArray): Boolean {
+        if (blobId.size != BLOB_ID_LEN) {
+            throw StorageClientArgError("blobId must be $BLOB_ID_LEN bytes (got ${blobId.size})")
+        }
+        val endpoint = "/blob/${blobIdHex(blobId)}"
+        val proof = deleteKeys?.deleteProof(blobId, endpoint)
+            ?: throw StorageClientArgError("no account to sign the delete with")
+        val response = try {
+            client.delete("$baseUrl$endpoint") { header(proof.first, proof.second) }
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            throw StorageNetworkError(endpoint, cause)
+        }
+        val status = response.status.value
+        // 204 deleted; 403 is the uniform final refusal; anything else
+        // (a 404 is not expected) is tried again later.
+        if (status == 204) return true
+        if (status == 403) return false
+        throw StorageHttpError(status, endpoint, response.safeReadBody())
     }
 
     // -----------------------------------------------------------------
@@ -186,10 +292,8 @@ public class StorageClient(
         val hex = blobIdHex(blobId)
         val endpoint = "/blob/$hex"
         val url = "$baseUrl$endpoint"
-        val response: HttpResponse = try {
-            client.get(url)
-        } catch (cause: Throwable) {
-            throw StorageNetworkError(endpoint, cause)
+        val response: HttpResponse = withPass(BlobPassKind.READ, endpoint) { pass ->
+            client.get(url) { pass?.let { header(BLOB_PASS_HEADER, it) } }
         }
         val status = response.status.value
         if (status == 404) return null
@@ -224,10 +328,8 @@ public class StorageClient(
         val hex = blobIdHex(blobId)
         val endpoint = "/blob/$hex"
         val url = "$baseUrl$endpoint"
-        val response: HttpResponse = try {
-            client.head(url)
-        } catch (cause: Throwable) {
-            throw StorageNetworkError(endpoint, cause)
+        val response: HttpResponse = withPass(BlobPassKind.READ, endpoint) { pass ->
+            client.head(url) { pass?.let { header(BLOB_PASS_HEADER, it) } }
         }
         val status = response.status.value
         if (status == 404) return null
@@ -327,6 +429,9 @@ public class StorageClient(
          *  without one. */
         public val DEFAULT_BASE_URL: String
             get() = ApiEndpoints.baseUrlFor(ApiService.STORAGE)
+
+        /** ADR-0065 — at most this many ids per `POST /blob/keep`. */
+        public const val KEEP_MAX_IDS: Int = 256
 
         /** Raw SHA-256 blob id length. */
         public const val BLOB_ID_LEN: Int = 32

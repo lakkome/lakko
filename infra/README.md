@@ -151,6 +151,8 @@ sudo mariadb <<'SQL'
         CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
     CREATE DATABASE IF NOT EXISTS lakko_channels
         CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    CREATE DATABASE IF NOT EXISTS lakko_storage
+        CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 SQL
 
 # Create the service user — password is NOT in git.
@@ -162,6 +164,7 @@ sudo mariadb -e "
     GRANT ALL PRIVILEGES ON lakko_discovery.* TO 'lakko'@'localhost';
     GRANT ALL PRIVILEGES ON lakko_push_gw.*   TO 'lakko'@'localhost';
     GRANT ALL PRIVILEGES ON lakko_channels.*  TO 'lakko'@'localhost';
+    GRANT ALL PRIVILEGES ON lakko_storage.*   TO 'lakko'@'localhost';
     FLUSH PRIVILEGES;
 "
 echo "DB password: $LAKKO_DB_PASS"  # save it — needed in step 7
@@ -182,6 +185,8 @@ sudo nano /etc/lakko/lakko.env
 #   LAKKO_DISCOVERY_DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko_discovery
 #   LAKKO_PUSH_GW_DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko_push_gw
 #   LAKKO_CHANNELS_DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko_channels
+#   LAKKO_STORAGE_DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko_storage
+# and set LAKKO_STORAGE_PASS_SECRET=$(openssl rand -hex 32) (ADR-0065 blob passes).
 
 sudo chown root:lakkome /etc/lakko/lakko.env
 sudo chmod 640 /etc/lakko/lakko.env

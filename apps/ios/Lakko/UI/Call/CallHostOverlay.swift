@@ -237,6 +237,7 @@ struct CallHostOverlay: ViewModifier {
                     // the banner had the emphasis backwards.
                     IncomingCallScreen(
                         callerName: host.activePeerName,
+                        callerKey: host.activePeerKey,
                         video: host.incomingVideo,
                         onAccept: { host.acceptIncomingCall(withVideo: host.incomingVideo) },
                         onAcceptWithoutVideo: { host.acceptIncomingCall(withVideo: false) },
@@ -248,6 +249,7 @@ struct CallHostOverlay: ViewModifier {
                     CallScreen(
                         session: session,
                         peerName: host.activePeerName,
+                        peerKey: host.activePeerKey,
                         notice: host.outgoingNotice,
                         connectedAt: callBar.connectedAt,
                         onCollapse: { callBar.collapse() }

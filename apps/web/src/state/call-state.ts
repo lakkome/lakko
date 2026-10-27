@@ -85,6 +85,9 @@ export interface Participant {
    *  speaker (LiveKit metadata). The UI promotes them to the
    *  large active-speaker tile. */
   readonly speaking: boolean;
+  /** ADR-0084 - the person's profile key (or `self` for this device), whose
+   *  photo the tile shows while the camera is off. Absent until known. */
+  readonly personKeyB64?: string | undefined;
 }
 
 /**
@@ -426,6 +429,11 @@ export const callActions = {
    *  avatar). The LOCAL camera uses `setCamera`. No-op on unknown id. */
   setParticipantCamera(id: string, on: boolean): void {
     patchParticipant(id, { camOn: on });
+  },
+  /** ADR-0084 - name the person behind a tile (their profile key), for the
+   *  photo shown while their camera is off. No-op on unknown id. */
+  setParticipantPerson(id: string, personKeyB64: string | null): void {
+    patchParticipant(id, { personKeyB64: personKeyB64 ?? undefined });
   },
   /** Set the currently-speaking participant. Pass `null` to
    *  clear (no one speaking). The UI promotes the speaker to

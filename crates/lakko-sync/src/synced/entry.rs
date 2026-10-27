@@ -525,6 +525,11 @@ pub struct SavedSnapshot {
     /// client maps to its own label. Empty when the message has no
     /// attachment. At most 32 bytes.
     pub attachment_kind: String,
+    /// The message's own time in UNIX milliseconds, as the saving device
+    /// showed it, so a row can show the message date before the device
+    /// holds the message. `0` means unknown. Display only: it never orders
+    /// the saved list and never decides which write wins.
+    pub sent_at_ms: u64,
 }
 
 /// The longest prefix of `s` that is at most `max` bytes and ends on a
@@ -545,13 +550,14 @@ impl SavedSnapshot {
     /// `excerpt` to their byte bounds on a character boundary. An excerpt is
     /// a prefix by definition, so a long message is cut, not refused.
     /// `attachment_kind` is a token and is never cut: an over-long one is
-    /// refused by [`Self::validate`].
+    /// refused by [`Self::validate`]. `sent_at_ms` is kept as given.
     #[must_use]
-    pub fn fitted(author: &str, excerpt: &str, attachment_kind: &str) -> Self {
+    pub fn fitted(author: &str, excerpt: &str, attachment_kind: &str, sent_at_ms: u64) -> Self {
         Self {
             author: fit(author, SAVED_AUTHOR_MAX_BYTES).to_owned(),
             excerpt: fit(excerpt, SAVED_EXCERPT_MAX_BYTES).to_owned(),
             attachment_kind: attachment_kind.to_owned(),
+            sent_at_ms,
         }
     }
 
@@ -785,6 +791,7 @@ impl SavedMessage {
                     &snapshot.author,
                     &snapshot.excerpt,
                     &snapshot.attachment_kind,
+                    snapshot.sent_at_ms,
                 ),
                 blob_ids: distinct,
             },
@@ -1093,6 +1100,7 @@ impl SyncEntry {
                     put_bytes32(&mut out, snapshot.author.as_bytes());
                     put_bytes32(&mut out, snapshot.excerpt.as_bytes());
                     put_bytes32(&mut out, snapshot.attachment_kind.as_bytes());
+                    out.extend_from_slice(&snapshot.sent_at_ms.to_be_bytes());
                     put_len(&mut out, blob_ids.len());
                     for b in blob_ids {
                         out.extend_from_slice(b);
@@ -1572,6 +1580,7 @@ fn take_saved(cur: &mut &[u8]) -> Result<SavedMessage, CodecError> {
                 SAVED_ATTACHMENT_KIND_MAX_BYTES,
                 BoundsError::SavedAttachmentKindTooLong,
             )?;
+            let sent_at_ms = take_u64(cur)?;
             let n = take_u32(cur)? as usize;
             if n > SAVED_BLOB_IDS_MAX {
                 return Err(BoundsError::TooManyBlobIds.into());
@@ -1586,6 +1595,7 @@ fn take_saved(cur: &mut &[u8]) -> Result<SavedMessage, CodecError> {
                     author,
                     excerpt,
                     attachment_kind,
+                    sent_at_ms,
                 },
                 blob_ids,
             }
@@ -1655,6 +1665,7 @@ mod tests {
                     author: "Ada".into(),
                     excerpt: "see you at nine".into(),
                     attachment_kind: "photo".into(),
+                    sent_at_ms: 1_699_999_000_000,
                 },
                 blob_ids: blob_ids.to_vec(),
             },
@@ -1812,6 +1823,7 @@ mod tests {
         blobs.extend_from_slice(&len(0));
         blobs.extend_from_slice(&len(0));
         blobs.extend_from_slice(&len(0));
+        blobs.extend_from_slice(&0u64.to_be_bytes()); // sent_at_ms
         blobs.extend_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(
             SyncEntry::from_canonical_bytes(&blobs),
@@ -1844,6 +1856,7 @@ mod tests {
         short_blob.extend_from_slice(&len(0));
         short_blob.extend_from_slice(&len(0));
         short_blob.extend_from_slice(&len(0));
+        short_blob.extend_from_slice(&0u64.to_be_bytes()); // sent_at_ms
         short_blob.extend_from_slice(&len(1));
         short_blob.extend_from_slice(&[1; 31]);
         assert_eq!(
@@ -1856,6 +1869,28 @@ mod tests {
         assert_eq!(
             SyncEntry::from_canonical_bytes(&tombstone),
             Err(CodecError::Trailing)
+        );
+    }
+
+    #[test]
+    fn the_message_time_survives_the_canonical_encoding() {
+        for sent_at_ms in [0u64, 1, 1_699_999_000_000, u64::MAX] {
+            let e = SyncEntry::Saved(saved_with(|_, s, _| s.sent_at_ms = sent_at_ms));
+            let Ok(SyncEntry::Saved(back)) = SyncEntry::from_canonical_bytes(&e.canonical_bytes())
+            else {
+                panic!("a saved register did not round-trip");
+            };
+            assert!(matches!(
+                back.value,
+                SavedValue::Present { snapshot, .. } if snapshot.sent_at_ms == sent_at_ms
+            ));
+        }
+        // A register cut inside the message time is truncated, not read short.
+        let bytes = SyncEntry::Saved(saved(9, &[])).canonical_bytes();
+        let cut = bytes.len() - 4 /* blob count */ - 3;
+        assert_eq!(
+            SyncEntry::from_canonical_bytes(&bytes[..cut]),
+            Err(CodecError::Truncated)
         );
     }
 
@@ -1882,14 +1917,15 @@ mod tests {
         // 4-byte scalars: 512 bytes is exactly 128 of them, 255 is not a
         // multiple of 4 and must round down to 252.
         let long = "😀".repeat(200);
-        let snap = SavedSnapshot::fitted(&long, &long, "voice");
+        let snap = SavedSnapshot::fitted(&long, &long, "voice", 42);
+        assert_eq!(snap.sent_at_ms, 42);
         assert_eq!(snap.excerpt.len(), SAVED_EXCERPT_MAX_BYTES);
         assert_eq!(snap.author.len(), 252);
         assert_eq!(snap.attachment_kind, "voice");
         assert!(long.starts_with(&snap.excerpt));
         assert_eq!(snap.validate(), Ok(()));
         // Short text is untouched.
-        assert_eq!(SavedSnapshot::fitted("Ada", "hi", "").excerpt, "hi");
+        assert_eq!(SavedSnapshot::fitted("Ada", "hi", "", 0).excerpt, "hi");
 
         let m = SavedMessage::present(
             sref(),
@@ -1899,6 +1935,7 @@ mod tests {
                 author: long.clone(),
                 excerpt: long,
                 attachment_kind: "voice".into(),
+                sent_at_ms: 7,
             },
             &[vec![1u8; 32], vec![2; 32], vec![1; 32]],
         );

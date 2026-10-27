@@ -45,6 +45,46 @@ export interface SyncedProjection {
   readonly folders: readonly FolderModel[];
   /** ADR-0073 R.5 — the lineage registers (`successor -> root`). */
   readonly lineage: readonly LineageEntry[];
+  /** ADR-0065 section 4 — the saved messages, most recently saved first. */
+  readonly saved: readonly SavedEntry[];
+  /** Every blob id a saved message names, lower-case hex (the keeps). */
+  readonly savedBlobIdsHex: readonly string[];
+}
+
+/** One saved message, as the Saved screen draws it. */
+export interface SavedEntry {
+  readonly ref: ConversationRef;
+  readonly messageId: number;
+  readonly savedAtMs: number;
+  /** The message's own time, unix ms; `0` when the saving device did not
+   *  know it. */
+  readonly sentAtMs: number;
+  readonly author: string;
+  readonly excerpt: string;
+  /** The attachment kind token (`photo`, `voice`, ...), empty for none. */
+  readonly attachmentKind: string;
+  readonly blobIdsHex: readonly string[];
+}
+
+/** The key one saved message is known by (`kind:idHex:messageId`). */
+export function savedKey(ref: ConversationRef, messageId: number | bigint): string {
+  return `${ref.kind}:${bytesToHex(ref.id)}:${messageId.toString()}`;
+}
+
+function splitIds(flat: Uint8Array): string[] {
+  const out: string[] = [];
+  for (let i = 0; i + 32 <= flat.length; i += 32) out.push(bytesToHex(flat.subarray(i, i + 32)));
+  return out;
+}
+
+function joinIds(idsHex: readonly string[]): Uint8Array {
+  const out = new Uint8Array(idsHex.length * 32);
+  idsHex.forEach((hex, i) => {
+    const b = hexToBytes(hex);
+    if (b === null || b.length !== 32) throw new Error("saved blob id is not hex");
+    out.set(b, i * 32);
+  });
+  return out;
 }
 
 function refsOf(list: WasmRef[]): ConversationRef[] {
@@ -112,7 +152,25 @@ export function projectSyncedState(state: WasmSyncedState): SyncedProjection {
     });
     l.free();
   }
-  return { drafts, flags, readCursors, order, folders, lineage };
+  const saved: SavedEntry[] = [];
+  for (const v of state.saved()) {
+    const kind = v.refKind;
+    if (kind === 1 || kind === 2 || kind === 3) {
+      saved.push({
+        ref: { kind: kind as RefKind, id: v.refId },
+        messageId: Number(v.messageId),
+        savedAtMs: Number(v.savedAtMs),
+        sentAtMs: Number(v.sentAtMs),
+        author: v.author,
+        excerpt: v.excerpt,
+        attachmentKind: v.attachmentKind,
+        blobIdsHex: splitIds(v.blobIds),
+      });
+    }
+    v.free();
+  }
+  const savedBlobIdsHex = splitIds(state.savedBlobIds());
+  return { drafts, flags, readCursors, order, folders, lineage, saved, savedBlobIdsHex };
 }
 
 /**
@@ -152,6 +210,23 @@ export function buildFolderChangeSet(
           break;
         case "order":
           cs.setOrder(e.hlc, e.folderIdsHex.map(fid));
+          break;
+        case "saved":
+          cs.addSaved(
+            e.hlc,
+            e.ref.kind,
+            e.ref.id,
+            e.messageId,
+            e.savedAtMs,
+            e.sentAtMs,
+            e.author,
+            e.excerpt,
+            e.attachmentKind,
+            joinIds(e.blobIdsHex),
+          );
+          break;
+        case "saved-removed":
+          cs.addSavedRemoved(e.hlc, e.ref.kind, e.ref.id, e.messageId);
           break;
       }
     }

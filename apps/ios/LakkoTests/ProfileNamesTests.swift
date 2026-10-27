@@ -728,11 +728,4 @@ final class ProfileDirectoryTests: XCTestCase {
         XCTAssertNil(directory.ownProfileEnvelope(), "no account, nothing to publish")
         XCTAssertNil(directory.ownProfileForRequest())
     }
-
-    func testOwnProfilePreviewShapes() {
-        XCTAssertEqual(ownProfilePreview(displayName: "Alice Petrova", username: "alice"), "Alice Petrova · @alice")
-        XCTAssertEqual(ownProfilePreview(displayName: "Guest", username: nil), "Guest")
-        XCTAssertEqual(ownProfilePreview(displayName: nil, username: "alice"), "@alice")
-        XCTAssertNil(ownProfilePreview(displayName: "  ", username: ""))
-    }
 }

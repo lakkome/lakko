@@ -333,6 +333,20 @@ struct LakkoApp: App {
             accountProtection: AccountProtectionCenter(ports: .live(auth, sync: sync))
         )
         self.services = services
+        // ADR-0065 — the blob routes' delete keys come from the ACCOUNT seed;
+        // the delete list and the keep tick are per account; saved messages
+        // live in the synced state.
+        BlobAccess.deleteKeySeed = { [weak auth] in
+            guard let secrets = auth?.identitySecrets else { return nil }
+            return BlobDeleteKeys.seed(
+                accountIdB64: base64Encode(secrets.accountId), currentSeed: secrets.accountIdentitySeed)
+        }
+        BlobLifecycle.shared.accountIdB64 = { [weak auth] in
+            auth?.identitySecrets.map { base64Encode($0.accountId) }
+        }
+        BlobLifecycle.shared.chat = chat
+        BlobLifecycle.shared.sync = sync
+        SavedMessagesCenter.shared.bind(sync: sync, chat: chat)
         // ADR-0075 — at every landing of a session with keys: what protects
         // the account (the recovery email, a saved phrase) and what its
         // devices are to be told.
@@ -1053,6 +1067,8 @@ enum TabRoute: Hashable {
     case newChat
     /// The create menu's Create group (see ``NewGroupScreen``).
     case newGroup
+    /// ADR-0065 — the account's saved messages.
+    case saved
     /// A channel this device holds, opened from the merged conversation list.
     case channel(channelId: String)
     /// A channel the network lookup found by `@handle`, which this device may
@@ -1081,8 +1097,6 @@ enum TabRoute: Hashable {
     case savePhrase
     /// `It was not me` on an account notice.
     case secureAccount
-    /// "Change username" (ADR-0076).
-    case changeUsername
     /// Settings > Security > Password: choose a new password from a device
     /// that holds the account's keys.
     case password
@@ -1388,7 +1402,7 @@ private struct SessionRoot: View, Equatable {
 #if DEBUG
         let _ = BodyEvaluationCounter.tick("SessionRoot")
 #endif
-        TabView(selection: $selectedTab) {
+        TabView(selection: guardedTab) {
             NavigationStack(path: $chatsPath) {
                 ChatListScreen(
                     viewModel: chatListVM,
@@ -1412,7 +1426,7 @@ private struct SessionRoot: View, Equatable {
                         // always does.
                         onShowNewPhrase: {
                             selectedTab = .settings
-                            settingsPath = [.recoveryFactors]
+                            setSettingsPath([.recoveryFactors])
                         }),
                     keysUpdatingLabel: KeysUpdatingLabel(authRepository: authRepository),
                     peopleSearch: models.chatsPeopleSearch
@@ -1480,7 +1494,7 @@ private struct SessionRoot: View, Equatable {
             .tabItem { Label(l10n.t("nav.calls"), systemImage: "phone") }
             .tag(SessionTab.calls)
 
-            NavigationStack(path: $settingsPath) {
+            NavigationStack(path: guardedSettingsPath) {
                 SettingsScreen(
                     account: account,
                     authRepository: authRepository,
@@ -1526,7 +1540,7 @@ private struct SessionRoot: View, Equatable {
             // open for ten minutes without another proof.
             authRepository.openPasswordChangeForNotice()
             selectedTab = .settings
-            settingsPath = [.secureAccount]
+            setSettingsPath([.secureAccount])
         }
         .onReceive(NewDeviceNoticeCenter.shared.$openDevicesRequested) { requested in
             guard requested else { return }
@@ -1551,6 +1565,11 @@ private struct SessionRoot: View, Equatable {
         .task(id: account.accountIdB64) {
             models.channelPostSync.start()
             openPendingFeedImport()
+        }
+        // ADR-0065 sections 3 and 6 — owed blob deletes and the monthly keep
+        // of pinned / saved / profile-photo files, on a slow foreground tick.
+        .task(id: account.accountIdB64) {
+            await BlobLifecycle.shared.runForegroundLoop()
         }
         // ADR-0059 section 4 — let new subscribers into every channel this
         // device posts to while the app is in front, whatever screen is
@@ -1746,6 +1765,7 @@ private struct SessionRoot: View, Equatable {
         case .chat: push(.newChat, on: .chats)
         case .group: push(.newGroup, on: .chats)
         case .channel: push(.newChannel, on: .chats)
+        case .saved: push(.saved, on: .chats)
         }
     }
 
@@ -1843,6 +1863,16 @@ private struct SessionRoot: View, Equatable {
                     replaceTop(route, with: .chat(groupIdHex: groupIdHex), in: tab)
                 }
             )
+        case .saved:
+            SavedScreen(
+                center: SavedMessagesCenter.shared,
+                chat: chatRepository,
+                headOf: { chatRepository.headGroupIdHex(of: $0) },
+                title: { groupIdHex in chatListVM.title(groupIdHex: groupIdHex) },
+                onOpen: { groupIdHex, rowId in
+                    chatViewModel(for: groupIdHex).requestJump(to: rowId)
+                    push(.chat(groupIdHex: groupIdHex), on: tab)
+                })
         case .newGroup:
             // docs/ux/new-group.md — a name (ADR-0051, shared with every
             // member) above a checkable contact list; the group is founded with
@@ -1932,20 +1962,22 @@ private struct SessionRoot: View, Equatable {
         case .profile:
             // ADR-0048 — Settings -> Profile. A saved name is
             // published into every group this device is in.
-            ProfileSettingsScreen(
-                viewModel: ProfileSettingsViewModel(
-                    publishToAllGroups: {
+            // ADR-0084 + UX `profile-screen.md` — the avatar, the name and
+            // the username edited in place; Save publishes into every group.
+            ProfileScreen(
+                model: ProfileEditModel.live(
+                    authRepository: authRepository,
+                    account: account,
+                    protection: services.accountProtection,
+                    republish: {
                         await chatRepository.publishOwnProfileToAllGroups()
                         // ADR-0060 — a new name changes what Everyone publishes
                         // and what the introduction record is findable by.
                         ReachCenter.shared.sync()
                         await chatRepository.sendIntroductions()
-                    }
-                ),
-                // A guest account never reaches Settings: it gets its
-                // username from the question after its call (``GuestRoot``).
-                onChangeUsername: account.username.isEmpty
-                    ? nil : { push(.changeUsername, on: tab) }
+                    }),
+                proof: FreshAuthProofModel(surface: .changeUsername, repository: authRepository),
+                tintIdentity: account.accountIdB64
             )
         case .passkeys:
             PasskeysView(
@@ -2022,13 +2054,6 @@ private struct SessionRoot: View, Equatable {
                 center: services.accountProtection,
                 rotation: services.keyRotation,
                 onDone: { pop(.savePhrase, from: tab) }
-            )
-        case .changeUsername:
-            ChangeUsernameScreen(
-                authRepository: authRepository,
-                center: services.accountProtection,
-                currentUsername: account.username,
-                onDone: { pop(.changeUsername, from: tab) }
             )
         case .secureAccount:
             SecureAccountScreen(
@@ -2205,6 +2230,37 @@ private struct SessionRoot: View, Equatable {
         }
     }
 
+    /// UX `profile-screen.md` section 6 — another tab is a navigation away
+    /// from Settings > Profile: it asks first while a change is pending.
+    private var guardedTab: Binding<SessionTab> {
+        Binding(
+            get: { selectedTab },
+            set: { next in
+                guard next != selectedTab, selectedTab == .settings,
+                      settingsPath.contains(.profile) else {
+                    selectedTab = next
+                    return
+                }
+                if ProfileLeaveGuard.shared.allows({ selectedTab = next }) { selectedTab = next }
+            })
+    }
+
+    /// The same for a Settings path that drops the profile screen (the tab
+    /// tapped again, a path the shell replaces).
+    private var guardedSettingsPath: Binding<[TabRoute]> {
+        Binding(
+            get: { settingsPath },
+            set: { next in setSettingsPath(next) })
+    }
+
+    private func setSettingsPath(_ next: [TabRoute]) {
+        guard settingsPath.contains(.profile), !next.contains(.profile) else {
+            settingsPath = next
+            return
+        }
+        if ProfileLeaveGuard.shared.allows({ settingsPath = next }) { settingsPath = next }
+    }
+
     private func push(_ route: TabRoute, on tab: SessionTab) {
         path(for: tab).wrappedValue.append(route)
     }
@@ -2213,7 +2269,7 @@ private struct SessionRoot: View, Equatable {
     /// local notification): Settings > Devices.
     private func openDevices() {
         selectedTab = .settings
-        if settingsPath.last != .devices { settingsPath = [.devices] }
+        if settingsPath.last != .devices { setSettingsPath([.devices]) }
     }
 
     /// Remove `route` from `tab`'s stack (the last occurrence, and everything

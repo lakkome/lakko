@@ -151,6 +151,7 @@ class SfuCallUi(
                 // roster (ADR-0078 section 2): name its tile.
                 if (peerNames?.peerIdentified(peerId, identity.personKeyB64, identity.memberKeyHex) == true) {
                     ui.setParticipantName(participantId(peerId), peerNames.name(peerId))
+                    ui.setParticipantPersonKey(participantId(peerId), identity.personKeyB64)
                 }
             },
             onPeerLeft = { peerId ->

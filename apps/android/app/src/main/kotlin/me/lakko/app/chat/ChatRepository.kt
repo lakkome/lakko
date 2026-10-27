@@ -4530,6 +4530,10 @@ public class ChatRepository(
                 val ownKey = ownIdentity(record.group)
                 prepared to ownKey
             }
+            // ADR-0065 section 6 — the message's files and thumbnails, taken
+            // BEFORE the row is tombstoned (the tombstone drops them).
+            val ownBlobs = record.snapshot().firstOrNull { it.messageId == targetMessageId }
+                ?.let { messageBlobIds(it) }.orEmpty()
             chatClient.publishPreparedSend(prepared)
             record.applyOwnOp(
                 op = MessageOp.Delete,
@@ -4538,6 +4542,9 @@ public class ChatRepository(
                 emoji = null,
                 ownKey = ownKey,
             )
+            // The delete is out: the files go from the server now, or later
+            // from the durable retry list.
+            if (ownBlobs.isNotEmpty()) me.lakko.app.storage.BlobLifetime.delete(applicationContext, ownBlobs)
             // ADR-0052 decision 3 — the deleted message's pins go with it.
             dropPinsOfDeletedMessages(groupIdHex, record)
             persistMessageLogBestEffort()
@@ -5322,16 +5329,8 @@ public class ChatRepository(
         try {
             profileDirectory.onProfileReceived(
                 signatureKeyB64 = senderKey,
-                profile = me.lakko.app.profile.PeerProfile(
-                    displayName = profile.displayName,
-                    username = profile.username,
-                    updatedAtMs = profile.updatedAtMs,
-                    // ADR-0048 v2 — the id the call roster derives the
-                    // ADR-0021 peer tag from; kept per person key.
-                    accountIdHex = me.lakko.app.profile.accountIdHexOrNull(profile.accountId),
-                    // ADR-0060 §5 — the username shows only on its certificate.
-                    usernameCertificateHex = profile.usernameCertificate?.let { me.lakko.app.reach.reachHex(it) },
-                ),
+                // ADR-0048 v2 / ADR-0060 §5 / ADR-0084: the one conversion.
+                profile = me.lakko.app.profile.peerProfileOf(profile),
             )
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0048 profile not stored", cause)
@@ -5747,7 +5746,63 @@ public class ChatRepository(
      * pin records go with it. Called after a batch that applied a delete, and
      * after this device's own delete; a store with no pins costs one read.
      */
+    /** ADR-0065 section 4 — told the SEGMENT group and the DS ids of its
+     *  messages deleted for everyone, so a saved one leaves the saved list. */
+    @Volatile
+    public var onMessagesDeleted: ((segmentHex: String, messageIds: Set<Long>) -> Unit)? = null
+
+    /**
+     * ADR-0065 section 3 — the keep buckets of the pinned messages: one per
+     * conversation this device holds, naming the files and thumbnails of the
+     * messages pinned in it, for everyone or for me.
+     */
+    public fun pinnedKeepBuckets(): List<me.lakko.app.storage.KeepBucket> {
+        val accountIdB64 = currentAccountIdB64.get() ?: return emptyList()
+        return groups.entries.mapNotNull { (groupIdHex, record) ->
+            try {
+                val pinned = PinStore.loadShared(applicationContext, accountIdB64, groupIdHex).keys +
+                    PinStore.loadPersonal(applicationContext, accountIdB64, groupIdHex).keys
+                if (pinned.isEmpty()) return@mapNotNull null
+                val ids = record.snapshot().asSequence()
+                    .filter { it.messageId in pinned && !it.deleted }
+                    .flatMap { messageBlobIds(it).asSequence() }
+                    .toList()
+                me.lakko.app.storage.KeepBucket(
+                    key = "pins:" + groupIdHex.lowercase(),
+                    blobIdsHex = me.lakko.app.storage.blobHexes(ids),
+                )
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "pinned keep bucket not read", cause)
+                null
+            }
+        }
+    }
+
+    /** The message [messageId] of the conversation [conversationHex] when
+     *  this device holds it (the Saved screen's rows), else `null`. */
+    public fun heldMessage(segmentHex: String, messageId: Long): ChatMessage? {
+        // The conversation that holds the segment (through the lineage), and
+        // the row in it: a saved message is named by its segment and DS id.
+        val thread = conversationThreadOf(state.value.conversations, segmentHex.lowercase()) ?: return null
+        return rowForSavedKey(thread, SavedKey(segmentHex.lowercase(), messageId))
+    }
+
+    /** The folded conversation that holds the group [segmentHex] (any of its
+     *  segments), or `null` when this device does not know it. */
+    public fun conversationHolding(segmentHex: String): ChatThread? =
+        conversationThreadOf(state.value.conversations, segmentHex.lowercase())
+            // A segment this device does not hold, but the lineage names: the
+            // conversation it belongs to.
+            ?: conversationThreadOf(state.value.conversations, conversationIdOf(segmentHex))
+
     private fun dropPinsOfDeletedMessages(groupIdHex: String, record: GroupRecord) {
+        try {
+            val deletedIds = record.snapshot().asSequence().filter { it.deleted && it.messageId > 0L }
+                .map { it.messageId }.toHashSet()
+            if (deletedIds.isNotEmpty()) onMessagesDeleted?.invoke(groupIdHex.lowercase(), deletedIds)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0065 saved of deleted messages not dropped", cause)
+        }
         val accountIdB64 = currentAccountIdB64.get() ?: return
         try {
             val shared = PinStore.loadShared(applicationContext, accountIdB64, groupIdHex)

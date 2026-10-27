@@ -285,6 +285,9 @@ private fun ContactDetailBody(
                 name = if (name.isPlaceholder) "?" else name.primary,
                 seed = contactKey,
                 size = 72.dp,
+                personKey = me.lakko.app.ui.components.personKeyBytes(contactKey),
+                // UX §7: a profile video plays in the large views.
+                large = true,
             )
             Spacer(Modifier.height(12.dp))
             Text(name.primary, style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)

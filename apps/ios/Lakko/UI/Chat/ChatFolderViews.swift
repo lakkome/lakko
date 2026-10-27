@@ -99,39 +99,34 @@ struct FolderBar: View {
         }
         .buttonStyle(.plain)
         .id(id)
-        .contextMenu { menu(folder: folder, count: count) }
+        .lakkoLongPressMenu { menuItems(folder: folder, count: count) }
         .accessibilityLabel(ChatFolders.tabAccessibilityLabel(name: name, count: count))
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 
-    /// Section 2.2 — the tab menu, in the spec's order.
-    @ViewBuilder
-    private func menu(folder: FolderView?, count: Int) -> some View {
+    /// Section 2.2 — the tab menu, in the spec's order (Lakko's own menu).
+    private func menuItems(folder: FolderView?, count: Int) -> [LakkoMenuItem] {
+        var items: [LakkoMenuItem] = []
         if let folder {
-            Button { onEdit(folder) } label: {
-                Label(l10n.t("folders.edit"), systemImage: "pencil")
-            }
+            items.append(.action(l10n.t("folders.edit"), systemImage: "pencil") { onEdit(folder) })
             if count > 0 {
-                Button { onMarkAllRead(folder) } label: {
-                    Label(l10n.t("folders.mark_all_read"), systemImage: "checkmark.message")
-                }
+                items.append(.action(l10n.t("folders.mark_all_read"), systemImage: "checkmark.message") {
+                    onMarkAllRead(folder)
+                })
             }
-            Button(action: onReorder) {
-                Label(l10n.t("folders.reorder"), systemImage: "arrow.up.arrow.down")
-            }
-            Button(role: .destructive) { onDelete(folder) } label: {
-                Label(l10n.t("folders.delete"), systemImage: "trash")
-            }
+            items.append(.action(l10n.t("folders.reorder"), systemImage: "arrow.up.arrow.down", perform: onReorder))
+            items.append(.action(l10n.t("folders.delete"), systemImage: "trash", destructive: true) {
+                onDelete(folder)
+            })
         } else {
             if anyUnread {
-                Button { onMarkAllRead(nil) } label: {
-                    Label(l10n.t("folders.mark_all_read"), systemImage: "checkmark.message")
-                }
+                items.append(.action(l10n.t("folders.mark_all_read"), systemImage: "checkmark.message") {
+                    onMarkAllRead(nil)
+                })
             }
-            Button(action: onEditFolders) {
-                Label(l10n.t("folders.edit_all"), systemImage: "folder")
-            }
+            items.append(.action(l10n.t("folders.edit_all"), systemImage: "folder", perform: onEditFolders))
         }
+        return items
     }
 }
 

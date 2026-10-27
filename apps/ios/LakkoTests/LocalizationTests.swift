@@ -208,8 +208,8 @@ final class LocalizationTests: XCTestCase {
             XCTAssertNotEqual(l10n.t(key), key, key)
         }
         XCTAssertEqual(
-            l10n.t("settings.profile.name.hint", counts: ["count": 64]),
-            "Shown to the people you talk to. Not unique, at most 64 characters.")
+            l10n.t("display_name.error.too_long", counts: ["count": 64]),
+            "At most 64 characters")
     }
 
     /// The notification extension reads the counted attachment line under

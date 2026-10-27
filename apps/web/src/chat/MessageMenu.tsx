@@ -144,6 +144,10 @@ export interface MessageMenuProps {
   /** The pin row was chosen: the view runs `pinRowDecision` and either acts
    *  at once or opens the sheet. */
   onPin: () => void;
+  /** ADR-0065 section 2 — the `Save` / `Remove from saved` row under Pin,
+   *  or `null` when not offered. */
+  saveLabel?: "save" | "unsave" | null;
+  onSave?: () => void;
   onCopy: (text: string) => void;
   /** Section 8 — whether the `Select` row is offered: the same gate as
    *  Forward (an id, a complete send; the menu never opens on a deleted
@@ -359,6 +363,22 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 >
                   <Icon name="pin" size={16} />
                   <span>{label() === "Pin" ? t("chat.message.pin") : t("chat.message.unpin")}</span>
+                </button>
+              )}
+            </Show>
+            <Show when={props.saveLabel}>
+              {(label) => (
+                <button
+                  ref={(el) => {
+                    // An older segment's menu with no Unpin row starts here.
+                    if (props.pinOnly === true && firstItem === undefined) firstItem = el;
+                  }}
+                  type="button"
+                  role="menuitem"
+                  onClick={() => run(() => props.onSave?.())}
+                >
+                  <Icon name="bookmark" size={16} />
+                  <span>{label() === "save" ? t("chat.message.save") : t("chat.message.unsave")}</span>
                 </button>
               )}
             </Show>

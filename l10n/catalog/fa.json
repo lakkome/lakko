@@ -1798,10 +1798,6 @@
       "text": "بارگیری پیوست ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
     },
-    "chat.attachment.error.gone": {
-      "text": "این پیوست دیگر روی سرور موجود نیست.",
-      "status": "machine"
-    },
     "chat.attachment.error.open_photo": {
       "text": "باز کردن این عکس ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
@@ -7854,36 +7850,8 @@
       "text": "رمز عبور",
       "status": "machine"
     },
-    "settings.profile.error.generic": {
-      "text": "ذخیره نام شما ممکن نشد. دوباره تلاش کنید.",
-      "status": "machine"
-    },
-    "settings.profile.lede": {
-      "text": "مخاطبانتان شما را چگونه می‌بینند.",
-      "status": "machine"
-    },
-    "settings.profile.name.hint": {
-      "text": "به کسانی که با آن‌ها گفتگو می‌کنید نشان داده می‌شود. لازم نیست یکتا باشد، حداکثر {count, plural, one {# نویسه} other {# نویسه}}.",
-      "status": "machine"
-    },
     "settings.profile.name.label": {
       "text": "نام شما",
-      "status": "machine"
-    },
-    "settings.profile.preview.label": {
-      "text": "دیگران شما را چگونه می‌بینند",
-      "status": "machine"
-    },
-    "settings.profile.preview.no_name": {
-      "text": "تا زمانی که نامی تعیین نکنید، دیگران اثر انگشت کلید شما را می‌بینند.",
-      "status": "machine"
-    },
-    "settings.profile.saved": {
-      "text": "نام شما برای مخاطبانتان به‌روز می‌شود.",
-      "status": "machine"
-    },
-    "settings.profile.username.none": {
-      "text": "ندارد",
       "status": "machine"
     },
     "settings.recovery.devices.title": {
@@ -8134,28 +8102,8 @@
       "text": "نام کاربری: {message}",
       "status": "machine"
     },
-    "username.change.body": {
-      "text": "دیگران دیگر شما را با {old} پیدا نمی‌کنند. تا 30 روز هیچ‌کس دیگری نمی‌تواند آن را بگیرد.",
-      "status": "machine"
-    },
-    "username.change.next_change": {
-      "text": "پس از این، 30 روز دیگر می‌توانید دوباره آن را تغییر دهید.",
-      "status": "machine"
-    },
-    "username.change.other_devices": {
-      "text": "دستگاه‌های دیگرتان دفعه بعد که آنلاین شوند نام کاربری جدید را می‌گیرند.",
-      "status": "machine"
-    },
-    "username.change.save": {
-      "text": "تغییر",
-      "status": "machine"
-    },
     "username.change.title": {
       "text": "تغییر نام کاربری",
-      "status": "machine"
-    },
-    "username.change.too_soon": {
-      "text": "در {date} می‌توانید دوباره نام کاربری خود را تغییر دهید.",
       "status": "machine"
     },
     "username.claim.body": {

@@ -43,7 +43,7 @@ import {
 } from "./protect/account-protection";
 import { markOwnAction, startNoticeCursor } from "./protect/notices";
 import { markFirstPasswordOwed } from "./username-claim";
-import { writeRenamedAt, writeRenameOwed } from "./username-change";
+import { writeRenameOwed } from "./username-change";
 import { markThreeWordsSuspended, saveBudget } from "./recover/three-words";
 import { writeKeyResetOwed } from "./key-reset-owed";
 import { writeGenesisRecorded, writeKnownDeviceId } from "./session-device";
@@ -138,6 +138,8 @@ function idbRows(acct: string, acctUrl: string): { db: string; store: string; ro
     { db: "lakko-discover", store: "rows", row: { key: `${acct}|prefs`, ciphertext: ct } },
     { db: "lakko-discover", store: "rows", row: { key: `${acct}|shared`, ciphertext: ct } },
     byId("lakko-profiles", "rows"),
+    // ADR-0084: the decrypted-avatar cache, one row per blob.
+    { db: "lakko-avatars", store: "blobs", row: { id: `${acct}|blob1`, ciphertext: ct } },
     byId("lakko-group-names", "rows"),
     byId("lakko-group-closed", "rows"),
     byId("lakko-registrar-seeds", "rows"),
@@ -252,8 +254,9 @@ function seedAccount(acct: string, acctUrl: string): void {
   put(`lakko.own-username.unsent.v1.${acct}`, "1");
   put(`lakko.link-records.unsent.v1.${acct}`, "1");
   put(`lakko.link-claims.v1.${acct}`, JSON.stringify({ v: 1, seen: {}, own: {} }));
+  put(`lakko.blob-deletes-owed.v1.${acct}`, JSON.stringify(["00".repeat(32)]));
+  put(`lakko.blob-keeps.v1.${acct}`, JSON.stringify({ v: 1, last: {} }));
   put(`lakko.link-row-deletions-owed.v1.${acct}`, JSON.stringify(["00"]));
-  writeRenamedAt(local, acct, 5);
   writeRenameOwed(local, acct, { v: 1, oldUsername: "alice", newUsername: "alicia", phase: "binding" });
   put(
     `lakko.contacts.verified-bindings.v1.${acct}`,
@@ -555,6 +558,7 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko-feed-marks": "account",
   "lakko-discover": "account",
   "lakko-profiles": "account",
+  "lakko-avatars": "account",
   "lakko-group-names": "account",
   "lakko-group-closed": "account",
   "lakko-registrar-seeds": "account",
@@ -619,8 +623,9 @@ const CLASSIFIED: Record<string, "account" | "device" | "retired" | "not-storage
   "lakko.own-username.unsent.v1.": "account",
   "lakko.link-records.unsent.v1.": "account",
   "lakko.link-claims.v1.": "account",
+  "lakko.blob-deletes-owed.v1.": "account",
+  "lakko.blob-keeps.v1.": "account",
   "lakko.link-row-deletions-owed.v1.": "account",
-  "lakko:username-changed-at:": "account",
   "lakko:username-change-owed:": "account",
   "lakko.contacts.verified-bindings.v1.": "account",
   "lakko.reset-continuity.v1.": "account",

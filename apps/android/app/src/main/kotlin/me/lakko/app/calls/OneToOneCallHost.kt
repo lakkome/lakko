@@ -128,6 +128,10 @@ public interface OneToOneCallPort<S : OneToOneCallSession> {
      */
     public fun peerName(groupIdHex: String): String? = null
 
+    /** ADR-0084 — the other person's signature key in [groupIdHex]
+     *  (standard base64), for the ring's photo, or `null`. */
+    public fun peerKeyB64(groupIdHex: String): String? = null
+
     /**
      * Is the conversation in [groupIdHex] muted (`docs/ux/calls.md` section
      * 2.1)?
@@ -869,6 +873,12 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                     null
                 },
                 video = offer.media.video,
+                callerKeyB64 = try {
+                    port?.peerKeyB64(row.groupIdHex)
+                } catch (error: Throwable) {
+                    warn("call host: resolving the caller's key failed", error)
+                    null
+                },
                 // The offer's own stamp, not this device's clock: a wake that
                 // took twenty seconds to arrive has twenty-five seconds of
                 // ringing left, not forty-five.

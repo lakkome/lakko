@@ -156,6 +156,15 @@ import { uiRules } from "../chat/ui-rules";
 import { paths } from "./paths";
 import { Icon } from "../ui/icons";
 import { initialsOf, toneOf } from "../ui/Avatar";
+import { avatarMediaFor } from "../profile/avatar-runtime";
+
+/** ADR-0084 - a person's photo when this device holds it, else their
+ *  initials: what a call surface shows while the camera is off. */
+const PhotoOrInitials: Component<{ name: string; personKey: string | undefined; class: string }> = (props) => (
+  <Show when={avatarMediaFor(props.personKey, false)?.stillUrl} fallback={initialsOf(props.name)}>
+    {(url) => <img class={props.class} src={url()} alt="" />}
+  </Show>
+);
 import { currentLanguage, t } from "../l10n";
 
 // ============================================================================
@@ -707,6 +716,8 @@ const CallStatus: Component<{
    *  video fill and the group grid, where the status floats at the top over
    *  the picture. */
   avatar?: boolean;
+  /** ADR-0084 - whose photo the voice portrait shows. */
+  personKey?: string | undefined;
   /** What `Invite` is doing, or `null` (`docs/ux/call-links.md` section 5:
    *  the wait "says what it is doing rather than only spinning"). Rendered as
    *  a second plain line rather than a banner, so it reads like the rest of
@@ -717,7 +728,7 @@ const CallStatus: Component<{
   <div class="lk-call-status">
     <Show when={props.avatar === true}>
       <div class="lk-call-portrait-avatar" aria-hidden="true">
-        {initialsOf(props.name)}
+        <PhotoOrInitials name={props.name} personKey={props.personKey} class="lk-call-photo" />
       </div>
     </Show>
     <h1 class="lk-call-name">{props.name}</h1>
@@ -763,10 +774,16 @@ const CallStatus: Component<{
  * The one thing §4.2 says we deliberately do not copy is an animation that
  * keeps moving for the whole call: decoration with a battery cost.
  */
-const CallPortrait: Component<{ name: string; toneId: string }> = (props) => (
+const CallPortrait: Component<{ name: string; toneId: string; personKey?: string | undefined }> = (props) => (
   <div class="lk-call-portrait" data-tone={toneOf(props.toneId)} aria-hidden="true">
     <div class="lk-call-portrait-wash">
-      <span class="lk-call-portrait-blur">{initialsOf(props.name)}</span>
+      {/* ADR-0084 - the person's own photo, blurred, when this device holds it. */}
+      <Show
+        when={avatarMediaFor(props.personKey, false)?.stillUrl}
+        fallback={<span class="lk-call-portrait-blur">{initialsOf(props.name)}</span>}
+      >
+        {(url) => <img class="lk-call-portrait-photo" src={url()} alt="" />}
+      </Show>
     </div>
   </div>
 );
@@ -1427,7 +1444,11 @@ const ParticipantTile: Component<TileProps> = (props) => {
         when={props.participant.camOn}
         fallback={
           <div class="lk-call-tile-avatar" aria-hidden="true">
-            {initialsOf(name())}
+            <PhotoOrInitials
+              name={name()}
+              personKey={props.participant.personKeyB64}
+              class="lk-call-photo lk-call-tile-photo"
+            />
           </div>
         }
       >
@@ -2716,7 +2737,7 @@ const Call: Component<{
       {/* The ground. A voice call gets the other person's colour, blurred and
           darkened (§4.2); a video call gets the other person. */}
       <Show when={surface() !== "group"}>
-        <CallPortrait name={peerLabel()} toneId={toneId()} />
+        <CallPortrait name={peerLabel()} toneId={toneId()} personKey={remotes()[0]?.personKeyB64} />
       </Show>
 
       {/* The picture, edge to edge. `object-fit: cover` in the stylesheet, so a
@@ -2750,7 +2771,11 @@ const Call: Component<{
                 when={remoteCameraOn() && fillStream() !== undefined}
                 fallback={
                   <div class="lk-call-tile-avatar" aria-hidden="true">
-                    {initialsOf(peerLabel())}
+                    <PhotoOrInitials
+                      name={peerLabel()}
+                      personKey={remotes()[0]?.personKeyB64}
+                      class="lk-call-photo lk-call-tile-photo"
+                    />
                   </div>
                 }
               >
@@ -2782,6 +2807,7 @@ const Call: Component<{
         detail={statusDetail()}
         spokenDetail={spokenDetail()}
         avatar={surface() === "voice"}
+        personKey={remotes()[0]?.personKeyB64}
         inviteStatus={props.inviteStatus ?? null}
         onOpenEncryption={(): void => {
           setEncryptionSheetOpen(true);

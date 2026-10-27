@@ -3,6 +3,7 @@
 
 package me.lakko.app.channels
 
+import me.lakko.app.profile.toFfi
 import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.cancellation.CancellationException
@@ -50,6 +51,8 @@ public data class ChannelMemberRow(
      *  card carried a `channel` grant this device verified and keeps). */
     val username: String?,
     val isSelf: Boolean,
+    /** ADR-0084 — the member's profile photo, carried in the card. */
+    val avatar: me.lakko.app.profile.AvatarRefs? = null,
 )
 
 /** What reading the member list came back with. */
@@ -228,6 +231,7 @@ private suspend fun readCard(
         name = memberRowName(profile.displayName, isSelf),
         username = username,
         isSelf = isSelf,
+        avatar = me.lakko.app.profile.avatarRefsOf(profile.avatar),
     )
 }
 
@@ -277,6 +281,8 @@ public object ChannelMemberCards {
         public val updatedAtMs: Long,
         public val accountId: ByteArray?,
         public val usernameCertificate: ByteArray?,
+        /** ADR-0084 — the own profile photo, or `null`. */
+        public val avatar: me.lakko.app.profile.AvatarRefs? = null,
     )
 
     /** Upload this device's card for [input]'s epoch when one is due. Never
@@ -322,6 +328,7 @@ public object ChannelMemberCards {
                         accountId = input.accountId,
                         usernameCertificate = if (content.username == null) null else input.usernameCertificate,
                         grants = listOfNotNull(grant),
+                        avatar = input.avatar?.toFfi(),
                     ),
                 )
                 // The card is bound to the account: without a reach session
@@ -412,6 +419,7 @@ public object ChannelMemberCards {
             updatedAtMs = own?.updatedAtMs ?: 0L,
             accountId = accountId.takeIf { it.size == 16 },
             usernameCertificate = username?.let { ReachManager.get(context).usernameCertificate() },
+            avatar = own?.avatar,
         )
     }
 

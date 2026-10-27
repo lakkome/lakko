@@ -73,12 +73,15 @@ import me.lakko.app.calls.oneToOneCallPresentation
 public fun BoxScope.OneToOneCallOverlay(
     host: OneToOneCallHost<CallSession>,
     nameForGroup: (groupIdHex: String) -> String?,
+    /** ADR-0084 — the other person's signature key for a 1x1 chat. */
+    keyForGroup: (groupIdHex: String) -> ByteArray? = { null },
 ) {
     val permissions = rememberCallPermissionGate()
     val active by host.active.collectAsStateWithLifecycle()
     val call = active ?: return
     val state by call.session.state.collectAsStateWithLifecycle()
     val name = nameForGroup(call.groupIdHex)
+    val personKey = keyForGroup(call.groupIdHex)
     // `docs/ux/calls.md` section 4.5 — the call has been put away into the bar
     // across the top of the app, so its screen is not drawn. "One state, one
     // place": the same flag that hides this screen is what the bar's visibility
@@ -136,6 +139,7 @@ public fun BoxScope.OneToOneCallOverlay(
                 // The chat's own avatar colour, so the ring, the call screen
                 // and the chat row are one person.
                 avatarSeed = call.groupIdHex,
+                personKey = personKey,
                 // A choice made on the notification is taken by the activity
                 // that notification opens; nothing arrives pre-answered here.
                 pendingAnswer = null,
@@ -184,6 +188,7 @@ public fun BoxScope.OneToOneCallOverlay(
                     // The chat's own avatar colour, so the portrait of
                     // section 4 matches the row the call was started from.
                     avatarSeed = call.groupIdHex,
+                    personKey = personKey,
                     // docs/ux/calls.md section 4.1 — the flip button on the
                     // self-view rectangle, which is the only place it lives.
                     onSwitchCamera = { call.session.switchCamera() },

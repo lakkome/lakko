@@ -57,6 +57,7 @@ import {
 import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
+import { Avatar } from "../ui/Avatar";
 import { useChats } from "../chat/ChatContext";
 import { useProfiles } from "../profile/ProfileContext";
 import { createDisplayNameCheck } from "../profile/username-field";
@@ -120,6 +121,14 @@ export default function JoinCall() {
     if (d === null || d === undefined || d.isOwner) return null;
     const resolved = profiles.resolve(d.ownerSignatureKey);
     return resolved.source === "fingerprint" ? null : resolved.name;
+  };
+  /** The host's signature key, standard base64 (empty when unknown). */
+  const hostKeyB64 = (): string => {
+    const d = decoded();
+    if (d === null || d === undefined) return "";
+    let bin = "";
+    for (const b of d.ownerSignatureKey) bin += String.fromCharCode(b);
+    return btoa(bin);
   };
   const callHost: CallHostApi = useCallHost();
 
@@ -493,7 +502,13 @@ export default function JoinCall() {
               </p>
             </Show>
             <Show when={hostName()}>
-              {(name) => <p>{t("call.link.host", { name: name() })}</p>}
+              {(name) => (
+                <p class="lk-person-line">
+                  {/* ADR-0084 - the host's photo beside their name. */}
+                  <Avatar label={name()} id={hostKeyB64()} size="sm" personKey={hostKeyB64()} />
+                  <span>{t("call.link.host", { name: name() })}</span>
+                </p>
+              )}
             </Show>
             <Show when={busyMessage()}>
               {(message) => (

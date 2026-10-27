@@ -67,6 +67,8 @@ public data class PeerProfile(
      * and that account's published key is the sender's.
      */
     val usernameCertificateHex: String? = null,
+    /** ADR-0084 — the person's profile photo references, or `null`. */
+    val avatar: AvatarRefs? = null,
 )
 
 /** The auth account id length, bytes. */
@@ -87,6 +89,7 @@ public fun peerProfileOf(profile: uniffi.lakko_ffi_uniffi.FfiProfile): PeerProfi
         updatedAtMs = profile.updatedAtMs,
         accountIdHex = accountIdHexOrNull(profile.accountId),
         usernameCertificateHex = profile.usernameCertificate?.let { me.lakko.app.reach.reachHex(it) },
+        avatar = avatarRefsOf(profile.avatar),
     )
 
 /**

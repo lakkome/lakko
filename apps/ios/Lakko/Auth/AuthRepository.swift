@@ -2520,15 +2520,6 @@ public final class AuthRepository: ObservableObject {
 
     // MARK: - ADR-0076: changing the username
 
-    /// When the next username change is possible by this device's own stamp
-    /// (unix ms), or `nil`. The server's `429` is the authority.
-    public var renameTooSoonUntilMs: Int64? {
-        guard case .session(let account) = state else { return nil }
-        return UsernameRename.tooSoonUntilMs(
-            lastChangeAtMs: protectionStore.lastRenameAtMs(accountIdB64: account.accountIdB64),
-            nowMs: grantNowMs())
-    }
-
     /// The `recovery_email` part of a handle change towards `handle`: the
     /// address this device holds and, while no phrase is saved, the email
     /// vault sealed (off the main thread) under THAT handle with a fresh
@@ -2586,7 +2577,6 @@ public final class AuthRepository: ObservableObject {
             throw UsernameRenameFailed(.rule)
         }
         guard new.canonical != old.canonical else { throw UsernameRenameFailed(.sameName) }
-        if let until = renameTooSoonUntilMs { throw UsernameRenameFailed(.tooSoon(untilMs: until)) }
         guard let grant = liveFreshGrant() else { throw FreshAuthRequired() }
 
         // b. The handle. The record first: a crash from here is resumed.
@@ -2676,7 +2666,6 @@ public final class AuthRepository: ObservableObject {
         // The handle of the new name is the bound one: no sync runs for it.
         _ = loginHandleBinds.claim(sessionToken: secrets.sessionToken, canonical: record.newName)
         sessionStore.save(PersistedSession(accountIdB64: accountIdB64, username: record.newName))
-        protectionStore.setLastRenameAtMs(grantNowMs(), accountIdB64: accountIdB64)
         // The register is owed BEFORE the record goes: until it is written
         // the register still holds the old name and must not be adopted.
         protectionStore.setUsernameRegisterOwed(record.newName, accountIdB64: accountIdB64)
@@ -2687,6 +2676,24 @@ public final class AuthRepository: ObservableObject {
         onUsernameRenamed?(named, certificate)
         // The recovery email was re-keyed, or dropped: read it again.
         onProtectionChanged?()
+    }
+
+    /// A rename this device started is not finished (or rolled back) yet.
+    public var hasOwedRename: Bool {
+        guard case .session(let account) = state else { return false }
+        return protectionStore.renameOwed(accountIdB64: account.accountIdB64) != nil
+    }
+
+    /// Settings > Profile (the screen that took over from the old rename
+    /// screen): finish an owed rename now, with the live proof when one is
+    /// held. `true` when it is still owed afterwards (a rollback that needs a
+    /// proof, or the network).
+    public func finishOwedRename() async -> Bool {
+        guard !renameResumeInFlight else { return hasOwedRename }
+        renameResumeInFlight = true
+        defer { renameResumeInFlight = false }
+        await resumeOwedRename()
+        return hasOwedRename
     }
 
     /// At a landing: finish (or roll back) a rename this device started.

@@ -221,13 +221,16 @@ struct DiscoverCardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: LakkoRadius.card).fill(Color.lakkoSurface))
         .overlay(RoundedRectangle(cornerRadius: LakkoRadius.card).strokeBorder(Color.lakkoBorder))
-        .contextMenu {
-            if model.relation(card.channelIdHex) == .none {
-                Button(l10n.t("discover.card.not_interested")) { model.notInterested(card.channelIdHex) }
-                if let topic = card.topic {
-                    Button(l10n.t("discover.card.hide_topic")) { model.hideTopic(topic) }
-                }
+        // Lakko's own long-press menu, never the system context menu.
+        .lakkoLongPressMenu {
+            guard model.relation(card.channelIdHex) == .none else { return [] }
+            var items: [LakkoMenuItem] = [
+                .action(l10n.t("discover.card.not_interested")) { model.notInterested(card.channelIdHex) },
+            ]
+            if let topic = card.topic {
+                items.append(.action(l10n.t("discover.card.hide_topic")) { model.hideTopic(topic) })
             }
+            return items
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(l10n.t("discover.card.a11y", texts: ["name": card.name]))

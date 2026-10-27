@@ -98,6 +98,7 @@ import { clearOwnerMoved } from "../channels/owner-moved";
 import { clearRotationStatesForAccount } from "../channels/rotation-state-store";
 import { clearUnconfirmedFoundingsForAccount } from "../channels/composer";
 import { deleteProfileRow } from "../profile/profile-idb";
+import { deleteAvatarCache } from "../profile/avatar-cache-idb";
 import { clearOwnProfile } from "../profile/own-profile";
 import { clearMemberBaselinesForAccount } from "../profile/membership-baseline";
 import { clearProfileRequestsForAccount } from "../profile/profile-request";
@@ -213,6 +214,7 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
     // rotated identity.
     { name: "channels-owner-moved", run: () => clearOwnerMoved(accountIdB64) },
     { name: "profiles", run: () => deleteProfileRow(accountIdB64) },
+    { name: "avatars", run: () => deleteAvatarCache(accountIdB64) },
     { name: "group-names", run: () => deleteGroupNameRow(accountIdB64) },
     { name: "group-closed", run: () => deleteGroupClosedRow(accountIdB64) },
     { name: "registrar-seeds", run: () => deleteRegistrarSeedRow(accountIdB64) },
@@ -349,6 +351,10 @@ export function accountWipeSteps(accountIdB64: string): WipeStep[] {
       run: () => removeLocal(`lakko.link-records.unsent.v1.${accountIdB64}`),
     },
     { name: "link-claims", run: () => removeLocal(`lakko.link-claims.v1.${accountIdB64}`) },
+    // ADR-0065 - blob deletes still owed, and when each conversation's
+    // files were last kept.
+    { name: "blob-deletes-owed", run: () => removeLocal(`lakko.blob-deletes-owed.v1.${accountIdB64}`) },
+    { name: "blob-keeps", run: () => removeLocal(`lakko.blob-keeps.v1.${accountIdB64}`) },
     {
       name: "link-row-deletions-owed",
       run: () => removeLocal(`lakko.link-row-deletions-owed.v1.${accountIdB64}`),

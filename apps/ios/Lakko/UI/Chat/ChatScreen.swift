@@ -28,6 +28,8 @@ public struct ChatScreen: View {
     @ObservedObject public var contacts: ContactsViewModel
     /// ADR-0061 — observed so a language switch re-renders the screen.
     @ObservedObject private var l10n = Localization.shared
+    /// ADR-0065 — the account's saved messages (the Save rows and marks).
+    @ObservedObject private var saved = SavedMessagesCenter.shared
     /// Leave this screen (pop it). Navigation back is the system back button
     /// and edge swipe; this is only for the case the chat was deleted from
     /// the members sheet, when there is nothing left to show.
@@ -448,7 +450,8 @@ public struct ChatScreen: View {
                     }
                 } label: {
                     ChatTitleView(title: headline, subtitle: subtitle, identity: viewModel.groupIdHex,
-                                  isGroup: viewModel.presentsAsGroup)
+                                  isGroup: viewModel.presentsAsGroup,
+                                  personKey: viewModel.presentsAsGroup ? nil : viewModel.oneToOnePeerSignatureKey)
                 }
                 .buttonStyle(.plain)
                 .accessibilityHint(infoDestination.accessibilityHint)
@@ -781,6 +784,9 @@ public struct ChatScreen: View {
                                 // who it is for.
                                 pinState: viewModel.pinMenuState(for: entry.message),
                                 onPin: { viewModel.beginPin(entry.message) },
+                                // ADR-0065 — Save under Pin.
+                                saveState: viewModel.saveMenuState(for: entry.message, saved: saved.entries),
+                                onToggleSave: { viewModel.toggleSave(entry.message) },
                                 // Section 8 — the menu's Select enters the
                                 // mode with this message; while in it the
                                 // menu does not open.
@@ -1118,6 +1124,21 @@ public struct ChatScreen: View {
                 .disabled(!selection.forwardEnabled || bulkRunning)
                 .opacity(selection.forwardEnabled && !bulkRunning ? 1 : 0.4)
                 .accessibilityIdentifier("selection-forward")
+                // ADR-0065 / UX section 2 — Save acts on the whole set.
+                Button {
+                    bulkNotice = nil
+                    runBulkSave()
+                } label: {
+                    Label(l10n.t("chat.select.save"), systemImage: "bookmark")
+                        .font(.body.weight(.medium))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.lakkoAccent)
+                .disabled(!selection.forwardEnabled || bulkRunning)
+                .opacity(selection.forwardEnabled && !bulkRunning ? 1 : 0.4)
+                .accessibilityIdentifier("selection-save")
                 Button {
                     bulkNotice = nil
                     confirmBulkDelete = true
@@ -1145,6 +1166,23 @@ public struct ChatScreen: View {
         .padding(.vertical, 8)
         .background(Color.lakkoSurface)
         .accessibilityIdentifier("selection-action-bar")
+    }
+
+    /// ADR-0065 — save the selected set in one go; on success leave the mode.
+    private func runBulkSave() {
+        let messages = selectedMessagesOldestFirst.filter { !$0.deleted }
+        guard !messages.isEmpty, !bulkRunning else { return }
+        bulkRunning = true
+        Task { @MainActor in
+            do {
+                try await viewModel.saveMessagesAwaiting(messages)
+                bulkRunning = false
+                leaveSelection()
+            } catch {
+                bulkRunning = false
+                bulkNotice = l10n.t("chat.error.save")
+            }
+        }
     }
 
     /// Section 8 — on confirmation, one delete per message, oldest first,
@@ -1274,6 +1312,12 @@ public struct ChatScreen: View {
         VStack(spacing: 8) {
             if let err = viewModel.sendError {
                 Text(err.text)
+                    .font(.footnote)
+                    .foregroundStyle(Color.lakkoDanger)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if media.sendLimited {
+                // ADR-0065 / UX 4.2 — a media send stopped at the limit.
+                Text(l10n.t("chat.attachment.limit.send"))
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoDanger)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1811,6 +1855,10 @@ struct MessageRow: View {
     /// ADR-0052 decision 3 — the menu's `Pin` / `Unpin`: open the sheet, or
     /// act at once when there is only one way to unpin.
     var onPin: () -> Void = {}
+    /// ADR-0065 — the menu's Save / Remove from saved, and the saved mark
+    /// beside the time.
+    var saveState: SaveMenuState = .unavailable
+    var onToggleSave: () -> Void = {}
     /// `docs/ux/message-actions.md` section 8 — the screen is in selection
     /// mode: the reaction row and the action card do not open (the row's
     /// long press toggles the selection instead, handled by the wrapper).
@@ -1967,7 +2015,9 @@ struct MessageRow: View {
                         InitialsAvatar(
                             name: authorName ?? "",
                             identity: message.authorKeyB64,
-                            size: Self.avatarSize)
+                            size: Self.avatarSize,
+                            photo: message.authorKeyB64
+                                .flatMap { Data(base64Encoded: $0) }.map(AvatarPhoto.person))
                     } else {
                         Color.clear.frame(width: Self.avatarSize, height: 1)
                     }
@@ -2103,7 +2153,10 @@ struct MessageRow: View {
             // ADR-0073 R.5 — ...and on a pinned row of an older segment,
             // which offers Unpin alone (the view model decides).
             pin: (canForward || isHistoryRow) ? pinState : .unavailable,
-            canSelect: canSelect)
+            canSelect: canSelect,
+            // UX section 2 — on any message that is not deleted.
+            // An older segment's row may be saved too (round-6 rule).
+            save: saveState)
     }
 
     /// Make a bubble the thing the menu opens on.
@@ -2174,6 +2227,8 @@ struct MessageRow: View {
                         onForward()
                     case .pin, .unpin:
                         onPin()
+                    case .save, .unsave:
+                        onToggleSave()
                     case .copy:
                         // Decided here because this is what knows which text the
                         // person can see.
@@ -2290,6 +2345,12 @@ struct MessageRow: View {
     @ViewBuilder
     private var metaContent: some View {
         HStack(spacing: 3) {
+            // ADR-0065 / UX section 2 — the saved mark, seen by this person only.
+            if saveState == .unsave {
+                Image(systemName: "bookmark.fill")
+                    .font(.caption2)
+                    .accessibilityLabel(l10n.t("chat.message.saved_mark"))
+            }
             if message.edited, !message.deleted {
                 Text(l10n.t("chat.message.edited"))
                     .font(.caption2)
@@ -2370,13 +2431,20 @@ struct MessageRow: View {
         HStack(spacing: 4) {
             ForEach(message.reactionSummary(own: ownIdentity)) { tally in
                 if actionsAvailable {
-                    Button { onReact(tally.emoji) } label: { chipLabel(tally) }
-                        .buttonStyle(.plain)
-                        .contextMenu { reactedBy(tally.emoji) }
+                    // A tap reacts; a long press lists who reacted (Lakko's
+                    // own menu, never the system context menu). Not a
+                    // `Button`: its tap would also fire when a long press
+                    // ends.
+                    chipLabel(tally)
+                        .contentShape(Rectangle())
+                        .onTapGesture { onReact(tally.emoji) }
+                        .lakkoLongPressMenu { reactedByItems(tally.emoji) }
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityAction { onReact(tally.emoji) }
                         .accessibilityHint(reactedByLine(tally.emoji))
                 } else {
                     chipLabel(tally)
-                        .contextMenu { reactedBy(tally.emoji) }
+                        .lakkoLongPressMenu { reactedByItems(tally.emoji) }
                         .accessibilityHint(reactedByLine(tally.emoji))
                 }
             }
@@ -2392,16 +2460,10 @@ struct MessageRow: View {
     }
 
     /// ADR-0048 — the long-press list of who reacted with `emoji`.
-    @ViewBuilder
-    private func reactedBy(_ emoji: String) -> some View {
+    private func reactedByItems(_ emoji: String) -> [LakkoMenuItem] {
         let names = reactorNames(emoji)
-        if !names.isEmpty {
-            Section(l10n.t("chat.reaction.reacted_by_title")) {
-                ForEach(Array(names.enumerated()), id: \.offset) { _, name in
-                    Text(name)
-                }
-            }
-        }
+        guard !names.isEmpty else { return [] }
+        return [.text(l10n.t("chat.reaction.reacted_by_title"), secondary: true)] + names.map { .text($0) }
     }
 
     /// The chip's content, shared by the interactive and the frozen arm so the
@@ -2542,12 +2604,33 @@ private struct AttachmentChip: View {
 
     @State private var resolvedBytes: Data?
     @State private var resolving: Bool = false
-    @State private var resolveError: String?
+    /// ADR-0065 — why the last open failed (gone / limited / failed).
+    @State private var failure: MediaLoadFailure?
     /// The decrypted copy the system's save picker is up for.
     @State private var exporting: ExportedFile?
     @ObservedObject private var l10n = Localization.shared
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            chipRow
+            switch failure {
+            case .gone?: MediaGoneNotice()
+            case .limited?: MediaLimitNotice(onRetry: save)
+            case .failed?:
+                Text(l10n.t("chat.attachment.error.download"))
+                    .font(.caption2)
+                    .foregroundStyle(Color.lakkoDanger)
+            case nil: EmptyView()
+            }
+        }
+        .fileExport($exporting)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(chipBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var chipRow: some View {
         HStack(spacing: 6) {
             Image(systemName: chipIcon).font(.caption)
             VStack(alignment: .leading, spacing: 0) {
@@ -2571,13 +2654,8 @@ private struct AttachmentChip: View {
             // file can leave the app, and the narrowest one (it asks
             // where to put the file and offers nothing else). Not the
             // share sheet.
-            saveControl
+            if failure != .gone { saveControl }
         }
-        .fileExport($exporting)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(chipBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     @ViewBuilder
@@ -2585,30 +2663,32 @@ private struct AttachmentChip: View {
         if resolving {
             ProgressView().controlSize(.small)
         } else {
-            Button(l10n.t("common.save")) {
-                Task {
-                    resolving = true
-                    resolveError = nil
-                    do {
-                        let bytes: Data
-                        if let resolvedBytes {
-                            bytes = resolvedBytes
-                        } else {
-                            bytes = try await AttachmentBridge.downloadAndDecrypt(ref: ref)
-                            resolvedBytes = bytes
-                        }
-                        if let url = writeTempCopy(bytes: bytes, ref: ref) {
-                            exporting = ExportedFile(url: url)
-                        }
-                    } catch {
-                        NSLog("attachment save failed: %@", String(describing: error))
-                        resolveError = Localization.text("chat.attachment.error.download")
-                    }
-                    resolving = false
+            Button(l10n.t("common.save"), action: save)
+                .font(.caption)
+                .buttonStyle(.borderless)
+        }
+    }
+
+    private func save() {
+        Task {
+            resolving = true
+            failure = nil
+            do {
+                let bytes: Data
+                if let resolvedBytes {
+                    bytes = resolvedBytes
+                } else {
+                    bytes = try await AttachmentBridge.downloadAndDecrypt(ref: ref)
+                    resolvedBytes = bytes
                 }
+                if let url = writeTempCopy(bytes: bytes, ref: ref) {
+                    exporting = ExportedFile(url: url)
+                }
+            } catch {
+                NSLog("attachment save failed: %@", String(describing: error))
+                failure = MediaLoadFailure.of(error)
             }
-            .font(.caption)
-            .buttonStyle(.borderless)
+            resolving = false
         }
     }
 
@@ -2972,6 +3052,10 @@ struct MembersSheet: View {
                         }
                         ForEach(viewModel.pendingJoins, id: \.self) { ref in
                             HStack {
+                                InitialsAvatar(
+                                    name: viewModel.pendingJoinLabel(ref), identity: base64Encode(ref),
+                                    size: 32, placeholderSymbol: "person.fill",
+                                    photo: .person(viewModel.pendingJoinPhotoKey(ref)))
                                 VStack(alignment: .leading, spacing: 2) {
                                     // ADR-0048 — the one resolver: a contact's
                                     // rename or profile name when known, else the
@@ -3042,9 +3126,17 @@ struct MembersSheet: View {
                             texts: ["count": viewModel.waitingToBeAddedRequests.count.formatted(.number.locale(Localization.currentLocale))])
                     ) {
                         ForEach(viewModel.waitingToBeAddedRequests) { request in
-                            Text(Self.pendingAddLabel(request))
-                                .font(.system(.footnote, design: .monospaced))
-                                .foregroundStyle(.secondary)
+                            HStack {
+                                InitialsAvatar(
+                                    name: Self.initialsName(keyB64: request.addSignatureKeyB64),
+                                    identity: request.addSignatureKeyB64 ?? "",
+                                    size: 32, placeholderSymbol: "person.fill",
+                                    photo: request.addSignatureKeyB64
+                                        .flatMap(base64Decode).map(AvatarPhoto.person))
+                                Text(Self.pendingAddLabel(request))
+                                    .font(.system(.footnote, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
@@ -3075,6 +3167,10 @@ struct MembersSheet: View {
                             .foregroundStyle(.secondary)
                         ForEach(viewModel.unappliedAddRows, id: \.rowKey) { item in
                             HStack {
+                                InitialsAvatar(
+                                    name: Self.initialsName(keyB64: item.addSignatureKeyB64), identity: item.addSignatureKeyB64,
+                                    size: 32, placeholderSymbol: "person.fill",
+                                    photo: base64Decode(item.addSignatureKeyB64).map(AvatarPhoto.person))
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(Self.unappliedLabel(item))
                                         .font(.system(.footnote, design: .monospaced))
@@ -3124,6 +3220,11 @@ struct MembersSheet: View {
                     Section(memberCountLabel) {
                         ForEach(viewModel.members, id: \.leafIndex) { member in
                             HStack {
+                                InitialsAvatar(
+                                    name: viewModel.memberInitialsName(member),
+                                    identity: base64Encode(member.signaturePublicKey),
+                                    size: 32, placeholderSymbol: "person.fill",
+                                    photo: viewModel.memberPhoto(member))
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(viewModel.memberLabel(member))
                                     // ADR-0045 S4a — NO optimistic update: a member
@@ -3432,6 +3533,19 @@ struct MembersSheet: View {
     /// without `@`.
     @MainActor
     private static func pendingAddLabel(_ request: PendingRequest) -> String {
+        listLabel(request)
+    }
+
+    /// The bare name a row's initials are taken from, or nothing.
+    @MainActor
+    private static func initialsName(keyB64: String?) -> String {
+        guard let keyB64, let bytes = base64Decode(keyB64) else { return "" }
+        let resolved = ProfileDirectory.shared.resolve(signatureKey: bytes)
+        return resolved.isPlaceholder ? "" : resolved.name
+    }
+
+    @MainActor
+    private static func listLabel(_ request: PendingRequest) -> String {
         guard let b64 = request.addSignatureKeyB64,
               let bytes = base64Decode(b64) else { return Localization.text("chat.members.unnamed") }
         return ProfileDirectory.shared.resolve(signatureKey: bytes).listLabel
@@ -3607,6 +3721,8 @@ private struct ChatTitleView: View {
     /// Hashed for the avatar tint only; never shown.
     let identity: String
     let isGroup: Bool
+    /// ADR-0084 — the other person of a one-to-one, for their photo.
+    var personKey: Data? = nil
 
     /// The bar item's height, fixed on purpose. As a `.principal` toolbar
     /// item this view is measured by the navigation bar at a fitting width,
@@ -3624,7 +3740,9 @@ private struct ChatTitleView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            InitialsAvatar(name: title, identity: identity, size: 32, isGroup: isGroup)
+            InitialsAvatar(
+                name: title, identity: identity, size: 32, isGroup: isGroup,
+                photo: personKey.map(AvatarPhoto.person))
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
                     .font(.headline)

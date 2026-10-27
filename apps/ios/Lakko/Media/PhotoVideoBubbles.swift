@@ -36,6 +36,28 @@ private struct MediaFailedLabel: View {
     }
 }
 
+/// ADR-0065 / UX 4.1, 4.2 — what a photo or video shows when it did not
+/// open: the gone notice, the limit line, or the kind's own failure.
+private struct MediaFailureOverlay: View {
+    let failure: MediaLoadFailure
+    let genericText: String
+
+    var body: some View {
+        switch failure {
+        case .gone:
+            MediaGoneNotice(onDark: true)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: LakkoRadius.control).fill(Color.black.opacity(0.55)))
+                .padding(8)
+        case .limited:
+            MediaFailedLabel(text: Localization.text("chat.attachment.limit.open"))
+        case .failed:
+            MediaFailedLabel(text: genericText)
+        }
+    }
+}
+
 private struct CornerSpinner: View {
     var body: some View {
         ProgressView()
@@ -66,6 +88,7 @@ struct PhotoBubble: View {
     @State private var fullData: Data?
     @State private var loadingFull = false
     @State private var failed = false
+    @State private var failure: MediaLoadFailure = .failed
     @State private var attempt = 0
     @State private var viewerOpen = false
 
@@ -108,7 +131,9 @@ struct PhotoBubble: View {
                 if loadingFull, !failed { CornerSpinner() }
             }
             .overlay {
-                if failed { MediaFailedLabel(text: Localization.text("chat.photo.load_failed")) }
+                if failed {
+                    MediaFailureOverlay(failure: failure, genericText: Localization.text("chat.photo.load_failed"))
+                }
             }
             .overlay(alignment: .bottomTrailing) {
                 if let overlay { overlay }
@@ -131,7 +156,7 @@ struct PhotoBubble: View {
 
     private func tap() {
         if failed {
-            attempt += 1
+            if failure.retries { attempt += 1 }
         } else if fullData != nil {
             viewerOpen = true
         }
@@ -161,7 +186,10 @@ struct PhotoBubble: View {
             fullData = bytes
             full = image
         } catch {
-            if !Task.isCancelled { failed = true }
+            if !Task.isCancelled {
+                failure = MediaLoadFailure.of(error)
+                failed = true
+            }
         }
     }
 }
@@ -182,6 +210,7 @@ struct VideoBubble: View {
     @State private var poster: UIImage?
     @State private var downloading = false
     @State private var failed = false
+    @State private var failure: MediaLoadFailure = .failed
     @State private var playing: PlayableVideo?
 
     struct PlayableVideo: Identifiable {
@@ -238,7 +267,9 @@ struct VideoBubble: View {
                 }
             }
             .overlay {
-                if failed { MediaFailedLabel(text: Localization.text("chat.video.load_failed")) }
+                if failed {
+                    MediaFailureOverlay(failure: failure, genericText: Localization.text("chat.video.load_failed"))
+                }
             }
             .overlay(alignment: .bottomTrailing) {
                 if let overlay { overlay }
@@ -273,7 +304,7 @@ struct VideoBubble: View {
 
     /// Videos download only on tap (UX spec section 10).
     private func tap() {
-        guard !downloading else { return }
+        guard !downloading, !(failed && !failure.retries) else { return }
         failed = false
         if let local = MediaSessionCache.shared.videoFile(key) {
             playing = PlayableVideo(url: local)
@@ -286,6 +317,7 @@ struct VideoBubble: View {
                 let url = try await media.mediaFile(for: ref)
                 playing = PlayableVideo(url: url)
             } catch {
+                failure = MediaLoadFailure.of(error)
                 failed = true
             }
         }

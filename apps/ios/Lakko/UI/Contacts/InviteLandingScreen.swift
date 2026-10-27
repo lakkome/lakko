@@ -82,7 +82,8 @@ public struct InviteLandingScreen: View {
                 name: invite.statedName ?? "",
                 identity: base64Encode(invite.ownerSignaturePubkey),
                 size: 72,
-                placeholderSymbol: "person.fill")
+                placeholderSymbol: "person.fill",
+                photo: .person(invite.ownerSignaturePubkey))
             Text(l10n.t("invite.contact.page.title", texts: ["name": name(invite.statedName)]))
                 .font(.title2.weight(.semibold))
                 .multilineTextAlignment(.center)

@@ -79,13 +79,19 @@
 //!       || account_id_len || account_id || cert_len || cert || grant_count || grants
 //!          └─ 1 B: 0|16 ─┘ └── .. ────┘  └ 1 B: 0|153 ┘ └ .. ┘ └── 1 B ───┘ └ 134 B each ┘
 //!
+//!       || avatar_len || avatar
+//!          └ 1 B: 0|84|170 ┘
+//!
+//!   avatar   = still_ref | still_ref || video_ref || duration_ms(2 B, BE)
+//!   *_ref    = blob_id(32) || key(32) || nonce(12) || size(4 B, BE) || width(2 B, BE) || height(2 B, BE)
+//!
 //!                     "lakko/profile/v1\x00"
 //! ```
 //!
 //! A length of `0` means "no name" / "no username" / "no account id" / "no
 //! certificate". Total length is between [`PROFILE_ENVELOPE_MIN_LEN`] and
-//! [`PROFILE_ENVELOPE_MAX_LEN`]. v3 (ADR-0060) is a flag day: v1 and v2 are
-//! refused as [`ProfileError::UnknownVersion`].
+//! [`PROFILE_ENVELOPE_MAX_LEN`]. v4 (ADR-0084, the profile photo) is a flag
+//! day: v1, v2 and v3 are refused as [`ProfileError::UnknownVersion`].
 //!
 //! ## Bounds, and why a violation rejects the whole envelope
 //!
@@ -98,6 +104,15 @@
 //!   beside a username.
 //! * `grants`: at most [`MAX_PROFILE_GRANTS`], no two of one class, and only
 //!   of a class a profile may carry ([`is_profile_grant_class`]).
+//! * `avatar` (ADR-0084): a reference to an encrypted still (a square JPEG,
+//!   1..=[`AVATAR_STILL_MAX_PX`] px, 1..=[`AVATAR_STILL_MAX_BYTES`] bytes)
+//!   and optionally to an encrypted video (a square MP4,
+//!   1..=[`AVATAR_VIDEO_MAX_PX`] px, 1..=[`AVATAR_VIDEO_MAX_BYTES`] bytes,
+//!   1..=[`AVATAR_VIDEO_MAX_DURATION_MS`] ms). The key of each reference is
+//!   a secret like a grant: the envelope only travels inside an E2EE
+//!   carrier. That the referenced bytes are what the slot says is the
+//!   receiver's check after it downloads them; this codec bounds only the
+//!   reference.
 //!
 //! An envelope violating any bound is **rejected as a whole**. Unlike
 //! attachment metadata, a profile has no remainder worth keeping: a valid
@@ -195,6 +210,35 @@ pub const PROFILE_VERSION_V2: u8 = 0x02;
 /// nothing is deployed.
 pub const PROFILE_VERSION_V3: u8 = 0x03;
 
+/// Schema version carried in the first payload byte since ADR-0084: v3
+/// plus an optional avatar after the grants. The only version decoded.
+pub const PROFILE_VERSION_V4: u8 = 0x04;
+
+/// Length of an encoded [`AvatarRef`]: blob id, key, nonce, size, width,
+/// height.
+pub const AVATAR_REF_LEN: usize = 32 + 32 + 12 + 4 + 2 + 2;
+
+/// Length of an avatar field holding a still only.
+pub const AVATAR_STILL_ONLY_LEN: usize = AVATAR_REF_LEN;
+
+/// Length of an avatar field holding a still, a video and its duration.
+pub const AVATAR_WITH_VIDEO_LEN: usize = 2 * AVATAR_REF_LEN + 2;
+
+/// Largest side of the avatar still, in pixels.
+pub const AVATAR_STILL_MAX_PX: u16 = 640;
+
+/// Largest avatar still, in plaintext bytes (256 KiB).
+pub const AVATAR_STILL_MAX_BYTES: u32 = 256 * 1024;
+
+/// Largest side of the avatar video, in pixels.
+pub const AVATAR_VIDEO_MAX_PX: u16 = 480;
+
+/// Largest avatar video, in plaintext bytes (4 MiB).
+pub const AVATAR_VIDEO_MAX_BYTES: u32 = 4 * 1024 * 1024;
+
+/// Longest avatar video, in milliseconds.
+pub const AVATAR_VIDEO_MAX_DURATION_MS: u16 = 10_000;
+
 /// Length of the discovery-signed username certificate a profile may carry
 /// (ADR-0060 §5). Opaque to this crate: `lakko-attest` defines the layout
 /// with this same length, and verification (one OPRF evaluation plus the
@@ -222,20 +266,21 @@ pub const DISPLAY_NAME_MAX_BYTES: usize = u8::MAX as usize;
 
 /// Bytes after the separator that every envelope carries: version,
 /// `updated_at_ms`, `name_len`, `username_len`, `account_id_len`,
-/// `cert_len`, `grant_count`.
-const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 1 + 1 + 1 + 1;
+/// `cert_len`, `grant_count`, `avatar_len`.
+const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 1 + 1 + 1 + 1 + 1;
 
 /// Shortest well-formed envelope: no name, no username.
 pub const PROFILE_ENVELOPE_MIN_LEN: usize = PROFILE_ENVELOPE_DOMAIN_V1.len() + FIXED_PAYLOAD_LEN;
 
 /// Longest well-formed envelope: a maximal name, a maximal username, an
-/// account id, a certificate and the most grants.
+/// account id, a certificate, the most grants and an avatar with a video.
 pub const PROFILE_ENVELOPE_MAX_LEN: usize = PROFILE_ENVELOPE_MIN_LEN
     + DISPLAY_NAME_MAX_BYTES
     + USERNAME_MAX_LEN
     + ACCOUNT_ID_LEN
     + USERNAME_CERT_LEN
-    + MAX_PROFILE_GRANTS * REACH_GRANT_LEN;
+    + MAX_PROFILE_GRANTS * REACH_GRANT_LEN
+    + AVATAR_WITH_VIDEO_LEN;
 
 /// `true` for the reach classes a profile may hand out (ADR-0060 §3, §6):
 /// `contact` (in a one-to-one conversation's profile), `group`, `member`,
@@ -337,6 +382,128 @@ pub struct Profile {
     /// [`MAX_PROFILE_GRANTS`], one per class, of a class
     /// [`is_profile_grant_class`] admits. Secret — see the module docs.
     pub grants: Vec<ReachGrant>,
+    /// The profile photo (ADR-0084), or `None` for "no photo". Its keys are
+    /// secret — see the module docs.
+    pub avatar: Option<Avatar>,
+}
+
+/// A reference to one encrypted avatar blob in storage (ADR-0084): what
+/// `lakko_attachments::encrypt_attachment` produced for it, plus its size
+/// and pixel dimensions.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AvatarRef {
+    /// `SHA-256` of the ciphertext: the storage address.
+    pub blob_id: [u8; 32],
+    /// The ChaCha20-Poly1305 key. Secret.
+    pub key: [u8; 32],
+    /// The AEAD nonce.
+    pub nonce: [u8; 12],
+    /// Plaintext size in bytes.
+    pub size: u32,
+    /// Width in pixels.
+    pub width: u16,
+    /// Height in pixels; equal to `width`.
+    pub height: u16,
+}
+
+impl core::fmt::Debug for AvatarRef {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AvatarRef")
+            .field("size", &self.size)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A profile video: its blob and its length.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvatarVideo {
+    /// The encrypted square MP4.
+    pub reference: AvatarRef,
+    /// Duration in milliseconds, 1..=[`AVATAR_VIDEO_MAX_DURATION_MS`].
+    pub duration_ms: u16,
+}
+
+/// The profile photo: a still, and optionally a short video whose first
+/// frame the still is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Avatar {
+    /// The encrypted square JPEG, shown everywhere.
+    pub still: AvatarRef,
+    /// The encrypted square MP4, played in large views.
+    pub video: Option<AvatarVideo>,
+}
+
+impl AvatarRef {
+    fn check(&self, max_px: u16, max_bytes: u32) -> CoreResult<(), ProfileError> {
+        if self.width != self.height {
+            return Err(ProfileError::AvatarNotSquare);
+        }
+        if self.width == 0 || self.width > max_px {
+            return Err(ProfileError::AvatarDimensions);
+        }
+        if self.size == 0 || self.size > max_bytes {
+            return Err(ProfileError::AvatarSize);
+        }
+        Ok(())
+    }
+
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.blob_id);
+        out.extend_from_slice(&self.key);
+        out.extend_from_slice(&self.nonce);
+        out.extend_from_slice(&self.size.to_be_bytes());
+        out.extend_from_slice(&self.width.to_be_bytes());
+        out.extend_from_slice(&self.height.to_be_bytes());
+    }
+
+    fn decode(cur: &mut &[u8]) -> CoreResult<Self, ProfileError> {
+        let blob_id = take_array::<32>(cur)?;
+        let key = take_array::<32>(cur)?;
+        let nonce = take_array::<12>(cur)?;
+        let size = u32::from_be_bytes(take_array::<4>(cur)?);
+        let width = u16::from_be_bytes(take_array::<2>(cur)?);
+        let height = u16::from_be_bytes(take_array::<2>(cur)?);
+        Ok(Self {
+            blob_id,
+            key,
+            nonce,
+            size,
+            width,
+            height,
+        })
+    }
+}
+
+impl Avatar {
+    /// Check every avatar bound (ADR-0084).
+    ///
+    /// # Errors
+    ///
+    /// [`ProfileError::AvatarNotSquare`], [`ProfileError::AvatarDimensions`],
+    /// [`ProfileError::AvatarSize`], [`ProfileError::AvatarDuration`].
+    pub fn validate(&self) -> CoreResult<(), ProfileError> {
+        self.still
+            .check(AVATAR_STILL_MAX_PX, AVATAR_STILL_MAX_BYTES)?;
+        if let Some(video) = &self.video {
+            video
+                .reference
+                .check(AVATAR_VIDEO_MAX_PX, AVATAR_VIDEO_MAX_BYTES)?;
+            if video.duration_ms == 0 || video.duration_ms > AVATAR_VIDEO_MAX_DURATION_MS {
+                return Err(ProfileError::AvatarDuration);
+            }
+        }
+        Ok(())
+    }
+
+    const fn encoded_len(&self) -> usize {
+        if self.video.is_some() {
+            AVATAR_WITH_VIDEO_LEN
+        } else {
+            AVATAR_STILL_ONLY_LEN
+        }
+    }
 }
 
 impl Profile {
@@ -384,6 +551,9 @@ impl Profile {
             if self.grants[..i].iter().any(|g| g.binding != grant.binding) {
                 return Err(ProfileError::GrantBindingsDiffer);
             }
+        }
+        if let Some(avatar) = &self.avatar {
+            avatar.validate()?;
         }
         Ok(())
     }
@@ -571,7 +741,7 @@ pub fn compose_profile(profile: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
 
     let mut out = Vec::with_capacity(PROFILE_ENVELOPE_MIN_LEN + name.len() + username.len());
     out.extend_from_slice(PROFILE_ENVELOPE_DOMAIN_V1);
-    out.push(PROFILE_VERSION_V3);
+    out.push(PROFILE_VERSION_V4);
     out.extend_from_slice(&profile.updated_at_ms.to_be_bytes());
     out.push(name_len);
     out.extend_from_slice(name);
@@ -604,6 +774,17 @@ pub fn compose_profile(profile: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
     for grant in &profile.grants {
         out.extend_from_slice(&grant.encode());
     }
+    match &profile.avatar {
+        Some(avatar) => {
+            out.push(u8::try_from(avatar.encoded_len()).unwrap_or(u8::MAX));
+            avatar.still.encode_into(&mut out);
+            if let Some(video) = &avatar.video {
+                video.reference.encode_into(&mut out);
+                out.extend_from_slice(&video.duration_ms.to_be_bytes());
+            }
+        },
+        None => out.push(0),
+    }
     Ok(out)
 }
 
@@ -619,8 +800,10 @@ pub fn compose_profile(profile: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
 ///
 /// * [`ProfileError::Truncated`] — the payload ends before a declared field.
 /// * [`ProfileError::UnknownVersion`] — the version byte is not
-///   [`PROFILE_VERSION_V3`].
-/// * [`ProfileError::TrailingBytes`] — bytes remain after the grants.
+///   [`PROFILE_VERSION_V4`].
+/// * [`ProfileError::TrailingBytes`] — bytes remain after the avatar.
+/// * [`ProfileError::AvatarLength`] — the avatar length byte is not 0, 84
+///   or 170.
 /// * [`ProfileError::AccountIdLength`] / [`ProfileError::CertificateLength`]
 ///   — a length byte that is neither 0 nor the field's one length.
 /// * [`ProfileError::Grant`] — a grant's class byte is not a class.
@@ -633,7 +816,7 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
     let mut cur = payload;
 
     let version = take_u8(&mut cur)?;
-    if version != PROFILE_VERSION_V3 {
+    if version != PROFILE_VERSION_V4 {
         return Err(ProfileError::UnknownVersion(version));
     }
     let updated_at_bytes: [u8; 8] = take(&mut cur, 8)?
@@ -672,6 +855,25 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
             ReachGrant::decode(take(&mut cur, REACH_GRANT_LEN)?).map_err(ProfileError::Grant)?;
         grants.push(grant);
     }
+    let avatar_len = usize::from(take_u8(&mut cur)?);
+    let avatar = match avatar_len {
+        0 => None,
+        AVATAR_STILL_ONLY_LEN | AVATAR_WITH_VIDEO_LEN => {
+            let still = AvatarRef::decode(&mut cur)?;
+            let video = if avatar_len == AVATAR_WITH_VIDEO_LEN {
+                let reference = AvatarRef::decode(&mut cur)?;
+                let duration_ms = u16::from_be_bytes(take_array::<2>(&mut cur)?);
+                Some(AvatarVideo {
+                    reference,
+                    duration_ms,
+                })
+            } else {
+                None
+            };
+            Some(Avatar { still, video })
+        },
+        got => return Err(ProfileError::AvatarLength { got }),
+    };
     if !cur.is_empty() {
         return Err(ProfileError::TrailingBytes { count: cur.len() });
     }
@@ -699,6 +901,7 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
         account_id,
         username_certificate,
         grants,
+        avatar,
     };
     profile.validate()?;
     Ok(Some(profile))
@@ -731,7 +934,7 @@ pub enum ProfileError {
         /// How many bytes followed the last field.
         count: usize,
     },
-    /// The version byte is not [`PROFILE_VERSION_V3`].
+    /// The version byte is not [`PROFILE_VERSION_V4`].
     #[error("profile envelope carries unknown schema version {0:#04x}")]
     UnknownVersion(u8),
     /// The display name violates a bound.
@@ -775,6 +978,25 @@ pub enum ProfileError {
     /// profile writes to its one owner's mailbox.
     #[error("profile reach grants name different mailboxes")]
     GrantBindingsDiffer,
+    /// The avatar length byte is not 0, [`AVATAR_STILL_ONLY_LEN`] or
+    /// [`AVATAR_WITH_VIDEO_LEN`].
+    #[error("profile avatar is {got} bytes, expected 0, 84 or 170")]
+    AvatarLength {
+        /// The length byte as read.
+        got: usize,
+    },
+    /// An avatar image or video is not square.
+    #[error("profile avatar is not square")]
+    AvatarNotSquare,
+    /// An avatar side is 0 or above its slot's limit.
+    #[error("profile avatar dimensions are out of bounds")]
+    AvatarDimensions,
+    /// An avatar blob size is 0 or above its slot's limit.
+    #[error("profile avatar size is out of bounds")]
+    AvatarSize,
+    /// The avatar video duration is 0 or above the limit.
+    #[error("profile avatar video duration is out of bounds")]
+    AvatarDuration,
 }
 
 impl ProfileError {
@@ -799,6 +1021,11 @@ impl ProfileError {
             Self::GrantClassNotAllowed(_) => "grants.classNotAllowed".to_string(),
             Self::Grant(e) => format!("grants.{}", e.code()),
             Self::GrantBindingsDiffer => "grants.bindingsDiffer".to_string(),
+            Self::AvatarLength { .. } => "avatar.length".to_string(),
+            Self::AvatarNotSquare => "avatar.notSquare".to_string(),
+            Self::AvatarDimensions => "avatar.dimensions".to_string(),
+            Self::AvatarSize => "avatar.size".to_string(),
+            Self::AvatarDuration => "avatar.duration".to_string(),
         }
     }
 }
@@ -807,6 +1034,12 @@ fn take_u8(cur: &mut &[u8]) -> CoreResult<u8, ProfileError> {
     let (&first, rest) = cur.split_first().ok_or(ProfileError::Truncated)?;
     *cur = rest;
     Ok(first)
+}
+
+fn take_array<const N: usize>(cur: &mut &[u8]) -> CoreResult<[u8; N], ProfileError> {
+    take(cur, N)?
+        .try_into()
+        .map_err(|_| ProfileError::Truncated)
 }
 
 fn take<'a>(cur: &mut &'a [u8], n: usize) -> CoreResult<&'a [u8], ProfileError> {
@@ -834,6 +1067,7 @@ mod tests {
             account_id: None,
             username_certificate: None,
             grants: Vec::new(),
+            avatar: None,
         }
     }
 
@@ -850,6 +1084,192 @@ mod tests {
         vec![byte; USERNAME_CERT_LEN]
     }
 
+    fn avatar_ref(byte: u8, side: u16, bytes: u32) -> AvatarRef {
+        AvatarRef {
+            blob_id: [byte; 32],
+            key: [byte.wrapping_add(1); 32],
+            nonce: [byte.wrapping_add(2); 12],
+            size: bytes,
+            width: side,
+            height: side,
+        }
+    }
+
+    fn still_avatar() -> Avatar {
+        Avatar {
+            still: avatar_ref(0x10, 640, 40_000),
+            video: None,
+        }
+    }
+
+    fn full_avatar() -> Avatar {
+        Avatar {
+            still: avatar_ref(0x20, 480, 30_000),
+            video: Some(AvatarVideo {
+                reference: avatar_ref(0x30, 480, 1_500_000),
+                duration_ms: 9_500,
+            }),
+        }
+    }
+
+    // --- avatar (ADR-0084) ---------------------------------------------------
+
+    #[test]
+    fn avatar_round_trips_with_and_without_video() {
+        for avatar in [still_avatar(), full_avatar()] {
+            let mut p = profile(Some("Alice"), Some("alice"), 3);
+            p.avatar = Some(avatar.clone());
+            let wire = compose_profile(&p).unwrap();
+            let expected_avatar_len = if avatar.video.is_some() { 170 } else { 84 };
+            assert_eq!(wire.len(), 32 + 5 + 5 + expected_avatar_len);
+            assert_eq!(
+                wire[wire.len() - expected_avatar_len - 1],
+                u8::try_from(expected_avatar_len).unwrap()
+            );
+            assert_eq!(decode_profile(&wire).unwrap(), p);
+        }
+    }
+
+    #[test]
+    fn avatar_layout_is_pinned() {
+        let mut p = profile(None, None, 0);
+        p.avatar = Some(Avatar {
+            still: AvatarRef {
+                blob_id: [1; 32],
+                key: [2; 32],
+                nonce: [3; 12],
+                size: 0x0001_0203,
+                width: 0x0140,
+                height: 0x0140,
+            },
+            video: None,
+        });
+        let wire = compose_profile(&p).unwrap();
+        let at = PROFILE_ENVELOPE_MIN_LEN - 1;
+        assert_eq!(wire[at], 84);
+        let r = &wire[at + 1..];
+        assert_eq!(&r[..32], &[1; 32]);
+        assert_eq!(&r[32..64], &[2; 32]);
+        assert_eq!(&r[64..76], &[3; 12]);
+        assert_eq!(&r[76..80], &[0, 1, 2, 3]);
+        assert_eq!(&r[80..84], &[0x01, 0x40, 0x01, 0x40]);
+    }
+
+    #[test]
+    fn avatar_bounds_are_refused_by_compose_and_decode_alike() {
+        let mut too_big = still_avatar();
+        too_big.still.size = AVATAR_STILL_MAX_BYTES + 1;
+        let mut zero_size = still_avatar();
+        zero_size.still.size = 0;
+        let mut not_square = still_avatar();
+        not_square.still.height = 639;
+        let mut too_wide = still_avatar();
+        too_wide.still.width = 641;
+        too_wide.still.height = 641;
+        let mut zero_px = still_avatar();
+        zero_px.still.width = 0;
+        zero_px.still.height = 0;
+        let mut video_too_wide = full_avatar();
+        if let Some(v) = video_too_wide.video.as_mut() {
+            v.reference.width = 481;
+            v.reference.height = 481;
+        }
+        let mut video_too_big = full_avatar();
+        if let Some(v) = video_too_big.video.as_mut() {
+            v.reference.size = AVATAR_VIDEO_MAX_BYTES + 1;
+        }
+        let mut too_long = full_avatar();
+        if let Some(v) = too_long.video.as_mut() {
+            v.duration_ms = AVATAR_VIDEO_MAX_DURATION_MS + 1;
+        }
+        let mut zero_long = full_avatar();
+        if let Some(v) = zero_long.video.as_mut() {
+            v.duration_ms = 0;
+        }
+        let cases = [
+            (too_big, ProfileError::AvatarSize),
+            (zero_size, ProfileError::AvatarSize),
+            (not_square, ProfileError::AvatarNotSquare),
+            (too_wide, ProfileError::AvatarDimensions),
+            (zero_px, ProfileError::AvatarDimensions),
+            (video_too_wide, ProfileError::AvatarDimensions),
+            (video_too_big, ProfileError::AvatarSize),
+            (too_long, ProfileError::AvatarDuration),
+            (zero_long, ProfileError::AvatarDuration),
+        ];
+        for (avatar, why) in cases {
+            let mut p = profile(Some("Alice"), None, 5);
+            p.avatar = Some(avatar.clone());
+            assert_eq!(compose_profile(&p), Err(why), "{avatar:?}");
+            // The same avatar on the wire, hand-built past compose.
+            let mut wire = raw(4, 5, b"Alice", b"");
+            wire.pop();
+            wire.push(u8::try_from(avatar.encoded_len()).unwrap());
+            avatar.still.encode_into(&mut wire);
+            if let Some(v) = &avatar.video {
+                v.reference.encode_into(&mut wire);
+                wire.extend_from_slice(&v.duration_ms.to_be_bytes());
+            }
+            assert_eq!(decode_profile(&wire), Err(why), "{avatar:?}");
+        }
+    }
+
+    #[test]
+    fn an_avatar_length_other_than_0_84_or_170_is_refused() {
+        for got in [1_u8, 83, 85, 169, 171, 255] {
+            let mut wire = raw(4, 5, b"", b"");
+            wire.pop();
+            wire.push(got);
+            wire.extend(core::iter::repeat_n(0_u8, usize::from(got)));
+            assert_eq!(
+                decode_profile(&wire),
+                Err(ProfileError::AvatarLength {
+                    got: usize::from(got)
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn every_truncation_point_of_an_avatar_envelope_is_refused() {
+        let mut p = profile(Some("Alice"), Some("alice"), 9);
+        p.avatar = Some(full_avatar());
+        let wire = compose_profile(&p).unwrap();
+        for cut in PROFILE_ENVELOPE_DOMAIN_V1.len()..wire.len() {
+            assert_eq!(
+                try_unwrap_profile(&wire[..cut]),
+                Err(ProfileError::Truncated),
+                "cut at {cut}"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_of_an_avatar_never_prints_its_key() {
+        let mut p = profile(None, None, 1);
+        p.avatar = Some(Avatar {
+            still: AvatarRef {
+                blob_id: [0xA1; 32],
+                key: [0xEE; 32],
+                nonce: [0xA3; 12],
+                size: 10,
+                width: 10,
+                height: 10,
+            },
+            video: None,
+        });
+        let dbg = format!("{p:?}");
+        assert!(!dbg.contains("238"), "{dbg}");
+    }
+
+    #[test]
+    fn a_v3_envelope_is_refused() {
+        assert_eq!(
+            decode_profile(&raw(PROFILE_VERSION_V3, 0, b"", b"")),
+            Err(ProfileError::UnknownVersion(PROFILE_VERSION_V3))
+        );
+    }
+
     /// Hand-build an envelope with arbitrary (possibly invalid) fields,
     /// bypassing `compose`'s validation — so decode's own gates are tested.
     fn raw(version: u8, at: u64, name: &[u8], username: &[u8]) -> Vec<u8> {
@@ -860,8 +1280,8 @@ mod tests {
         out.extend_from_slice(name);
         out.push(u8::try_from(username.len()).unwrap());
         out.extend_from_slice(username);
-        // No account id, no certificate, no grants.
-        out.extend_from_slice(&[0, 0, 0]);
+        // No account id, no certificate, no grants, no avatar.
+        out.extend_from_slice(&[0, 0, 0, 0]);
         out
     }
 
@@ -900,7 +1320,7 @@ mod tests {
         let sep = PROFILE_ENVELOPE_DOMAIN_V1.len();
         assert_eq!(sep, 17);
         assert_eq!(&wire[..sep], b"lakko/profile/v1\x00");
-        assert_eq!(wire[sep], PROFILE_VERSION_V3);
+        assert_eq!(wire[sep], PROFILE_VERSION_V4);
         assert_eq!(&wire[sep + 1..sep + 9], &[1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(wire[sep + 9], 2);
         assert_eq!(&wire[sep + 10..sep + 12], b"Al");
@@ -908,16 +1328,19 @@ mod tests {
         assert_eq!(&wire[sep + 13..sep + 16], b"abc");
         assert_eq!(
             &wire[sep + 16..],
-            &[0, 0, 0],
-            "no account id, no certificate, no grants: three zero bytes"
+            &[0, 0, 0, 0],
+            "no account id, no certificate, no grants, no avatar: four zero bytes"
         );
     }
 
     #[test]
     fn envelope_length_bounds_are_the_documented_construction() {
-        assert_eq!(PROFILE_ENVELOPE_MIN_LEN, 31);
-        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 31 + 255 + 32 + 16 + 153 + 2 * 134);
-        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 755);
+        assert_eq!(PROFILE_ENVELOPE_MIN_LEN, 32);
+        assert_eq!(
+            PROFILE_ENVELOPE_MAX_LEN,
+            32 + 255 + 32 + 16 + 153 + 2 * 134 + 170
+        );
+        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 926);
         let empty = compose_profile(&profile(None, None, 0)).unwrap();
         assert_eq!(empty.len(), PROFILE_ENVELOPE_MIN_LEN);
         // A maximal envelope: 255 bytes of name in exactly 64 chars (63
@@ -929,6 +1352,7 @@ mod tests {
         maximal.account_id = Some([7; ACCOUNT_ID_LEN]);
         maximal.username_certificate = Some(cert(9));
         maximal.grants = vec![grant(ReachClass::Group, 1), grant(ReachClass::Member, 2)];
+        maximal.avatar = Some(full_avatar());
         let max = compose_profile(&maximal).unwrap();
         assert_eq!(max.len(), PROFILE_ENVELOPE_MAX_LEN);
     }
@@ -974,7 +1398,7 @@ mod tests {
 
     #[test]
     fn unknown_versions_are_refused() {
-        for v in [0x00, 0x01, 0x02, 0x04, 0xFF] {
+        for v in [0x00, 0x01, 0x02, 0x03, 0xFF] {
             assert_eq!(
                 decode_profile(&raw(v, 0, b"", b"")),
                 Err(ProfileError::UnknownVersion(v))
@@ -985,11 +1409,11 @@ mod tests {
     #[test]
     fn non_utf8_fields_are_refused() {
         assert_eq!(
-            decode_profile(&raw(3, 0, &[0xFF, 0xFE], b"")),
+            decode_profile(&raw(4, 0, &[0xFF, 0xFE], b"")),
             Err(ProfileError::DisplayName(DisplayNameError::NotUtf8))
         );
         assert_eq!(
-            decode_profile(&raw(3, 0, b"", &[0xC3, 0x28, 0x61])),
+            decode_profile(&raw(4, 0, b"", &[0xC3, 0x28, 0x61])),
             Err(ProfileError::Username(UsernameError::InvalidCharacters))
         );
     }
@@ -998,13 +1422,13 @@ mod tests {
     fn an_out_of_bounds_field_rejects_the_whole_envelope() {
         // A perfectly good username does not rescue a bad name, and vice versa.
         assert_eq!(
-            decode_profile(&raw(3, 0, "Alice\u{202E}".as_bytes(), b"alice")),
+            decode_profile(&raw(4, 0, "Alice\u{202E}".as_bytes(), b"alice")),
             Err(ProfileError::DisplayName(
                 DisplayNameError::ControlOrFormatCharacter
             ))
         );
         assert_eq!(
-            decode_profile(&raw(3, 0, b"Pavel", "p\u{430}vel".as_bytes())),
+            decode_profile(&raw(4, 0, b"Pavel", "p\u{430}vel".as_bytes())),
             Err(ProfileError::Username(UsernameError::InvalidCharacters))
         );
     }
@@ -1033,7 +1457,7 @@ mod tests {
             );
             let compose_err = compose_profile(&p).unwrap_err();
             let decode_err =
-                decode_profile(&raw(3, 0, name.as_bytes(), username.as_bytes())).unwrap_err();
+                decode_profile(&raw(4, 0, name.as_bytes(), username.as_bytes())).unwrap_err();
             assert_eq!(compose_err, decode_err, "{name:?} / {username:?}");
         }
         // 65 chars cannot even be hand-built past the u8 length on some
@@ -1041,7 +1465,7 @@ mod tests {
         let long = "a".repeat(DISPLAY_NAME_MAX_CHARS + 1);
         assert_eq!(
             compose_profile(&profile(Some(&long), None, 0)),
-            decode_profile(&raw(3, 0, long.as_bytes(), b"")).map(|_| Vec::new()),
+            decode_profile(&raw(4, 0, long.as_bytes(), b"")).map(|_| Vec::new()),
         );
     }
 
@@ -1180,7 +1604,7 @@ mod tests {
     fn error_messages_never_echo_the_name() {
         let err = check_display_name("Secret\u{202E}Name").unwrap_err();
         assert!(!err.to_string().contains("Secret"));
-        let err = decode_profile(&raw(3, 0, "Secret\u{202E}".as_bytes(), b"")).unwrap_err();
+        let err = decode_profile(&raw(4, 0, "Secret\u{202E}".as_bytes(), b"")).unwrap_err();
         assert!(!err.to_string().contains("Secret"));
         assert!(!format!("{err:?}").contains("Secret"));
     }
@@ -1190,7 +1614,7 @@ mod tests {
         let mut p = profile(Some("Alice"), Some("alice"), 7);
         p.account_id = Some([0xAB; ACCOUNT_ID_LEN]);
         let wire = compose_profile(&p).unwrap();
-        assert_eq!(wire.len(), 31 + 5 + 5 + 16);
+        assert_eq!(wire.len(), 32 + 5 + 5 + 16);
         assert_eq!(decode_profile(&wire).unwrap(), p);
         // No account id: a single zero length byte.
         let bare = compose_profile(&profile(None, None, 1)).unwrap();
@@ -1264,7 +1688,7 @@ mod tests {
             let wire = compose_profile(&p).unwrap();
             assert_eq!(
                 wire.len(),
-                31 + 5 + 5 + USERNAME_CERT_LEN + p.grants.len() * REACH_GRANT_LEN
+                32 + 5 + 5 + USERNAME_CERT_LEN + p.grants.len() * REACH_GRANT_LEN
             );
             assert_eq!(decode_profile(&wire).unwrap(), p);
         }
@@ -1279,7 +1703,7 @@ mod tests {
             Err(ProfileError::CertificateWithoutUsername)
         );
         // The same fields on the wire, hand-built past compose.
-        let mut wire = raw(3, 5, b"Alice", b"");
+        let mut wire = raw(4, 5, b"Alice", b"");
         let at = account_id_len_offset(5, 0);
         wire[at + 1] = u8::try_from(USERNAME_CERT_LEN).unwrap();
         insert_at(&mut wire, at + 2, &cert(1));
@@ -1304,7 +1728,7 @@ mod tests {
                 compose_profile(&p),
                 Err(ProfileError::CertificateLength { got: len })
             );
-            let mut wire = raw(3, 5, b"", b"alice");
+            let mut wire = raw(4, 5, b"", b"alice");
             let at = account_id_len_offset(0, 5);
             wire[at + 1] = u8::try_from(len).unwrap();
             insert_at(&mut wire, at + 2, &vec![0; len]);
@@ -1360,24 +1784,28 @@ mod tests {
             p.grants.clone_from(&grants);
             assert_eq!(compose_profile(&p), Err(why), "{grants:?}");
             // The same grants on the wire, hand-built past compose.
-            let mut wire = raw(3, 5, b"Alice", b"");
+            let mut wire = raw(4, 5, b"Alice", b"");
             let count_at = account_id_len_offset(5, 0) + 2;
             wire[count_at] = u8::try_from(grants.len()).unwrap();
+            wire.pop(); // the avatar length, re-pushed after the grants
             for g in &grants {
                 wire.extend_from_slice(&g.encode());
             }
+            wire.push(0);
             assert_eq!(decode_profile(&wire), Err(why), "{grants:?}");
         }
     }
 
     #[test]
     fn a_grant_with_an_unknown_class_byte_is_refused() {
-        let mut wire = raw(3, 5, b"Alice", b"");
+        let mut wire = raw(4, 5, b"Alice", b"");
         let count_at = account_id_len_offset(5, 0) + 2;
         wire[count_at] = 1;
         let mut g = grant(ReachClass::Group, 1).encode();
         g[0] = 0x09;
+        wire.pop();
         wire.extend_from_slice(&g);
+        wire.push(0);
         assert_eq!(
             decode_profile(&wire),
             Err(ProfileError::Grant(ReachError::UnknownClass(0x09)))
@@ -1386,7 +1814,7 @@ mod tests {
 
     #[test]
     fn a_huge_grant_count_is_refused_before_reading_grants() {
-        let mut wire = raw(3, 5, b"", b"");
+        let mut wire = raw(4, 5, b"", b"");
         let count_at = account_id_len_offset(0, 0) + 2;
         wire[count_at] = 0xFF;
         assert_eq!(

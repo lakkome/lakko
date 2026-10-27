@@ -21,6 +21,9 @@ public data class ContactRowModel(
     /** Whether the resolved name is the neutral placeholder — such a row sorts
      *  under `#` rather than under `M`, and matches no search term. */
     val placeholder: Boolean = false,
+    /** ADR-0084 — the person's signature key in either base64 spelling, for
+     *  rows whose [key] is not one (an invited contact); `null` = [key]. */
+    val personKey: String? = null,
 )
 
 /** A letter section of the alphabetical list: the header and its rows. */

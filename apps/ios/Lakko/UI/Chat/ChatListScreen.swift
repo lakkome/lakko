@@ -35,6 +35,9 @@ public struct ChatListScreen: View {
         case chat
         case group
         case channel
+        /// ADR-0065 / UX `saved-messages-and-file-lifetime.md` section 3 —
+        /// not a creation: the Saved screen, reached from the same menu.
+        case saved
     }
 
     @ObservedObject public var viewModel: ChatListViewModel
@@ -236,6 +239,10 @@ public struct ChatListScreen: View {
             Button { onCreate(.channel) } label: {
                 Label(l10n.t("chats.create.channel"), systemImage: "megaphone")
             }
+            Divider()
+            Button { onCreate(.saved) } label: {
+                Label(l10n.t("saved.title"), systemImage: "bookmark")
+            }
         } label: {
             Image(systemName: "square.and.pencil")
         }
@@ -317,7 +324,8 @@ public struct ChatListScreen: View {
                 endedLine: chatListLine(
                     membershipState(
                         isActive: !thread.membershipEnded, leaveRequestedAtMs: nil)),
-                markedUnread: flags?.unreadOverride == true)
+                markedUnread: flags?.unreadOverride == true,
+                personKey: kind == .group ? nil : viewModel.peerSignatureKey(groupIdHex: thread.groupIdHex))
         }
     }
 
@@ -450,10 +458,7 @@ public struct ChatListScreen: View {
                     // Spec section 2.1, Per platform — the row's own menu is a
                     // long press on both natives: the swipe's actions plus the
                     // folder items (`docs/ux/chat-folders.md` section 5).
-                    .contextMenu {
-                        rowActions(row: row, folder: folder, inMenu: true)
-                        folderActions(row: row, folder: folder)
-                    }
+                    .lakkoLongPressMenu { rowMenuItems(row: row, folder: folder) }
                 }
                 // ADR-0060 — the people this device knows, then the network
                 // results under People (UX section 6.1).
@@ -527,55 +532,62 @@ public struct ChatListScreen: View {
         return out
     }
 
-    /// Section 5 — Add to folder, and inside a folder, Remove from folder.
-    @ViewBuilder
-    private func folderActions(row: ConversationListRow, folder: FolderView?) -> some View {
+    /// The row's long-press menu (Lakko's own, never the system context
+    /// menu): the swipe's actions, then the folder items; "Add to folder" is
+    /// a second level of the same sheet listing the folders.
+    private func rowMenuItems(row: ConversationListRow, folder: FolderView?) -> [LakkoMenuItem] {
+        var items: [LakkoMenuItem] = []
+        if let folder {
+            let pinned = ChatFolders.isPinned(row, in: folder)
+            let atLimit = !pinned && folder.pinned.count >= ChatFolders.maxPins
+            items.append(.action(
+                l10n.t(pinned ? "chats.action.unpin" : "chats.action.pin"),
+                systemImage: pinned ? "pin.slash" : "pin", enabled: !atLimit
+            ) { Task { await toggleFolderPin(folder: folder, row: row) } })
+            if atLimit { items.append(.text(ChatFolders.pinLimitLine, secondary: true)) }
+        } else if row.kind != .channel {
+            items.append(.action(
+                l10n.t(row.pinned ? "chats.action.unpin" : "chats.action.pin"),
+                systemImage: row.pinned ? "pin.slash" : "pin"
+            ) { Task { await toggleFlag(groupIdHex: row.id, field: .pin) } })
+        }
+        if row.kind != .channel {
+            items.append(.action(
+                l10n.t(row.muted ? "chats.action.unmute" : "chats.action.mute"),
+                systemImage: row.muted ? "bell" : "bell.slash"
+            ) { Task { await toggleFlag(groupIdHex: row.id, field: .mute) } })
+            items.append(.action(
+                l10n.t(row.archived ? "chats.action.unarchive" : "chats.action.archive"),
+                systemImage: row.archived ? "tray.and.arrow.up" : "archivebox"
+            ) { Task { await toggleFlag(groupIdHex: row.id, field: .archive) } })
+        }
         let folders = deviceGroupSync.folders
+        let openEditor = {
+            editor = FolderEditorRequest(folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
+        }
         if folders.isEmpty {
-            // With no folders yet, Add to folder goes straight to the editor.
-            Button {
-                editor = FolderEditorRequest(
-                    folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
-            } label: {
-                Label(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus")
-            }
+            items.append(.action(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus", perform: openEditor))
         } else {
-            Menu {
-                ForEach(folders, id: \.folderId) { f in
-                    let isIn = ChatFolders.matches(f, row)
-                    Button {
-                        Task { await toggleMembership(folder: f, row: row) }
-                    } label: {
-                        if isIn {
-                            Label(f.meta.name, systemImage: "checkmark")
-                        } else {
-                            Text(f.meta.name)
-                        }
-                    }
-                    .disabled(
-                        !isIn && ChatFolders.handState(f, rowId: row.id) != .excluded
-                            && ChatFolders.handAddLimitReached(f))
-                }
-                Divider()
-                Button(l10n.t("folders.new_ellipsis")) {
-                    editor = FolderEditorRequest(
-                        folder: nil, prefill: ChatFolders.ref(for: row), rows: allRows)
-                }
-                .disabled(folders.count >= ChatFolders.maxFolders)
-                if folders.count >= ChatFolders.maxFolders {
-                    Text(ChatFolders.folderLimitLine)
-                }
-            } label: {
-                Label(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus")
+            var sub: [LakkoMenuItem] = folders.map { f in
+                let isIn = ChatFolders.matches(f, row)
+                return .action(
+                    f.meta.name, systemImage: isIn ? "checkmark" : nil,
+                    enabled: isIn || ChatFolders.handState(f, rowId: row.id) == .excluded
+                        || !ChatFolders.handAddLimitReached(f)
+                ) { Task { await toggleMembership(folder: f, row: row) } }
             }
+            sub.append(.action(
+                l10n.t("folders.new_ellipsis"), systemImage: "folder.badge.plus",
+                enabled: folders.count < ChatFolders.maxFolders, perform: openEditor))
+            if folders.count >= ChatFolders.maxFolders { sub.append(.text(ChatFolders.folderLimitLine, secondary: true)) }
+            items.append(.submenu(l10n.t("folders.add_to_folder"), systemImage: "folder.badge.plus", items: sub))
         }
         if let folder {
-            Button {
+            items.append(.action(l10n.t("folders.remove_from_folder"), systemImage: "folder.badge.minus") {
                 Task { await toggleMembership(folder: folder, row: row) }
-            } label: {
-                Label(l10n.t("folders.remove_from_folder"), systemImage: "folder.badge.minus")
-            }
+            })
         }
+        return items
     }
 
     private func toggleMembership(folder: FolderView, row: ConversationListRow) async {
@@ -864,7 +876,8 @@ struct ConversationRowView: View {
         HStack(alignment: .center, spacing: 12) {
             InitialsAvatar(
                 // The id is hashed for the tint only, never shown.
-                name: row.title, identity: row.id, size: 40)
+                name: row.title, identity: row.id, size: 40,
+                photo: row.personKey.map(AvatarPhoto.person))
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(row.title)
@@ -1004,6 +1017,11 @@ public final class ChatListViewModel: ObservableObject {
     /// conversation has one (only a group can: a name received in a
     /// one-to-one is dropped, ADR-0062 §7) — else the other person's resolved
     /// name (ADR-0048) for a one-to-one, else the members' names. Never a hex id (UX spec section 6).
+    /// ADR-0084 — the other person of a one-to-one, for the row's photo.
+    func peerSignatureKey(groupIdHex: String) -> Data? {
+        repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
+    }
+
     func title(groupIdHex: String) -> String {
         if let shared = repository.groupName(groupIdHex: groupIdHex) {
             return shared
@@ -1106,7 +1124,9 @@ struct InvitedChatRow: View {
         let title = PendingContacts.name(contact) ?? Localization.text("invite.contact.page.unnamed")
         NavigationLink(value: TabRoute.pendingChat(accountIdHex: contact.accountIdHex)) {
             HStack(alignment: .center, spacing: 12) {
-                InitialsAvatar(name: title, identity: contact.accountIdHex, size: 40)
+                InitialsAvatar(
+                    name: title, identity: contact.accountIdHex, size: 40,
+                    photo: .person(contact.signaturePubkey))
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
                         .font(.body)

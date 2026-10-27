@@ -607,6 +607,10 @@ dependencies {
     // and view were already here for the QR scanner; this is the one module
     // that records.
     implementation(libs.androidx.camera.video)
+    // ADR-0084 — the profile video: crop, scale, trim and drop the sound.
+    implementation(libs.androidx.media3.transformer)
+    implementation(libs.androidx.media3.effect)
+    implementation(libs.androidx.media3.common)
     implementation(libs.mlkit.barcode.scanning)
     implementation(libs.zxing.core)
 

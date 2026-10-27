@@ -136,7 +136,11 @@ final class LinkCallTileNames {
     /// Re-run the naming rule for every remote tile on `ui`.
     func relabel(_ ui: CallUiState) {
         for peerId in peers {
-            ui.setParticipantName(SfuCallUi.participantId(forPeer: peerId), currentName(peerId))
+            let id = SfuCallUi.participantId(forPeer: peerId)
+            ui.setParticipantName(id, currentName(peerId))
+            // ADR-0084 — the person the verified announcement bound the peer
+            // to shows their photo on the tile.
+            ui.setPersonKey(persons[peerId].flatMap(base64Decode), forParticipant: id)
         }
     }
 

@@ -49,6 +49,8 @@ export interface ForwardCandidate {
    *  offered: a membership whose state cannot be read is not a place a
    *  message can be promised to reach. */
   readonly live: boolean | undefined;
+  /** ADR-0084 - the person of a one-to-one, whose photo the row shows. */
+  readonly personKey?: string | undefined;
 }
 
 /** One row of the picker. `id` is the group id, standard base64. */
@@ -71,6 +73,7 @@ export function forwardPickerRows(
       pinned: c.pinned,
       muted: c.muted,
       archived: c.archived,
+      ...(c.personKey === undefined ? {} : { personKey: c.personKey }),
     }));
   return sortConversations(rows, rules).filter(
     (r): r is ForwardPickerRow => r.kind !== "channel",

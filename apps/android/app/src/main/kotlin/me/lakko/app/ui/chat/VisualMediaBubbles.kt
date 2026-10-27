@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.chat
 
+import androidx.compose.runtime.collectAsState
 import android.widget.MediaController
 import android.widget.VideoView
 import androidx.compose.foundation.Image
@@ -163,7 +164,15 @@ internal fun PhotoBubble(
     }
 
     val ready = file != null && (animated || full != null)
-    val photoLabel = t(if (failed) "chat.photo.load_failed_retry" else "chat.media.photo")
+    // UX 4.1 / 4.2 — why it failed: gone has no Retry.
+    val failures by hub.failures.collectAsState()
+    val failure = if (failed) failures[key] else null
+    val canRetry = mediaRetryOffered(failure)
+    val photoLabel = when {
+        failed && failure == me.lakko.app.media.MediaFailure.GONE -> t("chat.attachment.gone.title")
+        failed -> t("chat.photo.load_failed_retry")
+        else -> t("chat.media.photo")
+    }
     Box(
         modifier = Modifier
             .size(box.widthDp.dp, box.heightDp.dp)
@@ -172,7 +181,9 @@ internal fun PhotoBubble(
             .mediaGestures(
                 label = t(if (failed) "common.retry" else "chat.photo.open"),
                 onClick = {
-                    if (failed) {
+                    if (failed && !canRetry) {
+                        Unit
+                    } else if (failed) {
                         failed = false
                         full = null
                         attempt += 1
@@ -208,7 +219,7 @@ internal fun PhotoBubble(
             )
         }
         if (failed) {
-            FailedLabel(t(COULD_NOT_LOAD_PHOTO), Modifier.align(Alignment.Center))
+            MediaFailureLabel(failure, t(COULD_NOT_LOAD_PHOTO), Modifier.align(Alignment.Center))
         } else if (!ready) {
             CircularProgressIndicator(
                 strokeWidth = 2.dp,
@@ -275,6 +286,7 @@ internal fun VideoBubble(
 
     fun open() {
         if (loading) return
+        if (failed && !mediaRetryOffered(hub.failureFor(key))) return
         failed = false
         if (file != null) {
             player = true
@@ -293,7 +305,12 @@ internal fun VideoBubble(
         }
     }
 
-    val videoLabel = if (failed) {
+    // UX 4.1 / 4.2 — why it failed: gone has no Retry.
+    val failures by hub.failures.collectAsState()
+    val failure = if (failed) failures[key] else null
+    val videoLabel = if (failed && failure == me.lakko.app.media.MediaFailure.GONE) {
+        t("chat.attachment.gone.title")
+    } else if (failed) {
         t("chat.video.load_failed_retry")
     } else {
         t("chat.video.play", mapOf("size" to sizeLabel))
@@ -340,7 +357,8 @@ internal fun VideoBubble(
             }
         }
         if (failed) {
-            FailedLabel(
+            MediaFailureLabel(
+                failure,
                 t(COULD_NOT_LOAD_VIDEO),
                 Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp),
             )

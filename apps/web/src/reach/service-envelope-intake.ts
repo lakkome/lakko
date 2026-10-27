@@ -30,13 +30,20 @@ import { loadWasm } from "../wasm";
 import { reachSession } from "./reach-service";
 import { isVisibilityLoaded, receiveVisibility, visibilitySetting } from "./visibility-store";
 import { isOwnProfileBound, ownProfileHeld, receiveOwnProfile } from "../profile/own-profile-sync";
+import { avatarFromWasm, type AvatarData } from "../profile/avatar-model";
 
 /** What to do with one `ServiceEnvelope` body. */
 export type ServiceEnvelopeVerdict =
   | { readonly kind: "visibility"; readonly updatedAtMs: bigint }
   | { readonly kind: "reachState"; readonly updatedAtMs: bigint }
   /** The own display name from another device (`null` = cleared). */
-  | { readonly kind: "profile"; readonly updatedAtMs: bigint; readonly displayName: string | null }
+  | {
+      readonly kind: "profile";
+      readonly updatedAtMs: bigint;
+      readonly displayName: string | null;
+      /** ADR-0084 — the own photo from another device, `null` for none. */
+      readonly avatar: AvatarData | null;
+    }
   /** A Visibility or Profile not newer than what is held (equal included: a
    *  re-send). */
   | { readonly kind: "stale"; readonly of: "visibility" | "profile" }
@@ -94,22 +101,24 @@ export function classifyServiceEnvelope(
         let stamp: bigint;
         let displayName: string | null;
         let accountId: Uint8Array | undefined;
+        let avatar: AvatarData | null;
         try {
           stamp = p.updatedAtMs;
           displayName = p.displayName ?? null;
           accountId = p.accountId;
+          avatar = avatarFromWasm(p.avatar);
         } finally {
           p.free();
         }
         const own = held.ownProfile;
-        if (own === null) return { kind: "profile", updatedAtMs: stamp, displayName };
+        if (own === null) return { kind: "profile", updatedAtMs: stamp, displayName, avatar };
         // It names an account: it must be this one. (One without an id is a
         // DeviceGroup member's, which is this account by construction.)
         if (accountId !== undefined && (own.accountId === null || !sameBytes(accountId, own.accountId))) {
           return { kind: "foreign" };
         }
         if (!wasm.profileIsNewer(stamp, own.stamp)) return { kind: "stale", of: "profile" };
-        return { kind: "profile", updatedAtMs: stamp, displayName };
+        return { kind: "profile", updatedAtMs: stamp, displayName, avatar };
       }
       default:
         return { kind: "foreign" };
@@ -183,7 +192,7 @@ async function receiveOne(envelope: Uint8Array): Promise<ServiceEnvelopeVerdict>
       // Held while unbound; re-classified against the account when applied.
       // Adopted into the own-profile store only: never republished.
       if (!isOwnProfileBound()) holdProfile(verdict.updatedAtMs, envelope);
-      else receiveOwnProfile(verdict.displayName, verdict.updatedAtMs);
+      else receiveOwnProfile(verdict.displayName, verdict.updatedAtMs, verdict.avatar);
     } else if (verdict.kind === "reachState") {
       const session = reachSession();
       if (session === null) {

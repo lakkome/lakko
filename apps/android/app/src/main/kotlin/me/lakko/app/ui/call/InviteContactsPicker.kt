@@ -161,7 +161,7 @@ private fun InviteContactRow(
             }
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
-        LakkoAvatar(name = row.name, seed = row.key, size = 40.dp)
+        LakkoAvatar(name = row.name, seed = row.key, size = 40.dp, personKey = me.lakko.app.ui.components.personKeyBytes(row.personKey ?: row.key))
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(row.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)

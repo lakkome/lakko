@@ -134,7 +134,11 @@ private fun ContactPickRow(
             .clickable(enabled = available, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
-        LakkoAvatar(name = title, seed = java.util.Base64.getEncoder().encodeToString(contact.request.fromPubkey))
+        LakkoAvatar(
+            name = title,
+            seed = java.util.Base64.getEncoder().encodeToString(contact.request.fromPubkey),
+            personKey = contact.request.fromPubkey,
+        )
         Spacer(Modifier.width(12.dp))
         Column {
             Text(title, style = MaterialTheme.typography.titleMedium)

@@ -30,7 +30,7 @@ describe("own profile", () => {
   it("round-trips per account", () => {
     const storage = memoryStorage();
     saveOwnProfile("one", "Alice", 1000, storage);
-    expect(loadOwnProfile("one", storage)).toEqual({ displayName: "Alice", updatedAtMs: 1000 });
+    expect(loadOwnProfile("one", storage)).toEqual({ displayName: "Alice", updatedAtMs: 1000, avatar: null });
     expect(loadOwnProfile("two", storage)).toEqual(EMPTY_OWN_PROFILE);
   });
 
@@ -44,7 +44,7 @@ describe("own profile", () => {
   it("clearing the name keeps a stamp, so receivers replace the old name", () => {
     const storage = memoryStorage();
     saveOwnProfile("acct", "Alice", 5000, storage);
-    expect(saveOwnProfile("acct", null, 6000, storage)).toEqual({ displayName: null, updatedAtMs: 6000 });
+    expect(saveOwnProfile("acct", null, 6000, storage)).toEqual({ displayName: null, updatedAtMs: 6000, avatar: null });
   });
 
   it("malformed storage reads as empty; clear removes", () => {
@@ -61,9 +61,9 @@ describe("own profile", () => {
     saveOwnProfile("acct", "Alice", 5000, storage);
     expect(adoptOwnProfile("acct", "Same", 5000n, storage)).toBeNull();
     expect(adoptOwnProfile("acct", "Older", 4000n, storage)).toBeNull();
-    expect(adoptOwnProfile("acct", "Alice B.", 9000n, storage)).toEqual({ displayName: "Alice B.", updatedAtMs: 9000 });
-    expect(adoptOwnProfile("acct", null, 9001n, storage)).toEqual({ displayName: null, updatedAtMs: 9001 });
-    expect(loadOwnProfile("acct", storage)).toEqual({ displayName: null, updatedAtMs: 9001 });
+    expect(adoptOwnProfile("acct", "Alice B.", 9000n, storage)).toEqual({ displayName: "Alice B.", updatedAtMs: 9000, avatar: null });
+    expect(adoptOwnProfile("acct", null, 9001n, storage)).toEqual({ displayName: null, updatedAtMs: 9001, avatar: null });
+    expect(loadOwnProfile("acct", storage)).toEqual({ displayName: null, updatedAtMs: 9001, avatar: null });
     // A stamp a JS number cannot hold exactly is refused.
     expect(adoptOwnProfile("acct", "Far", 2n ** 60n, storage)).toBeNull();
   });

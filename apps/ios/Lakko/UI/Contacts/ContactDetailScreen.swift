@@ -97,7 +97,9 @@ struct ContactDetailScreen: View {
                         name: resolved.isPlaceholder ? "" : resolved.name,
                         identity: base64Encode(contact.request.fromPubkey),
                         size: 72,
-                        placeholderSymbol: "person.fill"
+                        placeholderSymbol: "person.fill",
+                        photo: .person(contact.request.fromPubkey),
+                        playsVideo: true
                     )
                     Text(resolved.name)
                         .font(.title2.weight(.semibold))

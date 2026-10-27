@@ -1798,10 +1798,6 @@
       "text": "Не вдалося завантажити вкладення. Спробуйте ще раз.",
       "status": "machine"
     },
-    "chat.attachment.error.gone": {
-      "text": "Вкладення більше немає на сервері.",
-      "status": "machine"
-    },
     "chat.attachment.error.open_photo": {
       "text": "Не вдалося відкрити це фото. Спробуйте ще раз.",
       "status": "machine"
@@ -7854,36 +7850,8 @@
       "text": "Пароль",
       "status": "machine"
     },
-    "settings.profile.error.generic": {
-      "text": "Не вдалося зберегти ім’я. Спробуйте ще раз.",
-      "status": "machine"
-    },
-    "settings.profile.lede": {
-      "text": "Як вас бачать ваші контакти.",
-      "status": "machine"
-    },
-    "settings.profile.name.hint": {
-      "text": "Його бачать ваші співрозмовники. Не обов’язково унікальне, не більше {count, plural, one {# символу} few {# символів} many {# символів} other {# символу}}.",
-      "status": "machine"
-    },
     "settings.profile.name.label": {
       "text": "Ваше ім’я",
-      "status": "machine"
-    },
-    "settings.profile.preview.label": {
-      "text": "Як вас бачать інші",
-      "status": "machine"
-    },
-    "settings.profile.preview.no_name": {
-      "text": "Доки ви не вкажете ім’я, інші бачать відбиток вашого ключа.",
-      "status": "machine"
-    },
-    "settings.profile.saved": {
-      "text": "Ваше ім’я оновиться у ваших контактів.",
-      "status": "machine"
-    },
-    "settings.profile.username.none": {
-      "text": "Немає",
       "status": "machine"
     },
     "settings.recovery.devices.title": {
@@ -8134,28 +8102,8 @@
       "text": "Ім’я користувача: {message}",
       "status": "machine"
     },
-    "username.change.body": {
-      "text": "Вас більше не зможуть знайти за іменем {old}. Протягом 30 днів ніхто інший не зможе його зайняти.",
-      "status": "machine"
-    },
-    "username.change.next_change": {
-      "text": "Після цього змінити його знову можна буде через 30 днів.",
-      "status": "machine"
-    },
-    "username.change.other_devices": {
-      "text": "Інші ваші пристрої отримають нове ім’я користувача, коли наступного разу будуть у мережі.",
-      "status": "machine"
-    },
-    "username.change.save": {
-      "text": "Змінити",
-      "status": "machine"
-    },
     "username.change.title": {
       "text": "Змінити ім’я користувача",
-      "status": "machine"
-    },
-    "username.change.too_soon": {
-      "text": "Змінити ім’я користувача знову можна буде {date}.",
       "status": "machine"
     },
     "username.claim.body": {

@@ -343,11 +343,14 @@ function InviterCard(props: {
   name: string;
   username: string | null;
   label: string | null;
+  /** ADR-0084 - the inviter's signature key: their photo when this device
+   *  already holds their profile (the link's own preview carries none). */
+  personKey?: string | undefined;
   children: JSX.Element;
 }): JSX.Element {
   return (
     <section class="lk-stack" style={{ gap: "12px", "align-items": "center", "text-align": "center" }}>
-      <Avatar label={props.name} id={props.name} />
+      <Avatar label={props.name} id={props.name} personKey={props.personKey} />
       <h1>{t("invite.contact.page.title", { name: props.name })}</h1>
       <Show when={props.username}>{(u) => <p class="lk-row-sub">@{u()}</p>}</Show>
       <Show when={props.label}>{(l) => <p>{l()}</p>}</Show>
@@ -469,7 +472,12 @@ function AddPanel(props: {
 
   return (
     <>
-      <InviterCard name={props.name} username={props.username} label={props.label}>
+      <InviterCard
+        name={props.name}
+        username={props.username}
+        label={props.label}
+        personKey={base64Encode(props.invite.cap.ownerSignaturePubkey)}
+      >
         <div class="lk-actions">
           <button class="primary" type="button" disabled={busy()} onClick={() => void onAdd()}>
             <Show when={busy()} fallback={t("invite.contact.page.add")}>

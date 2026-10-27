@@ -1798,10 +1798,6 @@
       "text": "تعذّر تنزيل المرفق. حاول مجددًا.",
       "status": "machine"
     },
-    "chat.attachment.error.gone": {
-      "text": "لم يعد المرفق متاحًا على الخادم.",
-      "status": "machine"
-    },
     "chat.attachment.error.open_photo": {
       "text": "تعذّر فتح هذه الصورة. حاول مجددًا.",
       "status": "machine"
@@ -7854,36 +7850,8 @@
       "text": "كلمة المرور",
       "status": "machine"
     },
-    "settings.profile.error.generic": {
-      "text": "تعذّر حفظ اسمك. حاول مجددًا.",
-      "status": "machine"
-    },
-    "settings.profile.lede": {
-      "text": "كيف تظهر لجهات اتصالك.",
-      "status": "machine"
-    },
-    "settings.profile.name.hint": {
-      "text": "يظهر للأشخاص الذين تتحدث معهم. ليس فريدًا، وبحد أقصى {count, plural, zero {# حرف} one {حرف واحد} two {حرفان} few {# أحرف} many {# حرفًا} other {# حرف}}.",
-      "status": "machine"
-    },
     "settings.profile.name.label": {
       "text": "اسمك",
-      "status": "machine"
-    },
-    "settings.profile.preview.label": {
-      "text": "كيف يراك الآخرون",
-      "status": "machine"
-    },
-    "settings.profile.preview.no_name": {
-      "text": "يرى الآخرون بصمة مفتاحك إلى أن تضع اسمًا.",
-      "status": "machine"
-    },
-    "settings.profile.saved": {
-      "text": "سيتحدّث اسمك لدى جهات اتصالك.",
-      "status": "machine"
-    },
-    "settings.profile.username.none": {
-      "text": "لا يوجد",
       "status": "machine"
     },
     "settings.recovery.devices.title": {
@@ -8134,28 +8102,8 @@
       "text": "اسم المستخدم: {message}",
       "status": "machine"
     },
-    "username.change.body": {
-      "text": "لن يعثر عليك الآخرون بالاسم {old} بعد الآن. لا يستطيع أحد غيرك أخذه لمدة 30 يومًا.",
-      "status": "machine"
-    },
-    "username.change.next_change": {
-      "text": "بعد ذلك يمكنك تغييره مجددًا بعد 30 يومًا.",
-      "status": "machine"
-    },
-    "username.change.other_devices": {
-      "text": "تحصل أجهزتك الأخرى على اسم المستخدم الجديد عند اتصالها بالإنترنت في المرة القادمة.",
-      "status": "machine"
-    },
-    "username.change.save": {
-      "text": "تغيير",
-      "status": "machine"
-    },
     "username.change.title": {
       "text": "تغيير اسم المستخدم",
-      "status": "machine"
-    },
-    "username.change.too_soon": {
-      "text": "يمكنك تغيير اسم المستخدم مجددًا في {date}.",
       "status": "machine"
     },
     "username.claim.body": {
