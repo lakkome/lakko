@@ -58,6 +58,14 @@
       "text": "Şifrenizi unutursanız hâlâ oturumu açık olan başka bir cihaz, bir geçiş anahtarı, kurtarma ifadeniz, ifadenizden üç kelime ya da bir kimlik doğrulayıcı uygulaması ile hesabınıza geri dönebilirsiniz.",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "Sistem anahtarlığınız kullanılamıyor. Kilidini açın veya bir tane yükleyin, sonra tekrar deneyin.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko anahtarlarınızı bu bilgisayarda güvenle saklayamıyor.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "Dili değiştir",
       "status": "machine"
@@ -4106,6 +4114,14 @@
       "text": "İstek gönderildi: {name}. Kabul edilene kadar Gönderilenler bölümünde bekler.",
       "status": "machine"
     },
+    "desktop.quit_call.confirm": {
+      "text": "Aramayı sonlandır ve çık",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "Arama sonlandırılıp çıkılsın mı?",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "Diğer cihazınızın gösterdiği altı haneyi girin.",
       "status": "machine"
@@ -4534,12 +4550,12 @@
       "text": "Diğer cihazlarınız sohbetlerini korur ve yeni anahtarları kendiliğinden alır.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Geçiş anahtarlarınız giriş yapmanızı sağlamaya devam eder. \"Anahtarları bu geçiş anahtarıyla geri yükle\" seçeneği, siz yeniden açana kadar kapalıdır.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "Daha önce oluşturduğunuz davet ve arama bağlantıları artık çalışmaz. Yenilerini oluşturun.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Geçiş anahtarlarınız giriş yapmanızı sağlamaya devam eder. \"Anahtarları bu geçiş anahtarıyla geri yükle\" seçeneği, siz yeniden açana kadar kapalıdır.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -7382,6 +7398,54 @@
       "text": "Lakko sizi nasıl korur",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "Pencereyi kapat",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Sohbetler, Akış, Kişiler, Aramalar, Ayarlar",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Son mesajımı düzenle (boş mesaj alanında)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Menüyü, iletişim kutusunu veya paneli kapat; aramadan çık",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Sohbet klasörünü değiştir",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "Yeni sohbet",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Önceki veya sonraki sohbet",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Lakko'dan çık",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Sohbetlerde ve kişilerde ara",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Gönder veya yeni satıra geç",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Ayarlar",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Klavye kısayolları",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Çeviriler güncellendi: {date}",
       "status": "machine"
@@ -7568,6 +7632,30 @@
     },
     "settings.data.title": {
       "text": "Verileriniz",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "Pencere kapalıyken mesaj ve aramalar gelmeye devam eder.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Pencere kapatıldığında çalışmaya devam et",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Lakko'nun bu bilgisayarda nasıl çalıştığı.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Bu bilgisayarda oturum açtığımda Lakko'yu aç",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "Bu ayarlar okunamadı. Ayarlar'ı yeniden açın.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "Bu ayar değiştirilemedi. Tekrar deneyin.",
       "status": "machine"
     },
     "settings.devices.add.lede": {

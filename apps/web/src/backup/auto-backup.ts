@@ -25,6 +25,8 @@
  * ones taken right after the change that made them worth taking.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
+
 /** No more than one upload per this interval, however much changes. */
 export const MIN_BACKUP_INTERVAL_MS = 5 * 60_000;
 
@@ -170,7 +172,7 @@ export interface AutoBackupDeps {
   readonly accountId: () => Uint8Array | null;
   readonly accountIdB64: () => string | null;
   readonly ed25519Seed: () => Uint8Array | null;
-  readonly deviceKey: () => Promise<CryptoKey | null>;
+  readonly deviceKey: () => Promise<DeviceCipher | null>;
   readonly sessionToken: () => string | null;
   /** Whether a fetch of this account's backup is still owed
    *  (`restore-owed.ts`). While it is, nothing is uploaded: the blob on the
@@ -181,7 +183,7 @@ export interface AutoBackupDeps {
   readonly upload: (args: {
     accountId: Uint8Array;
     ed25519Seed: Uint8Array;
-    deviceKey: CryptoKey;
+    deviceKey: DeviceCipher;
     sessionToken: string;
   }) => Promise<boolean>;
   readonly now?: () => number;

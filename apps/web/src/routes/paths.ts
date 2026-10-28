@@ -66,6 +66,7 @@ export const paths = {
       | "privacy"
       | "privacy-groups"
       | "security"
+      | "notifications"
       | "folders"
       | "appearance"
       | "language"

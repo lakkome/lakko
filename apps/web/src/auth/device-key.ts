@@ -38,12 +38,41 @@
  * The OPAQUE export key bytes themselves drop out of memory the
  * moment this function returns. Callers MUST NOT cache the
  * `exportKey` argument for any longer than necessary.
+ *
+ * ## Desktop (ADR-0085 section 2)
+ *
+ * In the desktop build (`isDesktop()`) nothing is derived in the page: the
+ * input bytes go to the Tauri host (`hostDeriveDeviceKey`), which derives
+ * the key with the IDENTICAL HKDF-SHA-512 parameters below (the same salt
+ * bytes, the same `info` prefix per source followed by the account id
+ * base64 string, 32-byte output) and returns a handle. The host must use
+ * these exact strings, or a store written by one shape will not open under
+ * the other:
+ *
+ * ```text
+ *   salt                       = "lakko-device-root-v1"
+ *   info  (source export-key)    = "lakko/device-root/v1|" || account_id_b64
+ *   info  (source identity-seed) = "lakko/device-root/from-identity-seed/v1|" || account_id_b64
+ * ```
+ *
+ * Both functions return a {@link DeviceCipher}; the web shape wraps the
+ * non-extractable `CryptoKey` in a {@link WebDeviceCipher}.
  */
 
-const HKDF_SALT = new TextEncoder().encode("lakko-device-root-v1");
+import { isDesktop } from "../platform";
+import {
+  type DeviceCipher,
+  WebDeviceCipher,
+  hostDeriveDeviceKey,
+} from "./device-cipher";
+
+/** HKDF salt (ASCII). The desktop host uses the same bytes. */
+export const HKDF_SALT_STRING = "lakko-device-root-v1";
+
+const HKDF_SALT = new TextEncoder().encode(HKDF_SALT_STRING);
 
 /** Fixed HKDF info-prefix; the account_id_b64 string is appended. */
-const HKDF_INFO_PREFIX = "lakko/device-root/v1|";
+export const HKDF_INFO_PREFIX = "lakko/device-root/v1|";
 
 /** ADR-0018 factor (a), path (b): distinct HKDF info for a device
  *  root key derived from the 64-byte AccountIdentity (phrase) seed
@@ -52,7 +81,7 @@ const HKDF_INFO_PREFIX = "lakko/device-root/v1|";
  *  export key) at bootstrap time. A DISTINCT domain string keeps
  *  the two derivations cryptographically separated even though the
  *  inputs differ anyway. */
-const HKDF_INFO_PREFIX_IDENTITY_SEED =
+export const HKDF_INFO_PREFIX_IDENTITY_SEED =
   "lakko/device-root/from-identity-seed/v1|";
 
 /**
@@ -66,12 +95,17 @@ const HKDF_INFO_PREFIX_IDENTITY_SEED =
  *                        id. Mixed into the HKDF `info` so two
  *                        accounts on the same device derive
  *                        different keys.
- * @returns               Non-extractable AES-256-GCM `CryptoKey`.
+ * @returns               The account's device cipher: a
+ *                        non-extractable AES-256-GCM `CryptoKey` on
+ *                        the web, a host handle on the desktop.
  */
 export async function deriveDeviceRootKey(
   exportKey: Uint8Array,
   accountIdB64: string,
-): Promise<CryptoKey> {
+): Promise<DeviceCipher> {
+  if (isDesktop()) {
+    return hostDeriveDeviceKey(accountIdB64, "export-key", exportKey);
+  }
   // 1. Import the export key as an HKDF base. `extractable: false`
   //    here means the base key is never extractable either —
   //    we only ever use it to derive the device root key below.
@@ -91,7 +125,7 @@ export async function deriveDeviceRootKey(
   //    "decrypt"]` — the consumer is `lakko-storage`'s eventual
   //    IDB-backed `EncryptedStore` (1.13c).
   const info = new TextEncoder().encode(HKDF_INFO_PREFIX + accountIdB64);
-  return crypto.subtle.deriveKey(
+  const key = await crypto.subtle.deriveKey(
     {
       name: "HKDF",
       hash: "SHA-512",
@@ -103,6 +137,7 @@ export async function deriveDeviceRootKey(
     /* extractable */ false,
     ["encrypt", "decrypt"],
   );
+  return new WebDeviceCipher(key);
 }
 
 /**
@@ -126,7 +161,10 @@ export async function deriveDeviceRootKey(
 export async function deriveDeviceRootKeyFromIdentitySeed(
   accountIdentitySeed: Uint8Array,
   accountIdB64: string,
-): Promise<CryptoKey> {
+): Promise<DeviceCipher> {
+  if (isDesktop()) {
+    return hostDeriveDeviceKey(accountIdB64, "identity-seed", accountIdentitySeed);
+  }
   const baseKey = await crypto.subtle.importKey(
     "raw",
     accountIdentitySeed.slice(),
@@ -137,7 +175,7 @@ export async function deriveDeviceRootKeyFromIdentitySeed(
   const info = new TextEncoder().encode(
     HKDF_INFO_PREFIX_IDENTITY_SEED + accountIdB64,
   );
-  return crypto.subtle.deriveKey(
+  const key = await crypto.subtle.deriveKey(
     {
       name: "HKDF",
       hash: "SHA-512",
@@ -149,4 +187,5 @@ export async function deriveDeviceRootKeyFromIdentitySeed(
     /* extractable */ false,
     ["encrypt", "decrypt"],
   );
+  return new WebDeviceCipher(key);
 }

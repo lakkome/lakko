@@ -488,6 +488,8 @@ import {
 import { conversationKindOf, type ConversationKind } from "../chat/conversation-kind";
 import { MembersCanFindMeSwitch } from "../settings/MembersCanFindMeSwitch";
 import { durableSnapshotHook, sessionAccountOf } from "../chat/persist-hooks";
+import { isDesktop, publicOrigin } from "../platform";
+import { lastEditableOwnMessage, upEditsLastMessage } from "../chat/edit-last";
 
 /**
  * `/chat/:id` (from the Chats list) and `/groups/:id` (from the Groups list)
@@ -822,6 +824,9 @@ function ChatView(props: {
   // edited (or `null`), plus the working text.
   const [editingId, setEditingId] = createSignal<number | null>(null);
   const [editText, setEditText] = createSignal("");
+  /** The open edit was started from the keyboard (desktop `Up` in an empty
+   *  composer), so its field takes the focus. */
+  const [editFromKeyboard, setEditFromKeyboard] = createSignal(false);
   // ADR-0052 / message-actions.md section 3.1 — the reply the composer is
   // armed with: the target's DS id and the snapshot taken when Reply was
   // chosen. Session-scoped by construction: this view is keyed on the group
@@ -5959,7 +5964,7 @@ function ChatView(props: {
         props.requireIdentity(),
         props.entry.group,
         0n,
-        window.location.origin,
+        publicOrigin(),
         {
           groupName:
             groupNames.nameOf(props.entry.groupIdB64) ??
@@ -8440,11 +8445,13 @@ function ChatView(props: {
                 editingId={editingId()}
                 editText={editText()}
                 setEditText={setEditText}
+                focusEditOnOpen={editFromKeyboard()}
                 onStartEdit={(id, current) => {
                   // ADR-0052 — replying and editing are exclusive: starting
                   // an edit drops an armed reply.
                   setReplyingTo(null);
                   setEditText(current);
+                  setEditFromKeyboard(false);
                   setEditingId(id);
                 }}
                 onCancelEdit={() => setEditingId(null)}
@@ -8853,6 +8860,7 @@ function ChatView(props: {
         <textarea
           ref={composerInput}
           class="lk-composer-input"
+          data-lk-composer=""
           rows={1}
           placeholder={t("chat.composer.placeholder")}
           autocomplete="off"
@@ -8862,6 +8870,28 @@ function ChatView(props: {
             if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
               e.preventDefault();
               e.currentTarget.form?.requestSubmit();
+            }
+            // docs/ux/desktop.md section 5 - Up in an empty composer edits
+            // my last message, through the same edit the message menu starts.
+            if (
+              upEditsLastMessage({
+                desktop: isDesktop(),
+                key: e.key,
+                modified: e.altKey || e.ctrlKey || e.metaKey || e.shiftKey,
+                composing: e.isComposing,
+                empty: input().length === 0 && pendingAttachments().length === 0,
+                editing: editingId() !== null,
+                actionsAvailable: messageActionsAvailable(),
+              })
+            ) {
+              const last = lastEditableOwnMessage(rows(), (id) => msgOps().get(id));
+              if (last !== null) {
+                e.preventDefault();
+                setReplyingTo(null);
+                setEditText(last.text);
+                setEditFromKeyboard(true);
+                setEditingId(last.messageId);
+              }
             }
             // ADR-0052 — Escape in the composer drops an armed reply.
             if (e.key === "Escape" && replyingTo() !== null) {

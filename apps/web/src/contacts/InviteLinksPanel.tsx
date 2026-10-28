@@ -52,6 +52,7 @@ import {
   describeInviteExpiry,
   describeInviteUses,
 } from "./invite-describe";
+import { publicOrigin } from "../platform";
 
 /** A link this panel can show: an uploaded one from the list, or the inline
  *  fallback minted a moment ago (no server row, so it cannot be revoked).
@@ -277,7 +278,7 @@ export function InviteLinksPanel(): JSX.Element {
         setInlineLink({
           key: "inline",
           url: composeSealedInviteLink({
-            origin: location.origin,
+            origin: publicOrigin(),
             prefix: INVITE_URL_PREFIX,
             blobId: null,
             sealed,

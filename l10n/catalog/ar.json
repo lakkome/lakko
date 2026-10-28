@@ -58,6 +58,14 @@
       "text": "إذا نسيتها، يمكنك العودة إلى حسابك بجهاز آخر لا يزال مسجّل الدخول، أو بمفتاح مرور، أو بعبارة الاسترداد، أو بثلاث كلمات منها، أو بتطبيق مصادقة.",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "حلقة مفاتيح النظام غير متاحة. افتح قفلها أو ثبّت واحدة، ثم حاول مرة أخرى.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "لا يستطيع Lakko حفظ مفاتيحك بأمان على هذا الكمبيوتر.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "تغيير اللغة",
       "status": "machine"
@@ -4106,6 +4114,14 @@
       "text": "أُرسل الطلب إلى {name}. يبقى ضمن «المُرسلة» إلى أن يقبله.",
       "status": "machine"
     },
+    "desktop.quit_call.confirm": {
+      "text": "إنهاء المكالمة والخروج",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "هل تريد إنهاء المكالمة والخروج؟",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "أدخل الأرقام الستة التي يعرضها جهازك الآخر.",
       "status": "machine"
@@ -4534,12 +4550,12 @@
       "text": "تحتفظ أجهزتك الأخرى بدردشاتها وتحصل على المفاتيح الجديدة تلقائيًا.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "ما زالت مفاتيح المرور تسجّل دخولك. خيار «استعادة المفاتيح بمفتاح المرور هذا» متوقف إلى أن تشغّله مجددًا.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "روابط الدعوة وروابط المكالمات التي أنشأتها سابقًا ستتوقف عن العمل. أنشئ روابط جديدة.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "ما زالت مفاتيح المرور تسجّل دخولك. خيار «استعادة المفاتيح بمفتاح المرور هذا» متوقف إلى أن تشغّله مجددًا.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -7382,6 +7398,54 @@
       "text": "كيف يحميك Lakko",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "إغلاق النافذة",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "الدردشات، الموجز، جهات الاتصال، المكالمات، الإعدادات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "تعديل رسالتي الأخيرة (في حقل رسالة فارغ)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "إغلاق قائمة أو مربع حوار أو لوحة؛ الخروج من البحث",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "تبديل مجلد المحادثات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "محادثة جديدة",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "المحادثة السابقة أو التالية",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "الخروج من Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "البحث في المحادثات والأشخاص",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "الإرسال أو بدء سطر جديد",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "الإعدادات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "اختصارات لوحة المفاتيح",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "تم تحديث الترجمات {date}",
       "status": "machine"
@@ -7568,6 +7632,30 @@
     },
     "settings.data.title": {
       "text": "بياناتك",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "ستصلك الرسائل والمكالمات والنافذة مغلقة.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "مواصلة العمل عند إغلاق النافذة",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "كيف يعمل Lakko على هذا الكمبيوتر.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "فتح Lakko عند تسجيل الدخول إلى هذا الكمبيوتر",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "تعذّرت قراءة هذه الإعدادات. افتح الإعدادات مرة أخرى.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "تعذّر تغيير هذا الإعداد. حاول مرة أخرى.",
       "status": "machine"
     },
     "settings.devices.add.lede": {

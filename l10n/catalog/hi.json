@@ -58,6 +58,14 @@
       "text": "अगर आप इसे भूल जाएँ, तो कोई दूसरा डिवाइस जिस पर अभी भी लॉग इन है, कोई पासकी, आपकी रिकवरी फ़्रेज़, उसके तीन शब्द, या कोई ऑथेंटिकेटर ऐप आपको वापस अकाउंट में ले आता है।",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "आपके सिस्टम का कीरिंग उपलब्ध नहीं है। उसे अनलॉक करें या कोई इंस्टॉल करें, फिर दोबारा कोशिश करें।",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko इस कंप्यूटर पर आपकी कुंजियाँ सुरक्षित रूप से नहीं रख सकता।",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "भाषा बदलें",
       "status": "machine"
@@ -4106,6 +4114,14 @@
       "text": "{name} को अनुरोध भेजा गया। उनके स्वीकार करने तक यह \"भेजे गए\" में रहेगा।",
       "status": "machine"
     },
+    "desktop.quit_call.confirm": {
+      "text": "कॉल खत्म करें और बाहर निकलें",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "कॉल खत्म करके बाहर निकलें?",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "आपके दूसरे डिवाइस पर दिख रहे छह अंक डालें।",
       "status": "machine"
@@ -4534,12 +4550,12 @@
       "text": "आपके दूसरे डिवाइस अपनी चैट रखते हैं और नई कुंजियाँ अपने आप पा लेते हैं।",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "आपकी पासकी से अब भी साइन इन होता है। \"इस पासकी से कुंजियाँ रिस्टोर करें\" तब तक बंद रहता है जब तक आप इसे फिर से चालू नहीं करते।",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "आपके पहले बनाए गए आमंत्रण लिंक और कॉल लिंक काम करना बंद कर देंगे। नए बनाएँ।",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "आपकी पासकी से अब भी साइन इन होता है। \"इस पासकी से कुंजियाँ रिस्टोर करें\" तब तक बंद रहता है जब तक आप इसे फिर से चालू नहीं करते।",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -7382,6 +7398,54 @@
       "text": "Lakko आपकी सुरक्षा कैसे करता है",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "विंडो बंद करें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "चैट, फ़ीड, संपर्क, कॉल, सेटिंग्स",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "मेरा आखिरी संदेश संपादित करें (खाली संदेश फ़ील्ड में)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "मेनू, डायलॉग या शीट बंद करें; खोज से बाहर निकलें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "चैट फ़ोल्डर बदलें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "नई चैट",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "पिछली या अगली बातचीत",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Lakko से बाहर निकलें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "बातचीत और लोग खोजें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "भेजें या नई पंक्ति शुरू करें",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "सेटिंग",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "कीबोर्ड शॉर्टकट",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "अनुवाद अपडेट किए गए {date}",
       "status": "machine"
@@ -7568,6 +7632,30 @@
     },
     "settings.data.title": {
       "text": "आपका डेटा",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "विंडो बंद होने पर भी आपको संदेश और कॉल मिलेंगे।",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "विंडो बंद होने पर भी चलता रहे",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "इस कंप्यूटर पर Lakko कैसे चलता है।",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "इस कंप्यूटर में साइन इन करने पर Lakko खोलें",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "ये सेटिंग पढ़ी नहीं जा सकीं। सेटिंग फिर से खोलें।",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "यह सेटिंग बदली नहीं जा सकी। फिर से कोशिश करें।",
       "status": "machine"
     },
     "settings.devices.add.lede": {

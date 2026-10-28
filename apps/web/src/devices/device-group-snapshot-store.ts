@@ -57,6 +57,7 @@
  * DS itself assigned and already knows.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { requireAccountStoresWritable } from "../auth/account-store-gate";
 
 const DB_NAME = "lakko-device-group-snapshots";
@@ -102,7 +103,7 @@ function openDb(): Promise<IDBDatabase> {
 export async function putDeviceGroupSnapshot(
   accountIdB64: string,
   snapshot: Uint8Array,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   journalCursor?: number,
 ): Promise<void> {
   if (snapshot.length === 0) {
@@ -110,11 +111,7 @@ export async function putDeviceGroupSnapshot(
   }
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv },
-      deviceKey,
-      snapshot.slice(),
-    ),
+    await deviceKey.encrypt(iv, snapshot),
   );
   const envelope = new Uint8Array(iv.length + ct.length);
   envelope.set(iv, 0);
@@ -153,7 +150,7 @@ export async function putDeviceGroupSnapshot(
  *  decrypt failure (device key rotated, tampered, truncated). */
 export async function getDeviceGroupSnapshot(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<Uint8Array | null> {
   const db = await openDb();
   try {
@@ -176,7 +173,7 @@ export async function getDeviceGroupSnapshot(
     const iv = row.ciphertext.slice(0, 12);
     const ct = row.ciphertext.slice(12);
     return new Uint8Array(
-      await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+      await deviceKey.decrypt(iv, ct),
     );
   } finally {
     db.close();

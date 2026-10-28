@@ -23,7 +23,12 @@ import {
   INCLUDE_ONE_TO_ONE,
   type FolderModel,
 } from "./folder-model";
-import { folderRowsOrdered, folderUnreadCount, isPinnedInFolder, rowIsInFolder } from "./folder-view";
+import {
+  allChatsUnreadCount,
+  folderRowsOrdered,
+  folderUnreadCount, isPinnedInFolder,
+  rowIsInFolder,
+} from "./folder-view";
 
 beforeAll(async () => {
   const path = fileURLToPath(new URL("../../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -117,5 +122,20 @@ describe("the tab count", () => {
       row({ id: ch, kind: "channel" }),
     ];
     expect(folderUnreadCount(rows, folder({ includeKinds: INCLUDE_GROUPS | INCLUDE_CHANNELS }), rules)).toBe(1);
+  });
+});
+
+describe("allChatsUnreadCount", () => {
+  it("counts every unread, unmuted conversation, archived and channels included", () => {
+    const rows = [
+      row({ id: "a", unread: 2 }),
+      row({ id: "b", unread: 1, muted: true }),
+      row({ id: "c", unread: 0, hasUnread: true, archived: true }),
+      row({ id: "d", kind: "channel", unread: 5 }),
+      row({ id: "e", unread: 3, hasUnread: false }),
+      row({ id: "f" }),
+    ];
+    expect(allChatsUnreadCount(rows)).toBe(3);
+    expect(allChatsUnreadCount([])).toBe(0);
   });
 });

@@ -58,6 +58,14 @@
       "text": "Якщо ви його забудете, повернутися допоможуть інший пристрій, на якому ви ще в системі, ключ доступу, фраза відновлення, три слова з неї або застосунок-автентифікатор.",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "Системна в'язка ключів недоступна. Розблокуйте її або встановіть, потім спробуйте ще раз.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko не може надійно зберігати ваші ключі на цьому комп'ютері.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "Змінити мову",
       "status": "machine"
@@ -4106,6 +4114,14 @@
       "text": "Запит надіслано: {name}. Він буде в розділі «Надіслані», доки його не приймуть.",
       "status": "machine"
     },
+    "desktop.quit_call.confirm": {
+      "text": "Завершити дзвінок і вийти",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "Завершити дзвінок і вийти?",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "Введіть шість цифр, які показує інший пристрій.",
       "status": "machine"
@@ -4534,12 +4550,12 @@
       "text": "Інші ваші пристрої збережуть чати й самі отримають нові ключі.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Ключі доступу, як і раніше, дають змогу увійти. Функцію «Відновлювати ключі цим ключем доступу» вимкнено, доки ви не ввімкнете її знову.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "Посилання-запрошення та посилання на дзвінок, створені раніше, перестануть працювати. Створіть нові.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Ключі доступу, як і раніше, дають змогу увійти. Функцію «Відновлювати ключі цим ключем доступу» вимкнено, доки ви не ввімкнете її знову.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -7382,6 +7398,54 @@
       "text": "Як Lakko вас захищає",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "Закрити вікно",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Чати, Стрічка, Контакти, Дзвінки, Налаштування",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Змінити останнє повідомлення (у порожньому полі)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Закрити меню, діалог або панель; вийти з пошуку",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Перемкнути папку чатів",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "Новий чат",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Попередня або наступна розмова",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Вийти з Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Пошук розмов і людей",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Надіслати або почати новий рядок",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Налаштування",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Комбінації клавіш",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Переклади оновлено {date}",
       "status": "machine"
@@ -7568,6 +7632,30 @@
     },
     "settings.data.title": {
       "text": "Ваші дані",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "Повідомлення і дзвінки надходитимуть, поки вікно закрите.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Працювати, коли вікно закрите",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Як Lakko працює на цьому комп'ютері.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Відкривати Lakko під час входу на цей комп'ютер",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "Не вдалося прочитати налаштування. Відкрийте Налаштування знову.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "Не вдалося змінити налаштування. Спробуйте ще раз.",
       "status": "machine"
     },
     "settings.devices.add.lede": {

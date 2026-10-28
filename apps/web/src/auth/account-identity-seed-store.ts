@@ -61,6 +61,7 @@
  * length, no length prefix needed.
  */
 
+import type { DeviceCipher } from "./device-cipher";
 import { accountStoresWritable } from "./account-store-gate";
 
 const DB_NAME = "lakko-account-identity-seed";
@@ -105,7 +106,7 @@ function openDb(): Promise<IDBDatabase> {
 export async function putAccountIdentitySeed(
   accountIdB64: string,
   seed: Uint8Array,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<void> {
   if (seed.length !== ACCOUNT_IDENTITY_SEED_LENGTH) {
     throw new Error(
@@ -117,11 +118,7 @@ export async function putAccountIdentitySeed(
   // `ArrayBuffer` so `crypto.subtle.encrypt`'s `BufferSource`
   // parameter accepts it (TS 5.7+ rejects the wider type).
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv },
-      deviceKey,
-      seed.slice(),
-    ),
+    await deviceKey.encrypt(iv, seed),
   );
   const envelope = new Uint8Array(iv.length + ct.length);
   envelope.set(iv, 0);
@@ -159,7 +156,7 @@ export async function putAccountIdentitySeed(
  */
 export async function getAccountIdentitySeed(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<Uint8Array | null> {
   const db = await openDb();
   try {
@@ -187,7 +184,7 @@ export async function getAccountIdentitySeed(
     const iv = row.ciphertext.slice(0, 12);
     const ct = row.ciphertext.slice(12);
     const plain = new Uint8Array(
-      await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+      await deviceKey.decrypt(iv, ct),
     );
     if (plain.length !== ACCOUNT_IDENTITY_SEED_LENGTH) {
       throw new Error(

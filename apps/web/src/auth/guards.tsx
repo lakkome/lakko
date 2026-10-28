@@ -35,6 +35,7 @@ import ProtectAccountPrompt from "./protect/ProtectAccountPrompt";
 import NewPasswordPrompt from "./NewPasswordPrompt";
 import { RemovedDeviceScreen } from "../devices/RemovedDeviceScreen";
 import { GuestAccountScreen } from "./GuestAccountOffer";
+import { KeyStoreUnavailableScreen } from "./KeyStoreUnavailableScreen";
 import { readReturnUrl } from "./return-url";
 import {
   anonymousGuardView,
@@ -74,8 +75,22 @@ export function RequireSession(props: { children: JSX.Element }): JSX.Element {
 function SignedOutGate(props: { children: JSX.Element }): JSX.Element {
   const auth = useAuth();
   return (
-    <Show when={auth.signedOut()} fallback={props.children}>
+    <Show when={auth.signedOut()} fallback={<KeyStoreGate>{props.children}</KeyStoreGate>}>
       {(signedOut) => <RemovedDeviceScreen signedOut={signedOut()} />}
+    </Show>
+  );
+}
+
+/**
+ * ADR-0085 (desktop, `docs/ux/desktop.md` 1.1): a sign-in or landing that
+ * stopped because the OS key store refused shows the refusal screen in
+ * place of every route, public ones included, until Try again gets past it.
+ */
+function KeyStoreGate(props: { children: JSX.Element }): JSX.Element {
+  const auth = useAuth();
+  return (
+    <Show when={auth.keyStoreUnavailable()} fallback={props.children}>
+      <KeyStoreUnavailableScreen />
     </Show>
   );
 }

@@ -12,6 +12,7 @@
  * policy stays unit-testable without wasm / IDB / network.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { loadWasm } from "../wasm";
 import {
   fetchDeviceAttestKey,
@@ -49,7 +50,7 @@ export interface RestoreEvaluationInput {
   /** Base64 account id — the floor-store key. */
   readonly accountIdB64: string;
   /** Non-extractable device key for the floor store. */
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   /** Auth base for the attest-key fetch (default the shared `/api/auth`). */
   readonly authBaseUrl?: string | undefined;
   /** Injectable clock in ms (default `Date.now()`). */

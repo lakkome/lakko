@@ -24,6 +24,7 @@
  * the account wipe. Without a device key or without IndexedDB every read is
  * empty and every write a no-op: the re-send then carries no intro.
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 
@@ -118,7 +119,7 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
   });
 }
 
-async function deviceKeyOf(accountIdB64: string): Promise<CryptoKey | null> {
+async function deviceKeyOf(accountIdB64: string): Promise<DeviceCipher | null> {
   try {
     return await getDeviceKey(accountIdB64);
   } catch {
@@ -126,7 +127,7 @@ async function deviceKeyOf(accountIdB64: string): Promise<CryptoKey | null> {
   }
 }
 
-async function read(accountIdB64: string, key: CryptoKey): Promise<SentIntros> {
+async function read(accountIdB64: string, key: DeviceCipher): Promise<SentIntros> {
   const db = await openDb();
   let row: PersistedRow | undefined;
   try {
@@ -141,16 +142,12 @@ async function read(accountIdB64: string, key: CryptoKey): Promise<SentIntros> {
   }
   if (row === undefined || row.ciphertext.length < IV_LEN + 16) return {};
   const plaintext = new Uint8Array(
-    await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: row.ciphertext.slice(0, IV_LEN) },
-      key,
-      row.ciphertext.slice(IV_LEN),
-    ),
+    await key.decrypt(row.ciphertext.slice(0, IV_LEN), row.ciphertext.slice(IV_LEN)),
   );
   return decodeSentIntros(new TextDecoder().decode(plaintext));
 }
 
-async function write(accountIdB64: string, key: CryptoKey, intros: SentIntros): Promise<void> {
+async function write(accountIdB64: string, key: DeviceCipher, intros: SentIntros): Promise<void> {
   const db = await openDb();
   try {
     if (Object.keys(intros).length === 0) {
@@ -161,7 +158,7 @@ async function write(accountIdB64: string, key: CryptoKey, intros: SentIntros): 
     }
     const plaintext = new TextEncoder().encode(encodeSentIntros(intros));
     const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext));
+    const ct = new Uint8Array(await key.encrypt(iv, plaintext));
     const blob = new Uint8Array(IV_LEN + ct.length);
     blob.set(iv, 0);
     blob.set(ct, IV_LEN);

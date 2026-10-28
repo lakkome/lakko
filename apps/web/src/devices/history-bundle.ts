@@ -30,6 +30,7 @@
  * the chat envelope parser; for the MVP the opaque round-trip
  * is enough to prove the catch-up path.
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { loadWasm } from "../wasm";
 import type { Wasm } from "../wasm";
 import type {
@@ -76,7 +77,7 @@ const MAX_BUNDLE_MESSAGES = 1000;
  */
 export async function buildHistoryBundleFromLog(args: {
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   readonly secret: Uint8Array;
 }): Promise<Uint8Array | null> {
   const log = await loadMessageLog(args.accountIdB64, args.deviceKey);
@@ -156,7 +157,7 @@ export async function buildHistoryBundleFromLog(args: {
  */
 export async function applyHistoryBundleToLog(args: {
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   readonly secret: Uint8Array;
   readonly sealedBytes: Uint8Array;
 }): Promise<number> {

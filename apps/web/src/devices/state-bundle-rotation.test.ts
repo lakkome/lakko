@@ -8,6 +8,7 @@
  * the real core - that the paired device binds its conversation identity
  * under the same account key as the sending device.
  */
+import { type DeviceCipher, WebDeviceCipher } from "../auth/device-cipher";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -69,8 +70,8 @@ function keyHexOfSeed(s: Uint8Array): string {
   }
 }
 
-function deviceKey(): Promise<CryptoKey> {
-  return crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+async function deviceKey(): Promise<DeviceCipher> {
+  return new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]));
 }
 
 function encodeRaw(value: unknown): Uint8Array {

@@ -45,6 +45,7 @@
  * configure VAPID right away.
  */
 
+import { isDesktop } from "../platform";
 import { anonTokenQuotaExhausted } from "../tokens/anon-token-pool";
 import { PushClient } from "./client";
 import { clearDevicePushId, getOrCreateDevicePushId } from "./device-id";
@@ -116,6 +117,8 @@ export async function subscribeToPush(
     // No build-time VAPID key — dev fallback.
     return null;
   }
+  // The desktop app receives through its host, not Web Push (ADR-0085).
+  if (isDesktop()) return null;
   if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
     return null;
   }
@@ -232,6 +235,11 @@ export async function unsubscribeFromPush(): Promise<void> {
   // The callers release the wake binding before anything else; this repeat
   // is idempotent and keeps the invariant for any other caller.
   await releaseWakeBinding();
+  // The desktop app never registered a Web Push token (ADR-0085).
+  if (isDesktop()) {
+    clearDevicePushId();
+    return;
+  }
   const devicePseudonym = getOrCreateDevicePushId();
   // Best-effort server tell.
   try {

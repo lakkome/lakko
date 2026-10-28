@@ -58,6 +58,14 @@
       "text": "如果忘记密码，你可以通过另一台仍在登录的设备、通行密钥、恢复短语、恢复短语中的三个词或身份验证器应用重新登录。",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "你的系统密钥环不可用。请解锁或安装一个，然后重试。",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko 无法在这台电脑上安全地保存你的密钥。",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "更改语言",
       "status": "machine"
@@ -4106,6 +4114,14 @@
       "text": "已向 {name} 发送请求。对方接受前，它会显示在“已发送”中。",
       "status": "machine"
     },
+    "desktop.quit_call.confirm": {
+      "text": "结束通话并退出",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "结束通话并退出？",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "请输入你另一台设备上显示的六位数字。",
       "status": "machine"
@@ -4534,12 +4550,12 @@
       "text": "你的其他设备会保留聊天，并自动获得新密钥。",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "你的通行密钥仍可用于登录。“使用此通行密钥恢复密钥”已关闭，直到你重新开启。",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "你之前创建的邀请链接和通话链接将失效。请创建新的链接。",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "你的通行密钥仍可用于登录。“使用此通行密钥恢复密钥”已关闭，直到你重新开启。",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -7382,6 +7398,54 @@
       "text": "Lakko 如何保护你",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "关闭窗口",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "聊天、动态、联系人、通话、设置",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "编辑我的最后一条消息（在空的消息框中）",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "关闭菜单、对话框或面板；退出搜索",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "切换聊天文件夹",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "新聊天",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "上一个或下一个对话",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "退出 Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "搜索对话和联系人",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "发送或换行",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "设置",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "键盘快捷键",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "翻译已更新 {date}",
       "status": "machine"
@@ -7568,6 +7632,30 @@
     },
     "settings.data.title": {
       "text": "你的数据",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "窗口关闭时仍会收到消息和通话。",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "关闭窗口后继续运行",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Lakko 在这台电脑上的运行方式。",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "登录这台电脑时打开 Lakko",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "无法读取这些设置。请重新打开设置。",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "无法更改此设置。请重试。",
       "status": "machine"
     },
     "settings.devices.add.lede": {

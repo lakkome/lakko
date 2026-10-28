@@ -29,7 +29,9 @@
  * its own module so swapping a route is a single import change.
  */
 import { FolderEditorHost } from "./chat/folders/FolderEditor";
-import type { Component } from "solid-js";
+import { Show, type Component } from "solid-js";
+import { isDesktop } from "./platform";
+import { DesktopBridge } from "./platform/DesktopBridge";
 import { MemoryRouter, type RouteSectionProps } from "@solidjs/router";
 import { originHistory } from "./routes/origin-history";
 import { AuthProvider } from "./auth/AuthContext";
@@ -89,6 +91,14 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
      * app existed and the call has not reached the slot yet.
      */}
     <CallActionListener />
+    {/*
+     * ADR-0085 section 4 - the desktop host's badge, quit question, Settings
+     * menu item and keyboard shortcuts. Inside the router (it navigates);
+     * the browser build never mounts it.
+     */}
+    <Show when={isDesktop()}>
+      <DesktopBridge />
+    </Show>
     {props.children}
     <CallHostView />
   </>

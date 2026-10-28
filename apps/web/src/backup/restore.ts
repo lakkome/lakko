@@ -44,6 +44,7 @@
  * backup does not upload, so the blob this still has to read is not replaced
  * by this device's nearly empty state.
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { announceRestoredSyncedState } from "../devices/sync/synced-state-source";
 import { mergeSyncStateFromBackup } from "../devices/sync/sync-state-idb";
 import { mergeRestoredFoldBytes } from "../devices/sync/synced-projection";
@@ -91,7 +92,7 @@ export interface AccountBackupRestoreInputs {
   readonly accountIdB64: string;
   /** The device root key (the head-gate floor store and the synced-state
    *  row are wrapped under it). */
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   /** Bearer token for `GET /backup`. */
   readonly sessionToken: string;
   /** The recovery phrase, canonical form. */
@@ -112,7 +113,7 @@ export interface AccountBackupRestoreDeps {
   /** Merge the restored ADR-0058 synced state. */
   readonly applySyncedState: (
     accountIdB64: string,
-    deviceKey: CryptoKey,
+    deviceKey: DeviceCipher,
     synced: Uint8Array,
   ) => Promise<void>;
   /** Keep the conversation ids the backup named. */
@@ -131,7 +132,7 @@ export interface AccountBackupRestoreDeps {
  *  is written, nothing is announced, and the rest of the restore goes on. */
 async function mergeRestoredSyncedState(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   synced: Uint8Array,
 ): Promise<void> {
   if (synced.length === 0) return;
@@ -284,7 +285,7 @@ export interface OwedRestoreInputs {
   readonly accountIdB64: string;
   readonly sessionToken: string;
   /** The account's device root key, or `null` when this device has none. */
-  readonly deviceKey: () => Promise<CryptoKey | null>;
+  readonly deviceKey: () => Promise<DeviceCipher | null>;
   /** The phrase, when the landing itself has it in hand (the phrase prompt).
    *  Absent on every other landing, which reads the device's phrase cache. */
   readonly phrase?: string;
@@ -295,7 +296,7 @@ export interface OwedRestoreDeps {
   readonly isOwed: (accountIdB64: string) => boolean;
   readonly clearOwed: (accountIdB64: string) => void;
   /** The phrase cached on this device, or `null`. */
-  readonly cachedPhrase: (accountIdB64: string, deviceKey: CryptoKey) => Promise<string | null>;
+  readonly cachedPhrase: (accountIdB64: string, deviceKey: DeviceCipher) => Promise<string | null>;
   readonly restore: (inputs: AccountBackupRestoreInputs) => Promise<AccountBackupRestoreOutcome>;
 }
 

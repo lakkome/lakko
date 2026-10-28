@@ -27,6 +27,7 @@ import {
   type ClassifiedInviteSlug,
   type InviteLinkWidths,
 } from "./invite-link";
+import { publicOrigin } from "../platform";
 
 /** Path prefix every invite URL starts with — kept in lock-step
  *  with `routes/paths.ts::inviteRoutePattern`. */
@@ -64,9 +65,7 @@ export const INVITE_INLINE_MIN_LEN = 160;
  *  censored-region path). */
 export function composeInviteUrl(
   bytes: Uint8Array,
-  origin: string = typeof location !== "undefined"
-    ? location.origin
-    : "https://lakko.me",
+  origin: string = publicOrigin(),
 ): string {
   return `${origin}${INVITE_URL_PREFIX}${base64UrlEncodeNoPad(bytes)}`;
 }

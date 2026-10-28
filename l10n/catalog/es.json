@@ -58,6 +58,14 @@
       "text": "Si la olvidas, puedes volver a entrar con otro dispositivo que siga con la sesión iniciada, una llave de acceso, tu frase de recuperación, tres palabras de ella o una app de autenticación.",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "El llavero del sistema no está disponible. Desbloquéalo o instala uno y vuelve a intentarlo.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko no puede guardar tus claves de forma segura en este ordenador.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "Cambiar idioma",
       "status": "machine"
@@ -4106,6 +4114,14 @@
       "text": "Solicitud enviada a {name}. Queda en Enviadas hasta que la acepte.",
       "status": "machine"
     },
+    "desktop.quit_call.confirm": {
+      "text": "Terminar llamada y salir",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "¿Terminar la llamada y salir?",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "Introduce los seis dígitos que muestra tu otro dispositivo.",
       "status": "machine"
@@ -4534,12 +4550,12 @@
       "text": "Tus otros dispositivos conservan sus chats y reciben las claves nuevas por sí solos.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "Tus llaves de acceso siguen sirviendo para iniciar sesión. «Restaurar claves con esta llave de acceso» queda desactivado hasta que lo vuelvas a activar.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "Los enlaces de invitación y de llamada que creaste antes dejarán de funcionar. Crea otros nuevos.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "Tus llaves de acceso siguen sirviendo para iniciar sesión. «Restaurar claves con esta llave de acceso» queda desactivado hasta que lo vuelvas a activar.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -7382,6 +7398,54 @@
       "text": "Cómo te protege Lakko",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "Cerrar la ventana",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Chats, Feed, Contactos, Llamadas, Ajustes",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Editar mi último mensaje (con el campo vacío)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Cerrar un menú, diálogo u hoja; salir de una búsqueda",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Cambiar de carpeta de chats",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "Nuevo chat",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Conversación anterior o siguiente",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Salir de Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Buscar conversaciones y personas",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Enviar o empezar una línea nueva",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Ajustes",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Atajos de teclado",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Traducciones actualizadas {date}",
       "status": "machine"
@@ -7568,6 +7632,30 @@
     },
     "settings.data.title": {
       "text": "Tus datos",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "Recibirás mensajes y llamadas con la ventana cerrada.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Seguir abierto al cerrar la ventana",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Cómo funciona Lakko en este ordenador.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Abrir Lakko al iniciar sesión en este ordenador",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "No se pudieron leer estos ajustes. Vuelve a abrir Ajustes.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "No se pudo cambiar este ajuste. Inténtalo de nuevo.",
       "status": "machine"
     },
     "settings.devices.add.lede": {

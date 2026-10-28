@@ -18,6 +18,7 @@
  * lists (`shared-channels.ts`). Both are wiped by `forgetDevice`.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import type { DirectoryItemWire } from "./cards";
 import type { DecoyDraw } from "./decoys";
@@ -212,7 +213,7 @@ function done(tx: IDBTransaction): Promise<void> {
 export async function loadDiscoverRow(
   accountId: string,
   kind: DiscoverRowKind,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<string | null> {
   const db = await openDb();
   let row: { ciphertext: Uint8Array } | undefined;
@@ -229,11 +230,7 @@ export async function loadDiscoverRow(
   }
   if (row === undefined || row.ciphertext.length < IV_LEN + 16) return null;
   try {
-    const plain = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: row.ciphertext.slice(0, IV_LEN) },
-      deviceKey,
-      row.ciphertext.slice(IV_LEN),
-    );
+    const plain = await deviceKey.decrypt(row.ciphertext.slice(0, IV_LEN), row.ciphertext.slice(IV_LEN));
     return new TextDecoder().decode(plain);
   } catch {
     return null;
@@ -243,12 +240,12 @@ export async function loadDiscoverRow(
 export async function saveDiscoverRow(
   accountId: string,
   kind: DiscoverRowKind,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   plaintext: string,
 ): Promise<void> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, deviceKey, new TextEncoder().encode(plaintext)),
+    await deviceKey.encrypt(iv, new TextEncoder().encode(plaintext)),
   );
   const ciphertext = new Uint8Array(IV_LEN + ct.length);
   ciphertext.set(iv, 0);
@@ -277,7 +274,7 @@ export async function deleteDiscoverRows(accountId: string): Promise<void> {
   }
 }
 
-export async function loadDiscoverPrefs(accountId: string, deviceKey: CryptoKey): Promise<DiscoverPrefs> {
+export async function loadDiscoverPrefs(accountId: string, deviceKey: DeviceCipher): Promise<DiscoverPrefs> {
   const json = await loadDiscoverRow(accountId, "prefs", deviceKey);
   if (json === null) return defaultDiscoverPrefs();
   try {
@@ -289,7 +286,7 @@ export async function loadDiscoverPrefs(accountId: string, deviceKey: CryptoKey)
 
 export async function saveDiscoverPrefs(
   accountId: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   prefs: DiscoverPrefs,
 ): Promise<void> {
   await saveDiscoverRow(accountId, "prefs", deviceKey, JSON.stringify(encodeDiscoverPrefs(prefs)));

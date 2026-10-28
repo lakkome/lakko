@@ -66,6 +66,7 @@
  * (`export-key-length.ts`), so a length-prefix is wasteful.
  */
 
+import type { DeviceCipher } from "./device-cipher";
 import { accountStoresWritable } from "./account-store-gate";
 import {
   assertExportKeyLength,
@@ -115,7 +116,7 @@ function openDb(): Promise<IDBDatabase> {
 export async function putExportKey(
   accountIdB64: string,
   exportKey: Uint8Array,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<void> {
   assertExportKeyLength(exportKey, "export key");
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -124,11 +125,7 @@ export async function putExportKey(
   // parameter accepts it — TS 5.7+ rejects the wider type. Cheap
   // 64-byte copy.
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv },
-      deviceKey,
-      exportKey.slice(),
-    ),
+    await deviceKey.encrypt(iv, exportKey),
   );
   const envelope = new Uint8Array(iv.length + ct.length);
   envelope.set(iv, 0);
@@ -167,7 +164,7 @@ export async function putExportKey(
  */
 export async function getExportKey(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<Uint8Array | null> {
   const db = await openDb();
   try {
@@ -196,7 +193,7 @@ export async function getExportKey(
     const iv = row.ciphertext.slice(0, 12);
     const ct = row.ciphertext.slice(12);
     const plain = new Uint8Array(
-      await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+      await deviceKey.decrypt(iv, ct),
     );
     assertExportKeyLength(plain, "decrypted export key");
     return plain;

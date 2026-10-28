@@ -14,6 +14,7 @@
  * Nothing here leaves the device.
  */
 import { createEffect, createRoot } from "solid-js";
+import { isDesktop } from "../platform";
 import { currentLanguage, t } from "./index";
 
 /** Cache name; must equal `NOTIFICATION_STRINGS_CACHE` in the worker. */
@@ -64,6 +65,9 @@ export function renderNotificationStrings(): NotificationWords {
 
 async function store(words: NotificationWords): Promise<void> {
   if (typeof caches === "undefined") return;
+  // The desktop app has no service worker to read them (ADR-0085), and its
+  // webview refuses Cache Storage for the app's own URL scheme.
+  if (isDesktop()) return;
   try {
     const cache = await caches.open(NOTIFICATION_STRINGS_CACHE);
     await cache.put(

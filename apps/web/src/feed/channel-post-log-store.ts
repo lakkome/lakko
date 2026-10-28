@@ -18,6 +18,7 @@
  * and across tabs, so the feed reloads.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { decodeChannelPostLog, type ChannelPostLog } from "./channel-post-log";
 
@@ -60,13 +61,13 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
 /** Persist (or replace) the log for an account. */
 export async function saveChannelPostLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   log: ChannelPostLog,
 ): Promise<void> {
   const plaintext = new TextEncoder().encode(JSON.stringify(log));
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, deviceKey, plaintext),
+    await deviceKey.encrypt(iv, plaintext),
   );
   const ciphertext = new Uint8Array(IV_LEN + ct.length);
   ciphertext.set(iv, 0);
@@ -87,7 +88,7 @@ export async function saveChannelPostLog(
  *  unknown version (the caller starts empty). */
 export async function loadChannelPostLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<ChannelPostLog | null> {
   const db = await openDb();
   let row: PersistedRow | undefined;
@@ -104,11 +105,7 @@ export async function loadChannelPostLog(
   }
   if (row === undefined || row.ciphertext.length < IV_LEN + 16) return null;
   try {
-    const plaintext = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: row.ciphertext.slice(0, IV_LEN) },
-      deviceKey,
-      row.ciphertext.slice(IV_LEN),
-    );
+    const plaintext = await deviceKey.decrypt(row.ciphertext.slice(0, IV_LEN), row.ciphertext.slice(IV_LEN));
     return decodeChannelPostLog(JSON.parse(new TextDecoder().decode(plaintext)));
   } catch {
     return null;

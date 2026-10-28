@@ -1,0 +1,117 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lakko</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 24px; background: #f6f7fb; color: #1a1d2b; }
+  pre { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Desktop probe</h1>
+<pre id="out">running...</pre>
+<script type="module">
+const out = document.getElementById("out");
+const report = (obj) =>
+  fetch("/__probe/report", { method: "POST", body: JSON.stringify(obj) }).catch(() => {});
+
+async function attempt(fn) {
+  try { return { ok: true, value: await fn() }; }
+  catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+}
+
+const checks = {};
+checks.userAgent = navigator.userAgent;
+checks.origin = location.origin;
+checks.isSecureContext = window.isSecureContext;
+checks.subtle = typeof crypto !== "undefined" && !!crypto.subtle;
+checks.webAssembly = typeof WebAssembly === "object";
+checks.indexedDB = typeof indexedDB !== "undefined";
+checks.serviceWorker = "serviceWorker" in navigator;
+checks.notification = typeof Notification !== "undefined";
+checks.webSocket = typeof WebSocket !== "undefined";
+checks.rtcPeerConnection = typeof RTCPeerConnection !== "undefined";
+checks.rtcRtpScriptTransform = typeof RTCRtpScriptTransform !== "undefined";
+checks.createEncodedStreams =
+  typeof RTCRtpSender !== "undefined" && typeof RTCRtpSender.prototype.createEncodedStreams === "function";
+checks.getUserMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+checks.navigatorLocks = !!navigator.locks;
+
+checks.webCryptoNonExtractable = await attempt(async () => {
+  const raw = crypto.getRandomValues(new Uint8Array(32));
+  const key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode("x"));
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
+  return new TextDecoder().decode(pt) === "x" && key.extractable === false;
+});
+
+checks.indexedDBOpen = await attempt(() => new Promise((resolve, reject) => {
+  const req = indexedDB.open("lakko-probe", 1);
+  req.onupgradeneeded = () => req.result.createObjectStore("s");
+  req.onsuccess = () => { req.result.close(); resolve(true); };
+  req.onerror = () => reject(req.error);
+}));
+
+checks.moduleWorker = await attempt(() => new Promise((resolve, reject) => {
+  const w = new Worker("/__probe/worker.js", { type: "module" });
+  const timer = setTimeout(() => reject(new Error("no reply in 3 s")), 3000);
+  w.onmessage = (e) => { clearTimeout(timer); w.terminate(); resolve(e.data); };
+  w.onerror = (e) => { clearTimeout(timer); reject(new Error(e.message || "worker error")); };
+  w.postMessage("ping");
+}));
+
+checks.rtcOffer = await attempt(async () => {
+  const pc = new RTCPeerConnection();
+  pc.addTransceiver("audio");
+  pc.addTransceiver("video");
+  const offer = await pc.createOffer();
+  pc.close();
+  return { hasAudio: offer.sdp.includes("m=audio"), hasVideo: offer.sdp.includes("m=video"),
+           vp8: offer.sdp.includes("VP8"), opus: offer.sdp.includes("opus") };
+});
+
+checks.scriptTransformAttach = await attempt(async () => {
+  if (typeof RTCRtpScriptTransform === "undefined") return "absent";
+  const pc = new RTCPeerConnection();
+  const tr = pc.addTransceiver("audio");
+  const worker = new Worker("/__probe/worker.js", { type: "module" });
+  tr.sender.transform = new RTCRtpScriptTransform(worker, { side: "send" });
+  pc.close();
+  worker.terminate();
+  return "attached";
+});
+
+checks.apiProxyHealth = await attempt(async () => {
+  const r = await fetch("/api/auth/health");
+  return { status: r.status, body: (await r.text()).slice(0, 40) };
+});
+
+out.textContent = JSON.stringify(checks, null, 2);
+await report({ kind: "checks", checks });
+
+document.addEventListener("visibilitychange", () =>
+  report({ kind: "visibility", hidden: document.hidden, state: document.visibilityState, t: Date.now() }));
+
+let tick = 0;
+let last = Date.now();
+setInterval(() => {
+  const now = Date.now();
+  report({ kind: "tick", seq: ++tick, gapMs: now - last, hidden: document.hidden });
+  last = now;
+}, 1000);
+
+let poll = 0;
+(async function loop() {
+  for (;;) {
+    const started = Date.now();
+    const r = await attempt(() => fetch("/__probe/slow?ms=5000").then((x) => x.status));
+    report({ kind: "poll", seq: ++poll, tookMs: Date.now() - started, ok: r.ok, hidden: document.hidden });
+  }
+})();
+</script>
+</body>
+</html>

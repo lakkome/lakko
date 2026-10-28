@@ -6,6 +6,7 @@
  * reads, through the in-memory IndexedDB: the intro kept for a sent request,
  * and the list of links this device minted.
  */
+import { WebDeviceCipher } from "../auth/device-cipher";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { putDeviceKey } from "../auth/key-store";
@@ -24,10 +25,10 @@ const HEX_A = "00112233445566778899aabbccddeeff";
 const HEX_B = "ffeeddccbbaa99887766554433221100";
 
 async function installDeviceKey(account: string): Promise<void> {
-  const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+  const key = new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
     "encrypt",
     "decrypt",
-  ]);
+  ]));
   await putDeviceKey(account, key);
 }
 

@@ -19,6 +19,7 @@
  * One AES-GCM row per account in its own IndexedDB database. Never in the
  * recall record's keep-list: both wipes delete it.
  */
+import type { DeviceCipher } from "./device-cipher";
 import { accountStoresWritable } from "./account-store-gate";
 import type { PendingRotation } from "../devices/key-rotation";
 import { base64Decode, base64Encode } from "./account-id";
@@ -160,7 +161,7 @@ function openDb(): Promise<IDBDatabase> {
  *  when the row does not open under `deviceKey`. */
 export async function getKeyRotationState(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<KeyRotationState> {
   const db = await openDb();
   let row: Row | undefined;
@@ -177,7 +178,7 @@ export async function getKeyRotationState(
   if (row === undefined) return EMPTY_KEY_ROTATION_STATE;
   const iv = row.ciphertext.slice(0, 12);
   const ct = row.ciphertext.slice(12);
-  const plain = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct));
+  const plain = new Uint8Array(await deviceKey.decrypt(iv, ct));
   try {
     return decodeKeyRotationState(new TextDecoder().decode(plain));
   } finally {
@@ -189,13 +190,13 @@ export async function getKeyRotationState(
 export async function putKeyRotationState(
   accountIdB64: string,
   state: KeyRotationState,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<void> {
   const plain = new TextEncoder().encode(encodeKeyRotationState(state));
   const iv = crypto.getRandomValues(new Uint8Array(12));
   let ct: Uint8Array;
   try {
-    ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, deviceKey, plain));
+    ct = new Uint8Array(await deviceKey.encrypt(iv, plain));
   } finally {
     plain.fill(0);
   }
@@ -221,7 +222,7 @@ export async function putKeyRotationState(
 const queues = new Map<string, Promise<unknown>>();
 export function updateKeyRotationState(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   change: (state: KeyRotationState) => KeyRotationState,
 ): Promise<KeyRotationState> {
   const run = async (): Promise<KeyRotationState> => {

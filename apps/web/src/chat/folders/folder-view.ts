@@ -105,6 +105,16 @@ export function folderUnreadCount(
   );
 }
 
+/** The same count over every conversation (All chats, not a folder): the
+ *  desktop app-icon badge (`docs/ux/desktop.md` section 2). One rule with
+ *  the folder tabs: conversations with anything unread, muted ones not
+ *  counted. */
+export function allChatsUnreadCount(rows: readonly ConversationRow[]): number {
+  return unreadConversationCount(
+    rows.map((r) => ({ muted: r.muted, hasUnread: rowHasUnread(r) })),
+  );
+}
+
 /** Whether the row is pinned inside this folder. */
 export function isPinnedInFolder(row: ConversationRow, folder: FolderModel): boolean {
   const id = ruleRowId(row.kind, row.id);

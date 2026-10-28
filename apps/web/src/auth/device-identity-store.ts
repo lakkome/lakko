@@ -58,6 +58,7 @@
  * contract, no length prefix needed.
  */
 
+import type { DeviceCipher } from "./device-cipher";
 import { accountStoresWritable } from "./account-store-gate";
 
 const DB_NAME = "lakko-device-identity";
@@ -106,7 +107,7 @@ function openDb(): Promise<IDBDatabase> {
 export async function putDeviceIdentitySeed(
   accountIdB64: string,
   seed: Uint8Array,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<void> {
   if (seed.length !== DEVICE_IDENTITY_SEED_LENGTH) {
     throw new Error(
@@ -115,11 +116,7 @@ export async function putDeviceIdentitySeed(
   }
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv },
-      deviceKey,
-      seed.slice(),
-    ),
+    await deviceKey.encrypt(iv, seed),
   );
   const envelope = new Uint8Array(iv.length + ct.length);
   envelope.set(iv, 0);
@@ -157,7 +154,7 @@ export async function putDeviceIdentitySeed(
  */
 export async function getDeviceIdentitySeed(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<Uint8Array | null> {
   const db = await openDb();
   try {
@@ -180,7 +177,7 @@ export async function getDeviceIdentitySeed(
     const iv = row.ciphertext.slice(0, 12);
     const ct = row.ciphertext.slice(12);
     const plain = new Uint8Array(
-      await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+      await deviceKey.decrypt(iv, ct),
     );
     if (plain.length !== DEVICE_IDENTITY_SEED_LENGTH) {
       throw new Error(
@@ -233,7 +230,7 @@ export async function deleteDeviceIdentitySeed(
  */
 export async function ensureDeviceIdentitySeed(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<Uint8Array> {
   try {
     const existing = await getDeviceIdentitySeed(accountIdB64, deviceKey);

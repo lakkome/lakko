@@ -55,6 +55,7 @@
  * `lakko-mnemonic` emits).
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import {
   accountStoresWritable,
   accountStoresWritableSince,
@@ -132,16 +133,12 @@ function writable(accountIdB64: string, wipes: WipeMark | undefined): boolean {
 export async function putPhrase(
   accountIdB64: string,
   phraseBytes: Uint8Array,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   wipes?: WipeMark,
 ): Promise<boolean> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv },
-      deviceKey,
-      phraseBytes.slice(),
-    ),
+    await deviceKey.encrypt(iv, phraseBytes),
   );
   const envelope = new Uint8Array(iv.length + ct.length);
   envelope.set(iv, 0);
@@ -217,7 +214,7 @@ export function putPhraseRow(
  */
 export async function getPhrase(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<PersistedPhrase | null> {
   const db = await openDb();
   try {
@@ -232,7 +229,7 @@ export async function getPhrase(
     const iv = row.ciphertext.slice(0, 12);
     const ct = row.ciphertext.slice(12);
     const plaintext = new Uint8Array(
-      await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+      await deviceKey.decrypt(iv, ct),
     );
     return { phrase: plaintext, cachedAtMs: row.cachedAtMs };
   } finally {

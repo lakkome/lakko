@@ -16,6 +16,7 @@
  * `read-watermark-store.ts`'s {@link encodeReadWatermarkRow}.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import {
   decodeReadWatermarkRow,
@@ -60,10 +61,10 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
   });
 }
 
-async function encryptBlob(deviceKey: CryptoKey, plaintext: Uint8Array): Promise<Uint8Array> {
+async function encryptBlob(deviceKey: DeviceCipher, plaintext: Uint8Array): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, deviceKey, plaintext.slice()),
+    await deviceKey.encrypt(iv, plaintext),
   );
   const out = new Uint8Array(IV_LEN + ct.length);
   out.set(iv, 0);
@@ -71,14 +72,10 @@ async function encryptBlob(deviceKey: CryptoKey, plaintext: Uint8Array): Promise
   return out;
 }
 
-async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint8Array> {
+async function decryptBlob(deviceKey: DeviceCipher, blob: Uint8Array): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) throw new Error("encrypted read-watermark row is too short");
   return new Uint8Array(
-    await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: blob.slice(0, IV_LEN) },
-      deviceKey,
-      blob.slice(IV_LEN),
-    ),
+    await deviceKey.decrypt(blob.slice(0, IV_LEN), blob.slice(IV_LEN)),
   );
 }
 
@@ -88,7 +85,7 @@ async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint
  */
 export async function loadReadWatermarkRows(
   accountId: string,
-  deviceKey: CryptoKey | null,
+  deviceKey: DeviceCipher | null,
 ): Promise<ReadWatermarkRows | null> {
   if (deviceKey === null) return null;
   const db = await openDb();
@@ -122,7 +119,7 @@ export async function loadReadWatermarkRows(
  *                      device holds none (the store then stays in memory)
  */
 export class IdbReadWatermarkBackend implements ReadWatermarkBackend {
-  constructor(private readonly deviceKeyFor: (accountId: string) => Promise<CryptoKey | null>) {}
+  constructor(private readonly deviceKeyFor: (accountId: string) => Promise<DeviceCipher | null>) {}
 
   async load(accountId: string): Promise<ReadWatermarkRows | null> {
     return loadReadWatermarkRows(accountId, await this.deviceKeyFor(accountId));

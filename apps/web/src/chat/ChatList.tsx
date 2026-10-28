@@ -24,9 +24,19 @@ import {
   onCleanup,
   onMount,
   Show,
+  untrack,
   type JSX,
 } from "solid-js";
-import { A, useNavigate } from "@solidjs/router";
+import { A, useLocation, useNavigate } from "@solidjs/router";
+import { isDesktop } from "../platform";
+import {
+  clearListCommand,
+  folderTabIndexFor,
+  neighbourHref,
+  noteConversationListMounted,
+  pendingListCommand,
+  type ListCommand,
+} from "../platform/shortcuts";
 
 import { useCallHost } from "../calls/CallHostContext";
 import { quietCallKindLabel, quietCallOfferFor } from "../calls/quiet-call-offer";
@@ -297,12 +307,13 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   }
 
   // Ctrl+1..9 (Cmd on macOS) select the first nine tabs, All chats being 1.
+  // Never with Shift: Mod+Shift+1..5 are the desktop destinations.
   onMount(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
-      if (e.key < "1" || e.key > "9") return;
+      const index = folderTabIndexFor(e);
+      if (index === null) return;
       if (folders().length === 0) return;
-      const t = tabs()[Number(e.key) - 1];
+      const t = tabs()[index];
       if (t === undefined) return;
       e.preventDefault();
       selectTab(accountId(), t.id);
@@ -403,6 +414,41 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     return kindOf(g) === "chat" ? paths.chat(slug) : paths.groupChat(slug);
   };
 
+  // docs/ux/desktop.md section 5 - the desktop shortcuts this list carries
+  // out (`platform/shortcuts.ts`): focus the search field, open the create
+  // menu, open the previous / next conversation in the list's own order.
+  let searchInput: HTMLInputElement | undefined;
+  const location = useLocation();
+  const rowHref = (row: ConversationRow): string | null => {
+    if (row.kind === "channel") return paths.channel(row.id);
+    const g = groupById().get(row.id);
+    return g === undefined ? null : hrefOf(g);
+  };
+  const runListCommand = (cmd: ListCommand): void => {
+    if (cmd === "search") {
+      searchInput?.focus();
+      searchInput?.select();
+    } else if (cmd === "create") {
+      setCreateOpen(true);
+    } else {
+      const hrefs = visibleRows()
+        .map(rowHref)
+        .filter((h): h is string => h !== null);
+      const to = neighbourHref(hrefs, location.pathname, cmd);
+      if (to !== null) navigate(to);
+    }
+  };
+  if (isDesktop()) {
+    onMount(() => onCleanup(noteConversationListMounted()));
+    createEffect(() => {
+      const cmd = pendingListCommand();
+      if (cmd === null) return;
+      clearListCommand();
+      // After mount: the search field's ref is set by then.
+      queueMicrotask(() => untrack(() => runListCommand(cmd)));
+    });
+  }
+
   return (
     <aside class="lk-pane" aria-label={copy().aria()}>
       <div class="lk-pane-head">
@@ -440,6 +486,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       <label class="lk-search lk-pane-search">
         <Icon name="search" size={16} />
         <input
+          ref={searchInput}
           type="search"
           placeholder={t("chats.search.placeholder")}
           aria-label={t("chats.search.label")}

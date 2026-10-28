@@ -21,6 +21,7 @@
  * `wipeChannelsForAccount` in `AuthContext`.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { createEffect, untrack, type Component } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
@@ -61,7 +62,7 @@ export const ChannelsHydration: Component = () => {
       if (key === null || identity === null) return;
 
       void (async (): Promise<void> => {
-        let deviceKey: CryptoKey | null = null;
+        let deviceKey: DeviceCipher | null = null;
         try {
           deviceKey = await getDeviceKey(key);
         } catch (err) {

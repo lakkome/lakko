@@ -29,6 +29,7 @@
  * reload on this device either (`docs/PRODUCT-READINESS.md`), so there is
  * nothing durable to carry until that lands.
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { DsClient, DsHttpError, DsNetworkError } from "../ds/client";
 import {
   boundContactsAccount,
@@ -308,7 +309,7 @@ export function mergeCarriedPredecessorSeeds(
  */
 export async function collectOwnPredecessors(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   keyHexOfSeed: (seed: Uint8Array) => string,
   nowMs: number = Date.now(),
 ): Promise<CarriedOwnPredecessor[]> {
@@ -347,7 +348,7 @@ export async function collectOwnPredecessors(
 export async function applyOwnPredecessors(
   bundle: StateBundleV2,
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   keyHexOfSeed: (seed: Uint8Array) => string,
 ): Promise<number> {
   if (bundle.ownPredecessors.length === 0) return 0;

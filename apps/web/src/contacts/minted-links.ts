@@ -27,6 +27,7 @@
  * `null` and every write a no-op: a link minted there still works, it just
  * cannot be copied again from the list.
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 import { base64Decode, base64Encode } from "../auth/account-id";
@@ -147,7 +148,7 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
   });
 }
 
-async function withKey(accountIdB64: string): Promise<CryptoKey | null> {
+async function withKey(accountIdB64: string): Promise<DeviceCipher | null> {
   try {
     return await getDeviceKey(accountIdB64);
   } catch {
@@ -170,7 +171,7 @@ export async function rememberMintedLink(
   try {
     const plaintext = new TextEncoder().encode(encodeMintedLink(link, mintedAtMs));
     const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext));
+    const ct = new Uint8Array(await key.encrypt(iv, plaintext));
     const blob = new Uint8Array(IV_LEN + ct.length);
     blob.set(iv, 0);
     blob.set(ct, IV_LEN);
@@ -214,11 +215,7 @@ export async function mintedLinkFor(
     }
     if (row === undefined || row.ciphertext.length < IV_LEN + 16) return null;
     const plaintext = new Uint8Array(
-      await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: row.ciphertext.slice(0, IV_LEN) },
-        key,
-        row.ciphertext.slice(IV_LEN),
-      ),
+      await key.decrypt(row.ciphertext.slice(0, IV_LEN), row.ciphertext.slice(IV_LEN)),
     );
     const decoded = decodeMintedLink(new TextDecoder().decode(plaintext));
     return decoded === null ? null : { linkSecret: decoded.linkSecret, linkId: decoded.linkId };
@@ -255,11 +252,7 @@ export async function listMintedLinks(accountIdB64: string): Promise<MintedLinkR
       if (named === null) continue;
       try {
         const plaintext = new Uint8Array(
-          await crypto.subtle.decrypt(
-            { name: "AES-GCM", iv: row.ciphertext.slice(0, IV_LEN) },
-            key,
-            row.ciphertext.slice(IV_LEN),
-          ),
+          await key.decrypt(row.ciphertext.slice(0, IV_LEN), row.ciphertext.slice(IV_LEN)),
         );
         const decoded = decodeMintedLink(new TextDecoder().decode(plaintext));
         if (decoded !== null) out.push({ ...named, ...decoded });

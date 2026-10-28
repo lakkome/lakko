@@ -35,6 +35,7 @@
  * conversation groups (ADR-0007). Snapshot/restore goes
  * through this DeviceIdentity provider's storage only.
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { loadWasm } from "../wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { keyResetAttestationGeneration } from "../auth/key-reset-owed";
@@ -103,7 +104,7 @@ export async function ensureDeviceGroup(
   accountIdBytes: Uint8Array,
   accountIdB64: string,
   deviceIdentitySeed: Uint8Array,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   /** ADR-0057 — the account's phrase seed, so a founding can claim (or, on a
    *  re-found, reset) the journal with the account's root even before the
    *  session has installed its signer factory. Optional: without it the
@@ -295,7 +296,7 @@ export function rootEndorsementFor(
 export async function persistDeviceGroupSnapshot(
   identity: WasmIdentity,
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<void> {
   try {
     const snapshot = identity.snapshotStorage();
@@ -316,7 +317,7 @@ export async function persistDeviceGroupSnapshot(
 export async function persistDeviceGroupSnapshotWithCursor(
   identity: WasmIdentity,
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   journalCursor: number,
 ): Promise<void> {
   const snapshot = identity.snapshotStorage();

@@ -21,6 +21,7 @@
  * walks to the other device); the scanner side is a single
  * acknowledged transaction (scan happens, ack happens, done).
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { announceDeviceGroupChangedHere } from "./sync/growth";
 import { resendServiceEnvelopes } from "../reach/service-envelope-outbox";
 import { loadWasm, type Wasm } from "../wasm";
@@ -207,7 +208,7 @@ export interface JoinSession {
 export async function prepareJoinFlow(args: {
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   /** ADR-0056 — the 32-byte login handle of this account's username; the
    *  payload names the account by it, never by the id. */
   readonly loginHandle: Uint8Array;
@@ -378,7 +379,7 @@ function accountKeyHexOfSeed(wasm: Wasm, seed: Uint8Array): string {
 async function storeOwnPredecessors(
   bundle: StateBundleV2,
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<void> {
   if (bundle.ownPredecessors.length === 0) return;
   try {
@@ -553,7 +554,7 @@ export interface AnonymousJoinSession {
    *  recovered seed: persist the in-memory DeviceIdentity seed +
    *  the post-join DeviceGroup snapshot under it, then zeroize the
    *  in-memory seed copy. Call once, after a successful `accept`. */
-  persistTo(deviceKey: CryptoKey): Promise<void>;
+  persistTo(deviceKey: DeviceCipher): Promise<void>;
   /** Release the wasm handles + zeroize the in-memory
    *  DeviceIdentity seed. Idempotent. */
   dispose(): void;
@@ -813,7 +814,7 @@ export async function runScanFlow(args: {
   readonly loginHandle: Uint8Array;
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   /** ADR-0018 factor (a) — when present, the scanner also mints a
    *  device-authorization grant and publishes the sealed
    *  `grant ‖ phrase_entropy` recovery row (v2) after the Welcome, so

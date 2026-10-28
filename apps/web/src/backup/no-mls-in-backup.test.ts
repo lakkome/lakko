@@ -21,6 +21,7 @@
  * written unframed, which is the documented soft-fail; the gate then takes
  * its fresh-install fail-open branch).
  */
+import { type DeviceCipher, WebDeviceCipher } from "../auth/device-cipher";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -46,7 +47,7 @@ const G1 = base64Encode(new Uint8Array(32).fill(0xa1));
 const G2 = base64Encode(new Uint8Array(32).fill(0xa2));
 
 let phrase: Uint8Array;
-let deviceKey: CryptoKey;
+let deviceKey: DeviceCipher;
 
 /** A storage tier that keeps the one blob it was given. */
 function recorder(): { client: StorageClient; blob: () => Uint8Array | null } {
@@ -67,10 +68,10 @@ beforeAll(async () => {
   const mnemonic = wasm.RecoveryMnemonic.generate();
   phrase = new TextEncoder().encode(mnemonic.phrase);
   mnemonic.free();
-  deviceKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
+  deviceKey = new WebDeviceCipher(await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
     "encrypt",
     "decrypt",
-  ]);
+  ]));
 });
 
 beforeEach(() => {

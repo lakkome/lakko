@@ -58,6 +58,14 @@
       "text": "اگر آن را فراموش کنید، با دستگاه دیگری که هنوز وارد شده، یک کلید عبور، عبارت بازیابی، سه کلمه از آن، یا یک برنامه احراز هویت دوباره وارد می‌شوید.",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "دسته‌کلید سیستم در دسترس نیست. قفل آن را باز کنید یا یکی نصب کنید، سپس دوباره تلاش کنید.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko نمی‌تواند کلیدهای شما را روی این رایانه به‌طور امن نگه دارد.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "تغییر زبان",
       "status": "machine"
@@ -4106,6 +4114,14 @@
       "text": "درخواست به {name} فرستاده شد. تا وقتی آن را بپذیرد، در «ارسال‌شده» می‌ماند.",
       "status": "machine"
     },
+    "desktop.quit_call.confirm": {
+      "text": "پایان تماس و خروج",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "تماس پایان یابد و خارج شوید؟",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "شش رقمی را که دستگاه دیگرتان نشان می‌دهد وارد کنید.",
       "status": "machine"
@@ -4534,12 +4550,12 @@
       "text": "دستگاه‌های دیگرتان گفتگوهایشان را نگه می‌دارند و کلیدهای جدید را خودشان می‌گیرند.",
       "status": "machine"
     },
-    "devices.rotate.effect_passkeys": {
-      "text": "کلیدهای عبورتان همچنان شما را وارد می‌کنند. «بازیابی کلیدها با این کلید عبور» خاموش می‌ماند تا دوباره روشنش کنید.",
-      "status": "machine"
-    },
     "devices.rotate.effect_links": {
       "text": "پیوندهای دعوت و پیوندهای تماسی که قبلاً ساخته‌اید دیگر کار نمی‌کنند. پیوندهای تازه بسازید.",
+      "status": "machine"
+    },
+    "devices.rotate.effect_passkeys": {
+      "text": "کلیدهای عبورتان همچنان شما را وارد می‌کنند. «بازیابی کلیدها با این کلید عبور» خاموش می‌ماند تا دوباره روشنش کنید.",
       "status": "machine"
     },
     "devices.rotate.effect_phrase": {
@@ -7382,6 +7398,54 @@
       "text": "Lakko چگونه از شما محافظت می‌کند",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "بستن پنجره",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "گفتگوها، فید، مخاطبان، تماس‌ها، تنظیمات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "ویرایش آخرین پیام من (در کادر خالی پیام)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "بستن منو، کادر گفتگو یا برگه؛ خروج از جستجو",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "تغییر پوشه گفتگو",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "گفتگوی جدید",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "گفتگوی قبلی یا بعدی",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "خروج از Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "جستجوی گفتگوها و افراد",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "ارسال یا شروع خط جدید",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "تنظیمات",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "میان‌برهای صفحه‌کلید",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "ترجمه‌ها به‌روز شد {date}",
       "status": "machine"
@@ -7568,6 +7632,30 @@
     },
     "settings.data.title": {
       "text": "داده‌های شما",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "وقتی پنجره بسته است پیام‌ها و تماس‌ها دریافت می‌شوند.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "اجرا ماندن پس از بستن پنجره",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "نحوه اجرای Lakko در این رایانه.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "باز شدن Lakko هنگام ورود به این رایانه",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "خواندن این تنظیمات ممکن نشد. تنظیمات را دوباره باز کنید.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "تغییر این تنظیم ممکن نشد. دوباره تلاش کنید.",
       "status": "machine"
     },
     "settings.devices.add.lede": {

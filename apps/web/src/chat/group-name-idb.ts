@@ -16,6 +16,7 @@
  * `group-name-store.ts`'s {@link encodeGroupNameRow}.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import {
   decodeGroupNameRow,
@@ -60,10 +61,10 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
   });
 }
 
-async function encryptBlob(deviceKey: CryptoKey, plaintext: Uint8Array): Promise<Uint8Array> {
+async function encryptBlob(deviceKey: DeviceCipher, plaintext: Uint8Array): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, deviceKey, plaintext.slice()),
+    await deviceKey.encrypt(iv, plaintext),
   );
   const out = new Uint8Array(IV_LEN + ct.length);
   out.set(iv, 0);
@@ -71,14 +72,10 @@ async function encryptBlob(deviceKey: CryptoKey, plaintext: Uint8Array): Promise
   return out;
 }
 
-async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint8Array> {
+async function decryptBlob(deviceKey: DeviceCipher, blob: Uint8Array): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) throw new Error("encrypted group-name row is too short");
   return new Uint8Array(
-    await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: blob.slice(0, IV_LEN) },
-      deviceKey,
-      blob.slice(IV_LEN),
-    ),
+    await deviceKey.decrypt(blob.slice(0, IV_LEN), blob.slice(IV_LEN)),
   );
 }
 
@@ -90,7 +87,7 @@ async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint
  */
 export async function loadGroupNameRows(
   accountId: string,
-  deviceKey: CryptoKey | null,
+  deviceKey: DeviceCipher | null,
 ): Promise<ReadonlyMap<string, StoredGroupName> | null> {
   if (deviceKey === null) return null;
   const db = await openDb();
@@ -124,7 +121,7 @@ export async function loadGroupNameRows(
  *                      device holds none (the store then stays in memory)
  */
 export class IdbGroupNameBackend implements GroupNameBackend {
-  constructor(private readonly deviceKeyFor: (accountId: string) => Promise<CryptoKey | null>) {}
+  constructor(private readonly deviceKeyFor: (accountId: string) => Promise<DeviceCipher | null>) {}
 
   async load(accountId: string): Promise<ReadonlyMap<string, StoredGroupName> | null> {
     return loadGroupNameRows(accountId, await this.deviceKeyFor(accountId));

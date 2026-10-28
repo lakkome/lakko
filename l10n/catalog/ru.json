@@ -58,6 +58,14 @@
       "text": "Если вы его забудете, вернуться в аккаунт помогут другое устройство, на котором вы ещё вошли, ключ доступа, фраза восстановления, три слова из неё или приложение-аутентификатор.",
       "status": "machine"
     },
+    "auth.key_store_unavailable.body": {
+      "text": "Системная связка ключей недоступна. Разблокируйте её или установите, затем попробуйте снова.",
+      "status": "machine"
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko не может надёжно хранить ваши ключи на этом компьютере.",
+      "status": "machine"
+    },
     "auth.language.button": {
       "text": "Сменить язык",
       "status": "machine"
@@ -4106,6 +4114,14 @@
       "text": "Запрос отправлен: {name}. Он будет в разделе «Отправленные», пока его не примут.",
       "status": "machine"
     },
+    "desktop.quit_call.confirm": {
+      "text": "Завершить звонок и выйти",
+      "status": "machine"
+    },
+    "desktop.quit_call.title": {
+      "text": "Завершить звонок и выйти?",
+      "status": "machine"
+    },
     "device_link.code.enter_six_digits": {
       "text": "Введите шесть цифр, которые показывает другое устройство.",
       "status": "machine"
@@ -7382,6 +7398,54 @@
       "text": "Как Lakko вас защищает",
       "status": "machine"
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "Закрыть окно",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Чаты, Лента, Контакты, Звонки, Настройки",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Изменить последнее сообщение (в пустом поле)",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Закрыть меню, диалог или панель; выйти из поиска",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Переключить папку чатов",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "Новый чат",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Предыдущий или следующий разговор",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Выйти из Lakko",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Поиск по разговорам и людям",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Отправить или начать новую строку",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Настройки",
+      "status": "machine"
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Сочетания клавиш",
+      "status": "machine"
+    },
     "settings.about.translations_updated": {
       "text": "Переводы обновлены {date}",
       "status": "machine"
@@ -7568,6 +7632,30 @@
     },
     "settings.data.title": {
       "text": "Ваши данные",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "Сообщения и звонки будут приходить, пока окно закрыто.",
+      "status": "machine"
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Не закрываться, когда окно закрыто",
+      "status": "machine"
+    },
+    "settings.desktop.lede": {
+      "text": "Как Lakko работает на этом компьютере.",
+      "status": "machine"
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Открывать Lakko при входе в систему на этом компьютере",
+      "status": "machine"
+    },
+    "settings.desktop.read_failed": {
+      "text": "Не удалось прочитать настройки. Откройте Настройки снова.",
+      "status": "machine"
+    },
+    "settings.desktop.save_failed": {
+      "text": "Не удалось изменить настройку. Попробуйте ещё раз.",
       "status": "machine"
     },
     "settings.devices.add.lede": {

@@ -18,6 +18,7 @@
  * written in the clear.
  */
 
+import type { DeviceCipher } from "../../auth/device-cipher";
 import { accountStoresWritable } from "../../auth/account-store-gate";
 import {
   decodeSyncState,
@@ -78,10 +79,10 @@ function awaitTx(tx: IDBTransaction): Promise<void> {
   });
 }
 
-async function encryptBlob(deviceKey: CryptoKey, plaintext: Uint8Array): Promise<Uint8Array> {
+async function encryptBlob(deviceKey: DeviceCipher, plaintext: Uint8Array): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, deviceKey, plaintext.slice()),
+    await deviceKey.encrypt(iv, plaintext),
   );
   const out = new Uint8Array(IV_LEN + ct.length);
   out.set(iv, 0);
@@ -89,14 +90,10 @@ async function encryptBlob(deviceKey: CryptoKey, plaintext: Uint8Array): Promise
   return out;
 }
 
-async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint8Array> {
+async function decryptBlob(deviceKey: DeviceCipher, blob: Uint8Array): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) throw new Error("encrypted device-sync row is too short");
   return new Uint8Array(
-    await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: blob.slice(0, IV_LEN) },
-      deviceKey,
-      blob.slice(IV_LEN),
-    ),
+    await deviceKey.decrypt(blob.slice(0, IV_LEN), blob.slice(IV_LEN)),
   );
 }
 
@@ -107,7 +104,7 @@ async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint
  */
 export async function loadSyncState(
   accountId: string,
-  deviceKey: CryptoKey | null,
+  deviceKey: DeviceCipher | null,
 ): Promise<SyncStateRow | null> {
   if (deviceKey === null) return null;
   const db = await openDb();
@@ -143,7 +140,7 @@ export async function loadSyncState(
  */
 export async function saveSyncState(
   accountId: string,
-  deviceKey: CryptoKey | null,
+  deviceKey: DeviceCipher | null,
   state: SyncStateRow,
   onlyIfGeneration?: number,
 ): Promise<void> {
@@ -193,7 +190,7 @@ export async function deleteSyncState(accountId: string): Promise<void> {
  */
 export async function mergeSyncStateFromBackup(
   accountId: string,
-  deviceKey: CryptoKey | null,
+  deviceKey: DeviceCipher | null,
   synced: Uint8Array,
   merge: (local: Uint8Array | null, backup: Uint8Array) => Uint8Array | null,
 ): Promise<boolean> {

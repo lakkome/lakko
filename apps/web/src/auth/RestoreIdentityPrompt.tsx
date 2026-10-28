@@ -29,6 +29,7 @@
  * The lost-everything fallback (`mintFreshIdentity`) sits behind a warning
  * at the bottom; it is the one path that publishes a new identity.
  */
+import type { DeviceCipher } from "./device-cipher";
 import { isAbandoned } from "./binding-epoch";
 import {
   createResource,
@@ -99,7 +100,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
   // DeviceGroup snapshot, the history and state bundles), landed under the
   // device key `completeFromPairing` bootstraps. `null` on the route that
   // already held a device key: that join wrote as it went.
-  let persistAnonymousJoin: ((deviceKey: CryptoKey) => Promise<void>) | null = null;
+  let persistAnonymousJoin: ((deviceKey: DeviceCipher) => Promise<void>) | null = null;
   const pairingUsername = (): string => {
     const acct = account();
     if (acct === null) return "";

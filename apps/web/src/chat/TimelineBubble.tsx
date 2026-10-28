@@ -63,6 +63,7 @@ import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { currentLanguage, joinList, t } from "../l10n";
+import { publicOrigin } from "../platform";
 
 /** The callbacks and reactive reads a bubble needs from the chat view. */
 export interface BubbleHost {
@@ -85,6 +86,9 @@ export interface BubbleHost {
   readersOf: (messageId: number) => MemberIdentity[];
   editingId: number | null;
   editText: string;
+  /** The edit was opened from the keyboard (desktop): its field takes the
+   *  focus. Unset, the edit opens as it always did. */
+  focusEditOnOpen?: boolean;
   setEditText: (v: string) => void;
   onStartEdit: (messageId: number, current: string) => void;
   onCancelEdit: () => void;
@@ -392,8 +396,15 @@ function ChatBubbleBody(
   /** `docs/ux/call-links.md` section 3: a message that is one call link of
    *  this deployment is an invitation, drawn with a `Join` button instead of
    *  a line of characters. */
-  const callInvite = (): ReturnType<typeof callInviteOf> =>
-    typeof location === "undefined" ? null : callInviteOf(displayText(), location.origin);
+  const callInvite = (): ReturnType<typeof callInviteOf> => {
+    let origin: string;
+    try {
+      origin = publicOrigin();
+    } catch {
+      return null;
+    }
+    return callInviteOf(displayText(), origin);
+  };
   const isEditing = (): boolean =>
     props.messageId !== undefined && props.editingId === props.messageId;
 
@@ -858,6 +869,14 @@ function ChatBubbleBody(
                 text; Save publishes the edit op, Cancel discards. */}
             <div class="lk-bubble-edit">
               <textarea
+                ref={(el) => {
+                  if (props.focusEditOnOpen === true) {
+                    queueMicrotask(() => {
+                      el.focus();
+                      el.setSelectionRange(el.value.length, el.value.length);
+                    });
+                  }
+                }}
                 value={props.editText}
                 onInput={(e) => props.setEditText(e.currentTarget.value)}
                 rows={2}

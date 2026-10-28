@@ -62,6 +62,14 @@
       "text": "If you forget it, you can get back in with another device that is still logged in, a passkey, your recovery phrase, three words from it, or an authenticator app.",
       "comment": "Third paragraph of the password explanation: the ways back into an account (another device, a passkey, the recovery phrase, three words of it, an authenticator app)."
     },
+    "auth.key_store_unavailable.body": {
+      "text": "Your system keyring isn't available. Unlock it or install one, then try again.",
+      "comment": "Body of the desktop key-store refusal screen; the button under it (common.try_again) repeats the step that failed."
+    },
+    "auth.key_store_unavailable.title": {
+      "text": "Lakko can't store your keys safely on this computer.",
+      "comment": "Title of the desktop screen shown when the operating system's key store (Keychain, Windows key store, Linux keyring) is missing or refused. Sign-in stops here."
+    },
     "auth.language.button": {
       "text": "Change language",
       "comment": "Accessibility label of the globe button on the sign-in and sign-up screens."
@@ -4175,6 +4183,14 @@
       "text": "Request sent to {name}. It waits under Sent until they accept.",
       "comment": "Shown after a contact request was sent. {name} is the recipient's @username, with the @. \"Sent\" is the name of the section in the contacts list (contacts.list.sent)."
     },
+    "desktop.quit_call.confirm": {
+      "text": "End call and quit",
+      "comment": "Desktop app: confirm button of the quit-during-a-call question."
+    },
+    "desktop.quit_call.title": {
+      "text": "End the call and quit?",
+      "comment": "Desktop app: question shown when the person quits Lakko during a call."
+    },
     "device_link.code.enter_six_digits": {
       "text": "Enter the six digits your other device shows.",
       "comment": "Error under the code field when what was typed is not six digits."
@@ -7656,6 +7672,54 @@
       "comment": "Row title in About.",
       "security_critical": true
     },
+    "settings.about.shortcuts.close_window": {
+      "text": "Close the window",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.destinations": {
+      "text": "Chats, Feed, Contacts, Calls, Settings",
+      "comment": "Keyboard shortcut list entry for Mod+Shift+1 to Mod+Shift+5, which open these five destinations in this order."
+    },
+    "settings.about.shortcuts.edit_last": {
+      "text": "Edit my last message (in an empty message field)",
+      "comment": "Keyboard shortcut list entry for the Up arrow."
+    },
+    "settings.about.shortcuts.escape": {
+      "text": "Close a menu, dialog or sheet; leave a search",
+      "comment": "Keyboard shortcut list entry for Esc."
+    },
+    "settings.about.shortcuts.folders": {
+      "text": "Switch chat folder",
+      "comment": "Keyboard shortcut list entry: selects a chat folder tab."
+    },
+    "settings.about.shortcuts.new_chat": {
+      "text": "New chat",
+      "comment": "Keyboard shortcut list entry: opens the create menu."
+    },
+    "settings.about.shortcuts.previous_next": {
+      "text": "Previous or next conversation",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.quit": {
+      "text": "Quit Lakko",
+      "comment": "Keyboard shortcut list entry (macOS)."
+    },
+    "settings.about.shortcuts.search": {
+      "text": "Search conversations and people",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.send": {
+      "text": "Send or start a new line",
+      "comment": "Keyboard shortcut list entry for Enter / Shift+Enter in the composer."
+    },
+    "settings.about.shortcuts.settings": {
+      "text": "Settings",
+      "comment": "Keyboard shortcut list entry."
+    },
+    "settings.about.shortcuts.title": {
+      "text": "Keyboard shortcuts",
+      "comment": "Card title in Settings > About, desktop app."
+    },
     "settings.about.translations_updated": {
       "text": "Translations updated {date}",
       "comment": "Settings > About, shown when a signed translation update is active. {date} is a date formatted for the locale."
@@ -7859,6 +7923,30 @@
     "settings.data.title": {
       "text": "Your data",
       "comment": "Card heading in Settings > Account: the data export."
+    },
+    "settings.desktop.keep_running.sub": {
+      "text": "You'll get messages and calls while the window is closed.",
+      "comment": "Subtitle of the keep-running switch."
+    },
+    "settings.desktop.keep_running.title": {
+      "text": "Keep running when the window is closed",
+      "comment": "Switch row in Settings > Notifications, desktop app. Off: closing the window quits."
+    },
+    "settings.desktop.lede": {
+      "text": "How Lakko runs on this computer.",
+      "comment": "Line under the Notifications title in Settings, desktop app."
+    },
+    "settings.desktop.open_at_login.title": {
+      "text": "Open Lakko when I sign in to this computer",
+      "comment": "Switch row in Settings > Notifications, desktop app. On: Lakko starts hidden at login."
+    },
+    "settings.desktop.read_failed": {
+      "text": "These settings could not be read. Open Settings again to retry.",
+      "comment": "Shown in Settings > Notifications, desktop app, when the current values could not be read."
+    },
+    "settings.desktop.save_failed": {
+      "text": "This setting could not be changed. Try again.",
+      "comment": "Shown under a desktop switch when the change was not saved; the switch keeps its old state."
     },
     "settings.devices.add.lede": {
       "text": "Sign in to Lakko on the new device first. Then pick which of the two is showing a code.",

@@ -12,6 +12,7 @@
  * is still added to the account's devices, and it restores its keys another
  * way. The caller says so on screen (`ScanResult.recoveryPublished`).
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import { readDevicePhraseWith } from "../backup/device-phrase";
 import { loadWasm } from "../wasm";
 
@@ -23,7 +24,7 @@ export interface RecoveryHalf {
 
 export async function recoveryHalfFor(args: {
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   readonly deviceAuthorizeStart: () => Promise<string>;
 }): Promise<RecoveryHalf | undefined> {
   const phrase = await readDevicePhraseWith(args.accountIdB64, args.deviceKey);

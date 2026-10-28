@@ -26,6 +26,7 @@
  * `BLAKE3("lakko-device-group/v1" || account_id)` value the
  * server already accepts as opaque bytes.
  */
+import type { DeviceCipher } from "../auth/device-cipher";
 import {
   ensureDeviceGroup,
   persistDeviceGroupSnapshot,
@@ -65,7 +66,7 @@ export interface DeviceList {
 export async function listDevices(args: {
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
 }): Promise<DeviceList> {
   const { ensureDeviceIdentitySeed } = await import("../auth/device-identity-store");
   const seed = await ensureDeviceIdentitySeed(args.accountIdB64, args.deviceKey);
@@ -137,7 +138,7 @@ export interface RemoveResult {
 export async function removeDeviceAt(args: {
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   readonly leafIndex: number;
   /** G-13 (ADR-0015): the removal attestation bytes from
    *  `/auth/action/finish` (decoded from `attestation_b64`). Carried in the
@@ -222,7 +223,7 @@ export type RemoveByKeyResult =
 export async function removeDeviceByKey(args: {
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
-  readonly deviceKey: CryptoKey;
+  readonly deviceKey: DeviceCipher;
   readonly targetKey: Uint8Array;
   readonly attestation: Uint8Array | null;
 }): Promise<RemoveByKeyResult> {

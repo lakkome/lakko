@@ -19,6 +19,7 @@
  * squatted login handle at auth must not land this device in another
  * account under the typed name).
  */
+import type { DeviceCipher } from "../device-cipher";
 import type { JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { base64Encode } from "../account-id";
@@ -106,7 +107,7 @@ export function DeviceRecover(props: {
       forgotPassword: true,
       ...(session !== null
         ? {
-            persistJoinState: (deviceKey: CryptoKey): Promise<void> => session.persistTo(deviceKey),
+            persistJoinState: (deviceKey: DeviceCipher): Promise<void> => session.persistTo(deviceKey),
           }
         : {}),
     });

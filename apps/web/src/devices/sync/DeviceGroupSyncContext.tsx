@@ -45,6 +45,7 @@
  * of the session rather than acquiring + releasing per call,
  * because the poll loop needs a long-lived handle.
  */
+import type { DeviceCipher } from "../../auth/device-cipher";
 import {
   createContext,
   createEffect,
@@ -676,7 +677,7 @@ export function DeviceGroupSyncProvider(props: {
     uninstallUsernameRegister = installUsernameRegister({ accountIdB64, set: setOwnUsernameImpl });
   }
 
-  function startPollLoop(accountIdB64: string, deviceKey: CryptoKey): void {
+  function startPollLoop(accountIdB64: string, deviceKey: DeviceCipher): void {
     if (group === null || identity === null || deviceRemoved()) return;
     pollAbort = new AbortController();
     pollDone = runPollLoop(group, identity, accountIdB64, deviceKey, pollAbort.signal);
@@ -1185,7 +1186,7 @@ export function DeviceGroupSyncProvider(props: {
     g: WasmDeviceGroup,
     id: WasmIdentity,
     accountIdB64: string,
-    deviceKey: CryptoKey,
+    deviceKey: DeviceCipher,
     signal: AbortSignal,
   ): Promise<void> {
     const ds = new DsClient();
@@ -1523,7 +1524,7 @@ export function DeviceGroupSyncProvider(props: {
   async function installRefoundedDeviceGroup(
     account: string,
     accountBytes: Uint8Array,
-    deviceKey: CryptoKey,
+    deviceKey: DeviceCipher,
     headCursor: number,
     current: () => boolean,
   ): Promise<void> {

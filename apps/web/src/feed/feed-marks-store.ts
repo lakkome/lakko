@@ -18,6 +18,7 @@
  * tabs so the lists showing a channel's count reload.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { getDeviceKey } from "../auth/key-store";
 import {
@@ -58,7 +59,7 @@ function done(tx: IDBTransaction): Promise<void> {
   });
 }
 
-export async function loadFeedMarks(accountIdB64: string, deviceKey: CryptoKey): Promise<FeedMarks> {
+export async function loadFeedMarks(accountIdB64: string, deviceKey: DeviceCipher): Promise<FeedMarks> {
   const db = await openDb();
   let row: { ciphertext: Uint8Array } | undefined;
   try {
@@ -74,22 +75,18 @@ export async function loadFeedMarks(accountIdB64: string, deviceKey: CryptoKey):
   }
   if (row === undefined || row.ciphertext.length < IV_LEN + 16) return emptyFeedMarks();
   try {
-    const plain = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: row.ciphertext.slice(0, IV_LEN) },
-      deviceKey,
-      row.ciphertext.slice(IV_LEN),
-    );
+    const plain = await deviceKey.decrypt(row.ciphertext.slice(0, IV_LEN), row.ciphertext.slice(IV_LEN));
     return decodeFeedMarks(JSON.parse(new TextDecoder().decode(plain)));
   } catch {
     return emptyFeedMarks();
   }
 }
 
-async function saveFeedMarks(accountIdB64: string, deviceKey: CryptoKey, marks: FeedMarks): Promise<void> {
+async function saveFeedMarks(accountIdB64: string, deviceKey: DeviceCipher, marks: FeedMarks): Promise<void> {
   const plain = new TextEncoder().encode(JSON.stringify(encodeFeedMarks(marks)));
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv.slice() }, deviceKey, plain),
+    await deviceKey.encrypt(iv, plain),
   );
   const ciphertext = new Uint8Array(IV_LEN + ct.length);
   ciphertext.set(iv, 0);

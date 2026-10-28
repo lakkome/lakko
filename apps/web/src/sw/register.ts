@@ -28,6 +28,8 @@
  * session is a no-op past the first registration.
  */
 
+import { isDesktop } from "../platform";
+
 const SW_URL = "/sw.js";
 const SW_SCOPE = "/";
 
@@ -90,6 +92,12 @@ export async function registerServiceWorker(): Promise<boolean> {
 
   // 1. Dev gate. Vite injects `import.meta.env.DEV`.
   if (import.meta.env.DEV) {
+    return false;
+  }
+
+  // The desktop app has no service worker: its host owns notifications and
+  // the page is served from the app's own scheme (ADR-0085).
+  if (isDesktop()) {
     return false;
   }
 

@@ -32,6 +32,7 @@ import {
   type InviteLinkFragment,
   type InviteLinkWidths,
 } from "./invite-link";
+import { publicOrigin } from "../platform";
 
 /** Path prefix every group-invite URL starts with — kept in lock-step with
  *  `routes/paths.ts::groupJoinRoutePattern` (`/g/:slug`). The `/g/` shape
@@ -44,7 +45,7 @@ export const GROUP_INVITE_URL_PREFIX = "/g/";
 export const GROUP_INVITE_INLINE_MIN_LEN = 100;
 
 function defaultOrigin(): string {
-  return typeof location !== "undefined" ? location.origin : "https://lakko.me";
+  return publicOrigin();
 }
 
 /** Build the **pointer** URL form — `https://<host>/g/<8-char id>`, backed by

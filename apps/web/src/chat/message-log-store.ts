@@ -41,6 +41,7 @@
  * the MLS snapshot blob.
  */
 
+import type { DeviceCipher } from "../auth/device-cipher";
 import { accountStoresWritable } from "../auth/account-store-gate";
 import { publishMessageLogChanged } from "./message-log-events";
 
@@ -338,16 +339,12 @@ function awaitTx<T>(tx: IDBTransaction, value: T): Promise<T> {
 }
 
 async function encryptBlob(
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   plaintext: Uint8Array,
 ): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: iv.slice() },
-      deviceKey,
-      plaintext.slice(),
-    ),
+    await deviceKey.encrypt(iv, plaintext),
   );
   const out = new Uint8Array(IV_LEN + ct.length);
   out.set(iv, 0);
@@ -356,7 +353,7 @@ async function encryptBlob(
 }
 
 async function decryptBlob(
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   blob: Uint8Array,
 ): Promise<Uint8Array> {
   if (blob.length < IV_LEN + 16) {
@@ -365,7 +362,7 @@ async function decryptBlob(
   const iv = blob.slice(0, IV_LEN);
   const ct = blob.slice(IV_LEN);
   const pt = new Uint8Array(
-    await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+    await deviceKey.decrypt(iv, ct),
   );
   return pt;
 }
@@ -382,7 +379,7 @@ async function decryptBlob(
  */
 export async function saveMessageLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   payload: MessageLogPayload,
 ): Promise<void> {
   const plaintext = new TextEncoder().encode(JSON.stringify(payload));
@@ -414,7 +411,7 @@ export async function saveMessageLog(
  */
 export async function loadMessageLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
 ): Promise<MessageLogPayload | null> {
   const db = await openDb();
   let row: PersistedRow | undefined;
@@ -463,7 +460,7 @@ const writeChains = new Map<string, Promise<unknown>>();
  */
 export function updateMessageLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   mutate: (current: MessageLogPayload | null) => MessageLogPayload | null,
 ): Promise<void> {
   const prev = writeChains.get(accountIdB64) ?? Promise.resolve();
@@ -539,7 +536,7 @@ export function withoutGroup(
  */
 export function setHeldInMessageLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   held: readonly PersistedHeldSend[],
 ): Promise<void> {
   return updateMessageLog(accountIdB64, deviceKey, (current) => {
@@ -569,7 +566,7 @@ export function setHeldInMessageLog(
  */
 export async function deleteGroupFromMessageLog(
   accountIdB64: string,
-  deviceKey: CryptoKey,
+  deviceKey: DeviceCipher,
   groupIdHex: string,
 ): Promise<boolean> {
   const payload = await loadMessageLog(accountIdB64, deviceKey);
